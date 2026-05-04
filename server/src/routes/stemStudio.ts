@@ -130,7 +130,9 @@ async function runExtraction(job: StemJob, ditSettings: any, style: string, lyri
       // Build AceRequest for this track
       const aceReq: AceRequest = {
         caption: style || '',
-        lyrics: lyrics || '',
+        // Only pass lyrics for the 'vocals' track — feeding them into other
+        // tracks (e.g. backing_vocals) forces the model to route lead vocals there
+        lyrics: trackName === 'vocals' ? (lyrics || '') : '',
         task_type: 'extract',
         track: trackName,
         audio_cover_strength: 1.0,  // forced — DiT sees full mix
