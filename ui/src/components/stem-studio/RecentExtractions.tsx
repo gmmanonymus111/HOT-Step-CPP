@@ -51,7 +51,6 @@ export const RecentExtractions: React.FC<RecentExtractionsProps> = ({ onSelectJo
 
   return (
     <div style={styles.container}>
-      <h3 style={styles.title}>Recent Extractions</h3>
 
       {loading && jobs.length === 0 && (
         <div style={styles.emptyMsg}>Loading...</div>

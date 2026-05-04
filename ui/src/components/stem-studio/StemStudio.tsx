@@ -5,9 +5,12 @@
 //
 // Extract mode forces a base/SFT DiT model and disables adapters,
 // LM thinking, and post-processing regardless of global bar settings.
+//
+// Layout follows the same pattern as CoverStudio / LyricStudio:
+// flex columns with border dividers, resizable right sidebar.
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, Info, Clock, ListOrdered } from 'lucide-react';
 import { modelApi } from '../../services/api';
 import {
   submitExtraction, waitForExtraction, getExtractResult,
@@ -18,6 +21,10 @@ import { StemMixer, type StemControl, type MixerStemInfo } from '../shared/StemM
 import { SourceSelector } from './SourceSelector';
 import { TrackSelector } from './TrackSelector';
 import { RecentExtractions } from './RecentExtractions';
+import { Section } from '../shared/ActivitySidebar';
+import { InlineAudioQueue } from '../lyric-studio/InlineAudioQueue';
+import { usePersistedState } from '../../hooks/usePersistedState';
+import { useAudioGenQueue } from '../../stores/audioGenQueueStore';
 
 /** Filter DiT model list to only pure base models (no merge/sft/turbo) */
 function getBaseModels(ditModels: string[]): string[] {
@@ -55,6 +62,13 @@ export const StemStudio: React.FC = () => {
   const [mixerStems, setMixerStems] = useState<MixerStemInfo[] | null>(null);
   const [stemControls, setStemControls] = useState<StemControl[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  // Sidebar — shared width with other studio pages
+  const [sidebarWidth, setSidebarWidth] = usePersistedState('hs-activitySidebarWidth', 320);
+  const queue = useAudioGenQueue();
+  const queueCount = queue.items.filter(i =>
+    i.status === 'pending' || i.status === 'loading-adapter' || i.status === 'generating'
+  ).length;
 
   // Fetch available base models on mount — restore persisted selection
   useEffect(() => {
@@ -169,11 +183,35 @@ export const StemStudio: React.FC = () => {
     a.click();
   }, [activeJobId]);
 
+  // Sidebar resize handler — identical to CoverStudio
+  const handleSidebarResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMove = (ev: MouseEvent) => {
+      const newW = Math.min(700, Math.max(240, startW + startX - ev.clientX));
+      setSidebarWidth(newW);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [sidebarWidth, setSidebarWidth]);
+
   return (
-    <div style={styles.outerContainer}>
-      <div style={styles.layout}>
-        {/* Left column — Source Audio */}
-        <div style={styles.leftCol}>
+    <div className="flex flex-col w-full h-full overflow-hidden">
+
+      {/* Main workspace */}
+      <div className="flex-1 flex overflow-hidden">
+
+        {/* Left — Source Audio + Optional Fields */}
+        <div className="flex flex-col gap-4 p-4 overflow-y-auto border-r border-white/5 flex-shrink-0" style={{ width: 300 }}>
           <SourceSelector
             sourceAudioUrl={sourceAudioUrl}
             sourceFileName={sourceFileName}
@@ -181,24 +219,24 @@ export const StemStudio: React.FC = () => {
           />
 
           {/* Optional: style hint + lyrics */}
-          <div style={styles.optionalSection}>
+          <div className="border-t border-white/5 pt-3">
             <details>
-              <summary style={styles.optionalSummary}>Optional: Style & Lyrics (improves extraction)</summary>
-              <div style={styles.optionalFields}>
-                <label style={styles.fieldLabel}>Style Hint</label>
+              <summary className="text-xs text-zinc-500 cursor-pointer font-medium">Optional: Style &amp; Lyrics (improves extraction)</summary>
+              <div className="flex flex-col gap-2 mt-2.5">
+                <label className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Style Hint</label>
                 <input
                   type="text"
                   value={style}
                   onChange={e => setStyle(e.target.value)}
                   placeholder="e.g. indie rock, distorted guitar, raw vocals"
-                  style={styles.textInput}
+                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-300 text-xs outline-none focus:border-purple-500/40 transition-colors"
                 />
-                <label style={styles.fieldLabel}>Lyrics</label>
+                <label className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lyrics</label>
                 <textarea
                   value={lyrics}
                   onChange={e => setLyrics(e.target.value)}
                   placeholder="Paste lyrics here to improve vocal extraction..."
-                  style={styles.textarea}
+                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-300 text-xs outline-none resize-y font-[inherit] focus:border-purple-500/40 transition-colors"
                   rows={4}
                 />
               </div>
@@ -206,8 +244,8 @@ export const StemStudio: React.FC = () => {
           </div>
         </div>
 
-        {/* Center column — Track Selection + Mixer */}
-        <div style={styles.centerCol}>
+        {/* Center — Track Selection + Mixer */}
+        <div className="flex-1 flex flex-col gap-4 p-4 overflow-y-auto border-r border-white/5">
           {/* Model selector for Extract */}
           {!modelsLoading && baseModels.length === 0 && (
             <div style={styles.noModelsWarning}>
@@ -264,7 +302,7 @@ export const StemStudio: React.FC = () => {
 
           {/* Mixer */}
           {mixerStems && activeJobId && (
-            <div style={styles.mixerSection}>
+            <div className="mt-2">
               <StemMixer
                 jobId={activeJobId}
                 stems={mixerStems}
@@ -277,13 +315,37 @@ export const StemStudio: React.FC = () => {
           )}
         </div>
 
-        {/* Right column — Recent Extractions */}
-        <div style={styles.rightCol}>
-          <RecentExtractions
-            onSelectJob={handleSelectPastJob}
-            activeJobId={activeJobId || undefined}
-            refreshTrigger={refreshTrigger}
-          />
+        {/* Resize handle */}
+        <div
+          className="flex-shrink-0 w-1.5 h-full cursor-col-resize group z-20 flex items-center hover:bg-purple-500/20 active:bg-purple-500/30 transition-colors"
+          onMouseDown={handleSidebarResize}
+        >
+          <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-purple-400 transition-colors" />
+        </div>
+
+        {/* Right — Recent Extractions + Queue */}
+        <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden flex flex-col" style={{ width: sidebarWidth }}>
+          <Section
+            title="Recent Extractions"
+            icon={<Clock className="w-3 h-3" />}
+            defaultOpen={true}
+          >
+            <RecentExtractions
+              onSelectJob={handleSelectPastJob}
+              activeJobId={activeJobId || undefined}
+              refreshTrigger={refreshTrigger}
+            />
+          </Section>
+
+          <Section
+            title="Queue"
+            icon={<ListOrdered className="w-3 h-3" />}
+            count={queueCount}
+            countColor="bg-purple-500/20 text-purple-300"
+            defaultOpen={true}
+          >
+            <InlineAudioQueue />
+          </Section>
         </div>
       </div>
     </div>
@@ -291,48 +353,6 @@ export const StemStudio: React.FC = () => {
 };
 
 const styles: Record<string, React.CSSProperties> = {
-  outerContainer: {
-    height: '100%',
-    padding: 16,
-    overflowY: 'auto',
-  },
-  layout: {
-    display: 'grid',
-    gridTemplateColumns: '280px 1fr 240px',
-    gap: 16,
-    maxWidth: 1400,
-    margin: '0 auto',
-    height: '100%',
-  },
-  leftCol: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 16,
-    padding: 16,
-    borderRadius: 12,
-    background: 'rgba(255,255,255,0.02)',
-    border: '1px solid rgba(255,255,255,0.06)',
-    overflowY: 'auto',
-  },
-  centerCol: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 16,
-    padding: 16,
-    borderRadius: 12,
-    background: 'rgba(255,255,255,0.02)',
-    border: '1px solid rgba(255,255,255,0.06)',
-    overflowY: 'auto',
-  },
-  rightCol: {
-    display: 'flex',
-    flexDirection: 'column',
-    padding: 12,
-    borderRadius: 12,
-    background: 'rgba(255,255,255,0.02)',
-    border: '1px solid rgba(255,255,255,0.06)',
-    overflowY: 'auto',
-  },
   noModelsWarning: {
     display: 'flex',
     alignItems: 'center',
@@ -413,52 +433,6 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid rgba(239,68,68,0.2)',
     color: '#ef4444',
     fontSize: 12,
-  },
-  mixerSection: {
-    marginTop: 8,
-  },
-  optionalSection: {
-    borderTop: '1px solid rgba(255,255,255,0.05)',
-    paddingTop: 12,
-  },
-  optionalSummary: {
-    fontSize: 12,
-    color: '#888',
-    cursor: 'pointer',
-    fontWeight: 500,
-  },
-  optionalFields: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-    marginTop: 10,
-  },
-  fieldLabel: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: '#888',
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
-  },
-  textInput: {
-    padding: '8px 10px',
-    borderRadius: 6,
-    border: '1px solid rgba(255,255,255,0.08)',
-    background: 'rgba(255,255,255,0.04)',
-    color: '#d4d4d4',
-    fontSize: 12,
-    outline: 'none',
-  },
-  textarea: {
-    padding: '8px 10px',
-    borderRadius: 6,
-    border: '1px solid rgba(255,255,255,0.08)',
-    background: 'rgba(255,255,255,0.04)',
-    color: '#d4d4d4',
-    fontSize: 12,
-    outline: 'none',
-    resize: 'vertical',
-    fontFamily: 'inherit',
   },
 };
 
