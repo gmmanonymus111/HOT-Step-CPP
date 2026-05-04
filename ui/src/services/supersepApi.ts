@@ -20,6 +20,7 @@ export interface ProgressResult {
   progress: number;
   message: string;
   n_stems?: number;
+  error?: string;
 }
 
 export interface StemListResult {
@@ -105,7 +106,7 @@ export async function waitForCompletion(
           const result = await getStemList(jobId);
           resolve(result);
         } else if (p.status === 'failed' || p.status === 'cancelled') {
-          reject(new Error(`Separation ${p.status}`));
+          reject(new Error(p.error || `Separation ${p.status}`));
         } else {
           setTimeout(poll, pollIntervalMs);
         }

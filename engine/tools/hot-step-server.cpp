@@ -1936,6 +1936,7 @@ int main(int argc, char ** argv) {
         std::mutex           mtx_progress;
         SuperSepResult *     result{nullptr};
         std::string          model_dir;
+        std::string          error_msg;
 
         ~SuperSepJob() {
             if (result) supersep_result_free(result);
@@ -2045,8 +2046,18 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "[Server] SuperSep job %s done (%d stems)\n",
                         job->id.c_str(), result->n_stems);
             } else {
+                // Capture the last progress message as the error
+                {
+                    std::lock_guard<std::mutex> lock(job->mtx_progress);
+                    if (job->error_msg.empty()) {
+                        job->error_msg = job->progress_msg.empty()
+                            ? "Unknown error during separation"
+                            : job->progress_msg;
+                    }
+                }
                 job->status.store(job->cancel.load() ? 3 : 2);
-                fprintf(stderr, "[Server] SuperSep job %s failed\n", job->id.c_str());
+                fprintf(stderr, "[Server] SuperSep job %s failed: %s\n",
+                        job->id.c_str(), job->error_msg.c_str());
             }
         });
 
@@ -2085,6 +2096,12 @@ int main(int argc, char ** argv) {
 
         if (status == 1 && job->result) {
             yyjson_mut_obj_add_int(doc, root, "n_stems", job->result->n_stems);
+        }
+        if (status == 2) {
+            std::lock_guard<std::mutex> lock2(job->mtx_progress);
+            if (!job->error_msg.empty()) {
+                yyjson_mut_obj_add_str(doc, root, "error", job->error_msg.c_str());
+            }
         }
 
         char * json = yyjson_mut_write(doc, 0, NULL);
