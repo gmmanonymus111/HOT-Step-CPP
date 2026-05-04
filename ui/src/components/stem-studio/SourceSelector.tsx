@@ -56,7 +56,7 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
       const res = await fetch('/api/upload/audio', { method: 'POST', body: formData });
       if (!res.ok) throw new Error('Upload failed');
       const data = await res.json();
-      onSourceChange(data.url || data.audioUrl, file.name);
+      onSourceChange(data.audio_url, file.name);
     } catch (err: any) {
       console.error('Upload failed:', err);
     } finally {
