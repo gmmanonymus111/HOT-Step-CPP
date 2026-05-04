@@ -103,7 +103,7 @@ export const CoverStudio: React.FC = () => {
   const [sepStems, setSepStems] = useState<StemInfo[] | null>(null);
   const [stemControls, setStemControls] = useState<StemControl[]>([]);
   const [showMixer, setShowMixer] = useState(false);
-  const [recombinedBlob, setRecombinedBlob] = useState<Blob | null>(null);
+
 
   // ── Persist ──
   useEffect(() => { persist('sourceFileName', sourceFileName); }, [sourceFileName]);
@@ -477,10 +477,7 @@ export const CoverStudio: React.FC = () => {
     }
   }, [sourceAudioUrl, sepLevel]);
 
-  const handleRecombine = useCallback((blob: Blob) => {
-    setRecombinedBlob(blob);
-    showToast('Stems recombined! Ready for generation.');
-  }, []);
+
 
   // ── Render ──
   return (
@@ -505,6 +502,8 @@ export const CoverStudio: React.FC = () => {
           sepLevel={sepLevel} onSepLevelChange={setSepLevel}
           isSeparating={isSeparating} sepProgress={sepProgress} sepMessage={sepMessage}
           sourceAudioUrl={sourceAudioUrl} onSeparate={handleSeparate}
+          hasStems={!!(sepStems && sepStems.length > 0 && sepJobId)}
+          onConfigureStems={() => setShowMixer(true)}
         />
 
         {/* Center: Lyrics */}
@@ -530,22 +529,11 @@ export const CoverStudio: React.FC = () => {
               placeholder="Lyrics will appear here after searching Genius, or paste them manually..."
               className="w-full h-full resize-none bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors font-mono leading-relaxed" />
           </div>
-          {/* Stem Mixer Toggle */}
-          {sepStems && sepJobId && (
-            <div className="flex-shrink-0 border-t border-white/5 p-4 flex justify-end bg-black/20">
-              <button 
-                onClick={() => setShowMixer(true)}
-                className="px-4 py-2 bg-gradient-to-r from-purple-500 to-cyan-500 rounded-lg text-sm font-semibold text-white shadow-lg hover:shadow-cyan-500/25 transition-all flex items-center gap-2"
-              >
-                🎛️ Configure Stems ({sepStems.length})
-              </button>
-            </div>
-          )}
           
           {showMixer && sepStems && sepJobId && (
             <StemMixer jobId={sepJobId} stems={sepStems}
               controls={stemControls} onControlsChange={setStemControls}
-              onRecombine={handleRecombine} onClose={() => setShowMixer(false)} />
+              onClose={() => setShowMixer(false)} />
           )}
         </div>
 

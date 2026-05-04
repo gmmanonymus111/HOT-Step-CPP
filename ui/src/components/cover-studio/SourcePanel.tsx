@@ -26,6 +26,8 @@ interface SourcePanelProps {
   sepMessage: string;
   sourceAudioUrl: string;
   onSeparate: () => void;
+  hasStems: boolean;
+  onConfigureStems: () => void;
 }
 
 export const SourcePanel: React.FC<SourcePanelProps> = ({
@@ -37,6 +39,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
   sepLevel, onSepLevelChange,
   isSeparating, sepProgress, sepMessage,
   sourceAudioUrl, onSeparate,
+  hasStems, onConfigureStems,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -215,27 +218,36 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             <select
               value={sepLevel}
               onChange={(e) => onSepLevelChange(parseInt(e.target.value))}
-              className="w-full px-2 py-1.5 rounded-lg bg-black/20 border border-white/10 text-xs text-zinc-300 focus:outline-none focus:border-purple-500"
+              className="w-full px-2 py-1.5 rounded-xl bg-zinc-800 border border-white/10 text-xs text-zinc-300 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors cursor-pointer"
             >
               {SEPARATION_LEVELS.map(l => (
                 <option key={l.value} value={l.value}>{l.label} — {l.description}</option>
               ))}
             </select>
 
-            <button
-              onClick={onSeparate}
-              disabled={isSeparating || !sourceAudioUrl}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 text-xs font-medium transition-colors disabled:opacity-50"
-            >
-              {isSeparating ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  {Math.round(sepProgress * 100)}% — {sepMessage}
-                </>
-              ) : (
-                '✂ Split Stems'
-              )}
-            </button>
+            {hasStems ? (
+              <button
+                onClick={onConfigureStems}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-purple-500 to-cyan-500 text-white text-xs font-semibold shadow-lg hover:shadow-cyan-500/25 transition-all"
+              >
+                🎛️ Configure Stems
+              </button>
+            ) : (
+              <button
+                onClick={onSeparate}
+                disabled={isSeparating || !sourceAudioUrl}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 text-xs font-medium transition-colors disabled:opacity-50"
+              >
+                {isSeparating ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {Math.round(sepProgress * 100)}% — {sepMessage}
+                  </>
+                ) : (
+                  '✂ Split Stems'
+                )}
+              </button>
+            )}
           </div>
         )}
       </div>

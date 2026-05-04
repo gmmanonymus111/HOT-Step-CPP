@@ -19,7 +19,6 @@ interface StemMixerProps {
   stems: StemInfo[];
   controls: StemControl[];
   onControlsChange: (controls: StemControl[]) => void;
-  onRecombine?: (audioBlob: Blob) => void;
   onClose?: () => void;
 }
 
@@ -32,9 +31,8 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const CATEGORY_ORDER = ['vocals', 'instruments', 'drums', 'other'];
 
-export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onRecombine, onClose }) => {
+export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onClose }) => {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isRecombining, setIsRecombining] = useState(false);
   const [soloIndex, setSoloIndex] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodesRef = useRef<Map<number, { source: AudioBufferSourceNode; gain: GainNode }>>(new Map());
@@ -230,23 +228,6 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
     };
   }, []);
 
-  const handleRecombine = useCallback(async () => {
-    setIsRecombining(true);
-    try {
-      const stemControls = controls.map(c => ({
-        index: c.index,
-        volume: (soloIndex !== null && soloIndex !== c.index) ? 0 : (c.muted ? 0 : c.volume),
-        muted: c.muted || (soloIndex !== null && soloIndex !== c.index),
-      }));
-      const blob = await recombineStems(jobId, stemControls);
-      onRecombine?.(blob);
-    } catch (err) {
-      console.error('Recombine failed:', err);
-    } finally {
-      setIsRecombining(false);
-    }
-  }, [jobId, controls, soloIndex, onRecombine]);
-
   const content = (
     <div style={{ ...styles.container, width: '100%', maxWidth: '600px', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
       <div style={styles.header}>
@@ -261,13 +242,6 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
             style={{ ...styles.button, ...(isPlaying ? styles.buttonActive : {}) }}
           >
             {loadingStems ? '⏳ Loading...' : isPlaying ? '⏹ Stop' : '▶ Preview'}
-          </button>
-          <button
-            onClick={handleRecombine}
-            disabled={isRecombining}
-            style={{ ...styles.button, ...styles.buttonPrimary }}
-          >
-            {isRecombining ? '⏳ Mixing...' : '🔀 Recombine'}
           </button>
         </div>
       </div>
