@@ -60,6 +60,9 @@ static const int BS_CHUNK_SIZE  = 588800;  // ~13.4s at 44100Hz
 static const int BS_N_FREQS     = BS_N_FFT / 2 + 1;  // 1025
 static const int BS_NUM_STEMS   = 6;
 
+// Mel-Band RoFormer lookup tables (auto-generated from mel filterbank)
+#include "mel_band_tables.inc"
+
 // Stem definitions for each stage
 struct StemDef {
     const char *key;
@@ -559,6 +562,169 @@ static bool bs_roformer_separate(
     return true;
 }
 
+// ── Mel-Band RoFormer STFT-based processing ─────────────────────────────
+//
+// Similar to BS-RoFormer but with mel-band frequency gathering.
+// Input:  waveform → STFT → rearrange → gather mel indices → [1, 3958, T, 2]
+// Output: mask [1, 1, 3958, T, 2] → scatter-add → average → complex multiply → iSTFT
+//
+// The model outputs 1 source; the complement is computed by subtraction.
+// Reference: ZFTurbo/MSS_ONNX_TensorRT/models/preprocess.py Mel_band_roformer_processor
+
+static bool mel_band_process_chunk(
+    Ort::Session *session,
+    const float *chunk,           // interleaved stereo vocals
+    int chunk_frames,             // per-channel frame count (must be MB_CHUNK_SAMPLES)
+    float *&out_lead,             // output: lead vocals (malloc'd interleaved stereo)
+    float *&out_backing,          // output: backing vocals (malloc'd interleaved stereo)
+    int &out_frames
+) {
+    const int n_fft   = MB_STFT_N_FFT;
+    const int hop     = MB_STFT_HOP;
+    const int n_freqs = MB_N_FREQS;  // 1025
+    const int n_ch    = 2;
+    const int fs      = n_freqs * n_ch;  // 2050 (stereo freq dimension)
+
+    // ── STFT ─────────────────────────────────────────────────────────
+    StftParams sp;
+    sp.n_fft = n_fft;
+    sp.hop_length = hop;
+    sp.n_channels = n_ch;
+    ComplexSpec spec = stft_forward(chunk, chunk_frames, sp);
+    const int T = spec.n_frames;
+
+    fprintf(stderr, "[SuperSep] Mel-Band STFT: %d freqs x %d time frames\n", n_freqs, T);
+
+    // ── Build stft_repr [fs, T, 2] ──────────────────────────────────
+    // Rearrange: 'b s f t c -> b (f s) t c' with freq leading
+    std::vector<float> stft_repr((size_t)fs * T * 2);
+    for (int f = 0; f < n_freqs; f++) {
+        for (int ch = 0; ch < n_ch; ch++) {
+            int fs_idx = f * n_ch + ch;
+            for (int t = 0; t < T; t++) {
+                const float *c = spec.at(ch, f, t);
+                stft_repr[((size_t)fs_idx * T + t) * 2 + 0] = c[0];
+                stft_repr[((size_t)fs_idx * T + t) * 2 + 1] = c[1];
+            }
+        }
+    }
+
+    // ── Gather mel-band frequency indices → model input [3958, T, 2] ─
+    const int n_gathered = MB_N_FREQ_INDICES_STEREO;
+    std::vector<float> model_input((size_t)n_gathered * T * 2);
+
+    for (int i = 0; i < MB_N_FREQ_INDICES_MONO; i++) {
+        int mono_f = MB_FREQ_INDICES_MONO[i];
+        for (int ch = 0; ch < n_ch; ch++) {
+            int stereo_gather_idx = i * n_ch + ch;  // output index
+            int stereo_src_idx = mono_f * n_ch + ch; // source in stft_repr
+            for (int t = 0; t < T; t++) {
+                model_input[((size_t)stereo_gather_idx * T + t) * 2 + 0] =
+                    stft_repr[((size_t)stereo_src_idx * T + t) * 2 + 0];
+                model_input[((size_t)stereo_gather_idx * T + t) * 2 + 1] =
+                    stft_repr[((size_t)stereo_src_idx * T + t) * 2 + 1];
+            }
+        }
+    }
+
+    // ── Run ONNX inference ───────────────────────────────────────────
+    Ort::AllocatorWithDefaultOptions alloc;
+    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+    std::vector<int64_t> input_shape = {1, (int64_t)n_gathered, (int64_t)T, 2};
+    auto input_tensor = Ort::Value::CreateTensor<float>(
+        mem, model_input.data(), model_input.size(), input_shape.data(), input_shape.size());
+
+    auto in_name = session->GetInputNameAllocated(0, alloc);
+    auto out_name = session->GetOutputNameAllocated(0, alloc);
+    const char *in_names[] = { in_name.get() };
+    const char *out_names[] = { out_name.get() };
+
+    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
+
+    auto &out_tensor = outputs[0];
+    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
+    auto out_shape = type_info.GetShape();
+    const float *mask_data = out_tensor.GetTensorData<float>();
+
+    fprintf(stderr, "[SuperSep] Mel-Band output shape: [");
+    for (size_t i = 0; i < out_shape.size(); i++)
+        fprintf(stderr, "%s%lld", i ? "," : "", (long long)out_shape[i]);
+    fprintf(stderr, "]\n");
+
+    // ── Scatter-add mask back to full spectrogram space ──────────────
+    // mask_data: [1, 1, n_gathered, T, 2]
+    // Scatter into masks_summed: [fs, T, 2]
+    std::vector<float> masks_summed((size_t)fs * T * 2, 0.0f);
+
+    for (int i = 0; i < MB_N_FREQ_INDICES_MONO; i++) {
+        int mono_f = MB_FREQ_INDICES_MONO[i];
+        for (int ch = 0; ch < n_ch; ch++) {
+            int stereo_gather_idx = i * n_ch + ch;
+            int stereo_dst_idx = mono_f * n_ch + ch;
+            for (int t = 0; t < T; t++) {
+                masks_summed[((size_t)stereo_dst_idx * T + t) * 2 + 0] +=
+                    mask_data[((size_t)stereo_gather_idx * T + t) * 2 + 0];
+                masks_summed[((size_t)stereo_dst_idx * T + t) * 2 + 1] +=
+                    mask_data[((size_t)stereo_gather_idx * T + t) * 2 + 1];
+            }
+        }
+    }
+
+    // ── Average by band overlap count ────────────────────────────────
+    for (int f = 0; f < n_freqs; f++) {
+        float denom = (float)MB_NUM_BANDS_PER_FREQ[f];
+        if (denom < 1e-8f) denom = 1.0f;
+        for (int ch = 0; ch < n_ch; ch++) {
+            int fs_idx = f * n_ch + ch;
+            for (int t = 0; t < T; t++) {
+                masks_summed[((size_t)fs_idx * T + t) * 2 + 0] /= denom;
+                masks_summed[((size_t)fs_idx * T + t) * 2 + 1] /= denom;
+            }
+        }
+    }
+
+    // ── Complex multiply: result = stft_repr * averaged_mask ─────────
+    // Then un-rearrange back to ComplexSpec for iSTFT
+    ComplexSpec result_spec;
+    result_spec.n_channels = n_ch;
+    result_spec.n_freqs = n_freqs;
+    result_spec.n_frames = T;
+    result_spec.n_fft = n_fft;
+    result_spec.hop_length = hop;
+    result_spec.data = (float *)calloc((size_t)n_ch * n_freqs * T * 2, sizeof(float));
+
+    for (int f = 0; f < n_freqs; f++) {
+        for (int ch = 0; ch < n_ch; ch++) {
+            int fs_idx = f * n_ch + ch;
+            for (int t = 0; t < T; t++) {
+                float sr = stft_repr[((size_t)fs_idx * T + t) * 2 + 0];
+                float si = stft_repr[((size_t)fs_idx * T + t) * 2 + 1];
+                float mr = masks_summed[((size_t)fs_idx * T + t) * 2 + 0];
+                float mi = masks_summed[((size_t)fs_idx * T + t) * 2 + 1];
+                float *dst = result_spec.at(ch, f, t);
+                dst[0] = sr * mr - si * mi;  // real
+                dst[1] = sr * mi + si * mr;  // imag
+            }
+        }
+    }
+
+    // ── iSTFT → lead vocals ─────────────────────────────────────────
+    int lead_frames = 0;
+    out_lead = stft_inverse(result_spec, chunk_frames, &lead_frames);
+    stft_free(&result_spec);
+
+    // ── Backing vocals = original - lead ─────────────────────────────
+    out_backing = (float *)malloc((size_t)chunk_frames * 2 * sizeof(float));
+    for (int i = 0; i < chunk_frames * 2; i++) {
+        out_backing[i] = chunk[i] - out_lead[i];
+    }
+
+    out_frames = chunk_frames;
+    stft_free(&spec);
+    return true;
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 SuperSep * supersep_init(const char * model_dir, int device_id) {
@@ -686,7 +852,7 @@ SuperSepResult * supersep_run(
         return nullptr;
     }
 
-    // ── STAGE 2: Vocal sub-separation ────────────────────────────────
+    // ── STAGE 2: Vocal sub-separation (Mel-Band RoFormer) ─────────────
     if (stages[1] && s1_vocals) {
         cb(2, "Loading Mel-Band RoFormer model...", 0.30f);
         if (cancelled()) { free(s1_vocals); free(s1_drums); free(s1_other); return nullptr; }
@@ -697,14 +863,47 @@ SuperSepResult * supersep_run(
             }
 
             cb(2, "Splitting lead/backing vocals...", 0.35f);
-            std::vector<int64_t> out_shape;
-            auto output = run_wave_model(ctx->s2_mel_band, s1_vocals, s1_vocal_frames, out_shape);
 
-            int n_out = (out_shape.size() >= 2) ? std::min((int)out_shape[1], 2) : 0;
-            for (int i = 0; i < n_out; i++) {
-                float *sa = extract_stem_interleaved(output, out_shape, i, s1_vocal_frames);
-                add_stem(stems, STAGE2_STEMS[i], sa, s1_vocal_frames);
+            // Mel-Band RoFormer uses spectrogram input with mel-band gathering.
+            // Pad to fixed chunk size (model has fixed input shape).
+            const int mb_chunk = MB_CHUNK_SAMPLES;
+            int padded_frames = ((s1_vocal_frames + mb_chunk - 1) / mb_chunk) * mb_chunk;
+            if (padded_frames < mb_chunk) padded_frames = mb_chunk;
+
+            std::vector<float> padded_vocals(padded_frames * 2, 0.0f);
+            memcpy(padded_vocals.data(), s1_vocals, (size_t)s1_vocal_frames * 2 * sizeof(float));
+
+            // Process single chunk (or first chunk — simple for now)
+            float *lead = nullptr, *backing = nullptr;
+            int out_frames = 0;
+            bool ok = mel_band_process_chunk(
+                ctx->s2_mel_band, padded_vocals.data(), mb_chunk,
+                lead, backing, out_frames);
+
+            if (ok && lead && backing) {
+                // Trim back to original length
+                if (out_frames > s1_vocal_frames) out_frames = s1_vocal_frames;
+
+                // Trim lead
+                float *lead_trimmed = (float *)malloc((size_t)s1_vocal_frames * 2 * sizeof(float));
+                memset(lead_trimmed, 0, (size_t)s1_vocal_frames * 2 * sizeof(float));
+                memcpy(lead_trimmed, lead, (size_t)out_frames * 2 * sizeof(float));
+                free(lead);
+
+                // Trim backing
+                float *back_trimmed = (float *)malloc((size_t)s1_vocal_frames * 2 * sizeof(float));
+                memset(back_trimmed, 0, (size_t)s1_vocal_frames * 2 * sizeof(float));
+                memcpy(back_trimmed, backing, (size_t)out_frames * 2 * sizeof(float));
+                free(backing);
+
+                add_stem(stems, STAGE2_STEMS[0], lead_trimmed, s1_vocal_frames);
+                add_stem(stems, STAGE2_STEMS[1], back_trimmed, s1_vocal_frames);
+            } else {
+                free(lead);
+                free(backing);
+                throw std::runtime_error("mel_band_process_chunk returned no data");
             }
+
             cb(2, "Vocal split complete", 0.45f);
         } catch (const std::exception &e) {
             fprintf(stderr, "[SuperSep] Stage 2 failed: %s\n", e.what());
