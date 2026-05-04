@@ -127,14 +127,18 @@ async function runExtraction(job: StemJob, ditSettings: any, style: string, lyri
         task_type: 'extract',
         track: trackName,
         audio_cover_strength: 1.0,  // forced — DiT sees full mix
-        // Inherit user's global DiT settings
+        // Use the client-specified model (forced to base/SFT)
+        synth_model: ditSettings?.ditModel,
+        // Inherit basic DiT settings (or use engine defaults)
         inference_steps: ditSettings?.inferenceSteps,
         infer_method: ditSettings?.inferMethod,
         scheduler: ditSettings?.scheduler || 'linear',
         guidance_mode: ditSettings?.guidanceMode || 'apg',
         guidance_scale: ditSettings?.guidanceScale,
         shift: ditSettings?.shift,
-        synth_model: ditSettings?.ditModel,
+        // Force-disable adapters for extraction
+        adapter: '',
+        adapter_scale: 0,
         // Clear metadata — let model infer from source audio
         bpm: 0,
         duration: 0,

@@ -2,10 +2,13 @@
 //
 // Composes: SourceSelector, TrackSelector, StemMixer, RecentExtractions
 // Manages extraction state, polls progress, loads results into mixer.
+//
+// Extract mode forces a base/SFT DiT model and disables adapters,
+// LM thinking, and post-processing regardless of global bar settings.
 
-import React, { useState, useCallback } from 'react';
-import { AlertTriangle } from 'lucide-react';
-import { useGlobalParams } from '../../context/GlobalParamsContext';
+import React, { useState, useEffect, useCallback } from 'react';
+import { AlertTriangle, Info } from 'lucide-react';
+import { modelApi } from '../../services/api';
 import {
   submitExtraction, waitForExtraction, getExtractResult,
   getStemUrl, getDownloadAllUrl, TRACK_CATEGORIES,
@@ -16,9 +19,12 @@ import { SourceSelector } from './SourceSelector';
 import { TrackSelector } from './TrackSelector';
 import { RecentExtractions } from './RecentExtractions';
 
-export const StemStudio: React.FC = () => {
-  const gp = useGlobalParams();
+/** Filter DiT model list to only base/SFT models (not turbo) */
+function getBaseModels(ditModels: string[]): string[] {
+  return ditModels.filter(m => !m.toLowerCase().includes('turbo'));
+}
 
+export const StemStudio: React.FC = () => {
   // Source audio
   const [sourceAudioUrl, setSourceAudioUrl] = useState('');
   const [sourceFileName, setSourceFileName] = useState('');
@@ -31,6 +37,11 @@ export const StemStudio: React.FC = () => {
   const [style, setStyle] = useState('');
   const [lyrics, setLyrics] = useState('');
 
+  // Model selection — extract requires base/SFT model
+  const [baseModels, setBaseModels] = useState<string[]>([]);
+  const [extractModel, setExtractModel] = useState<string>('');
+  const [modelsLoading, setModelsLoading] = useState(true);
+
   // Extraction state
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
@@ -41,8 +52,17 @@ export const StemStudio: React.FC = () => {
   const [stemControls, setStemControls] = useState<StemControl[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  // Turbo warning
-  const turboWarning = gp.ditModel?.toLowerCase().includes('turbo');
+  // Fetch available base models on mount
+  useEffect(() => {
+    modelApi.list()
+      .then(data => {
+        const base = getBaseModels(data.models.dit || []);
+        setBaseModels(base);
+        if (base.length > 0) setExtractModel(base[0]);
+      })
+      .catch(err => console.error('[StemStudio] Failed to load models:', err))
+      .finally(() => setModelsLoading(false));
+  }, []);
 
   const handleSourceChange = useCallback((url: string, fileName: string) => {
     setSourceAudioUrl(url);
@@ -50,25 +70,19 @@ export const StemStudio: React.FC = () => {
   }, []);
 
   const handleExtract = useCallback(async () => {
-    if (!sourceAudioUrl || selectedTracks.length === 0) return;
+    if (!sourceAudioUrl || selectedTracks.length === 0 || !extractModel) return;
 
     setIsExtracting(true);
     setExtractProgress(null);
     setMixerStems(null);
 
     try {
-      // Collect DiT settings from global params
+      // Force extract-specific settings — ignores global bar
       const ditSettings = {
-        ditModel: gp.ditModel,
-        inferenceSteps: gp.inferenceSteps,
-        inferMethod: gp.inferMethod,
-        scheduler: gp.scheduler,
-        guidanceMode: gp.guidanceMode,
-        guidanceScale: gp.guidanceScale,
-        shift: gp.shift,
-        loraPath: gp.adapter,
-        loraScale: gp.adapterScale,
-        seed: gp.randomSeed ? -1 : gp.seed,
+        ditModel: extractModel,       // forced base/SFT model
+        loraPath: '',                  // no adapter
+        loraScale: 0,                 // no adapter
+        seed: -1,                     // always random for extract
       };
 
       const jobId = await submitExtraction({
@@ -103,7 +117,7 @@ export const StemStudio: React.FC = () => {
     } finally {
       setIsExtracting(false);
     }
-  }, [sourceAudioUrl, sourceFileName, selectedTracks, style, lyrics, gp]);
+  }, [sourceAudioUrl, sourceFileName, selectedTracks, style, lyrics, extractModel]);
 
   const loadResultIntoMixer = useCallback((jobId: string, result: ExtractJobResult) => {
     const stems: MixerStemInfo[] = result.stems.map((s, idx) => ({
@@ -181,11 +195,27 @@ export const StemStudio: React.FC = () => {
 
         {/* Center column — Track Selection + Mixer */}
         <div style={styles.centerCol}>
-          {/* Turbo warning */}
-          {turboWarning && (
-            <div style={styles.turboWarning}>
+          {/* Model selector for Extract */}
+          {!modelsLoading && baseModels.length === 0 && (
+            <div style={styles.noModelsWarning}>
               <AlertTriangle size={14} />
-              <span>Active DiT model is turbo. Extract requires a base/SFT model for coherent output.</span>
+              <span>No base/SFT models found. Extract requires a non-turbo DiT model. Use <strong>Get More Models</strong> in the sidebar to download one.</span>
+            </div>
+          )}
+          {baseModels.length > 0 && (
+            <div style={styles.modelSelector}>
+              <Info size={13} style={{ color: '#a78bfa', flexShrink: 0 }} />
+              <span style={styles.modelLabel}>Extract Model</span>
+              <select
+                value={extractModel}
+                onChange={e => setExtractModel(e.target.value)}
+                style={styles.modelSelect}
+                disabled={isExtracting}
+              >
+                {baseModels.map(m => (
+                  <option key={m} value={m}>{m.replace(/\.gguf$/i, '')}</option>
+                ))}
+              </select>
             </div>
           )}
 
@@ -196,7 +226,7 @@ export const StemStudio: React.FC = () => {
             onModeChange={setMode}
             onExtract={handleExtract}
             isExtracting={isExtracting}
-            canExtract={!!sourceAudioUrl}
+            canExtract={!!sourceAudioUrl && !!extractModel}
           />
 
           {/* Progress */}
@@ -290,17 +320,45 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid rgba(255,255,255,0.06)',
     overflowY: 'auto',
   },
-  turboWarning: {
+  noModelsWarning: {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
     padding: '8px 12px',
     borderRadius: 8,
-    background: 'rgba(234,179,8,0.1)',
-    border: '1px solid rgba(234,179,8,0.25)',
-    color: '#eab308',
+    background: 'rgba(239,68,68,0.1)',
+    border: '1px solid rgba(239,68,68,0.25)',
+    color: '#ef4444',
     fontSize: 12,
     fontWeight: 500,
+  },
+  modelSelector: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 10px',
+    borderRadius: 8,
+    background: 'rgba(167,139,250,0.06)',
+    border: '1px solid rgba(167,139,250,0.15)',
+  },
+  modelLabel: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#a78bfa',
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
+    whiteSpace: 'nowrap' as const,
+  },
+  modelSelect: {
+    flex: 1,
+    padding: '4px 8px',
+    borderRadius: 6,
+    border: '1px solid rgba(255,255,255,0.1)',
+    background: 'rgba(0,0,0,0.3)',
+    color: '#d4d4d4',
+    fontSize: 12,
+    outline: 'none',
+    cursor: 'pointer',
   },
   progressSection: {
     display: 'flex',
