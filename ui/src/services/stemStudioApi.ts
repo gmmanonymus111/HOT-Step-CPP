@@ -1,0 +1,196 @@
+// stemStudioApi.ts — API client for Stem Studio extraction
+//
+// Communicates with Node server /api/stem-studio endpoints.
+
+const API_BASE = '/api/stem-studio';
+
+// ── Types ────────────────────────────────────────────────────────────────
+
+export interface ExtractStemInfo {
+  trackName: string;
+  audioUrl: string;
+  durationSec: number;
+  index: number;
+  sizeBytes?: number;
+}
+
+export interface ExtractJobResult {
+  id: string;
+  stems: ExtractStemInfo[];
+}
+
+export interface ExtractProgress {
+  status: 'pending' | 'extracting' | 'done' | 'failed' | 'cancelled';
+  progress: number;
+  currentTrack: string;
+  completedStems: string[];
+  totalTracks: number;
+  warning?: string;
+  error?: string;
+}
+
+export interface ExtractJobSummary {
+  id: string;
+  sourceFileName: string;
+  tracks: string[];
+  completedStems: string[];
+  createdAt: string;
+}
+
+export interface ExtractParams {
+  sourceAudioUrl: string;
+  sourceFileName: string;
+  tracks: string[];
+  style?: string;
+  lyrics?: string;
+  ditSettings: Record<string, any>;
+}
+
+export interface StemStats {
+  totalBytes: number;
+  jobCount: number;
+  stemCount: number;
+}
+
+// ── Constants ────────────────────────────────────────────────────────────
+
+export const EXTRACT_TRACKS = [
+  'vocals', 'backing_vocals', 'drums', 'bass', 'guitar', 'keyboard',
+  'percussion', 'strings', 'synth', 'fx', 'brass', 'woodwinds',
+] as const;
+
+export type ExtractTrack = typeof EXTRACT_TRACKS[number];
+
+export const TRACK_CATEGORIES: Record<string, 'vocals' | 'instruments' | 'drums' | 'other'> = {
+  vocals: 'vocals',
+  backing_vocals: 'vocals',
+  drums: 'drums',
+  percussion: 'drums',
+  bass: 'instruments',
+  guitar: 'instruments',
+  keyboard: 'instruments',
+  strings: 'instruments',
+  synth: 'instruments',
+  brass: 'instruments',
+  woodwinds: 'instruments',
+  fx: 'other',
+};
+
+/** Human-readable track labels */
+export const TRACK_LABELS: Record<string, string> = {
+  vocals: 'Vocals',
+  backing_vocals: 'Backing Vocals',
+  drums: 'Drums',
+  bass: 'Bass',
+  guitar: 'Guitar',
+  keyboard: 'Keyboard',
+  percussion: 'Percussion',
+  strings: 'Strings',
+  synth: 'Synth',
+  fx: 'FX',
+  brass: 'Brass',
+  woodwinds: 'Woodwinds',
+};
+
+// ── API Functions ────────────────────────────────────────────────────────
+
+/** Submit a new extraction job. Returns the job ID. */
+export async function submitExtraction(params: ExtractParams): Promise<string> {
+  const res = await fetch(`${API_BASE}/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `Extraction failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.id;
+}
+
+/** Poll extraction job progress. */
+export async function getExtractProgress(jobId: string): Promise<ExtractProgress> {
+  const res = await fetch(`${API_BASE}/${jobId}/progress`);
+  if (!res.ok) throw new Error(`Progress fetch failed: ${res.status}`);
+  return res.json();
+}
+
+/** Get completed extraction result with stem metadata. */
+export async function getExtractResult(jobId: string): Promise<ExtractJobResult> {
+  const res = await fetch(`${API_BASE}/${jobId}/result`);
+  if (!res.ok) throw new Error(`Result fetch failed: ${res.status}`);
+  return res.json();
+}
+
+/** Get the direct URL for a specific stem's audio. */
+export function getStemUrl(jobId: string, trackName: string): string {
+  return `${API_BASE}/${jobId}/stem/${trackName}`;
+}
+
+/** Get the URL for downloading all stems as a ZIP. */
+export function getDownloadAllUrl(jobId: string): string {
+  return `${API_BASE}/${jobId}/download-all`;
+}
+
+/** List all past extraction jobs (newest first). */
+export async function listJobs(): Promise<ExtractJobSummary[]> {
+  const res = await fetch(`${API_BASE}/jobs`);
+  if (!res.ok) throw new Error(`List jobs failed: ${res.status}`);
+  return res.json();
+}
+
+/** Delete a single extraction job and its files. */
+export async function deleteJob(jobId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/${jobId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+}
+
+/** Delete ALL extraction jobs and stems. */
+export async function deleteAllJobs(): Promise<void> {
+  const res = await fetch(`${API_BASE}/all`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Delete all failed: ${res.status}`);
+}
+
+/** Get stem storage statistics for the Settings page. */
+export async function getStemStats(): Promise<StemStats> {
+  const res = await fetch(`${API_BASE}/stats`);
+  if (!res.ok) throw new Error(`Stats fetch failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Poll until extraction completes, calling onProgress along the way.
+ * Returns the final result with stem metadata.
+ */
+export async function waitForExtraction(
+  jobId: string,
+  onProgress?: (p: ExtractProgress) => void,
+  pollMs = 1000,
+): Promise<ExtractJobResult> {
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        const p = await getExtractProgress(jobId);
+        onProgress?.(p);
+        if (p.status === 'done') {
+          resolve(await getExtractResult(jobId));
+        } else if (p.status === 'failed' || p.status === 'cancelled') {
+          reject(new Error(p.error || `Extraction ${p.status}`));
+        } else {
+          setTimeout(poll, pollMs);
+        }
+      } catch (err) { reject(err); }
+    };
+    poll();
+  });
+}
+
+/** Format bytes for display */
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
