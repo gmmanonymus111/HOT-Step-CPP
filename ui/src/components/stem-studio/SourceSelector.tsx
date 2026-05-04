@@ -1,6 +1,7 @@
 // SourceSelector.tsx — Upload or pick existing track for stem extraction
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Upload, Music, Search, X } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 
 interface Song {
   id: string;
@@ -25,6 +26,7 @@ const SOURCE_FILTERS = [
 ];
 
 export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, sourceFileName, onSourceChange }) => {
+  const { token } = useAuth();
   const [uploadDragging, setUploadDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
@@ -33,15 +35,15 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
   const [search, setSearch] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Fetch songs for the picker
+  // Fetch songs for the picker (requires auth token)
   useEffect(() => {
-    if (!showPicker) return;
+    if (!showPicker || !token) return;
     const url = filter === 'all' ? '/api/songs/recent?limit=50' : `/api/songs/recent?source=${filter}&limit=50`;
-    fetch(url)
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => setSongs(data.songs || []))
       .catch(() => setSongs([]));
-  }, [showPicker, filter]);
+  }, [showPicker, filter, token]);
 
   const filteredSongs = songs.filter(s =>
     !search || s.title.toLowerCase().includes(search.toLowerCase()) ||
