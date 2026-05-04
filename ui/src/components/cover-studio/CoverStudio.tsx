@@ -440,7 +440,7 @@ export const CoverStudio: React.FC = () => {
     setSongArtist(''); setSongTitle(''); setLyrics('');
     setBpmCorrection(1); setKeyOverride(null);
     // Clear stems too
-    setSepStems(null); setStemControls([]); setSepJobId(null); setRecombinedBlob(null); setShowMixer(false);
+    setSepStems(null); setStemControls([]); setSepJobId(null); setShowMixer(false);
   };
 
   const canGenerate = !!sourceAudioUrl && !!lyrics.trim() && !isGenerating;
@@ -452,7 +452,7 @@ export const CoverStudio: React.FC = () => {
     setSepProgress(0);
     setSepMessage('Starting separation...');
     setSepStems(null);
-    setRecombinedBlob(null);
+
 
     try {
       // Start separation — pass server URL directly (no need to download/re-upload)
