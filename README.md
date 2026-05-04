@@ -24,7 +24,9 @@ HOT-Step CPP extends the base acestep.cpp engine with 80+ features across infere
 
 ✍️ **Lyric Studio** — A complete AI-powered lyrics and music workspace. 6 LLM providers (Gemini, LM Studio, OpenAI-compatible), artist profiles with adapter presets, statistical lyric analysis, bulk generation with "Fill to N" mode, and full parameter parity with the Create page.
 
-🎤 **Cover Studio** — Upload a reference track, get Essentia-based analysis (BPM, key, energy, timbre), and generate style-matched covers with artist-specific settings.
+🎤 **Cover Studio** — Upload a reference track, get Essentia-based analysis (BPM, key, energy, timbre), and generate style-matched covers. Artist-optional workflow with editable style descriptions, pitch shift with key transposition preview, tempo scaling, stem separation + recombination, and per-album adapter presets.
+
+🔪 **Stem Studio** — 4-stage neural stem separation powered by SuperSep. BS-RoFormer for primary 6-stem splits, Mel-Band RoFormer for lead/backing vocal isolation, MDX23C for drum sub-separation, and HTDemucs for instrument refinement. Interactive mixer with multi-solo, per-stem volume controls, and ZIP export. Sequential VRAM management keeps peak usage under 3 GB.
 
 🔊 **Audio Post-Processing** — Spectral denoiser (Wiener-filter), Spectral Lifter (native C++), PP-VAE neural audio polish, duration buffer with auto-trim for clean endings, and configurable fade-out.
 

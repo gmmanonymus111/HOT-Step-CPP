@@ -98,19 +98,59 @@ A complete AI-powered lyrics and music generation workspace, powered by the Lire
 | **Send to Create** | Transfers artist context, adapter path, reference track, key signature, and all metadata to the Create page in one click. |
 | **Artist Sidebar** | Persistent sidebar with artist list, scroll position memory, and per-artist song counts. |
 | **Album Pages** | Browse by album with header bars, generated songs tab, and inline audio playback. |
-| **Database Migration** | Import tool for migrating from HOT-Step 9000's `hotstep_lyrics.db` — artists, profiles, and generations. |
+| **Database Migration** | Import tool for migrating from HOT-Step 9000’s `hotstep_lyrics.db` — artists, profiles, and generations. |
 | **Dynamic LLM Model List** | Fetches available models from provider APIs instead of using a hardcoded list. |
 | **Profile Stats Recalculation** | One-click re-run of all local statistical analysis without making any LLM calls. |
+| **LRC Synced Lyrics** | Timestamped lyric display synced to audio playback with seeking support. |
+| **Track Cropping** | Destructive IN/OUT point editing for trimming generated tracks to clean boundaries. |
 
 ---
 
 ## Cover Studio
 
+Full-featured cover generation workspace with audio analysis, stem manipulation, and artist-specific generation:
+
 | Feature | Description |
 |---------|-------------|
 | **Audio Analysis** | Essentia-based extraction of BPM, key, energy, and timbre characteristics from source tracks. |
-| **Source Upload** | Upload and analyse reference audio for style-matched cover generation. |
-| **Cover Generation UI** | Full workspace with metadata extraction, artist selection, cover-specific settings, and recent covers list. |
+| **Source Upload** | Upload and analyse reference audio for style-matched cover generation. Drag-and-drop with format auto-detection. |
+| **BPM Correction** | ÷2 / Detected / ×2 buttons to fix Essentia’s common tempo halving/doubling errors. |
+| **Key Override** | Manual key correction dropdown when Essentia’s detection is wrong — shows both detected and overridden keys. |
+| **Style Description** | Editable caption field for describing the target style. Auto-filled from artist profile when available, freely editable. |
+| **Artist-Optional Generation** | Generate covers using just a style description — no artist or adapter required. |
+| **Pitch Shift** | ±12 semitone slider with real-time key transposition preview (e.g. “+3 st → F Major”). |
+| **Tempo Scale** | 0.5x–2.0x tempo slider with computed BPM preview. |
+| **Structure Fidelity** | Controls how closely the output follows the source’s arrangement and structure. |
+| **Source Timbre** | Controls how much of the original artist’s sonic character is preserved in the output. |
+| **Timbre Reference Conditioning** | Uses the target artist’s reference track as a DiT timbre conditioner to influence sonic character. |
+| **Stem Separation + Recombination** | Advanced mode: split source into stems via SuperSep, configure the stem mix, then generate from the recombined audio. |
+| **Album Adapter Presets** | Per-album adapter presets with bound reference tracks — select an album to auto-load the matching adapter and reference. |
+| **Cover Generation UI** | Full workspace with metadata extraction, artist grid, cover-specific sliders, progress tracking, and recent covers list. |
+| **Persistent State** | All settings, selections, and analysis results persist across navigation and reloads. |
+
+---
+
+## Stem Studio
+
+Neural audio source separation with a 4-stage ONNX pipeline and interactive stem mixer:
+
+| Feature | Description |
+|---------|-------------|
+| **SuperSep Pipeline** | 4-stage cascaded separation using specialised ONNX models for different instrument groups. |
+| **Stage 1: BS-RoFormer** | Primary 6-stem split (Vocals, Drums, Bass, Guitar, Piano, Other) using Band-Split RoFormer with full-track chunking. |
+| **Stage 2: Mel-Band RoFormer** | Vocal sub-separation into Lead Vocals and Backing Vocals. Full-track processing with late-vocal detection. |
+| **Stage 3: MDX23C** | Drum sub-separation into Kick, Snare, Toms, Hi-Hat, Cymbals, and Other Percussion via STFT-based MDX processing. |
+| **Stage 4: HTDemucs** | Hybrid transformer for “Other” refinement — dual-input model taking both STFT spectrograms and raw waveforms, with dual-output combination. |
+| **4 Separation Levels** | Basic (6 stems), Vocal Split (+ lead/backing), Full (+ drum sub-stems), Maximum (+ other sub-stems). |
+| **Interactive Stem Mixer** | Multi-solo, mute, and per-stem volume sliders with real-time Web Audio playback. |
+| **Chunking + Overlap-Add** | Full-length audio processing with 1-second crossfade windows for seamless chunk boundaries. |
+| **Sequential VRAM Management** | Models loaded and released strictly sequentially — peak GPU usage stays under 3 GB. |
+| **Per-Stage WAV Exports** | All stages generate raw WAVs in `stage-N/` directories for diagnostics, regardless of downstream routing. |
+| **Hidden Intermediate Stems** | Debug stems (e.g. raw Vocals before lead/backing split) saved to disk but filtered from the UI mixer. |
+| **MDX STFT Preprocessing** | Generic engine function for MDX23C and HTDemucs models with stripped STFT layers — handles the [1,4,dim_f,T] tensor layout. |
+| **Source Library Browser** | Pick source audio from the song library with search, source filtering, and mastered/unmastered toggle. |
+| **ZIP Download** | Download all stems as a single ZIP archive, or download individual stems. |
+| **Persistent Source Selection** | Source audio URL and filename persist across sessions via localStorage. |
 
 ---
 
@@ -136,6 +176,8 @@ A complete AI-powered lyrics and music generation workspace, powered by the Lire
 | **LM / Thinking Toggle** | Skip or enable the LM inference phase entirely — useful for speed when you don't need metadata generation. |
 | **Nuke Generations** | One-click wipe of all generated content and database entries. |
 | **Configurable Download Defaults** | Set preferred export format, filename prefix, and download behaviour. |
+| **Environment Editor** | Read and edit the server's `.env` file directly from the Settings UI with categorised sections, masked API keys, and save confirmation. |
+| **Runtime Config Reload** | Hot-reload LLM provider settings and API keys without restarting the server. Engine-level changes show a restart notification. |
 
 ---
 
