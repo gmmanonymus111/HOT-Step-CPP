@@ -6,8 +6,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Zap, Download, Tag, AlertTriangle, Loader2, Settings2,
-  FolderOpen, Eye, EyeOff, ChevronRight, Save,
+  FolderOpen, Eye, EyeOff, ChevronRight, Save, Scissors,
 } from 'lucide-react';
+import { getStemStats, deleteAllJobs, formatBytes, type StemStats } from '../../services/stemStudioApi';
 import { useAuth } from '../../context/AuthContext';
 import { songApi, settingsApi } from '../../services/api';
 import { lireekApi } from '../../services/lireekApi';
@@ -269,6 +270,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [nukeProfilesConfirm, setNukeProfilesConfirm] = useState(false);
   const [nukeProfilesRunning, setNukeProfilesRunning] = useState(false);
 
+  // Stem storage state
+  const [stemStats, setStemStats] = useState<StemStats | null>(null);
+  const [stemClearConfirm, setStemClearConfirm] = useState(false);
+  const [stemClearing, setStemClearing] = useState(false);
+
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     onSettingsChange({ ...settings, [key]: value });
   };
@@ -316,6 +322,24 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       setNukeResult(`Failed: ${err.message}`);
     } finally {
       setNukeProfilesRunning(false);
+    }
+  };
+
+  // Load stem storage stats
+  useEffect(() => {
+    getStemStats().then(setStemStats).catch(() => setStemStats(null));
+  }, []);
+
+  const handleClearStems = async () => {
+    setStemClearing(true);
+    try {
+      await deleteAllJobs();
+      setStemStats({ totalBytes: 0, jobCount: 0, stemCount: 0 });
+      setStemClearConfirm(false);
+    } catch (err: any) {
+      console.error('[Settings] Clear stems failed:', err);
+    } finally {
+      setStemClearing(false);
     }
   };
 
@@ -664,6 +688,81 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             </div>
           </div>
         )}
+      </div>
+
+      {/* Stem Storage Section */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <Scissors size={16} className="settings-section-icon" />
+          <span className="settings-section-title">Stem Storage</span>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <div className="setting-label">Extracted Stems</div>
+            <div className="setting-description">
+              {stemStats ? (
+                <>
+                  {stemStats.jobCount} extraction{stemStats.jobCount !== 1 ? 's' : ''} · {stemStats.stemCount} stem{stemStats.stemCount !== 1 ? 's' : ''} · {formatBytes(stemStats.totalBytes)}
+                </>
+              ) : (
+                'Loading...'
+              )}
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px', flexShrink: 0 }}>
+            {!stemClearConfirm ? (
+              <button
+                id="clear-stems-btn"
+                onClick={() => setStemClearConfirm(true)}
+                disabled={stemClearing || !stemStats || stemStats.jobCount === 0}
+                className="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200"
+                style={{
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#fca5a5',
+                  cursor: (!stemStats || stemStats.jobCount === 0) ? 'not-allowed' : 'pointer',
+                  opacity: (!stemStats || stemStats.jobCount === 0) ? 0.5 : 1,
+                }}
+              >
+                🗑️ Clear All Stems
+              </button>
+            ) : (
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>Delete all stems?</span>
+                <button
+                  id="clear-stems-confirm-btn"
+                  onClick={handleClearStems}
+                  disabled={stemClearing}
+                  className="px-4 py-2 rounded-lg text-sm font-bold transition-all duration-200"
+                  style={{
+                    background: '#dc2626',
+                    border: '1px solid #ef4444',
+                    color: 'white',
+                    cursor: stemClearing ? 'wait' : 'pointer',
+                    opacity: stemClearing ? 0.6 : 1,
+                  }}
+                >
+                  {stemClearing ? (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Loader2 size={14} className="animate-spin" /> Clearing...
+                    </span>
+                  ) : (
+                    '🗑️ Confirm'
+                  )}
+                </button>
+                <button
+                  onClick={() => setStemClearConfirm(false)}
+                  disabled={stemClearing}
+                  className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Danger Zone */}
