@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "better-sqlite3": "^11.8.1",
     "cheerio": "^1.2.0",
     "cmu-pronouncing-dictionary": "^3.0.0",
@@ -25,6 +26,7 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
+    "@types/archiver": "^7.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.2",
