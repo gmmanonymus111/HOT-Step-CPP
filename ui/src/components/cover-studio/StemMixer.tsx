@@ -20,6 +20,7 @@ interface StemMixerProps {
   controls: StemControl[];
   onControlsChange: (controls: StemControl[]) => void;
   onRecombine?: (audioBlob: Blob) => void;
+  onClose?: () => void;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -31,7 +32,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const CATEGORY_ORDER = ['vocals', 'instruments', 'drums', 'other'];
 
-export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onRecombine }) => {
+export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onRecombine, onClose }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isRecombining, setIsRecombining] = useState(false);
   const [soloIndex, setSoloIndex] = useState<number | null>(null);
@@ -40,6 +41,18 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
   const buffersRef = useRef<Map<number, AudioBuffer>>(new Map());
   const [loadedStems, setLoadedStems] = useState<Set<number>>(new Set());
   const [loadingStems, setLoadingStems] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const playbackOffsetRef = useRef(0);
+  const playbackStartTimeRef = useRef(0);
+  const animationFrameRef = useRef<number>();
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
 
   // Group stems by category
   const groupedStems = useMemo(() => {
@@ -84,6 +97,10 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
         const arrayBuf = await res.arrayBuffer();
         const audioBuf = await ctx.decodeAudioData(arrayBuf);
         buffersRef.current.set(stem.index, audioBuf);
+        if (stem.index === stems[0].index) {
+          setDuration(audioBuf.duration);
+        }
+
         loaded.add(stem.index);
       } catch (err) {
         console.warn(`Failed to load stem ${stem.index}:`, err);
@@ -93,15 +110,43 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
     setLoadingStems(false);
   }, [jobId, stems]);
 
+
+  const updateProgress = useCallback(() => {
+    if (audioContextRef.current && isPlaying) {
+      const elapsed = audioContextRef.current.currentTime - playbackStartTimeRef.current;
+      let newTime = playbackOffsetRef.current + elapsed;
+      if (duration > 0 && newTime >= duration) {
+         newTime = 0;
+         setIsPlaying(false);
+         playbackOffsetRef.current = 0;
+      } else {
+         setCurrentTime(newTime);
+         animationFrameRef.current = requestAnimationFrame(updateProgress);
+      }
+    }
+  }, [isPlaying, duration]);
+
+  useEffect(() => {
+    if (isPlaying) {
+      animationFrameRef.current = requestAnimationFrame(updateProgress);
+    } else {
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    }
+    return () => { if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current); };
+  }, [isPlaying, updateProgress]);
+
   // Start/stop preview playback
   const togglePlayback = useCallback(async () => {
     if (isPlaying) {
-      // Stop
+      // Pause
       sourceNodesRef.current.forEach(({ source }) => {
         try { source.stop(); } catch {}
       });
       sourceNodesRef.current.clear();
       setIsPlaying(false);
+      if (audioContextRef.current) {
+         playbackOffsetRef.current += (audioContextRef.current.currentTime - playbackStartTimeRef.current);
+      }
       return;
     }
 
@@ -130,18 +175,38 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
 
       source.connect(gain);
       gain.connect(ctx.destination);
-      source.start(startTime);
+      source.start(startTime, playbackOffsetRef.current);
 
       sourceNodesRef.current.set(stem.index, { source, gain });
       source.onended = () => {
         sourceNodesRef.current.delete(stem.index);
         if (sourceNodesRef.current.size === 0) {
           setIsPlaying(false);
+          playbackOffsetRef.current = 0;
+          setCurrentTime(0);
         }
       };
     }
+    playbackStartTimeRef.current = ctx.currentTime;
     setIsPlaying(true);
-  }, [isPlaying, stems, controls, soloIndex, loadedStems, loadBuffers]);
+  }, [isPlaying, stems, controls, soloIndex, loadedStems, loadBuffers, duration]);
+
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const time = parseFloat(e.target.value);
+    setCurrentTime(time);
+    playbackOffsetRef.current = time;
+    
+    // If playing, restart from new time
+    if (isPlaying) {
+      sourceNodesRef.current.forEach(({ source }) => {
+        try { source.stop(); } catch {}
+      });
+      sourceNodesRef.current.clear();
+      setIsPlaying(false);
+      setTimeout(togglePlayback, 50); // micro-delay to let stop propagate
+    }
+  };
 
   // Update gain nodes in real-time when controls change
   useEffect(() => {
@@ -182,10 +247,13 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
     }
   }, [jobId, controls, soloIndex, onRecombine]);
 
-  return (
-    <div style={styles.container}>
+  const content = (
+    <div style={{ ...styles.container, width: '100%', maxWidth: '600px', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
       <div style={styles.header}>
-        <h3 style={styles.title}>🎛️ Stem Mixer</h3>
+                <h3 style={styles.title}>🎛️ Stem Mixer</h3>
+        {onClose && (
+           <button onClick={onClose} className="text-zinc-400 hover:text-white transition-colors" style={{ marginLeft: 'auto', marginRight: 16 }}>✕</button>
+        )}
         <div style={styles.headerButtons}>
           <button
             onClick={togglePlayback}
@@ -204,7 +272,22 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
         </div>
       </div>
 
-      <div style={styles.stemList}>
+
+      {duration > 0 && (
+        <div style={{ padding: '16px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 12, color: '#a3a3a3', fontFamily: 'monospace', width: 40, textAlign: 'right' }}>{formatTime(currentTime)}</span>
+          <input 
+            type="range" 
+            min="0" max={duration} step="0.1" 
+            value={currentTime} 
+            onChange={handleSeek}
+            style={{ flex: 1, accentColor: '#ec4899', height: 4, cursor: 'pointer' }} 
+          />
+          <span style={{ fontSize: 12, color: '#a3a3a3', fontFamily: 'monospace', width: 40 }}>{formatTime(duration)}</span>
+        </div>
+      )}
+
+      <div style={{ ...styles.stemList, overflowY: 'auto' }}>
         {groupedStems.map(({ category, stems: catStems }) => (
           <div key={category} style={styles.categoryGroup}>
             <div style={{
@@ -272,6 +355,14 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
           </div>
         ))}
       </div>
+    </div>
+  );
+
+  if (!onClose) return content;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+       {content}
     </div>
   );
 };

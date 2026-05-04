@@ -70,11 +70,11 @@ struct StemDef {
 
 static const StemDef STAGE1_STEMS[] = {
     {"01_Bass",   "Bass",   "instruments", 1},
-    {"02_Guitar", "Guitar", "instruments", 1},
-    {"03_Piano",  "Piano",  "instruments", 1},
+    {"02_Drums",  "Drums",  "drums",       1},
+    {"03_Other",  "Other",  "other",       1},
     {"04_Vocals", "Vocals", "vocals",      1},
-    {"05_Drums",  "Drums",  "drums",       1},
-    {"06_Other",  "Other",  "other",       1},
+    {"05_Guitar", "Guitar", "instruments", 1},
+    {"06_Piano",  "Piano",  "instruments", 1},
 };
 static const int N_STAGE1_STEMS = 6;
 

@@ -102,6 +102,7 @@ export const CoverStudio: React.FC = () => {
   const [sepJobId, setSepJobId] = useState<string | null>(null);
   const [sepStems, setSepStems] = useState<StemInfo[] | null>(null);
   const [stemControls, setStemControls] = useState<StemControl[]>([]);
+  const [showMixer, setShowMixer] = useState(false);
   const [recombinedBlob, setRecombinedBlob] = useState<Blob | null>(null);
 
   // ── Persist ──
@@ -439,7 +440,7 @@ export const CoverStudio: React.FC = () => {
     setSongArtist(''); setSongTitle(''); setLyrics('');
     setBpmCorrection(1); setKeyOverride(null);
     // Clear stems too
-    setSepStems(null); setStemControls([]); setSepJobId(null); setRecombinedBlob(null);
+    setSepStems(null); setStemControls([]); setSepJobId(null); setRecombinedBlob(null); setShowMixer(false);
   };
 
   const canGenerate = !!sourceAudioUrl && !!lyrics.trim() && !isGenerating;
@@ -467,6 +468,7 @@ export const CoverStudio: React.FC = () => {
       setSepStems(result.stems);
       // Initialize stem controls (all at 100%, unmuted)
       setStemControls(result.stems.map(s => ({ index: s.index, volume: 1.0, muted: false })));
+      setShowMixer(true);
       showToast(`Separated into ${result.stems.length} stems!`);
     } catch (err: any) {
       showToast(`Separation failed: ${err.message}`);
@@ -528,13 +530,22 @@ export const CoverStudio: React.FC = () => {
               placeholder="Lyrics will appear here after searching Genius, or paste them manually..."
               className="w-full h-full resize-none bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors font-mono leading-relaxed" />
           </div>
-          {/* Stem Mixer — always visible when stems are available */}
+          {/* Stem Mixer Toggle */}
           {sepStems && sepJobId && (
-            <div className="flex-shrink-0 border-t border-white/5 p-4 max-h-[360px] overflow-y-auto scrollbar-hide">
-              <StemMixer jobId={sepJobId} stems={sepStems}
-                controls={stemControls} onControlsChange={setStemControls}
-                onRecombine={handleRecombine} />
+            <div className="flex-shrink-0 border-t border-white/5 p-4 flex justify-end bg-black/20">
+              <button 
+                onClick={() => setShowMixer(true)}
+                className="px-4 py-2 bg-gradient-to-r from-purple-500 to-cyan-500 rounded-lg text-sm font-semibold text-white shadow-lg hover:shadow-cyan-500/25 transition-all flex items-center gap-2"
+              >
+                🎛️ Configure Stems ({sepStems.length})
+              </button>
             </div>
+          )}
+          
+          {showMixer && sepStems && sepJobId && (
+            <StemMixer jobId={sepJobId} stems={sepStems}
+              controls={stemControls} onControlsChange={setStemControls}
+              onRecombine={handleRecombine} onClose={() => setShowMixer(false)} />
           )}
         </div>
 
