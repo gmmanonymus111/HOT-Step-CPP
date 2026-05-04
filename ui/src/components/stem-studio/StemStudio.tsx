@@ -56,21 +56,31 @@ export const StemStudio: React.FC = () => {
   const [stemControls, setStemControls] = useState<StemControl[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  // Fetch available base models on mount
+  // Fetch available base models on mount — restore persisted selection
   useEffect(() => {
     modelApi.list()
       .then(data => {
         const base = getBaseModels(data.models.dit || []);
         setBaseModels(base);
-        if (base.length > 0) setExtractModel(base[0]);
+        if (base.length > 0) {
+          const stored = localStorage.getItem('hs-stem-extractModel');
+          setExtractModel(stored && base.includes(stored) ? stored : base[0]);
+        }
       })
       .catch(err => console.error('[StemStudio] Failed to load models:', err))
       .finally(() => setModelsLoading(false));
   }, []);
 
-  const handleSourceChange = useCallback((url: string, fileName: string) => {
+  // Persist extract model selection
+  useEffect(() => {
+    if (extractModel) localStorage.setItem('hs-stem-extractModel', extractModel);
+  }, [extractModel]);
+
+  const handleSourceChange = useCallback((url: string, fileName: string, meta?: { style?: string; lyrics?: string }) => {
     setSourceAudioUrl(url);
     setSourceFileName(fileName);
+    if (meta?.style) setStyle(meta.style);
+    if (meta?.lyrics) setLyrics(meta.lyrics);
   }, []);
 
   const handleExtract = useCallback(async () => {
@@ -78,7 +88,6 @@ export const StemStudio: React.FC = () => {
 
     setIsExtracting(true);
     setExtractProgress(null);
-    setMixerStems(null);
 
     try {
       // Force extract-specific settings — ignores global bar
