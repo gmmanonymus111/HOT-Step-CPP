@@ -453,29 +453,51 @@ static bool bs_roformer_separate(
     const int chunk_size = BS_CHUNK_SIZE;
 
     if (n_frames <= chunk_size) {
-        // Single chunk — no overlap needed
+        // Single chunk — pad to full chunk_size if needed
         cb(1, "Running BS-RoFormer inference...", 0.10f);
+
+        if (n_frames < chunk_size) {
+            // Pad with zeros to full chunk_size
+            std::vector<float> padded(chunk_size * 2, 0.0f);
+            memcpy(padded.data(), audio, (size_t)n_frames * 2 * sizeof(float));
+            bool ok = bs_roformer_process_chunk(session, padded.data(), chunk_size, n_stems,
+                                                  stem_outputs, stem_frame_counts);
+            // Trim outputs back to original length
+            if (ok) {
+                for (int s = 0; s < (int)stem_outputs.size(); s++) {
+                    stem_frame_counts[s] = n_frames;
+                }
+            }
+            return ok;
+        }
         return bs_roformer_process_chunk(session, audio, n_frames, n_stems,
                                           stem_outputs, stem_frame_counts);
     }
 
-    // Multiple chunks with overlap-add
-    // Use 50% overlap for seamless reconstruction
-    int overlap = chunk_size / 2;
-    int step = chunk_size - overlap;
-    int n_chunks = (n_frames - overlap + step - 1) / step;
+    // Multiple chunks with overlap-add.
+    // Use a small crossfade overlap (~1 second) for seamless joins.
+    // The model's chunk_size is ~13.4s, so overlap of ~1s is ~7%.
+    const int crossfade = 44100;  // 1 second crossfade region
+    int step = chunk_size - crossfade;
+    int n_chunks = (n_frames - crossfade + step - 1) / step;
     if (n_chunks < 1) n_chunks = 1;
 
     fprintf(stderr, "[SuperSep] Chunking: %d frames into %d chunks "
-            "(chunk=%d, overlap=%d, step=%d)\n",
-            n_frames, n_chunks, chunk_size, overlap, step);
+            "(chunk=%d, crossfade=%d, step=%d)\n",
+            n_frames, n_chunks, chunk_size, crossfade, step);
 
     // Allocate output accumulators (per stem)
     std::vector<std::vector<float>> accum(n_stems, std::vector<float>(n_frames * 2, 0.0f));
     std::vector<std::vector<float>> weight(n_stems, std::vector<float>(n_frames * 2, 0.0f));
 
-    // Crossfade window for blending overlapping chunks
-    auto fade_window = hann_window(chunk_size);
+    // Crossfade window: ramp up over first crossfade/2, constant 1, ramp down over last crossfade/2
+    std::vector<float> fade_window(chunk_size, 1.0f);
+    int half_fade = crossfade / 2;
+    for (int i = 0; i < half_fade; i++) {
+        float t = (float)i / (float)half_fade;
+        fade_window[i] = t;  // fade in
+        fade_window[chunk_size - 1 - i] = t;  // fade out
+    }
 
     for (int c = 0; c < n_chunks; c++) {
         if (cancelled()) return false;
@@ -489,24 +511,29 @@ static bool bs_roformer_separate(
         snprintf(msg, sizeof(msg), "Processing chunk %d/%d...", c + 1, n_chunks);
         cb(1, msg, pct);
 
-        // Extract chunk (interleaved stereo)
-        std::vector<float> chunk_buf(this_chunk * 2, 0.0f);
+        // Extract chunk — ALWAYS pad to full chunk_size for fixed ONNX input shape
+        std::vector<float> chunk_buf(chunk_size * 2, 0.0f);
         memcpy(chunk_buf.data(), audio + start * 2, (size_t)this_chunk * 2 * sizeof(float));
 
         std::vector<float *> chunk_stems;
         std::vector<int> chunk_counts;
 
-        if (!bs_roformer_process_chunk(session, chunk_buf.data(), this_chunk,
+        if (!bs_roformer_process_chunk(session, chunk_buf.data(), chunk_size,
                                         n_stems, chunk_stems, chunk_counts)) {
             for (auto p : chunk_stems) free(p);
             return false;
         }
 
-        // Overlap-add with fade window
+        // Overlap-add with crossfade window
+        // For first chunk: no fade-in. For last chunk: no fade-out.
         for (int s = 0; s < (int)chunk_stems.size() && s < n_stems; s++) {
-            int out_len = std::min(chunk_counts[s], this_chunk);
-            for (int i = 0; i < out_len; i++) {
-                float w = (i < chunk_size) ? fade_window[i] : 1.0f;
+            for (int i = 0; i < this_chunk; i++) {
+                float w = fade_window[i];
+                // First chunk: don't fade in
+                if (c == 0 && i < half_fade) w = 1.0f;
+                // Last chunk: don't fade out
+                if (c == n_chunks - 1 && i >= this_chunk - half_fade) w = 1.0f;
+
                 int dst = (start + i) * 2;
                 if (dst + 1 < n_frames * 2) {
                     accum[s][dst + 0] += chunk_stems[s][i * 2 + 0] * w;
