@@ -216,21 +216,46 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
   }, [isPlaying, stems, controls, soloIndex, loadedStems, loadBuffers, duration]);
 
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSeek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     setCurrentTime(time);
     playbackOffsetRef.current = time;
-    
-    // If playing, restart from new time
-    if (isPlaying) {
+
+    // If playing, stop old sources and immediately restart from new position
+    // (avoids the stale-closure problem of setTimeout + togglePlayback)
+    if (isPlaying && audioContextRef.current) {
       sourceNodesRef.current.forEach(({ source }) => {
         try { source.stop(); } catch {}
       });
       sourceNodesRef.current.clear();
-      setIsPlaying(false);
-      setTimeout(togglePlayback, 50); // micro-delay to let stop propagate
+
+      const ctx = audioContextRef.current;
+      const startTime = ctx.currentTime + 0.05;
+      for (const stem of stems) {
+        const buf = buffersRef.current.get(stem.index);
+        if (!buf) continue;
+        const source = ctx.createBufferSource();
+        source.buffer = buf;
+        const gain = ctx.createGain();
+        const ctrl = controls.find(c => c.index === stem.index);
+        const effectiveMuted = ctrl?.muted || (soloIndex !== null && soloIndex !== stem.index);
+        gain.gain.value = effectiveMuted ? 0 : (ctrl?.volume ?? 1.0);
+        source.connect(gain);
+        gain.connect(ctx.destination);
+        source.start(startTime, time);
+        sourceNodesRef.current.set(stem.index, { source, gain });
+        source.onended = () => {
+          sourceNodesRef.current.delete(stem.index);
+          if (sourceNodesRef.current.size === 0) {
+            setIsPlaying(false);
+            playbackOffsetRef.current = 0;
+            setCurrentTime(0);
+          }
+        };
+      }
+      playbackStartTimeRef.current = ctx.currentTime;
     }
-  };
+  }, [isPlaying, stems, controls, soloIndex]);
 
   // Update gain nodes in real-time when controls change
   useEffect(() => {
