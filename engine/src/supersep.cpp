@@ -748,6 +748,140 @@ static bool mel_band_process_chunk(
     return true;
 }
 
+// ── MDX-style STFT processing (MDX23C / HTDemucs) ───────────────────────
+//
+// Both MDX23C and HTDemucs models expect STFT input with stripped STFT layers.
+// Input layout:  [1, 4, dim_f, T]  where 4 = stereo(2) × complex(2)
+//   Channel order: [left_real, left_imag, right_real, right_imag]
+//
+// MDX23C output:  [1, n_stems, 4, dim_f, T]  (5D)
+// HTDemucs output: [1, n_stems*4, dim_f, T]  (4D, channels flattened)
+//
+// STFT params:  n_fft=4096, hop=1024, freq truncated to dim_f.
+// Chunk size:   (dim_t - 1) * hop samples (produces exactly dim_t time frames).
+//
+
+static bool mdx_process_chunk(
+    Ort::Session *session,
+    const float *chunk,       // interleaved stereo PCM
+    int chunk_frames,         // per-channel frame count
+    int n_fft,
+    int hop,
+    int dim_f,                // freq truncation (1024 for MDX23C, 2048 for HTDemucs)
+    int n_stems,              // max stems to extract
+    std::vector<float *> &stem_outputs,
+    std::vector<int> &stem_counts) {
+
+    const int n_ch = 2;
+    const int full_freqs = n_fft / 2 + 1;  // 2049
+
+    // 1. STFT
+    StftParams sp;
+    sp.n_fft = n_fft;
+    sp.hop_length = hop;
+    sp.n_channels = n_ch;
+    ComplexSpec spec = stft_forward(chunk, chunk_frames, sp);
+    int T = spec.n_frames;
+
+    fprintf(stderr, "[SuperSep] MDX STFT: %d freqs x %d frames (dim_f=%d)\n",
+            full_freqs, T, dim_f);
+
+    // 2. Build model input [1, 4, dim_f, T]
+    //    Layout: (c ri) f t  →  ch0_real, ch0_imag, ch1_real, ch1_imag
+    size_t input_size = (size_t)4 * dim_f * T;
+    std::vector<float> model_input(input_size, 0.0f);
+
+    for (int ch = 0; ch < n_ch; ch++) {
+        for (int f = 0; f < dim_f && f < full_freqs; f++) {
+            for (int t = 0; t < T; t++) {
+                const float *c = spec.at(ch, f, t);
+                // Real → channel ch*2, Imag → channel ch*2+1
+                model_input[((size_t)(ch*2) * dim_f + f) * T + t] = c[0];
+                model_input[((size_t)(ch*2+1) * dim_f + f) * T + t] = c[1];
+            }
+        }
+    }
+
+    // 3. Run inference
+    Ort::AllocatorWithDefaultOptions alloc;
+    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+    std::vector<int64_t> input_shape = {1, 4, dim_f, T};
+    auto input_tensor = Ort::Value::CreateTensor<float>(
+        mem, model_input.data(), model_input.size(), input_shape.data(), input_shape.size());
+
+    auto in_name = session->GetInputNameAllocated(0, alloc);
+    auto out_name = session->GetOutputNameAllocated(0, alloc);
+    const char *in_names[] = { in_name.get() };
+    const char *out_names[] = { out_name.get() };
+
+    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
+
+    auto &out_tensor = outputs[0];
+    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
+    auto out_shape = type_info.GetShape();
+    const float *out_data = out_tensor.GetTensorData<float>();
+
+    fprintf(stderr, "[SuperSep] MDX output shape: [");
+    for (size_t i = 0; i < out_shape.size(); i++)
+        fprintf(stderr, "%s%lld", i ? "," : "", (long long)out_shape[i]);
+    fprintf(stderr, "]\n");
+
+    // 4. Parse output format
+    //    MDX23C: [1, stems, 4, dim_f, T]  (5D)
+    //    HTDemucs: [1, stems*4, dim_f, T] (4D)
+    bool is_5d = (out_shape.size() == 5);
+    int out_T = is_5d ? (int)out_shape[4] : (int)out_shape[3];
+    int out_df = is_5d ? (int)out_shape[3] : (int)out_shape[2];
+    int actual_stems = is_5d ? (int)out_shape[1] : (int)out_shape[1] / 4;
+    if (actual_stems > n_stems) actual_stems = n_stems;
+
+    fprintf(stderr, "[SuperSep] MDX: %d stems, %s format, out_df=%d, out_T=%d\n",
+            actual_stems, is_5d ? "5D" : "4D", out_df, out_T);
+
+    // 5. iSTFT each stem
+    for (int s = 0; s < actual_stems; s++) {
+        ComplexSpec stem_spec;
+        stem_spec.n_channels = n_ch;
+        stem_spec.n_freqs = full_freqs;
+        stem_spec.n_frames = out_T;
+        stem_spec.n_fft = n_fft;
+        stem_spec.hop_length = hop;
+        stem_spec.data = (float *)calloc((size_t)n_ch * full_freqs * out_T * 2, sizeof(float));
+
+        for (int ch = 0; ch < n_ch; ch++) {
+            for (int f = 0; f < out_df && f < full_freqs; f++) {
+                for (int t = 0; t < out_T; t++) {
+                    float re, im;
+                    if (is_5d) {
+                        // [1, s, ch*2+0, f, t] and [1, s, ch*2+1, f, t]
+                        size_t base = (size_t)s * 4 * out_df * out_T;
+                        re = out_data[base + (size_t)(ch*2) * out_df * out_T + (size_t)f * out_T + t];
+                        im = out_data[base + (size_t)(ch*2+1) * out_df * out_T + (size_t)f * out_T + t];
+                    } else {
+                        // [1, s*4+ch*2, f, t] and [1, s*4+ch*2+1, f, t]
+                        re = out_data[(size_t)(s*4 + ch*2) * out_df * out_T + (size_t)f * out_T + t];
+                        im = out_data[(size_t)(s*4 + ch*2 + 1) * out_df * out_T + (size_t)f * out_T + t];
+                    }
+                    float *dst = stem_spec.at(ch, f, t);
+                    dst[0] = re;
+                    dst[1] = im;
+                }
+            }
+        }
+
+        int out_frames = 0;
+        float *audio = stft_inverse(stem_spec, chunk_frames, &out_frames);
+        stft_free(&stem_spec);
+
+        stem_outputs.push_back(audio);
+        stem_counts.push_back(out_frames);
+    }
+
+    stft_free(&spec);
+    return true;
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 SuperSep * supersep_init(const char * model_dir, int device_id) {
@@ -1018,14 +1152,84 @@ SuperSepResult * supersep_run(
             }
 
             cb(3, "Splitting drums...", 0.55f);
-            std::vector<int64_t> out_shape;
-            auto output = run_wave_model(ctx->s3_mdx23c, s1_drums, s1_drum_frames, out_shape);
 
-            int n_out = (out_shape.size() >= 2) ? std::min((int)out_shape[1], N_STAGE3_STEMS) : 0;
-            for (int i = 0; i < n_out; i++) {
-                float *sa = extract_stem_interleaved(output, out_shape, i, s1_drum_frames);
-                add_stem(stems, STAGE3_STEMS[i], sa, s1_drum_frames);
+            // MDX23C: n_fft=4096, hop=1024, dim_f=1024, dim_t=256
+            // chunk_frames = (256-1) * 1024 = 261120 (~5.9s)
+            const int mdx_nfft = 4096, mdx_hop = 1024, mdx_dimf = 1024;
+            const int mdx_chunk = 255 * mdx_hop;  // 261120
+            const int mdx_xfade = 44100;
+            const int mdx_step = mdx_chunk - mdx_xfade;
+            const int nf = s1_drum_frames;
+
+            int n_chunks = (nf <= mdx_chunk) ? 1 : (nf - mdx_xfade + mdx_step - 1) / mdx_step;
+            if (n_chunks < 1) n_chunks = 1;
+
+            fprintf(stderr, "[SuperSep] MDX23C: %d frames -> %d chunks\n", nf, n_chunks);
+
+            // Accumulators for up to 6 drum stems
+            const int max_drum_stems = N_STAGE3_STEMS;
+            std::vector<std::vector<double>> drum_accum(max_drum_stems, std::vector<double>(nf * 2, 0.0));
+            std::vector<double> drum_weight(nf * 2, 0.0);
+            int found_stems = 0;
+
+            // Crossfade window
+            std::vector<float> fade_win(mdx_chunk, 1.0f);
+            int half_fade = mdx_xfade / 2;
+            for (int i2 = 0; i2 < half_fade; i2++) {
+                float t = (float)i2 / (float)half_fade;
+                fade_win[i2] = t;
+                fade_win[mdx_chunk - 1 - i2] = t;
             }
+
+            for (int c = 0; c < n_chunks; c++) {
+                if (cancelled()) { free(s1_drums); free(s1_other); return nullptr; }
+
+                int start = c * mdx_step;
+                int end = std::min(start + mdx_chunk, nf);
+                int this_chunk = end - start;
+
+                float pct = 0.55f + 0.15f * (float)c / (float)n_chunks;
+                char msg[64]; snprintf(msg, sizeof(msg), "Drum chunk %d/%d...", c + 1, n_chunks);
+                cb(3, msg, pct);
+
+                std::vector<float> chunk_buf(mdx_chunk * 2, 0.0f);
+                memcpy(chunk_buf.data(), s1_drums + start * 2, (size_t)this_chunk * 2 * sizeof(float));
+
+                std::vector<float *> chunk_stems;
+                std::vector<int> chunk_counts;
+                if (!mdx_process_chunk(ctx->s3_mdx23c, chunk_buf.data(), mdx_chunk,
+                                       mdx_nfft, mdx_hop, mdx_dimf, max_drum_stems,
+                                       chunk_stems, chunk_counts)) {
+                    for (auto p : chunk_stems) free(p);
+                    continue;
+                }
+
+                found_stems = std::max(found_stems, (int)chunk_stems.size());
+
+                for (int s = 0; s < (int)chunk_stems.size(); s++) {
+                    for (int i2 = 0; i2 < this_chunk; i2++) {
+                        float w = fade_win[i2];
+                        if (c == 0 && i2 < half_fade) w = 1.0f;
+                        if (c == n_chunks - 1 && i2 >= this_chunk - half_fade) w = 1.0f;
+                        int dst = (start + i2) * 2;
+                        if (dst + 1 < nf * 2) {
+                            drum_accum[s][dst + 0] += chunk_stems[s][i2 * 2 + 0] * w;
+                            drum_accum[s][dst + 1] += chunk_stems[s][i2 * 2 + 1] * w;
+                            if (s == 0) { drum_weight[dst + 0] += w; drum_weight[dst + 1] += w; }
+                        }
+                    }
+                    free(chunk_stems[s]);
+                }
+            }
+
+            // Normalize and add stems
+            for (int s = 0; s < found_stems && s < max_drum_stems; s++) {
+                float *out = (float *)malloc((size_t)nf * 2 * sizeof(float));
+                for (int i2 = 0; i2 < nf * 2; i2++)
+                    out[i2] = (drum_weight[i2] > 1e-8) ? (float)(drum_accum[s][i2] / drum_weight[i2]) : 0.0f;
+                add_stem(stems, STAGE3_STEMS[s], out, nf);
+            }
+
             cb(3, "Drum split complete", 0.70f);
         } catch (const std::exception &e) {
             fprintf(stderr, "[SuperSep] Stage 3 failed: %s\n", e.what());
@@ -1055,15 +1259,81 @@ SuperSepResult * supersep_run(
             }
 
             cb(4, "Refining 'other' stem...", 0.80f);
-            std::vector<int64_t> out_shape;
-            auto sources = run_wave_model(ctx->s4_htdemucs, s1_other,
-                                          s1_other_frames, out_shape);
 
-            int n_out = std::min((int)out_shape[1], N_STAGE4_STEMS);
-            for (int i = 0; i < n_out; i++) {
-                float *sa = extract_stem_interleaved(sources, out_shape, i, s1_other_frames);
-                add_stem(stems, STAGE4_STEMS[i], sa, s1_other_frames);
+            // HTDemucs: n_fft=4096, hop=1024, dim_f=2048, dim_t=474
+            // chunk_frames = (474-1) * 1024 = 484352 (~11s)
+            const int ht_nfft = 4096, ht_hop = 1024, ht_dimf = 2048;
+            const int ht_chunk = 473 * ht_hop;  // 484352
+            const int ht_xfade = 44100;
+            const int ht_step = ht_chunk - ht_xfade;
+            const int nf = s1_other_frames;
+
+            int n_chunks = (nf <= ht_chunk) ? 1 : (nf - ht_xfade + ht_step - 1) / ht_step;
+            if (n_chunks < 1) n_chunks = 1;
+
+            fprintf(stderr, "[SuperSep] HTDemucs: %d frames -> %d chunks\n", nf, n_chunks);
+
+            const int max_other_stems = N_STAGE4_STEMS;
+            std::vector<std::vector<double>> other_accum(max_other_stems, std::vector<double>(nf * 2, 0.0));
+            std::vector<double> other_weight(nf * 2, 0.0);
+            int found_stems = 0;
+
+            std::vector<float> fade_win(ht_chunk, 1.0f);
+            int half_fade = ht_xfade / 2;
+            for (int i2 = 0; i2 < half_fade; i2++) {
+                float t = (float)i2 / (float)half_fade;
+                fade_win[i2] = t;
+                fade_win[ht_chunk - 1 - i2] = t;
             }
+
+            for (int c = 0; c < n_chunks; c++) {
+                if (cancelled()) { free(s1_other); return nullptr; }
+
+                int start = c * ht_step;
+                int end = std::min(start + ht_chunk, nf);
+                int this_chunk = end - start;
+
+                float pct = 0.80f + 0.10f * (float)c / (float)n_chunks;
+                char msg[64]; snprintf(msg, sizeof(msg), "Other chunk %d/%d...", c + 1, n_chunks);
+                cb(4, msg, pct);
+
+                std::vector<float> chunk_buf(ht_chunk * 2, 0.0f);
+                memcpy(chunk_buf.data(), s1_other + start * 2, (size_t)this_chunk * 2 * sizeof(float));
+
+                std::vector<float *> chunk_stems;
+                std::vector<int> chunk_counts;
+                if (!mdx_process_chunk(ctx->s4_htdemucs, chunk_buf.data(), ht_chunk,
+                                       ht_nfft, ht_hop, ht_dimf, max_other_stems,
+                                       chunk_stems, chunk_counts)) {
+                    for (auto p : chunk_stems) free(p);
+                    continue;
+                }
+
+                found_stems = std::max(found_stems, (int)chunk_stems.size());
+
+                for (int s = 0; s < (int)chunk_stems.size(); s++) {
+                    for (int i2 = 0; i2 < this_chunk; i2++) {
+                        float w = fade_win[i2];
+                        if (c == 0 && i2 < half_fade) w = 1.0f;
+                        if (c == n_chunks - 1 && i2 >= this_chunk - half_fade) w = 1.0f;
+                        int dst = (start + i2) * 2;
+                        if (dst + 1 < nf * 2) {
+                            other_accum[s][dst + 0] += chunk_stems[s][i2 * 2 + 0] * w;
+                            other_accum[s][dst + 1] += chunk_stems[s][i2 * 2 + 1] * w;
+                            if (s == 0) { other_weight[dst + 0] += w; other_weight[dst + 1] += w; }
+                        }
+                    }
+                    free(chunk_stems[s]);
+                }
+            }
+
+            for (int s = 0; s < found_stems && s < max_other_stems; s++) {
+                float *out = (float *)malloc((size_t)nf * 2 * sizeof(float));
+                for (int i2 = 0; i2 < nf * 2; i2++)
+                    out[i2] = (other_weight[i2] > 1e-8) ? (float)(other_accum[s][i2] / other_weight[i2]) : 0.0f;
+                add_stem(stems, STAGE4_STEMS[s], out, nf);
+            }
+
             cb(4, "Other refinement complete", 0.90f);
         } catch (const std::exception &e) {
             fprintf(stderr, "[SuperSep] Stage 4 failed: %s\n", e.what());
