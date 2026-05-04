@@ -20,21 +20,24 @@ export interface ExtractJobResult {
 }
 
 export interface ExtractProgress {
-  status: 'pending' | 'extracting' | 'done' | 'failed' | 'cancelled';
+  status: 'pending' | 'extracting' | 'separating' | 'saving' | 'done' | 'failed' | 'cancelled';
   progress: number;
   currentTrack: string;
   completedStems: string[];
   totalTracks: number;
   warning?: string;
   error?: string;
+  sepMessage?: string;       // SuperSep status message from ace-server
 }
 
 export interface ExtractJobSummary {
   id: string;
+  type?: 'extract' | 'supersep';
   sourceFileName: string;
   tracks: string[];
   completedStems: string[];
   createdAt: string;
+  sepLevel?: number;
 }
 
 export interface ExtractParams {
@@ -44,6 +47,12 @@ export interface ExtractParams {
   style?: string;
   lyrics?: string;
   ditSettings: Record<string, any>;
+}
+
+export interface SupersepParams {
+  sourceAudioUrl: string;
+  sourceFileName: string;
+  level: number;   // 0=Basic, 1=Vocal Split, 2=Full, 3=Maximum
 }
 
 export interface StemStats {
@@ -104,6 +113,21 @@ export async function submitExtraction(params: ExtractParams): Promise<string> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `Extraction failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.id;
+}
+
+/** Submit a new SuperSep separation job. Returns the job ID. */
+export async function submitSupersep(params: SupersepParams): Promise<string> {
+  const res = await fetch(`${API_BASE}/supersep`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `Separation failed: ${res.status}`);
   }
   const data = await res.json();
   return data.id;

@@ -13,10 +13,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { AlertTriangle, Info, Clock, ListOrdered } from 'lucide-react';
 import { modelApi } from '../../services/api';
 import {
-  submitExtraction, waitForExtraction, getExtractResult,
+  submitExtraction, submitSupersep, waitForExtraction, getExtractResult,
   getStemUrl, getDownloadAllUrl, TRACK_CATEGORIES,
   type ExtractProgress, type ExtractJobResult,
 } from '../../services/stemStudioApi';
+import { type SeparationLevel } from '../../services/supersepApi';
 import { StemMixer, type StemControl, type MixerStemInfo } from '../shared/StemMixer';
 import { SourceSelector } from './SourceSelector';
 import { TrackSelector } from './TrackSelector';
@@ -43,6 +44,10 @@ export const StemStudio: React.FC = () => {
   // Track selection
   const [selectedTracks, setSelectedTracks] = useState<string[]>(['vocals', 'drums', 'bass', 'guitar']);
   const [mode, setMode] = useState<'extract' | 'supersep'>('extract');
+  const [sepLevel, setSepLevel] = useState<SeparationLevel>(() => {
+    const stored = localStorage.getItem('hs-stem-sepLevel');
+    return (stored != null ? parseInt(stored) : 1) as SeparationLevel;
+  });
 
   // Optional enhancement
   const [style, setStyle] = useState('');
@@ -90,6 +95,11 @@ export const StemStudio: React.FC = () => {
     if (extractModel) localStorage.setItem('hs-stem-extractModel', extractModel);
   }, [extractModel]);
 
+  // Persist sep level selection
+  useEffect(() => {
+    localStorage.setItem('hs-stem-sepLevel', String(sepLevel));
+  }, [sepLevel]);
+
   const handleSourceChange = useCallback((url: string, fileName: string, meta?: { style?: string; lyrics?: string }) => {
     setSourceAudioUrl(url);
     setSourceFileName(fileName);
@@ -98,18 +108,25 @@ export const StemStudio: React.FC = () => {
   }, []);
 
   const handleExtract = useCallback(async () => {
-    if (!sourceAudioUrl || selectedTracks.length === 0 || !extractModel) return;
+    if (!sourceAudioUrl) return;
+
+    // Route based on mode
+    if (mode === 'supersep') {
+      return handleSupersep();
+    }
+
+    // Extract mode — needs tracks + model
+    if (selectedTracks.length === 0 || !extractModel) return;
 
     setIsExtracting(true);
     setExtractProgress(null);
 
     try {
-      // Force extract-specific settings — ignores global bar
       const ditSettings = {
-        ditModel: extractModel,       // forced base/SFT model
-        loraPath: '',                  // no adapter
-        loraScale: 0,                 // no adapter
-        seed: -1,                     // always random for extract
+        ditModel: extractModel,
+        loraPath: '',
+        loraScale: 0,
+        seed: -1,
       };
 
       const jobId = await submitExtraction({
@@ -123,7 +140,6 @@ export const StemStudio: React.FC = () => {
 
       setActiveJobId(jobId);
 
-      // Poll for progress
       const result = await waitForExtraction(jobId, (progress) => {
         setExtractProgress(progress);
       });
@@ -144,14 +160,52 @@ export const StemStudio: React.FC = () => {
     } finally {
       setIsExtracting(false);
     }
-  }, [sourceAudioUrl, sourceFileName, selectedTracks, style, lyrics, extractModel]);
+  }, [sourceAudioUrl, sourceFileName, selectedTracks, style, lyrics, extractModel, mode]);
+
+  const handleSupersep = useCallback(async () => {
+    if (!sourceAudioUrl) return;
+
+    setIsExtracting(true);
+    setExtractProgress(null);
+
+    try {
+      const jobId = await submitSupersep({
+        sourceAudioUrl,
+        sourceFileName,
+        level: sepLevel,
+      });
+
+      setActiveJobId(jobId);
+
+      const result = await waitForExtraction(jobId, (progress) => {
+        setExtractProgress(progress);
+      });
+
+      loadResultIntoMixer(jobId, result);
+      setRefreshTrigger(prev => prev + 1);
+
+    } catch (err: any) {
+      console.error('SuperSep failed:', err);
+      setExtractProgress({
+        status: 'failed',
+        progress: 0,
+        currentTrack: '',
+        completedStems: [],
+        totalTracks: 0,
+        error: err.message,
+      });
+    } finally {
+      setIsExtracting(false);
+    }
+  }, [sourceAudioUrl, sourceFileName, sepLevel]);
 
   const loadResultIntoMixer = useCallback((jobId: string, result: ExtractJobResult) => {
     const stems: MixerStemInfo[] = result.stems.map((s, idx) => ({
       name: s.trackName,
-      category: TRACK_CATEGORIES[s.trackName] || 'other',
-      audioUrl: getStemUrl(jobId, s.trackName),
+      category: (s as any).category || TRACK_CATEGORIES[s.trackName] || 'other',
+      audioUrl: s.audioUrl || getStemUrl(jobId, s.trackName),
       index: idx,
+      stage: (s as any).stage,
     }));
     setMixerStems(stems);
     setStemControls(stems.map(s => ({ index: s.index, volume: 1.0, muted: false })));
@@ -247,13 +301,13 @@ export const StemStudio: React.FC = () => {
         {/* Center — Track Selection + Mixer */}
         <div className="flex-1 flex flex-col gap-4 p-4 overflow-y-auto border-r border-white/5">
           {/* Model selector for Extract */}
-          {!modelsLoading && baseModels.length === 0 && (
+          {mode === 'extract' && !modelsLoading && baseModels.length === 0 && (
             <div style={styles.noModelsWarning}>
               <AlertTriangle size={14} />
               <span>No base/SFT models found. Extract requires a non-turbo DiT model. Use <strong>Get More Models</strong> in the sidebar to download one.</span>
             </div>
           )}
-          {baseModels.length > 0 && (
+          {mode === 'extract' && baseModels.length > 0 && (
             <div style={styles.modelSelector}>
               <Info size={13} style={{ color: '#a78bfa', flexShrink: 0 }} />
               <span style={styles.modelLabel}>Extract Model</span>
@@ -277,14 +331,21 @@ export const StemStudio: React.FC = () => {
             onModeChange={setMode}
             onExtract={handleExtract}
             isExtracting={isExtracting}
-            canExtract={!!sourceAudioUrl && !!extractModel}
+            canExtract={mode === 'supersep' ? !!sourceAudioUrl : (!!sourceAudioUrl && !!extractModel)}
+            sepLevel={sepLevel}
+            onSepLevelChange={setSepLevel}
           />
 
           {/* Progress */}
-          {extractProgress && extractProgress.status === 'extracting' && (
+          {extractProgress && (extractProgress.status === 'extracting' || extractProgress.status === 'separating' || extractProgress.status === 'saving') && (
             <div style={styles.progressSection}>
               <div style={styles.progressLabel}>
-                Extracting {extractProgress.currentTrack} ({extractProgress.completedStems.length + 1}/{extractProgress.totalTracks})
+                {extractProgress.status === 'separating'
+                  ? `Separating... ${extractProgress.sepMessage || ''}`
+                  : extractProgress.status === 'saving'
+                    ? `Saving stems (${extractProgress.completedStems.length}/${extractProgress.totalTracks})`
+                    : `Extracting ${extractProgress.currentTrack} (${extractProgress.completedStems.length + 1}/${extractProgress.totalTracks})`
+                }
               </div>
               <div style={styles.progressBar}>
                 <div style={{ ...styles.progressFill, width: `${extractProgress.progress}%` }} />

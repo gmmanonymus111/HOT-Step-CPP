@@ -80,6 +80,11 @@ export const RecentExtractions: React.FC<RecentExtractionsProps> = ({ onSelectJo
               <ChevronRight size={12} style={{ color: '#555', flexShrink: 0 }} />
             </div>
             <div style={styles.jobMeta}>
+              {job.type === 'supersep' ? (
+                <span style={styles.typeBadgeSep}>SuperSep</span>
+              ) : (
+                <span style={styles.typeBadgeExtract}>Extract</span>
+              )}
               <span style={styles.stemCount}>{job.completedStems?.length || 0} stems</span>
               <span style={styles.jobTime}>
                 <Clock size={10} /> {timeAgo(job.createdAt)}
@@ -168,6 +173,26 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '1px 6px',
     borderRadius: 4,
     background: 'rgba(167,139,250,0.1)',
+  },
+  typeBadgeExtract: {
+    fontSize: 9,
+    color: '#a78bfa',
+    fontWeight: 700,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: 'rgba(167,139,250,0.1)',
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
+  },
+  typeBadgeSep: {
+    fontSize: 9,
+    color: '#22c55e',
+    fontWeight: 700,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: 'rgba(34,197,94,0.1)',
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
   },
   jobTime: {
     fontSize: 10,

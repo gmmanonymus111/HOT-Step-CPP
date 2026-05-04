@@ -1,8 +1,11 @@
-// stemStudio.ts — Stem Studio extraction route
+// stemStudio.ts — Stem Studio stem separation route
 //
-// Server-side orchestration for ACE-Step DiT extract mode.
-// Manages extraction jobs: sequential /synth calls per stem,
-// progress polling, stem serving, ZIP downloads, and cleanup.
+// Server-side orchestration for two modes:
+//   1. Extract (DiT) — generative stem extraction via sequential /synth calls
+//   2. SuperSep (ONNX) — neural network separation via ace-server's supersep pipeline
+//
+// Both modes persist results to data/stems/<jobId>/ for a unified
+// mixer/download/history experience.
 
 import { Router, Request, Response } from 'express';
 import path from 'path';
@@ -15,6 +18,7 @@ import { config } from '../config.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
 
 const router = Router();
+const ACE_URL = config.aceServer.url;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -30,7 +34,8 @@ fs.mkdirSync(stemsBaseDir, { recursive: true });
 
 interface StemJob {
   id: string;
-  status: 'pending' | 'extracting' | 'done' | 'failed' | 'cancelled';
+  type: 'extract' | 'supersep';
+  status: 'pending' | 'extracting' | 'separating' | 'saving' | 'done' | 'failed' | 'cancelled';
   sourceAudioUrl: string;
   sourceFileName: string;
   tracks: string[];
@@ -41,6 +46,13 @@ interface StemJob {
   error?: string;
   warning?: string;
   createdAt: number;
+  // SuperSep-specific
+  sepLevel?: number;
+  aceSupersepJobId?: string;
+  sepProgress?: number;      // 0-100 progress from ace-server during separation
+  sepMessage?: string;       // status message from ace-server
+  savingTotal?: number;       // total stems to save
+  savingCurrent?: number;     // current stem being saved
 }
 
 const jobs = new Map<string, StemJob>();
@@ -77,6 +89,139 @@ async function pollAceJob(aceJobId: string, job: StemJob): Promise<void> {
   }
   throw new Error('Extract timed out');
 }
+
+// ── SuperSep Pipeline ────────────────────────────────────────────────────
+
+/** Sanitize a stem name for use as a filename (no slashes, dots, etc.) */
+function sanitizeStemName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+}
+
+/** Run the SuperSep pipeline: separate → save stems to disk */
+async function runSupersep(job: StemJob): Promise<void> {
+  const jobDir = path.join(stemsBaseDir, job.id);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  try {
+    // 1. Read and convert source audio
+    const srcPath = resolveAudioPath(job.sourceAudioUrl);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Source audio not found: ${srcPath}`);
+    }
+    let srcAudioBuf: Buffer;
+    try {
+      srcAudioBuf = ensureEngineFormat(srcPath);
+    } catch {
+      srcAudioBuf = fs.readFileSync(srcPath);
+    }
+
+    const level = job.sepLevel ?? 0;
+    console.log(`[StemStudio] SuperSep job ${job.id}: level=${level}, file=${path.basename(srcPath)} (${(srcAudioBuf.length / 1024 / 1024).toFixed(1)} MB)`);
+
+    // 2. Send to ace-server SuperSep
+    job.status = 'separating';
+    job.sepMessage = 'Starting separation...';
+    const sepRes = await fetch(`${ACE_URL}/supersep/separate?level=${level}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: srcAudioBuf,
+    });
+    if (!sepRes.ok) {
+      const errText = await sepRes.text();
+      throw new Error(`SuperSep engine error: ${errText}`);
+    }
+    const sepData = await sepRes.json() as { id: string };
+    const aceJobId = sepData.id;
+    job.aceSupersepJobId = aceJobId;
+    console.log(`[StemStudio] SuperSep job ${job.id}: ace-server job ${aceJobId}`);
+
+    // 3. Poll ace-server until separation completes
+    const MAX_POLLS = 14400; // 2 hours max
+    for (let i = 0; i < MAX_POLLS; i++) {
+      if ((job.status as string) === 'cancelled') return;
+
+      const progRes = await fetch(`${ACE_URL}/supersep/progress?id=${aceJobId}`);
+      const progData = await progRes.json() as { status: string; progress: number; message: string; error?: string };
+
+      job.sepProgress = progData.progress;
+      job.sepMessage = progData.message;
+
+      if (progData.status === 'done') break;
+      if (progData.status === 'failed' || progData.status === 'cancelled') {
+        throw new Error(progData.error || `Separation ${progData.status}`);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // 4. Fetch stem list
+    const resultRes = await fetch(`${ACE_URL}/supersep/result?id=${aceJobId}`);
+    if (!resultRes.ok) throw new Error('Failed to fetch SuperSep result');
+    const resultData = await resultRes.json() as { stems: Array<{ name: string; category: string; index: number; stage?: number }> };
+    const stemList = resultData.stems;
+
+    console.log(`[StemStudio] SuperSep job ${job.id}: ${stemList.length} stems to save`);
+
+    // 5. Download each stem to disk
+    job.status = 'saving';
+    job.savingTotal = stemList.length;
+    job.savingCurrent = 0;
+    job.tracks = stemList.map(s => sanitizeStemName(s.name));
+
+    for (let i = 0; i < stemList.length; i++) {
+      if ((job.status as string) === 'cancelled') return;
+
+      const stem = stemList[i];
+      const safeName = sanitizeStemName(stem.name);
+      job.savingCurrent = i + 1;
+      job.currentTrackName = stem.name;
+
+      const stemRes = await fetch(`${ACE_URL}/supersep/serve?id=${aceJobId}&stem=${stem.index}`);
+      if (!stemRes.ok) {
+        console.warn(`[StemStudio] Failed to fetch stem ${stem.index} (${stem.name}), skipping`);
+        continue;
+      }
+
+      const stemBuf = Buffer.from(await stemRes.arrayBuffer());
+      fs.writeFileSync(path.join(jobDir, `${safeName}.wav`), stemBuf);
+      job.completedStems.push(safeName);
+      console.log(`[StemStudio] SuperSep job ${job.id}: saved ${safeName} (${(stemBuf.length / 1024).toFixed(0)} KB)`);
+    }
+
+    // 6. Write metadata
+    // Build stem metadata for the result endpoint — preserve original names + categories
+    const stemMeta = stemList.map((s, idx) => ({
+      originalName: s.name,
+      safeName: sanitizeStemName(s.name),
+      category: s.category,
+      index: idx,
+      stage: s.stage,
+    }));
+
+    fs.writeFileSync(path.join(jobDir, '_meta.json'), JSON.stringify({
+      id: job.id,
+      type: 'supersep',
+      sourceAudioUrl: job.sourceAudioUrl,
+      sourceFileName: job.sourceFileName,
+      sepLevel: job.sepLevel,
+      tracks: job.completedStems,
+      completedStems: job.completedStems,
+      stemMeta,
+      createdAt: new Date(job.createdAt).toISOString(),
+    }, null, 2));
+
+    job.status = 'done';
+    console.log(`[StemStudio] SuperSep job ${job.id}: complete (${job.completedStems.length} stems saved)`);
+
+  } catch (err: any) {
+    if (job.status !== 'cancelled') {
+      job.status = 'failed';
+      job.error = err.message || 'Unknown error';
+      console.error(`[StemStudio] SuperSep job ${job.id}: FAILED — ${err.message}`);
+    }
+  }
+}
+
+// ── Extract Pipeline ─────────────────────────────────────────────────────
 
 /** Run the full extraction pipeline (async — called after POST returns) */
 async function runExtraction(job: StemJob, ditSettings: any, style: string, lyrics: string): Promise<void> {
@@ -181,6 +326,7 @@ async function runExtraction(job: StemJob, ditSettings: any, style: string, lyri
     // Write metadata file
     fs.writeFileSync(path.join(jobDir, '_meta.json'), JSON.stringify({
       id: job.id,
+      type: 'extract',
       sourceAudioUrl: job.sourceAudioUrl,
       sourceFileName: job.sourceFileName,
       tracks: job.tracks,
@@ -226,6 +372,7 @@ router.post('/extract', (req: Request, res: Response) => {
   // Create job
   const job: StemJob = {
     id: randomUUID(),
+    type: 'extract',
     status: 'pending',
     sourceAudioUrl,
     sourceFileName: sourceFileName || 'unknown',
@@ -245,7 +392,42 @@ router.post('/extract', (req: Request, res: Response) => {
 });
 
 /**
- * GET /:jobId/progress — Poll extraction progress
+ * POST /supersep — Start a new SuperSep separation job
+ */
+router.post('/supersep', (req: Request, res: Response) => {
+  const { sourceAudioUrl, sourceFileName, level } = req.body;
+
+  if (!sourceAudioUrl) {
+    res.status(400).json({ error: 'sourceAudioUrl is required' });
+    return;
+  }
+
+  const sepLevel = parseInt(String(level ?? '0'), 10);
+
+  const job: StemJob = {
+    id: randomUUID(),
+    type: 'supersep',
+    status: 'pending',
+    sourceAudioUrl,
+    sourceFileName: sourceFileName || 'unknown',
+    tracks: [],
+    currentTrackIndex: 0,
+    currentTrackName: '',
+    completedStems: [],
+    createdAt: Date.now(),
+    sepLevel,
+  };
+  jobs.set(job.id, job);
+
+  // Start separation async
+  runSupersep(job);
+
+  console.log(`[StemStudio] SuperSep job ${job.id} created: level=${sepLevel} from ${sourceFileName || sourceAudioUrl}`);
+  res.json({ id: job.id });
+});
+
+/**
+ * GET /:jobId/progress — Poll job progress (works for both extract and supersep)
  */
 router.get('/:jobId/progress', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
@@ -267,24 +449,39 @@ router.get('/:jobId/progress', (req: Request, res: Response) => {
     return;
   }
 
+  let progress = 0;
   const totalTracks = job.tracks.length;
   const completedCount = job.completedStems.length;
-  // Progress: each track is an equal share. Current track is estimated at 50% while running.
-  let progress = 0;
-  if (totalTracks > 0) {
-    const perTrack = 100 / totalTracks;
-    progress = Math.round(completedCount * perTrack + (job.status === 'extracting' ? perTrack * 0.5 : 0));
+
+  if (job.type === 'supersep') {
+    // SuperSep progress: separation phase (0-80%) + saving phase (80-100%)
+    if (job.status === 'separating') {
+      progress = Math.round((job.sepProgress || 0) * 0.8);
+    } else if (job.status === 'saving') {
+      const saveProgress = job.savingTotal ? (job.savingCurrent || 0) / job.savingTotal : 0;
+      progress = Math.round(80 + saveProgress * 20);
+    } else if (job.status === 'done') {
+      progress = 100;
+    }
+  } else {
+    // Extract progress: each track is an equal share
+    if (totalTracks > 0) {
+      const perTrack = 100 / totalTracks;
+      progress = Math.round(completedCount * perTrack + (job.status === 'extracting' ? perTrack * 0.5 : 0));
+    }
+    if (job.status === 'done') progress = 100;
   }
-  if (job.status === 'done') progress = 100;
 
   res.json({
     status: job.status,
     progress,
     currentTrack: job.currentTrackName,
     completedStems: job.completedStems,
-    totalTracks,
+    totalTracks: job.type === 'supersep' ? (job.savingTotal || 0) : totalTracks,
     warning: job.warning,
     error: job.error,
+    // SuperSep-specific extras
+    sepMessage: job.sepMessage,
   });
 });
 
@@ -302,19 +499,30 @@ router.get('/:jobId/result', (req: Request, res: Response) => {
   }
 
   const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-  const stems = (meta.completedStems || []).map((trackName: string, idx: number) => {
-    const stemPath = path.join(jobDir, `${trackName}.wav`);
+
+  // SuperSep jobs have stemMeta with original names + categories;
+  // Extract jobs just have completedStems (track names == filenames)
+  const stemMetaList: Array<{ originalName: string; safeName: string; category: string; index: number; stage?: number }> | undefined = meta.stemMeta;
+
+  const stems = (meta.completedStems || []).map((safeName: string, idx: number) => {
+    const stemPath = path.join(jobDir, `${safeName}.wav`);
     const stat = fs.existsSync(stemPath) ? fs.statSync(stemPath) : null;
+
+    // Use stemMeta for display name/category if available (supersep), else use track name
+    const sMeta = stemMetaList?.find(m => m.safeName === safeName);
+
     return {
-      trackName,
-      audioUrl: `/api/stem-studio/${jobId}/stem/${trackName}`,
-      durationSec: 0, // Could be computed from WAV header but not critical
+      trackName: sMeta?.originalName || safeName,
+      category: sMeta?.category || undefined,
+      audioUrl: `/api/stem-studio/${jobId}/stem/${safeName}`,
+      durationSec: 0,
       index: idx,
       sizeBytes: stat?.size || 0,
+      stage: sMeta?.stage,
     };
   });
 
-  res.json({ id: jobId, stems });
+  res.json({ id: jobId, type: meta.type || 'extract', stems });
 });
 
 /**
@@ -389,10 +597,12 @@ router.get('/jobs', (_req: Request, res: Response) => {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
         jobSummaries.push({
           id: meta.id || entry.name,
+          type: meta.type || 'extract',
           sourceFileName: meta.sourceFileName || 'unknown',
           tracks: meta.tracks || [],
           completedStems: meta.completedStems || [],
           createdAt: meta.createdAt || '',
+          sepLevel: meta.sepLevel,
         });
       } catch { /* skip corrupted meta */ }
     }

@@ -1,7 +1,8 @@
 // TrackSelector.tsx — Toggle grid for selecting stem extraction tracks
+// Supports two modes: Extract (pick individual tracks) and SuperSep (pick separation level)
 import React from 'react';
-import { Lock } from 'lucide-react';
 import { EXTRACT_TRACKS, TRACK_LABELS, TRACK_CATEGORIES } from '../../services/stemStudioApi';
+import { SEPARATION_LEVELS, type SeparationLevel } from '../../services/supersepApi';
 import { ToggleSwitch } from '../global-bar/BarSection';
 
 interface TrackSelectorProps {
@@ -11,7 +12,10 @@ interface TrackSelectorProps {
   onModeChange: (mode: 'extract' | 'supersep') => void;
   onExtract: () => void;
   isExtracting: boolean;
-  canExtract: boolean; // false if no source audio selected
+  canExtract: boolean;
+  // SuperSep-specific
+  sepLevel: SeparationLevel;
+  onSepLevelChange: (level: SeparationLevel) => void;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -31,6 +35,7 @@ const CATEGORY_ACCENTS: Record<string, 'pink' | 'emerald' | 'sky' | 'purple' | '
 export const TrackSelector: React.FC<TrackSelectorProps> = ({
   selectedTracks, onTracksChange, mode, onModeChange,
   onExtract, isExtracting, canExtract,
+  sepLevel, onSepLevelChange,
 }) => {
   const toggleTrack = (track: string) => {
     if (selectedTracks.includes(track)) {
@@ -51,6 +56,20 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
     return acc;
   }, {});
 
+  const isSupersep = mode === 'supersep';
+
+  // Button label depends on mode
+  const buttonLabel = isExtracting
+    ? '⏳ Processing...'
+    : isSupersep
+      ? '▶ Separate Audio'
+      : `▶ Extract ${selectedTracks.length} Track${selectedTracks.length !== 1 ? 's' : ''}`;
+
+  // Can proceed?
+  const canProceed = isSupersep
+    ? canExtract  // only needs source audio
+    : canExtract && selectedTracks.length > 0;  // needs source + tracks
+
   return (
     <div style={styles.container}>
       {/* Mode selector */}
@@ -67,48 +86,99 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
           🎵 Extract (DiT)
         </button>
         <button
-          onClick={() => {}}
-          disabled
+          onClick={() => onModeChange('supersep')}
           style={{
             ...styles.modeBtn,
-            opacity: 0.4,
-            cursor: 'not-allowed',
-            color: '#666',
+            background: mode === 'supersep' ? 'rgba(34,197,94,0.15)' : 'transparent',
+            color: mode === 'supersep' ? '#22c55e' : '#888',
+            borderColor: mode === 'supersep' ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)',
           }}
-          title="Coming soon — Phase 2"
         >
-          <Lock size={12} /> SuperSep
+          🧠 SuperSep (ONNX)
         </button>
       </div>
 
-      <h3 style={styles.sectionTitle}>Select Tracks</h3>
+      {/* SuperSep: Separation level dropdown */}
+      {isSupersep && (
+        <div style={styles.sepLevelSection}>
+          <h3 style={styles.sectionTitle}>Separation Level</h3>
+          <select
+            value={sepLevel}
+            onChange={e => onSepLevelChange(parseInt(e.target.value) as SeparationLevel)}
+            style={styles.sepLevelSelect}
+            disabled={isExtracting}
+          >
+            {SEPARATION_LEVELS.map(l => (
+              <option key={l.value} value={l.value}>
+                {l.label} — {l.description}
+              </option>
+            ))}
+          </select>
+          <p style={styles.sepLevelHint}>
+            SuperSep uses ONNX neural networks to separate the audio into stems.
+            Higher levels produce more stems but take longer.
+          </p>
+        </div>
+      )}
 
-      {/* Quick actions */}
-      <div style={styles.quickActions}>
-        <button onClick={selectAll} style={styles.quickBtn}>Select All</button>
-        <button onClick={clearAll} style={styles.quickBtn}>Clear</button>
-        <span style={styles.selectedCount}>{selectedTracks.length} selected</span>
-      </div>
+      {/* Extract: Track selection grid */}
+      {!isSupersep && (
+        <>
+          <h3 style={styles.sectionTitle}>Select Tracks</h3>
 
-      {/* Track grid — Row 1: Vocals, Drums, Other | Row 2: Instruments */}
-      <div style={styles.trackGrid}>
-        {/* Row 1 */}
-        <div style={styles.trackRow}>
-          {(['vocals', 'drums', 'other'] as const).map(cat => {
-            const tracks = grouped[cat];
-            if (!tracks) return null;
-            return (
-              <div key={cat} style={styles.categoryGroup}>
-                <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS[cat] }}>
-                  <span>●</span> {cat.charAt(0).toUpperCase() + cat.slice(1)}
+          {/* Quick actions */}
+          <div style={styles.quickActions}>
+            <button onClick={selectAll} style={styles.quickBtn}>Select All</button>
+            <button onClick={clearAll} style={styles.quickBtn}>Clear</button>
+            <span style={styles.selectedCount}>{selectedTracks.length} selected</span>
+          </div>
+
+          {/* Track grid — Row 1: Vocals, Drums, Other | Row 2: Instruments */}
+          <div style={styles.trackGrid}>
+            {/* Row 1 */}
+            <div style={styles.trackRow}>
+              {(['vocals', 'drums', 'other'] as const).map(cat => {
+                const tracks = grouped[cat];
+                if (!tracks) return null;
+                return (
+                  <div key={cat} style={styles.categoryGroup}>
+                    <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS[cat] }}>
+                      <span>●</span> {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                    </div>
+                    <div style={styles.categoryTracks}>
+                      {tracks.map(track => (
+                        <div key={track} style={styles.trackItem}>
+                          <ToggleSwitch
+                            checked={selectedTracks.includes(track)}
+                            onChange={() => toggleTrack(track)}
+                            accentColor={CATEGORY_ACCENTS[cat] || 'purple'}
+                          />
+                          <span style={{
+                            ...styles.trackLabel,
+                            color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
+                          }}>
+                            {TRACK_LABELS[track] || track}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {/* Row 2 — Instruments */}
+            {grouped['instruments'] && (
+              <div style={styles.categoryGroup}>
+                <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS['instruments'] }}>
+                  <span>●</span> Instruments
                 </div>
                 <div style={styles.categoryTracks}>
-                  {tracks.map(track => (
+                  {grouped['instruments'].map(track => (
                     <div key={track} style={styles.trackItem}>
                       <ToggleSwitch
                         checked={selectedTracks.includes(track)}
                         onChange={() => toggleTrack(track)}
-                        accentColor={CATEGORY_ACCENTS[cat] || 'purple'}
+                        accentColor={CATEGORY_ACCENTS['instruments'] || 'sky'}
                       />
                       <span style={{
                         ...styles.trackLabel,
@@ -120,47 +190,25 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
                   ))}
                 </div>
               </div>
-            );
-          })}
-        </div>
-        {/* Row 2 — Instruments */}
-        {grouped['instruments'] && (
-          <div style={styles.categoryGroup}>
-            <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS['instruments'] }}>
-              <span>●</span> Instruments
-            </div>
-            <div style={styles.categoryTracks}>
-              {grouped['instruments'].map(track => (
-                <div key={track} style={styles.trackItem}>
-                  <ToggleSwitch
-                    checked={selectedTracks.includes(track)}
-                    onChange={() => toggleTrack(track)}
-                    accentColor={CATEGORY_ACCENTS['instruments'] || 'sky'}
-                  />
-                  <span style={{
-                    ...styles.trackLabel,
-                    color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
-                  }}>
-                    {TRACK_LABELS[track] || track}
-                  </span>
-                </div>
-              ))}
-            </div>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
 
-      {/* Extract button */}
+      {/* Action button */}
       <button
         onClick={onExtract}
-        disabled={!canExtract || isExtracting || selectedTracks.length === 0}
+        disabled={!canProceed || isExtracting}
         style={{
           ...styles.extractBtn,
-          opacity: (!canExtract || isExtracting || selectedTracks.length === 0) ? 0.5 : 1,
-          cursor: (!canExtract || isExtracting || selectedTracks.length === 0) ? 'not-allowed' : 'pointer',
+          background: isSupersep
+            ? 'linear-gradient(135deg, #22c55e, #16a34a)'
+            : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
+          opacity: (!canProceed || isExtracting) ? 0.5 : 1,
+          cursor: (!canProceed || isExtracting) ? 'not-allowed' : 'pointer',
         }}
       >
-        {isExtracting ? '⏳ Extracting...' : `▶ Extract ${selectedTracks.length} Track${selectedTracks.length !== 1 ? 's' : ''}`}
+        {buttonLabel}
       </button>
     </div>
   );
@@ -197,6 +245,30 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#d4d4d4',
     letterSpacing: '0.02em',
   },
+  // SuperSep level
+  sepLevelSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+  sepLevelSelect: {
+    padding: '8px 12px',
+    borderRadius: 10,
+    border: '1px solid rgba(255,255,255,0.1)',
+    background: '#27272a',
+    color: '#d4d4d8',
+    fontSize: 13,
+    outline: 'none',
+    cursor: 'pointer',
+    transition: 'border-color 0.15s ease',
+  },
+  sepLevelHint: {
+    margin: 0,
+    fontSize: 11,
+    color: '#666',
+    lineHeight: 1.5,
+  },
+  // Extract tracks
   quickActions: {
     display: 'flex',
     alignItems: 'center',
@@ -266,7 +338,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 16px',
     borderRadius: 10,
     border: 'none',
-    background: 'linear-gradient(135deg, #8b5cf6, #6366f1)',
     color: '#fff',
     fontSize: 14,
     fontWeight: 600,
@@ -274,3 +345,4 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 4,
   },
 };
+
