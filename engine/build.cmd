@@ -49,12 +49,12 @@ set "ORT_MARKER=%ORT_DIR%\include\onnxruntime_cxx_api.h"
 
 if defined ONNXRUNTIME_ROOT (
     echo [ORT] Using ONNXRUNTIME_ROOT=%ONNXRUNTIME_ROOT%
-    goto :build
+    goto :cudnn
 )
 
 if exist "%ORT_MARKER%" (
     echo [ORT] Found at %ORT_DIR%
-    goto :build
+    goto :cudnn
 )
 
 echo.
@@ -91,6 +91,44 @@ if exist "%ORT_MARKER%" (
     echo [ORT] Successfully installed to %ORT_DIR%
 ) else (
     echo [ORT] WARNING: Installation may have failed. Check %ORT_DIR%
+)
+
+REM ── cuDNN 9 (required for ONNX Runtime CUDA EP) ────────────────────
+:cudnn
+REM ORT GPU needs cudnn64_9.dll which isn't bundled. We get it from
+REM the nvidia-cudnn-cu12 pip package (no NVIDIA login required).
+REM Only the runtime DLLs are needed — copied next to the exe.
+
+set "CUDNN_MARKER=%~dp0build\Release\cudnn64_9.dll"
+
+if exist "%CUDNN_MARKER%" (
+    echo [cuDNN] Found cudnn64_9.dll
+    goto :build
+)
+
+echo.
+echo [cuDNN] cudnn64_9.dll not found. Installing via pip...
+echo [cuDNN] (one-time download for CUDA-accelerated SuperSep)
+echo.
+
+python -m pip install --quiet nvidia-cudnn-cu12 2>nul
+if errorlevel 1 (
+    echo [cuDNN] WARNING: pip install failed. CUDA EP will be disabled.
+    echo [cuDNN]          To fix: pip install nvidia-cudnn-cu12
+    goto :build
+)
+
+REM Find the installed DLLs and copy them to build/Release
+for /f "tokens=*" %%d in ('python -c "import nvidia.cudnn; import os; print(os.path.join(nvidia.cudnn.__path__[0], 'bin'))" 2^>nul') do (
+    if exist "%%d\cudnn64_9.dll" (
+        echo [cuDNN] Copying DLLs from %%d
+        mkdir "%~dp0build\Release" 2>nul
+        copy /y "%%d\cudnn*.dll" "%~dp0build\Release\" >nul 2>nul
+        echo [cuDNN] Done
+    ) else (
+        echo [cuDNN] WARNING: Could not find cudnn64_9.dll in pip package
+        echo [cuDNN]          path checked: %%d
+    )
 )
 
 :build
