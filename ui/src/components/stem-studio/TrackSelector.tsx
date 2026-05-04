@@ -1,7 +1,8 @@
-// TrackSelector.tsx — Checkbox grid for selecting stem extraction tracks
+// TrackSelector.tsx — Toggle grid for selecting stem extraction tracks
 import React from 'react';
 import { Lock } from 'lucide-react';
 import { EXTRACT_TRACKS, TRACK_LABELS, TRACK_CATEGORIES } from '../../services/stemStudioApi';
+import { ToggleSwitch } from '../global-bar/BarSection';
 
 interface TrackSelectorProps {
   selectedTracks: string[];
@@ -18,6 +19,13 @@ const CATEGORY_COLORS: Record<string, string> = {
   instruments: '#60a5fa',
   drums: '#f97316',
   other: '#a3a3a3',
+};
+
+const CATEGORY_ACCENTS: Record<string, 'pink' | 'emerald' | 'sky' | 'purple' | 'amber'> = {
+  vocals: 'pink',
+  instruments: 'sky',
+  drums: 'amber',
+  other: 'purple',
 };
 
 export const TrackSelector: React.FC<TrackSelectorProps> = ({
@@ -92,22 +100,23 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
               <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS[cat] }}>
                 <span>●</span> {cat.charAt(0).toUpperCase() + cat.slice(1)}
               </div>
-              {tracks.map(track => (
-                <label key={track} style={styles.trackItem}>
-                  <input
-                    type="checkbox"
-                    checked={selectedTracks.includes(track)}
-                    onChange={() => toggleTrack(track)}
-                    style={{ accentColor: CATEGORY_COLORS[cat], cursor: 'pointer' }}
-                  />
-                  <span style={{
-                    ...styles.trackLabel,
-                    color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
-                  }}>
-                    {TRACK_LABELS[track] || track}
-                  </span>
-                </label>
-              ))}
+              <div style={styles.categoryTracks}>
+                {tracks.map(track => (
+                  <div key={track} style={styles.trackItem}>
+                    <ToggleSwitch
+                      checked={selectedTracks.includes(track)}
+                      onChange={() => toggleTrack(track)}
+                      accentColor={CATEGORY_ACCENTS[cat] || 'purple'}
+                    />
+                    <span style={{
+                      ...styles.trackLabel,
+                      color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
+                    }}>
+                      {TRACK_LABELS[track] || track}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           );
         })}
@@ -189,7 +198,12 @@ const styles: Record<string, React.CSSProperties> = {
   categoryGroup: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 2,
+    gap: 4,
+  },
+  categoryTracks: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: 4,
   },
   categoryLabel: {
     fontSize: 10,
