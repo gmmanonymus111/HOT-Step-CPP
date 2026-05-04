@@ -882,6 +882,13 @@ SuperSepResult * supersep_run(
 
     // ── STAGE 2: Vocal sub-separation (Mel-Band RoFormer) ─────────────
     if (stages[1] && s1_vocals) {
+        // Release Stage 1 model to free VRAM before loading Stage 2
+        if (ctx->s1_bs_roformer) {
+            delete ctx->s1_bs_roformer;
+            ctx->s1_bs_roformer = nullptr;
+            fprintf(stderr, "[SuperSep] Released BS-RoFormer (VRAM freed for Stage 2)\n");
+        }
+
         cb(2, "Loading Mel-Band RoFormer model...", 0.30f);
         if (cancelled()) { free(s1_vocals); free(s1_drums); free(s1_other); return nullptr; }
 
@@ -995,6 +1002,11 @@ SuperSepResult * supersep_run(
 
     // ── STAGE 3: Drum sub-separation ─────────────────────────────────
     if (stages[2] && s1_drums) {
+        // Release previous stage models to free VRAM
+        if (ctx->s2_mel_band) { delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
+        if (ctx->s1_bs_roformer) { delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
+        fprintf(stderr, "[SuperSep] Released previous models (VRAM freed for Stage 3)\n");
+
         cb(3, "Loading MDX23C DrumSep model...", 0.50f);
         if (cancelled()) { free(s1_drums); free(s1_other); return nullptr; }
 
@@ -1026,6 +1038,12 @@ SuperSepResult * supersep_run(
 
     // ── STAGE 4: "Other" refinement (HTDemucs waveform model) ────────
     if (stages[3] && s1_other) {
+        // Release previous stage models to free VRAM
+        if (ctx->s3_mdx23c) { delete ctx->s3_mdx23c; ctx->s3_mdx23c = nullptr; }
+        if (ctx->s2_mel_band) { delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
+        if (ctx->s1_bs_roformer) { delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
+        fprintf(stderr, "[SuperSep] Released previous models (VRAM freed for Stage 4)\n");
+
         cb(4, "Loading HTDemucs model...", 0.75f);
         if (cancelled()) { free(s1_other); return nullptr; }
 
