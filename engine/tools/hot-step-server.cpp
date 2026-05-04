@@ -35,6 +35,7 @@
 //   /understand LM + DiT + VAE
 
 #include "audio-io.h"
+#include "audio-resample.h"
 #include "denoiser.h"
 #include "spectral-lifter.h"
 #include "supersep.h"
@@ -2264,16 +2265,28 @@ int main(int argc, char ** argv) {
             return;
         }
 
-        // Convert interleaved to planar for WAV encoder
-        float * planar = (float *)malloc(sizeof(float) * out_frames * 2);
+        // Convert interleaved to planar for resampling
+        float * planar44 = (float *)malloc(sizeof(float) * out_frames * 2);
         for (int i = 0; i < out_frames; i++) {
-            planar[i]              = mixed[i * 2 + 0];
-            planar[out_frames + i] = mixed[i * 2 + 1];
+            planar44[i]              = mixed[i * 2 + 0];
+            planar44[out_frames + i] = mixed[i * 2 + 1];
         }
         free(mixed);
 
-        std::string wav = audio_encode_wav(planar, out_frames, 44100, WAV_S16);
-        free(planar);
+        // Resample 44100 → 48000 Hz (engine expects 48 kHz)
+        int out48_frames = 0;
+        float * planar48 = audio_resample(planar44, out_frames, 44100, 48000, 2, &out48_frames);
+        free(planar44);
+
+        if (!planar48 || out48_frames <= 0) {
+            json_error(res, 500, "Resample to 48kHz failed");
+            return;
+        }
+        fprintf(stderr, "[SuperSep] Recombined: %d frames @44.1k → %d frames @48k\n",
+                out_frames, out48_frames);
+
+        std::string wav = audio_encode_wav(planar48, out48_frames, 48000, WAV_S16);
+        free(planar48);
         res.set_content(wav, "audio/wav");
     });
 

@@ -392,7 +392,11 @@ export const CoverStudio: React.FC = () => {
     const iv = setInterval(async () => {
       try {
         const s = await generateApi.status(jobId);
-        const pct = s.progress != null ? Math.round(s.progress * 100) : undefined;
+        // Server sends 0-100; normalise to 0-100 for display
+        const rawProg = s.progress;
+        const pct = rawProg != null
+          ? Math.min(100, Math.max(0, Math.round(rawProg > 1 ? rawProg : rawProg * 100)))
+          : undefined;
         if (pct != null) setGenProgress(pct);
         if (s.stage) setGenStage(s.stage);
 

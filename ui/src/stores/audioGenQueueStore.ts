@@ -233,6 +233,11 @@ export function completeManualQueueItem(id: string, result: {
   item.stage = 'Complete!';
   _state.completionCounter++;
   _emit();
+
+  // If server didn't provide duration, probe the audio file
+  if (!item.audioDuration && result.audioUrl) {
+    _probeAudioDuration(id, result.audioUrl);
+  }
 }
 
 /** Mark a manually-added queue item as failed. */
@@ -244,6 +249,26 @@ export function failManualQueueItem(id: string, error: string): void {
   item.progress = undefined;
   item.stage = undefined;
   _emit();
+}
+// ── Audio duration probing ───────────────────────────────────────────────────
+
+/** Probe an audio URL with a hidden Audio element to get the real duration. */
+function _probeAudioDuration(itemId: string, url: string): void {
+  const audio = new Audio();
+  audio.preload = 'metadata';
+  audio.onloadedmetadata = () => {
+    const dur = audio.duration;
+    if (dur && isFinite(dur) && dur > 0) {
+      const item = _state.items.find(i => i.id === itemId);
+      if (item) {
+        item.audioDuration = Math.round(dur);
+        _emit();
+      }
+    }
+    audio.src = ''; // release
+  };
+  audio.onerror = () => { audio.src = ''; };
+  audio.src = url;
 }
 
 // ── Simple generation API (for Create page) ─────────────────────────────────
@@ -313,6 +338,11 @@ export async function enqueueSimpleGen(
           item.stage = 'Complete!';
           _state.completionCounter++;
           _emit();
+
+          // If server didn't provide duration, probe the audio file
+          if (!item.audioDuration && audioUrl) {
+            _probeAudioDuration(item.id, audioUrl);
+          }
 
           // Fetch and deliver songs to the library
           if (onSongCreated) {
@@ -550,6 +580,8 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
           if (masteredUrl) item.masteredAudioUrl = masteredUrl;
           if (status.result?.duration) item.audioDuration = status.result.duration;
           _emit();
+          // If server didn't provide duration, probe the audio file
+          if (!item.audioDuration) _probeAudioDuration(item.id, audioUrl);
         }
         // Resolve audio generation in Lireek DB
         if (audioUrl && jobId) {
