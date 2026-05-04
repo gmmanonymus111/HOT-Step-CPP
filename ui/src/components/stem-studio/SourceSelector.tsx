@@ -10,12 +10,15 @@ interface Song {
   source: string;
   created_at: string;
   artist_name?: string;
+  style?: string;
+  lyrics?: string;
+  caption?: string;
 }
 
 interface SourceSelectorProps {
   sourceAudioUrl: string;
   sourceFileName: string;
-  onSourceChange: (url: string, fileName: string) => void;
+  onSourceChange: (url: string, fileName: string, meta?: { style?: string; lyrics?: string }) => void;
 }
 
 const SOURCE_FILTERS = [
@@ -169,7 +172,10 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
               <button
                 key={song.id}
                 onClick={() => {
-                  onSourceChange(song.audio_url, song.title);
+                  onSourceChange(song.audio_url, song.title, {
+                    style: song.style || song.caption || '',
+                    lyrics: song.lyrics || '',
+                  });
                   setShowPicker(false);
                 }}
                 style={{
