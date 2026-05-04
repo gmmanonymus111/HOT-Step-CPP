@@ -7,6 +7,7 @@ interface Song {
   id: string;
   title: string;
   audio_url: string;
+  mastered_audio_url?: string;
   source: string;
   created_at: string;
   artist_name?: string;
@@ -168,26 +169,68 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
             {filteredSongs.length === 0 && (
               <div style={styles.emptyMsg}>No tracks found</div>
             )}
-            {filteredSongs.map(song => (
-              <button
+            {filteredSongs.map(song => {
+              const hasMastered = !!song.mastered_audio_url;
+              return (
+              <div
                 key={song.id}
-                onClick={() => {
-                  onSourceChange(song.audio_url, song.title, {
-                    style: song.caption || '',
-                    lyrics: song.lyrics || '',
-                  });
-                  setShowPicker(false);
-                }}
                 style={{
                   ...styles.songItem,
-                  background: sourceAudioUrl === song.audio_url ? 'rgba(167,139,250,0.15)' : 'transparent',
+                  background: sourceAudioUrl === song.audio_url || sourceAudioUrl === song.mastered_audio_url
+                    ? 'rgba(167,139,250,0.15)' : 'transparent',
                 }}
               >
-                <span style={styles.songTitle}>{song.title}</span>
-                {song.artist_name && <span style={styles.songArtist}>{song.artist_name}</span>}
-                <span style={styles.songSource}>{song.source}</span>
-              </button>
-            ))}
+                <button
+                  onClick={() => {
+                    onSourceChange(song.audio_url, song.title, {
+                      style: song.caption || '',
+                      lyrics: song.lyrics || '',
+                    });
+                    setShowPicker(false);
+                  }}
+                  style={styles.songSelectBtn}
+                >
+                  <span style={styles.songTitle}>{song.title}</span>
+                  {song.artist_name && <span style={styles.songArtist}>{song.artist_name}</span>}
+                  <span style={styles.songSource}>{song.source}</span>
+                </button>
+                {hasMastered && (
+                  <div style={styles.versionToggle}>
+                    <button
+                      onClick={() => {
+                        onSourceChange(song.audio_url, song.title, {
+                          style: song.caption || '',
+                          lyrics: song.lyrics || '',
+                        });
+                        setShowPicker(false);
+                      }}
+                      style={{
+                        ...styles.versionBtn,
+                        background: sourceAudioUrl === song.audio_url ? '#a78bfa' : 'transparent',
+                        color: sourceAudioUrl === song.audio_url ? '#000' : '#888',
+                      }}
+                      title="Use unmastered version"
+                    >Raw</button>
+                    <button
+                      onClick={() => {
+                        onSourceChange(song.mastered_audio_url!, `${song.title} (Mastered)`, {
+                          style: song.caption || '',
+                          lyrics: song.lyrics || '',
+                        });
+                        setShowPicker(false);
+                      }}
+                      style={{
+                        ...styles.versionBtn,
+                        background: sourceAudioUrl === song.mastered_audio_url ? '#a78bfa' : 'transparent',
+                        color: sourceAudioUrl === song.mastered_audio_url ? '#000' : '#888',
+                      }}
+                      title="Use mastered version"
+                    >Mastered</button>
+                  </div>
+                )}
+              </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -340,13 +383,22 @@ const styles: Record<string, React.CSSProperties> = {
   songItem: {
     display: 'flex',
     alignItems: 'center',
-    gap: 8,
-    padding: '6px 8px',
+    gap: 6,
+    padding: '4px 8px',
     borderRadius: 6,
+    transition: 'background 0.1s ease',
+  },
+  songSelectBtn: {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '4px 0',
     border: 'none',
+    background: 'none',
     cursor: 'pointer',
     textAlign: 'left',
-    transition: 'background 0.1s ease',
+    minWidth: 0,
   },
   songTitle: {
     flex: 1,
@@ -368,5 +420,22 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#666',
     fontWeight: 600,
     textTransform: 'uppercase',
+    flexShrink: 0,
   },
+  versionToggle: {
+    display: 'flex',
+    gap: 2,
+    borderRadius: 6,
+    border: '1px solid rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+    flexShrink: 0,
+  },
+  versionBtn: {
+    padding: '2px 7px',
+    border: 'none',
+    fontSize: 10,
+    fontWeight: 600,
+    cursor: 'pointer',
+    transition: 'all 0.1s ease',
+  } as React.CSSProperties,
 };

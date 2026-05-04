@@ -42,7 +42,7 @@ const CATEGORY_ORDER = ['vocals', 'instruments', 'drums', 'other'];
 
 export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onClose, onDownloadStem, onDownloadAll }) => {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [soloIndex, setSoloIndex] = useState<number | null>(null);
+  const [soloSet, setSoloSet] = useState<Set<number>>(new Set());
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodesRef = useRef<Map<number, { source: AudioBufferSourceNode; gain: GainNode }>>(new Map());
   const buffersRef = useRef<Map<number, AudioBuffer>>(new Map());
@@ -99,7 +99,11 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
   }, [controls, onControlsChange]);
 
   const toggleSolo = useCallback((index: number) => {
-    setSoloIndex(prev => prev === index ? null : index);
+    setSoloSet(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index); else next.add(index);
+      return next;
+    });
   }, []);
 
   // Load audio buffers for preview
@@ -195,7 +199,7 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
 
       const gain = ctx.createGain();
       const ctrl = controls.find(c => c.index === stem.index);
-      const effectiveMuted = ctrl?.muted || (soloIndex !== null && soloIndex !== stem.index);
+      const effectiveMuted = ctrl?.muted || (soloSet.size > 0 && !soloSet.has(stem.index));
       gain.gain.value = effectiveMuted ? 0 : (ctrl?.volume ?? 1.0);
 
       source.connect(gain);
@@ -214,7 +218,7 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
     }
     playbackStartTimeRef.current = ctx.currentTime;
     setIsPlaying(true);
-  }, [isPlaying, stems, controls, soloIndex, loadedStems, loadBuffers, duration]);
+  }, [isPlaying, stems, controls, soloSet, loadedStems, loadBuffers, duration]);
 
 
   const handleSeek = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -242,7 +246,7 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
         source.buffer = buf;
         const gain = ctx.createGain();
         const ctrl = controls.find(c => c.index === stem.index);
-        const effectiveMuted = ctrl?.muted || (soloIndex !== null && soloIndex !== stem.index);
+        const effectiveMuted = ctrl?.muted || (soloSet.size > 0 && !soloSet.has(stem.index));
         gain.gain.value = effectiveMuted ? 0 : (ctrl?.volume ?? 1.0);
         source.connect(gain);
         gain.connect(ctx.destination);
@@ -259,19 +263,19 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
       }
       playbackStartTimeRef.current = ctx.currentTime;
     }
-  }, [isPlaying, stems, controls, soloIndex]);
+  }, [isPlaying, stems, controls, soloSet]);
 
   // Update gain nodes in real-time when controls change
   useEffect(() => {
     sourceNodesRef.current.forEach((node, idx) => {
       const ctrl = controls.find(c => c.index === idx);
-      const effectiveMuted = ctrl?.muted || (soloIndex !== null && soloIndex !== idx);
+      const effectiveMuted = ctrl?.muted || (soloSet.size > 0 && !soloSet.has(idx));
       node.gain.gain.setValueAtTime(
         effectiveMuted ? 0 : (ctrl?.volume ?? 1.0),
         audioContextRef.current?.currentTime ?? 0
       );
     });
-  }, [controls, soloIndex]);
+  }, [controls, soloSet]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -339,8 +343,8 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
 
             {catStems.map(stem => {
               const ctrl = controls.find(c => c.index === stem.index)!;
-              const isSoloed = soloIndex === stem.index;
-              const effectiveMuted = ctrl.muted || (soloIndex !== null && !isSoloed);
+              const isSoloed = soloSet.has(stem.index);
+              const effectiveMuted = ctrl.muted || (soloSet.size > 0 && !isSoloed);
 
               return (
                 <div
