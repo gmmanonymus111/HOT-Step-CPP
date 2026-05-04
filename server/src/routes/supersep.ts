@@ -38,7 +38,14 @@ router.post('/separate', async (req, res) => {
 
     if (!isWav && !isMp3) {
       // Convert to WAV via ffmpeg (handles FLAC, OGG, M4A, AAC, OPUS, etc.)
-      console.log(`[SuperSep] Non-WAV/MP3 detected, converting via ffmpeg...`);
+      // Detect format from magic bytes for proper file extension (ffmpeg needs this)
+      let inputExt = '.bin';
+      if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'fLaC') inputExt = '.flac';
+      else if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'OggS') inputExt = '.ogg';
+      else if (audioBody.length >= 8 && audioBody.slice(4, 8).toString() === 'ftyp') inputExt = '.m4a';
+      else if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'FORM') inputExt = '.aiff';
+      console.log(`[SuperSep] Non-WAV/MP3 detected (ext=${inputExt}), converting via ffmpeg...`);
+
       const fs = await import('fs');
       const path = await import('path');
       const { execFileSync } = await import('child_process');
@@ -53,7 +60,7 @@ router.post('/separate', async (req, res) => {
       const tmpDir = path.default.join(process.cwd(), 'data', 'tmp');
       if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      const tmpIn = path.default.join(tmpDir, `supersep_in_${id}.dat`);
+      const tmpIn = path.default.join(tmpDir, `supersep_in_${id}${inputExt}`);
       const tmpOut = path.default.join(tmpDir, `supersep_out_${id}.wav`);
 
       try {
