@@ -90,36 +90,64 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
         <span style={styles.selectedCount}>{selectedTracks.length} selected</span>
       </div>
 
-      {/* Track grid grouped by category */}
+      {/* Track grid — Row 1: Vocals, Drums, Other | Row 2: Instruments */}
       <div style={styles.trackGrid}>
-        {(['vocals', 'drums', 'instruments', 'other'] as const).map(cat => {
-          const tracks = grouped[cat];
-          if (!tracks) return null;
-          return (
-            <div key={cat} style={styles.categoryGroup}>
-              <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS[cat] }}>
-                <span>●</span> {cat.charAt(0).toUpperCase() + cat.slice(1)}
+        {/* Row 1 */}
+        <div style={styles.trackRow}>
+          {(['vocals', 'drums', 'other'] as const).map(cat => {
+            const tracks = grouped[cat];
+            if (!tracks) return null;
+            return (
+              <div key={cat} style={styles.categoryGroup}>
+                <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS[cat] }}>
+                  <span>●</span> {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                </div>
+                <div style={styles.categoryTracks}>
+                  {tracks.map(track => (
+                    <div key={track} style={styles.trackItem}>
+                      <ToggleSwitch
+                        checked={selectedTracks.includes(track)}
+                        onChange={() => toggleTrack(track)}
+                        accentColor={CATEGORY_ACCENTS[cat] || 'purple'}
+                      />
+                      <span style={{
+                        ...styles.trackLabel,
+                        color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
+                      }}>
+                        {TRACK_LABELS[track] || track}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div style={styles.categoryTracks}>
-                {tracks.map(track => (
-                  <div key={track} style={styles.trackItem}>
-                    <ToggleSwitch
-                      checked={selectedTracks.includes(track)}
-                      onChange={() => toggleTrack(track)}
-                      accentColor={CATEGORY_ACCENTS[cat] || 'purple'}
-                    />
-                    <span style={{
-                      ...styles.trackLabel,
-                      color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
-                    }}>
-                      {TRACK_LABELS[track] || track}
-                    </span>
-                  </div>
-                ))}
-              </div>
+            );
+          })}
+        </div>
+        {/* Row 2 — Instruments */}
+        {grouped['instruments'] && (
+          <div style={styles.categoryGroup}>
+            <div style={{ ...styles.categoryLabel, color: CATEGORY_COLORS['instruments'] }}>
+              <span>●</span> Instruments
             </div>
-          );
-        })}
+            <div style={styles.categoryTracks}>
+              {grouped['instruments'].map(track => (
+                <div key={track} style={styles.trackItem}>
+                  <ToggleSwitch
+                    checked={selectedTracks.includes(track)}
+                    onChange={() => toggleTrack(track)}
+                    accentColor={CATEGORY_ACCENTS['instruments'] || 'sky'}
+                  />
+                  <span style={{
+                    ...styles.trackLabel,
+                    color: selectedTracks.includes(track) ? '#d4d4d4' : '#888',
+                  }}>
+                    {TRACK_LABELS[track] || track}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Extract button */}
@@ -194,6 +222,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: 10,
+  },
+  trackRow: {
+    display: 'flex',
+    gap: 16,
+    flexWrap: 'wrap' as const,
   },
   categoryGroup: {
     display: 'flex',
