@@ -852,20 +852,20 @@ SuperSepResult * supersep_run(
         // the original pointer is kept for the downstream stage.
         for (int i = 0; i < N_STAGE1_STEMS && i < (int)s1_stems.size(); i++) {
             // Keep vocals/drums/other for later stages (hold the original pointer)
-            if (i == 3 && stages[1]) { // Vocals → Stage 2
-                s1_vocals = s1_stems[i];
-                s1_vocal_frames = s1_counts[i];
-            } else if (i == 4 && stages[2]) { // Drums → Stage 3
+            if (i == 1 && stages[2]) { // Drums (index 1) → Stage 3
                 s1_drums = s1_stems[i];
                 s1_drum_frames = s1_counts[i];
-            } else if (i == 5 && stages[3]) { // Other → Stage 4
+            } else if (i == 2 && stages[3]) { // Other (index 2) → Stage 4
                 s1_other = s1_stems[i];
                 s1_other_frames = s1_counts[i];
+            } else if (i == 3 && stages[1]) { // Vocals (index 3) → Stage 2
+                s1_vocals = s1_stems[i];
+                s1_vocal_frames = s1_counts[i];
             }
 
             // Always add to output (duplicate buffer if held for later stage)
             float *buf = s1_stems[i];
-            bool is_held = (i == 3 && stages[1]) || (i == 4 && stages[2]) || (i == 5 && stages[3]);
+            bool is_held = (i == 1 && stages[2]) || (i == 2 && stages[3]) || (i == 3 && stages[1]);
             if (is_held) {
                 size_t nbytes = (size_t)s1_counts[i] * 2 * sizeof(float);
                 buf = (float *)malloc(nbytes);
