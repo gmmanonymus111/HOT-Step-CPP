@@ -9,13 +9,13 @@ import { DEFAULT_SETTINGS, type AppSettings } from '../settings/SettingsPanel';
 import { generateApi } from '../../services/api';
 import { lireekApi, type Artist, type AlbumPreset } from '../../services/lireekApi';
 import {
-  startSeparation, waitForCompletion,
+  startSeparation, waitForCompletion, recombineStems,
   SEPARATION_LEVELS, type SeparationLevel, type StemInfo,
 } from '../../services/supersepApi';
 import { SourcePanel } from './SourcePanel';
 import { ArtistSettingsPanel } from './ArtistSettingsPanel';
 import { ActivitySidebar } from '../shared/ActivitySidebar';
-import { StemMixer } from './StemMixer';
+import { StemMixer, type StemControl } from './StemMixer';
 import {
   addManualQueueItem, updateManualQueueItem,
   completeManualQueueItem, failManualQueueItem,
@@ -101,6 +101,7 @@ export const CoverStudio: React.FC = () => {
   const [sepMessage, setSepMessage] = useState('');
   const [sepJobId, setSepJobId] = useState<string | null>(null);
   const [sepStems, setSepStems] = useState<StemInfo[] | null>(null);
+  const [stemControls, setStemControls] = useState<StemControl[]>([]);
   const [recombinedBlob, setRecombinedBlob] = useState<Blob | null>(null);
 
   // ── Persist ──
@@ -276,6 +277,33 @@ export const CoverStudio: React.FC = () => {
     if (!token || !sourceAudioUrl || !lyrics.trim()) { showToast('Missing source audio or lyrics'); return; }
     setIsGenerating(true);
     try {
+      // Step 0: If advanced mode with stems, auto-recombine before generation
+      let effectiveSourceUrl = sourceAudioUrl;
+      if (advancedMode && sepStems && sepStems.length > 0 && sepJobId) {
+        setGenStage('Recombining stems...');
+        setGenProgress(2);
+        try {
+          // Build effective controls respecting solo state is handled by StemMixer internally,
+          // but the parent controls already have the user's volume/mute settings
+          const blob = await recombineStems(sepJobId, stemControls.map(c => ({
+            index: c.index,
+            volume: c.muted ? 0 : c.volume,
+            muted: c.muted,
+          })));
+          // Upload recombined WAV to get a server-side URL
+          const fd = new FormData();
+          fd.append('audio', blob, 'recombined-stems.wav');
+          const upRes = await fetch('/api/upload/audio', { method: 'POST', body: fd });
+          if (upRes.ok) {
+            const { audio_url } = await upRes.json();
+            effectiveSourceUrl = audio_url;
+            console.log('[CoverStudio] Using recombined stems:', audio_url);
+          }
+        } catch (err: any) {
+          console.warn('[CoverStudio] Stem recombine failed, using original:', err.message);
+          showToast(`Stem recombine failed: ${err.message}. Using original audio.`);
+        }
+      }
       const selectedArtist = artists.find(a => a.id === selectedArtistId);
       const sourceBpm = (analysis?.bpm || 120) * bpmCorrection;
       const sourceKey = keyOverride || analysis?.key || 'C major';
@@ -295,7 +323,7 @@ export const CoverStudio: React.FC = () => {
           ? `${songTitle || 'Cover'} (${songArtist} Cover)`
           : (songTitle || 'Cover'),
         taskType: 'cover',
-        sourceAudioUrl,
+        sourceAudioUrl: effectiveSourceUrl,
         audioCoverStrength,
         coverNoiseStrength,
         bpm: targetBpm,
@@ -410,6 +438,8 @@ export const CoverStudio: React.FC = () => {
     setMetadata(null); setAnalysis(null);
     setSongArtist(''); setSongTitle(''); setLyrics('');
     setBpmCorrection(1); setKeyOverride(null);
+    // Clear stems too
+    setSepStems(null); setStemControls([]); setSepJobId(null); setRecombinedBlob(null);
   };
 
   const canGenerate = !!sourceAudioUrl && !!lyrics.trim() && !isGenerating;
@@ -439,6 +469,8 @@ export const CoverStudio: React.FC = () => {
       });
 
       setSepStems(result.stems);
+      // Initialize stem controls (all at 100%, unmuted)
+      setStemControls(result.stems.map(s => ({ index: s.index, volume: 1.0, muted: false })));
       showToast(`Separated into ${result.stems.length} stems!`);
     } catch (err: any) {
       showToast(`Separation failed: ${err.message}`);
@@ -503,7 +535,9 @@ export const CoverStudio: React.FC = () => {
           {/* Stem Mixer (advanced mode only) */}
           {advancedMode && sepStems && sepJobId && (
             <div className="flex-shrink-0 border-t border-white/5 p-4 max-h-[360px] overflow-y-auto scrollbar-hide">
-              <StemMixer jobId={sepJobId} stems={sepStems} onRecombine={handleRecombine} />
+              <StemMixer jobId={sepJobId} stems={sepStems}
+                controls={stemControls} onControlsChange={setStemControls}
+                onRecombine={handleRecombine} />
             </div>
           )}
         </div>

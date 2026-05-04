@@ -1,14 +1,14 @@
 // StemMixer.tsx — Interactive stem mixer for SuperSep
 //
-// Displays separated stems with per-stem volume/mute controls,
-// categorized by type (vocals, instruments, drums, other).
+// Controlled component: parent owns volume/mute state so it can
+// read controls during generation for auto-recombine.
 // Supports real-time preview via Web Audio API.
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { StemInfo } from '../../services/supersepApi';
 import { getStemAudioUrl, recombineStems } from '../../services/supersepApi';
 
-interface StemControl {
+export interface StemControl {
   index: number;
   volume: number;
   muted: boolean;
@@ -17,6 +17,8 @@ interface StemControl {
 interface StemMixerProps {
   jobId: string;
   stems: StemInfo[];
+  controls: StemControl[];
+  onControlsChange: (controls: StemControl[]) => void;
   onRecombine?: (audioBlob: Blob) => void;
 }
 
@@ -29,10 +31,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const CATEGORY_ORDER = ['vocals', 'instruments', 'drums', 'other'];
 
-export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, onRecombine }) => {
-  const [controls, setControls] = useState<StemControl[]>(() =>
-    stems.map((s) => ({ index: s.index, volume: 1.0, muted: false }))
-  );
+export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, onControlsChange, onRecombine }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isRecombining, setIsRecombining] = useState(false);
   const [soloIndex, setSoloIndex] = useState<number | null>(null);
@@ -54,12 +53,12 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, onRecombine 
   }, [stems]);
 
   const updateControl = useCallback((index: number, partial: Partial<StemControl>) => {
-    setControls(prev => prev.map(c => c.index === index ? { ...c, ...partial } : c));
-  }, []);
+    onControlsChange(controls.map(c => c.index === index ? { ...c, ...partial } : c));
+  }, [controls, onControlsChange]);
 
   const toggleMute = useCallback((index: number) => {
-    setControls(prev => prev.map(c => c.index === index ? { ...c, muted: !c.muted } : c));
-  }, []);
+    onControlsChange(controls.map(c => c.index === index ? { ...c, muted: !c.muted } : c));
+  }, [controls, onControlsChange]);
 
   const toggleSolo = useCallback((index: number) => {
     setSoloIndex(prev => prev === index ? null : index);
