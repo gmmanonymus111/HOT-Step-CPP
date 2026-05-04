@@ -454,12 +454,8 @@ export const CoverStudio: React.FC = () => {
     setRecombinedBlob(null);
 
     try {
-      // Fetch the source audio as a blob
-      const audioRes = await fetch(sourceAudioUrl);
-      const audioBlob = await audioRes.blob();
-
-      // Start separation
-      const jobId = await startSeparation(audioBlob, sepLevel);
+      // Start separation — pass server URL directly (no need to download/re-upload)
+      const jobId = await startSeparation(sourceAudioUrl, sepLevel);
       setSepJobId(jobId);
 
       // Wait for completion with progress updates

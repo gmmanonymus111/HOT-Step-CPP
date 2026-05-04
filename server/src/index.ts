@@ -76,7 +76,7 @@ app.use('/api/lireek', lireekRoutes);
 app.use('/api/vst', vstRoutes);
 app.use('/api/analyze', analyzeRoutes);
 app.use('/api/upload', uploadRoutes);
-app.use('/api/supersep', express.raw({ type: 'application/octet-stream', limit: '200mb' }), supersepRoutes);
+app.use('/api/supersep', supersepRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/model-manager', modelManagerRoutes);
 

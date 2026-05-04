@@ -40,13 +40,13 @@ const API_BASE = '/api/supersep';
 
 /** Start a separation job. Returns the job ID. */
 export async function startSeparation(
-  audioBlob: Blob,
+  audioUrl: string,
   level: SeparationLevel = 0,
 ): Promise<string> {
   const res = await fetch(`${API_BASE}/separate?level=${level}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: audioBlob,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audioUrl }),
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));

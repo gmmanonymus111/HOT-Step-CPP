@@ -1,87 +1,59 @@
 // supersep.ts — SuperSep stem separation route (proxy to ace-server)
 //
 // Routes:
-//   POST /api/supersep/separate — upload audio, start separation job
+//   POST /api/supersep/separate — start separation (reads file from disk)
 //   GET  /api/supersep/:jobId/progress — poll job progress
 //   GET  /api/supersep/:jobId/result — get stem list metadata
 //   GET  /api/supersep/:jobId/stem/:index — download individual stem WAV
 //   POST /api/supersep/recombine — remix stems with volume/mute controls
 
 import { Router } from 'express';
-import { aceClient } from '../services/aceClient.js';
 import { config } from '../config.js';
+import { ensureEngineFormat } from '../services/audioConvert.js';
+import path from 'path';
 
 const router = Router();
 
 const ACE_URL = config.aceServer.url;
 
 // POST /api/supersep/separate
-// Accepts: raw audio body (WAV, MP3, FLAC, OGG, M4A, etc.)
+// Body (JSON): { audioUrl: "/references/uuid.flac" }
 // Query: level=0..3 (BASIC/VOCAL_SPLIT/FULL/MAXIMUM)
-// Non-WAV/MP3 is auto-converted to WAV via ffmpeg before forwarding to ace-server.
+// Reads the file from disk, converts non-WAV/MP3 to WAV, forwards to ace-server.
 router.post('/separate', async (req, res) => {
   try {
     const level = parseInt(String(req.query.level ?? '0'), 10);
-    let audioBody: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || []);
-    console.log(`[SuperSep] separate: level=${level}, body=${audioBody.length} bytes, type=${req.headers['content-type']}`);
+    const { audioUrl } = req.body || {};
 
-    if (!audioBody.length) {
-      return res.status(400).json({ error: 'No audio body received by Node server' });
+    if (!audioUrl || typeof audioUrl !== 'string') {
+      return res.status(400).json({ error: 'audioUrl required in request body' });
     }
 
-    // Detect format from magic bytes — ace-server only decodes WAV and MP3
-    const isWav = audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'RIFF';
-    const isMp3 = audioBody.length >= 3 && (
-      (audioBody[0] === 0xFF && (audioBody[1] & 0xE0) === 0xE0) || // MP3 sync word
-      audioBody.slice(0, 3).toString() === 'ID3'                    // ID3 header
-    );
-
-    if (!isWav && !isMp3) {
-      // Convert to WAV via ffmpeg (handles FLAC, OGG, M4A, AAC, OPUS, etc.)
-      // Detect format from magic bytes for proper file extension (ffmpeg needs this)
-      let inputExt = '.bin';
-      if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'fLaC') inputExt = '.flac';
-      else if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'OggS') inputExt = '.ogg';
-      else if (audioBody.length >= 8 && audioBody.slice(4, 8).toString() === 'ftyp') inputExt = '.m4a';
-      else if (audioBody.length >= 4 && audioBody.slice(0, 4).toString() === 'FORM') inputExt = '.aiff';
-      console.log(`[SuperSep] Non-WAV/MP3 detected (ext=${inputExt}), converting via ffmpeg...`);
-
-      const fs = await import('fs');
-      const path = await import('path');
-      const { execFileSync } = await import('child_process');
-      // @ts-ignore
-      const ffmpegPathImport = (await import('ffmpeg-static')).default;
-      const ffmpegPath = ffmpegPathImport as unknown as string | null;
-
-      if (!ffmpegPath) {
-        return res.status(400).json({ error: 'ffmpeg not available — cannot convert this audio format. Upload WAV or MP3.' });
-      }
-
-      const tmpDir = path.default.join(process.cwd(), 'data', 'tmp');
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      const tmpIn = path.default.join(tmpDir, `supersep_in_${id}${inputExt}`);
-      const tmpOut = path.default.join(tmpDir, `supersep_out_${id}.wav`);
-
-      try {
-        fs.writeFileSync(tmpIn, audioBody);
-        execFileSync(ffmpegPath, [
-          '-y', '-i', tmpIn,
-          '-ar', '44100', '-ac', '2',
-          '-c:a', 'pcm_s16le', '-f', 'wav',
-          tmpOut,
-        ], { timeout: 120_000, stdio: ['pipe', 'pipe', 'pipe'] });
-        audioBody = fs.readFileSync(tmpOut);
-        console.log(`[SuperSep] Converted to WAV: ${audioBody.length} bytes`);
-      } catch (convErr: any) {
-        const stderr = convErr.stderr?.toString()?.slice(-300) || '';
-        console.error(`[SuperSep] ffmpeg conversion failed:`, stderr || convErr.message);
-        return res.status(400).json({ error: `Audio format conversion failed: ${stderr || convErr.message}` });
-      } finally {
-        try { fs.unlinkSync(tmpIn); } catch {}
-        try { fs.unlinkSync(tmpOut); } catch {}
-      }
+    // Resolve server-side file path from URL
+    // audioUrl is like "/references/uuid.flac" → data/references/uuid.flac
+    const basename = path.basename(audioUrl);
+    let filePath: string;
+    if (audioUrl.startsWith('/references/')) {
+      filePath = path.join(config.data.dir, 'references', basename);
+    } else if (audioUrl.startsWith('/audio/')) {
+      filePath = path.join(config.data.audioDir, basename);
+    } else {
+      // Fallback: try in references
+      filePath = path.join(config.data.dir, 'references', basename);
     }
+
+    console.log(`[SuperSep] separate: level=${level}, file=${filePath}`);
+
+    // Read and convert to engine-compatible format (WAV/MP3)
+    let audioBody: Buffer;
+    try {
+      audioBody = ensureEngineFormat(filePath);
+    } catch (err: any) {
+      console.error(`[SuperSep] Format conversion failed:`, err.message);
+      return res.status(400).json({ error: `Audio conversion failed: ${err.message}` });
+    }
+
+    console.log(`[SuperSep] Forwarding ${audioBody.length} bytes to ace-server`);
 
     // Forward WAV/MP3 body to ace-server
     const aceRes = await fetch(
