@@ -38,7 +38,9 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
   const cacheKey = source || 'all';
   const cached = _cache.get(cacheKey);
   const [songs, setSongs] = useState<UnifiedRecentSong[]>(cached?.songs || []);
-  const [loading, setLoading] = useState(!cached?.songs?.length);
+  // Only show loading spinner if we have NO cached data at all (not even an empty result).
+  // A cache entry with songs=[] means "we fetched and there are none" — don't spin for that.
+  const [loading, setLoading] = useState(!cached);
   const mountedRef = useRef(true);
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
   const [downloadArtist, setDownloadArtist] = useState('');
@@ -47,16 +49,17 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      // Invalidate cache on unmount so returning fetches fresh data
-      _cache.delete(cacheKey);
     };
   }, [cacheKey]);
 
   useEffect(() => {
     if (!token) { setLoading(false); return; }
-    if (cached && cached.key === refreshKey && cached.songs.length > 0) return;
+    // Check cache inline (not via closure) to avoid stale dep issues
+    const entry = _cache.get(cacheKey);
+    if (entry && entry.key === refreshKey) return;
     if (_fetchInFlight) return;
-    if (!cached?.songs?.length) setLoading(true);
+    // Only show spinner if we have no cached data at all
+    if (!entry) setLoading(true);
 
     _fetchInFlight = true;
     songApi.getRecentSongs(token, source, 50).then(res => {
@@ -68,7 +71,7 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
       _fetchInFlight = false;
       if (mountedRef.current) setLoading(false);
     });
-  }, [refreshKey, token, source, cacheKey, cached]);
+  }, [refreshKey, token, source, cacheKey]);
 
   const handlePlay = useCallback(async (rs: UnifiedRecentSong) => {
     const track = unifiedRecentSongToTrack(rs);
