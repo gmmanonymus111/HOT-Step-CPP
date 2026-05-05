@@ -238,6 +238,7 @@ struct Job {
     std::string       result_body;
     std::string       result_mime;
     std::string       result_lrc;   // LRC timestamp text (base64), empty if not generated
+    std::vector<float> result_latent; // post-DiT latent [T*64] float32, empty if not captured
     std::atomic<bool> cancel{ false };
 
     // memory ordering contract: result_body and result_mime are written
@@ -761,6 +762,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
                          ServerFields            sf,
                          float *                 src_interleaved,
                          int                     src_len,
+                         float *                 src_latents,
+                         int                     src_T_latent,
                          float *                 ref_interleaved,
                          int                     ref_len,
                          bool                    output_wav,
@@ -783,6 +786,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     if (job->cancel.load()) {
         free(src_interleaved);
+        free(src_latents);
         free(ref_interleaved);
         job->status.store(3);
         return;
@@ -794,6 +798,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     if (!dit) {
         fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
         free(src_interleaved);
+        free(src_latents);
         free(ref_interleaved);
         job->status.store(2);
         return;
@@ -801,6 +806,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
         fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
         free(src_interleaved);
+        free(src_latents);
         free(ref_interleaved);
         job->status.store(2);
         return;
@@ -851,6 +857,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
             } else {
                 fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
                 free(src_interleaved);
+                free(src_latents);
                 free(ref_interleaved);
                 job->status.store(2);
                 return;
@@ -909,6 +916,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     if (!ctx) {
         fprintf(stderr, "[Server] FATAL: synth load failed\n");
         free(src_interleaved);
+        free(src_latents);
         free(ref_interleaved);
         job->status.store(2);
         return;
@@ -970,11 +978,27 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     // Two-phase run (+ optional Phase 3 LRC).
     std::vector<std::string> lrc_results(total_alloc);
-    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, audio.data(),
-                                   lrc_results.data(), server_cancel_job, (void *) &job->cancel);
+    std::vector<std::vector<float>> captured_latents;
+    const int rc = synth_batch_run(ctx, groups,
+                                   src_interleaved, src_len,
+                                   src_latents, src_T_latent,
+                                   ref_interleaved, ref_len,
+                                   nullptr, 0,  // ref_latents (not yet exposed in UI)
+                                   audio.data(),
+                                   lrc_results.data(),
+                                   &captured_latents,
+                                   server_cancel_job, (void *) &job->cancel);
     ace_synth_free(ctx);
     free(src_interleaved);
+    free(src_latents);
     free(ref_interleaved);
+
+    // Store first track's post-DiT latent for retrieval via /job?latent=1
+    if (!captured_latents.empty() && !captured_latents[0].empty()) {
+        job->result_latent = std::move(captured_latents[0]);
+        fprintf(stderr, "[Server] Latent captured: T=%zu (%.1fs @ 25Hz)\n",
+                job->result_latent.size() / 64, (float)(job->result_latent.size() / 64) / 25.0f);
+    }
 
     // Store LRC for the first track (used by the Node server)
     if (!lrc_results.empty() && !lrc_results[0].empty()) {
@@ -1102,6 +1126,8 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     std::vector<AceRequest> ace_reqs;
     float *                 src_interleaved = nullptr;
     int                     src_len         = 0;
+    float *                 src_latents     = nullptr;
+    int                     src_T_latent    = 0;
     float *                 ref_interleaved = nullptr;
     int                     ref_len         = 0;
 
@@ -1158,6 +1184,23 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
                 }
             }
         }
+
+        // Source latents (raw float32, alternative to source audio — skips VAE encode)
+        if (req.form.has_file("src_latents")) {
+            auto file = req.form.get_file("src_latents");
+            if (!file.content.empty()) {
+                if (file.content.size() % (64 * sizeof(float)) != 0) {
+                    json_error(res, 400, "src_latents size must be a multiple of 256 bytes (64 * float32)");
+                    return;
+                }
+                src_T_latent = (int)(file.content.size() / (64 * sizeof(float)));
+                src_latents = (float *) malloc(file.content.size());
+                memcpy(src_latents, file.content.data(), file.content.size());
+                fprintf(stderr, "[Server] Source latents: T=%d (%.2fs @ 25Hz)\n",
+                        src_T_latent, (float)src_T_latent / 25.0f);
+            }
+        }
+
         ace_reqs.push_back(ace_req);
     } else {
         // plain JSON body: single object {} or array [{}, ...]
@@ -1206,10 +1249,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     // per-request co-resident mode: ?keep_loaded=1
     const bool req_keep_loaded = req.has_param("keep_loaded") && req.get_param_value("keep_loaded") == "1";
 
-    work_push([job, reqs = std::move(ace_reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav,
-               wav_fmt, peak_clip, req_keep_loaded]() mutable {
-        synth_worker(job, std::move(reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
-                     peak_clip, req_keep_loaded);
+    work_push([job, reqs = std::move(ace_reqs), sf, src_interleaved, src_len, src_latents, src_T_latent,
+               ref_interleaved, ref_len, output_wav, wav_fmt, peak_clip, req_keep_loaded]() mutable {
+        synth_worker(job, std::move(reqs), sf, src_interleaved, src_len, src_latents, src_T_latent,
+                     ref_interleaved, ref_len, output_wav, wav_fmt, peak_clip, req_keep_loaded);
     });
 
     // return job ID immediately
@@ -1702,6 +1745,18 @@ int main(int argc, char ** argv) {
         auto job = job_find(req.get_param_value("id"));
         if (!job) {
             json_error(res, 404, "Job not found");
+            return;
+        }
+        // ?latent=1: return raw post-DiT latent bytes (float32, [T*64])
+        if (req.has_param("latent") && req.get_param_value("latent") == "1") {
+            if (job->status.load() != 1 || job->result_latent.empty()) {
+                json_error(res, 404, "Latent not available");
+                return;
+            }
+            res.set_content(
+                reinterpret_cast<const char *>(job->result_latent.data()),
+                job->result_latent.size() * sizeof(float),
+                "application/octet-stream");
             return;
         }
         // ?result=1: return result body

@@ -296,7 +296,11 @@ int main(int argc, char ** argv) {
     }
 
     // Two-phase run: DiT resident for all groups, then VAE for all jobs.
-    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, all_audio.data());
+    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len,
+                                   nullptr, 0,  // src_latents
+                                   ref_interleaved, ref_len,
+                                   nullptr, 0,  // ref_latents
+                                   all_audio.data());
     if (rc != 0) {
         fprintf(stderr, "[Ace-Synth] ERROR: batch run failed\n");
         for (auto & a : all_audio) {
