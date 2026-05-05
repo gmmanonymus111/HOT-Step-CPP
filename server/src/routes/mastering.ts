@@ -166,35 +166,56 @@ export async function runMastering(targetPath: string, referencePath: string, ou
 }
 
 // ── POST /upload-reference ──────────────────────────────────
-router.post('/upload-reference', upload.single('file'), (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+router.post('/upload-reference', upload.single('file'), async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
 
-  const file = req.file;
-  if (!file) { res.status(400).json({ error: 'No file uploaded' }); return; }
+    const file = req.file;
+    if (!file) { res.status(400).json({ error: 'No file uploaded' }); return; }
 
-  // Rename to original filename (sanitized)
-  const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const newPath = path.join(refsDir, safeName);
+    // Sanitize original filename
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = path.extname(safeName).toLowerCase();
 
-  // Avoid overwriting
-  let finalPath = newPath;
-  let finalName = safeName;
-  if (fs.existsSync(newPath)) {
-    const ext = path.extname(safeName);
-    const base = path.basename(safeName, ext);
-    finalName = `${base}_${Date.now()}${ext}`;
-    finalPath = path.join(refsDir, finalName);
+    // Engine only supports WAV and MP3 — convert anything else to WAV on upload
+    const needsConvert = ext !== '.wav' && ext !== '.mp3';
+    const baseName = path.basename(safeName, ext);
+    const targetName = needsConvert ? `${baseName}.wav` : safeName;
+
+    // Avoid overwriting existing files
+    let finalName = targetName;
+    let finalPath = path.join(refsDir, finalName);
+    if (fs.existsSync(finalPath)) {
+      const targetExt = path.extname(targetName);
+      const targetBase = path.basename(targetName, targetExt);
+      finalName = `${targetBase}_${Date.now()}${targetExt}`;
+      finalPath = path.join(refsDir, finalName);
+    }
+
+    if (needsConvert) {
+      console.log(`[Mastering] Converting ${ext} → WAV: ${safeName}`);
+      await convertToWav(file.path, finalPath);
+      // Clean up the original temp file
+      try { fs.unlinkSync(file.path); } catch {}
+    } else {
+      fs.renameSync(file.path, finalPath);
+    }
+
+    console.log(`[Mastering] Reference uploaded: ${finalName}`);
+    res.json({
+      name: finalName,
+      path: finalPath,
+      url: `/references/${finalName}`,
+    });
+  } catch (err: any) {
+    console.error(`[Mastering] Upload failed:`, err.message);
+    // Clean up temp file on error
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+    }
+    res.status(500).json({ error: err.message || 'Upload failed' });
   }
-
-  fs.renameSync(file.path, finalPath);
-
-  console.log(`[Mastering] Reference uploaded: ${finalName}`);
-  res.json({
-    name: finalName,
-    path: finalPath,
-    url: `/references/${finalName}`,
-  });
 });
 
 // ── GET /references ─────────────────────────────────────────
