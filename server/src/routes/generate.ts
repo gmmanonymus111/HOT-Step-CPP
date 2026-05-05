@@ -18,7 +18,7 @@ import { getDb } from '../db/database.js';
 import { config } from '../config.js';
 import { getUserId } from './auth.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
-import { runMastering } from './mastering.js';
+import { runMastering, convertToWav } from './mastering.js';
 import { applyVstChain } from './vst.js';
 // NOTE: Spectral Lifter is now native C++ in the engine (spectral-lifter.h).
 // The Python subprocess wrapper (spectralLifter.ts) is deprecated.
@@ -601,8 +601,28 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
       logGeneration(job.id, 'DEBUG', `[Synth Phase] Looking for timbre ref at: ${refPath}`);
       if (fs.existsSync(refPath)) {
-        refAudioBuf = fs.readFileSync(refPath);
+        // Engine only supports WAV and MP3 natively — convert other formats
+        const refExt = path.extname(refPath).toLowerCase();
+        let readPath = refPath;
+        let tempWav: string | undefined;
+        if (refExt !== '.wav' && refExt !== '.mp3') {
+          try {
+            tempWav = path.join(config.data.dir, `timbre_temp_${job.id}.wav`);
+            logGeneration(job.id, 'INFO', `[Synth Phase] Converting timbre ref ${refExt} → WAV via ffmpeg`);
+            await convertToWav(refPath, tempWav);
+            readPath = tempWav;
+          } catch (convErr: any) {
+            logGeneration(job.id, 'WARNING', `[Synth Phase] Timbre ref conversion failed (${convErr.message}), sending raw file`);
+            readPath = refPath;
+            tempWav = undefined;
+          }
+        }
+        refAudioBuf = fs.readFileSync(readPath);
         logGeneration(job.id, 'INFO', `[Synth Phase] Timbre reference: ${refPath} (${(refAudioBuf.length / 1024 / 1024).toFixed(1)} MB)`);
+        // Clean up temp conversion file
+        if (tempWav && fs.existsSync(tempWav)) {
+          try { fs.unlinkSync(tempWav); } catch {}
+        }
       } else {
         logGeneration(job.id, 'WARNING', `[Synth Phase] Timbre reference file not found: ${refPath}`);
       }

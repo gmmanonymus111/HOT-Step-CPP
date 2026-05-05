@@ -44,7 +44,7 @@ function getToolPath(name: string): string {
 }
 
 /** Convert any audio format to WAV using mp3-codec (for MP3) or ffmpeg (for everything else) */
-async function convertToWav(inputPath: string, outputWavPath: string): Promise<void> {
+export async function convertToWav(inputPath: string, outputWavPath: string): Promise<void> {
   const ext = path.extname(inputPath).toLowerCase();
 
   if (ext === '.wav') {
