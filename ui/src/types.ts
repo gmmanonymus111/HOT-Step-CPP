@@ -147,7 +147,7 @@ export interface GenerationParams {
   slShimmerReduction?: number;
   masteringEnabled?: boolean;
   masteringReference?: string;
-  timbreReference?: boolean;  // Also use mastering ref as timbre conditioner
+  timbreReference?: boolean | string;  // true = reuse mastering ref, string = dedicated timbre audio path
 
   // Solver sub-parameters (conditional on selected solver)
   storkSubsteps?: number;

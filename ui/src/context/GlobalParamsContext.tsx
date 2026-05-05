@@ -156,6 +156,8 @@ export interface GlobalParams {
   setMasteringReference: (v: string) => void;
   timbreReference: boolean;
   setTimbreReference: (v: boolean) => void;
+  timbreAudioPath: string;
+  setTimbreAudioPath: (v: string) => void;
 
   // PP-VAE re-encode
   ppVaeReencode: boolean;
@@ -261,6 +263,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [masteringEnabled, setMasteringEnabled] = usePersistedState('hs-masteringEnabled', false);
   const [masteringReference, setMasteringReference] = usePersistedState('hs-masteringReference', '');
   const [timbreReference, setTimbreReference] = usePersistedState('hs-timbreReference', false);
+  const [timbreAudioPath, setTimbreAudioPath] = usePersistedState('hs-timbreAudioPath', '');
 
   // PP-VAE re-encode (spectral cleanup via post-processing VAE)
   const [ppVaeReencode, setPpVaeReencode] = usePersistedState('hs-ppVaeReencode', false);
@@ -337,7 +340,15 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       slShimmerReduction: (postProcessingEnabled && spectralLifterEnabled) ? slShimmerReduction : undefined,
       masteringEnabled: postProcessingEnabled ? masteringEnabled : false,
       masteringReference: (postProcessingEnabled && masteringEnabled) ? masteringReference : undefined,
-      timbreReference: (postProcessingEnabled && masteringEnabled && timbreReference && masteringReference) ? true : undefined,
+      // Timbre conditioning — priority:
+      // 1. Dedicated timbre audio path (independent of mastering)
+      // 2. "Also use as timbre" toggle (requires mastering ref)
+      // 3. None (engine uses silence frame)
+      timbreReference: timbreAudioPath
+        ? timbreAudioPath
+        : (postProcessingEnabled && masteringEnabled && timbreReference && masteringReference)
+          ? true
+          : undefined,
 
       // DCW
       dcwEnabled,
@@ -377,7 +388,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     autoTrimEnabled, durationBuffer, autoTrimFadeMs,
     skipLm, useCotCaption, lmTemperature, lmCfgScale, lmTopK, lmTopP, lmNegativePrompt, lmCodesStrength,
      spectralLifterEnabled, slDenoiseStrength, slNoiseFloor, slHfMix, slTransientBoost, slShimmerReduction,
-    masteringEnabled, masteringReference, timbreReference,
+    masteringEnabled, masteringReference, timbreReference, timbreAudioPath,
     ppVaeReencode, ppVaeBlend,
     postProcessingEnabled,
     settings,
@@ -430,6 +441,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     masteringEnabled, setMasteringEnabled,
     masteringReference, setMasteringReference,
     timbreReference, setTimbreReference,
+    timbreAudioPath, setTimbreAudioPath,
     // PP-VAE
     ppVaeReencode, setPpVaeReencode,
     ppVaeBlend, setPpVaeBlend,
@@ -470,6 +482,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     masteringEnabled, setMasteringEnabled,
     masteringReference, setMasteringReference,
     timbreReference, setTimbreReference,
+    timbreAudioPath, setTimbreAudioPath,
     ppVaeReencode, setPpVaeReencode,
     ppVaeBlend, setPpVaeBlend,
     getGlobalParams,

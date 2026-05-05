@@ -534,7 +534,13 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
     writePersistedState('hs-timbreReference', true);
 
     params.masteringReference = preset.reference_track_path;
-    params.timbreReference = true;
+    // Timbre: use dedicated timbre path from globalParams if set,
+    // otherwise default to preset reference track
+    if (typeof item.globalParams.timbreReference === 'string' && item.globalParams.timbreReference) {
+      params.timbreReference = item.globalParams.timbreReference;  // dedicated timbre audio path
+    } else {
+      params.timbreReference = true;  // use preset reference track as timbre
+    }
 
     // Randomize Timbre: pick a random track from the same folder instead of the exact file
     try {

@@ -95,6 +95,7 @@ export const GlobalParamBar: React.FC = () => {
         if (p.masteringEnabled !== undefined) gp.setMasteringEnabled(p.masteringEnabled);
         if (p.masteringReference !== undefined) gp.setMasteringReference(p.masteringReference);
         if (p.timbreReference !== undefined) gp.setTimbreReference(p.timbreReference);
+        if (p.timbreAudioPath !== undefined) gp.setTimbreAudioPath(p.timbreAudioPath);
         if (p.storkSubsteps !== undefined) gp.setStorkSubsteps(p.storkSubsteps);
         if (p.beatStability !== undefined) gp.setBeatStability(p.beatStability);
         if (p.frequencyDamping !== undefined) gp.setFrequencyDamping(p.frequencyDamping);

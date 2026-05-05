@@ -3,13 +3,15 @@
 // Adapted from the DiT section of create/GenerationSettings.tsx.
 // Reads from GlobalParamsContext instead of props.
 
-import React from 'react';
-import { RotateCcw, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { RotateCcw, ChevronDown, Music2, Upload, Trash2 } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
-import { formatScheduler } from './modelLabels';
+import { formatScheduler, formatReferenceName } from './modelLabels';
 import { usePersistedState } from '../../hooks/usePersistedState';
+import { masteringApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
@@ -21,6 +23,36 @@ export const GenerationDropdown: React.FC = () => {
   const [latentOpen, setLatentOpen] = usePersistedState('hs-genAccordion-latent', false);
   const [denoiserOpen, setDenoiserOpen] = usePersistedState('hs-genAccordion-denoiser', false);
   const [autoTrimOpen, setAutoTrimOpen] = usePersistedState('hs-genAccordion-autotrim', false);
+  const [timbreOpen, setTimbreOpen] = usePersistedState('hs-genAccordion-timbre', false);
+  const { token } = useAuth();
+
+  // ── Timbre reference file management ──
+  interface ReferenceTrack { name: string; size: number; url: string; }
+  const [timbreRefs, setTimbreRefs] = useState<ReferenceTrack[]>([]);
+  const [timbreUploading, setTimbreUploading] = useState(false);
+
+  useEffect(() => {
+    masteringApi.listReferences()
+      .then(data => setTimbreRefs(data.references))
+      .catch(() => {});
+  }, []);
+
+  const handleTimbreUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !token) return;
+    try {
+      setTimbreUploading(true);
+      const result = await masteringApi.uploadReference(file, token);
+      gp.setTimbreAudioPath(result.name);
+      const data = await masteringApi.listReferences();
+      setTimbreRefs(data.references);
+    } catch (err) {
+      console.error('[Timbre] Upload failed:', err);
+    } finally {
+      setTimbreUploading(false);
+      e.target.value = '';
+    }
+  }, [token, gp]);
 
   // Resolve scheduler dropdown value from the composite string representation
   const schedulerKey = gp.scheduler.startsWith('composite') ? 'composite'
@@ -304,6 +336,99 @@ export const GenerationDropdown: React.FC = () => {
           <p className="text-[10px] text-zinc-500">Momentum smooths guidance across steps. Norm threshold clips gradient magnitude per channel.</p>
         </div>
       )}
+
+      {/* ── Timbre Conditioning (Accordion with file picker) ── */}
+      <div className={`rounded-xl border transition-all overflow-hidden ${gp.timbreAudioPath ? 'border-teal-500/20 bg-teal-500/5' : 'border-zinc-200 dark:border-white/10 bg-zinc-100/30 dark:bg-zinc-800/30'}`}>
+        <button
+          type="button"
+          onClick={() => setTimbreOpen(!timbreOpen)}
+          className="w-full flex items-center justify-between px-3 py-2 hover:bg-teal-500/5 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <ChevronDown size={12} className={`text-teal-400 transition-transform duration-200 ${timbreOpen ? 'rotate-180' : ''}`} />
+            <Music2 size={14} className={gp.timbreAudioPath ? 'text-teal-400' : 'text-zinc-500'} />
+            <span className="text-[10px] font-semibold text-teal-400 uppercase tracking-wider">Timbre Reference</span>
+          </div>
+          {gp.timbreAudioPath ? (
+            <span className="text-[10px] text-teal-400/60 font-mono truncate max-w-[120px]">
+              {formatReferenceName(gp.timbreAudioPath)}
+            </span>
+          ) : gp.timbreReference && gp.masteringReference ? (
+            <span className="text-[10px] text-zinc-500 font-mono">Mastering ref</span>
+          ) : (
+            <span className="text-[10px] text-zinc-600 font-mono">None</span>
+          )}
+        </button>
+        {timbreOpen && (
+          <div className="px-3 pb-3 space-y-3 border-t border-zinc-200 dark:border-white/5">
+            <p className="text-[10px] text-zinc-500 leading-relaxed mt-2">
+              Set a dedicated audio track for timbre conditioning. The reference is VAE-encoded
+              and fed into the DiT during synthesis, guiding tone and texture.
+              If not set, the mastering reference is used when the timbre toggle is enabled.
+            </p>
+
+            {/* Reference selector */}
+            {timbreRefs.length > 0 ? (
+              <select
+                className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-teal-500/50 focus:ring-1 focus:ring-teal-500/20 outline-none transition-colors cursor-pointer"
+                value={gp.timbreAudioPath}
+                onChange={e => gp.setTimbreAudioPath(e.target.value)}
+              >
+                <option value="">None (use mastering ref if enabled)</option>
+                {timbreRefs.map(r => (
+                  <option key={r.name} value={r.name}>
+                    {r.name} ({r.size < 1024 * 1024 ? `${(r.size / 1024).toFixed(1)} KB` : `${(r.size / (1024 * 1024)).toFixed(1)} MB`})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="text-xs text-zinc-500 italic px-1">
+                No reference tracks uploaded yet
+              </div>
+            )}
+
+            {/* Selected file info + clear */}
+            {gp.timbreAudioPath && (
+              <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-teal-500/5 border border-teal-500/10">
+                <Music2 size={14} className="text-teal-400 flex-shrink-0" />
+                <span className="text-xs text-teal-300 truncate flex-1">{gp.timbreAudioPath}</span>
+                <button
+                  onClick={() => gp.setTimbreAudioPath('')}
+                  className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors flex-shrink-0"
+                  title="Clear timbre reference"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            )}
+
+            {/* Upload button */}
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                accept="audio/*"
+                id="timbre-ref-upload-gen"
+                className="hidden"
+                onChange={handleTimbreUpload}
+              />
+              <label
+                htmlFor="timbre-ref-upload-gen"
+                className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer transition-all ${
+                  timbreUploading
+                    ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border-zinc-200 dark:border-white/5 cursor-wait'
+                    : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-white/10 hover:border-teal-500/30 hover:text-teal-400'
+                }`}
+              >
+                {timbreUploading ? (
+                  <><span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" /> Uploading...</>
+                ) : (
+                  <><Upload size={14} /> Upload Reference</>
+                )}
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── DCW Correction (Accordion with checkbox in title) ── */}
       <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 transition-all overflow-hidden">

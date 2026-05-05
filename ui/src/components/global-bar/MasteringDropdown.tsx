@@ -141,15 +141,22 @@ export const MasteringDropdown: React.FC = () => {
 
       {/* Timbre reference toggle */}
       {gp.masteringReference && (
-        <div className="flex items-center justify-between mt-1">
-          <div className="flex items-center gap-1.5">
+        gp.timbreAudioPath ? (
+          <div className="flex items-center gap-1.5 mt-1 px-2 py-1.5 rounded-lg bg-teal-500/5 border border-teal-500/10">
             <Music2 size={14} className="text-teal-400" />
-            <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
+            <span className="text-[10px] text-teal-400">Timbre: using dedicated reference ({gp.timbreAudioPath.split(/[\\/]/).pop()})</span>
           </div>
-          <ToggleSwitch checked={gp.timbreReference} onChange={gp.setTimbreReference} accentColor="amber" />
-        </div>
+        ) : (
+          <div className="flex items-center justify-between mt-1">
+            <div className="flex items-center gap-1.5">
+              <Music2 size={14} className="text-teal-400" />
+              <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
+            </div>
+            <ToggleSwitch checked={gp.timbreReference} onChange={gp.setTimbreReference} accentColor="amber" />
+          </div>
+        )
       )}
-      {gp.timbreReference && gp.masteringReference && (
+      {gp.timbreReference && gp.masteringReference && !gp.timbreAudioPath && (
         <p className="text-[10px] text-zinc-600 leading-relaxed">
           The reference track will be VAE-encoded and fed into the timbre conditioning pipeline,
           guiding the generation&apos;s tone and texture to match the reference.

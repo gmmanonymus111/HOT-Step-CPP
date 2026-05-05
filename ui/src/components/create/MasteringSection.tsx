@@ -16,6 +16,7 @@ interface MasteringSectionProps {
   onMasteringReferenceChange: (v: string) => void;
   timbreReference: boolean;
   onTimbreReferenceChange: (v: boolean) => void;
+  timbreAudioPath?: string;
 }
 
 interface ReferenceTrack {
@@ -37,6 +38,7 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
   onMasteringReferenceChange,
   timbreReference,
   onTimbreReferenceChange,
+  timbreAudioPath = '',
 }) => {
   const { token } = useAuth();
   const [open, setOpen] = useState(false);
@@ -181,18 +183,25 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
 
               {/* Timbre reference toggle */}
               {masteringReference && (
-                <label className="flex items-center gap-2.5 cursor-pointer mt-1">
-                  <input
-                    type="checkbox"
-                    checked={timbreReference}
-                    onChange={e => onTimbreReferenceChange(e.target.checked)}
-                    className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-teal-500 focus:ring-teal-500/20"
-                  />
-                  <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
-                  <Music2 size={14} className="text-teal-400 ml-auto" />
-                </label>
+                timbreAudioPath ? (
+                  <div className="flex items-center gap-1.5 mt-1 px-2 py-1.5 rounded-lg bg-teal-500/5 border border-teal-500/10">
+                    <Music2 size={14} className="text-teal-400" />
+                    <span className="text-[10px] text-teal-400">Timbre: using dedicated reference ({timbreAudioPath.split(/[\\/]/).pop()})</span>
+                  </div>
+                ) : (
+                  <label className="flex items-center gap-2.5 cursor-pointer mt-1">
+                    <input
+                      type="checkbox"
+                      checked={timbreReference}
+                      onChange={e => onTimbreReferenceChange(e.target.checked)}
+                      className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-teal-500 focus:ring-teal-500/20"
+                    />
+                    <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
+                    <Music2 size={14} className="text-teal-400 ml-auto" />
+                  </label>
+                )
               )}
-              {timbreReference && masteringReference && (
+              {timbreReference && masteringReference && !timbreAudioPath && (
                 <p className="text-[10px] text-zinc-600 leading-relaxed">
                   The reference track will be VAE-encoded and fed into the timbre conditioning pipeline,
                   guiding the generation&apos;s tone and texture to match the reference.

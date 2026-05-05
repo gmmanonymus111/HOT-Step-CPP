@@ -373,7 +373,13 @@ export const CoverStudio: React.FC = () => {
         params.referenceAudioUrl = selectedPreset.reference_track_path;
         params.masteringEnabled = true;
         params.masteringReference = selectedPreset.reference_track_path;
-        params.timbreReference = true; // Condition DiT output on target artist's timbre
+        // Timbre: use dedicated timbre path if set, otherwise default to preset reference
+        const timbreOverride = engineParams.timbreReference;
+        if (typeof timbreOverride === 'string' && timbreOverride) {
+          params.timbreReference = timbreOverride;  // dedicated timbre audio path
+        } else {
+          params.timbreReference = true;  // use preset reference track as timbre
+        }
       }
 
       const res = await generateApi.submit(params as any, token);
