@@ -35,6 +35,9 @@ export interface Song {
   // Mastered version
   masteredAudioUrl?: string;
   mastered_audio_url?: string;
+  // Latent file
+  latentUrl?: string;
+  latent_url?: string;
 }
 
 /** Normalized recent song returned by /api/songs/recent — unified across all modes */
@@ -129,6 +132,7 @@ export interface GenerationParams {
   coverNoiseStrength?: number;
   repaintingStart?: number;
   repaintingEnd?: number;
+  sourceLatentUrl?: string;  // HSLAT latent file URL (skips VAE encode)
 
   // Post-processing master toggle
   postProcessingEnabled?: boolean;

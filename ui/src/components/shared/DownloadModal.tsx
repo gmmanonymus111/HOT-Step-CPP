@@ -221,8 +221,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             )}
           </div>
 
-          {/* Footer */}
-          <div className="px-5 py-4 border-t border-white/5">
+          <div className="px-5 py-4 border-t border-white/5 space-y-2">
             <button
               onClick={handleDownload}
               disabled={downloading}
@@ -242,6 +241,24 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                 </>
               )}
             </button>
+            {/* Latent download — only visible when latent file exists */}
+            {(song.latentUrl || song.latent_url) && (
+              <button
+                onClick={() => {
+                  const params = new URLSearchParams({ version: 'latent' });
+                  const a = document.createElement('a');
+                  a.href = `/api/download/${song.id}?${params}`;
+                  a.download = '';
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                }}
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium text-cyan-400 hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors"
+              >
+                <FileAudio size={13} />
+                Download Latent (HSLAT)
+              </button>
+            )}
           </div>
         </div>
       </div>

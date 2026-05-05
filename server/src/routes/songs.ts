@@ -97,6 +97,7 @@ router.get('/recent', (req, res) => {
       title: s.title || 'Untitled',
       audio_url: s.audio_url || '',
       mastered_audio_url: s.mastered_audio_url || '',
+      latent_url: s.latent_url || '',
       cover_url: s.cover_url || '',
       duration: s.duration || 0,
       lyrics: s.lyrics || '',
@@ -222,6 +223,14 @@ router.delete('/:id', (req, res) => {
     const masteredFilepath = path.join(config.data.audioDir, masteredFilename);
     if (fs.existsSync(masteredFilepath)) {
       fs.unlinkSync(masteredFilepath);
+    }
+  }
+  // Delete latent file if it exists
+  if (song.latent_url) {
+    const latentFilename = path.basename(song.latent_url);
+    const latentFilepath = path.join(config.data.audioDir, latentFilename);
+    if (fs.existsSync(latentFilepath)) {
+      fs.unlinkSync(latentFilepath);
     }
   }
 
