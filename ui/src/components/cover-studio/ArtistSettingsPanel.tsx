@@ -17,6 +17,8 @@ interface ArtistSettingsPanelProps {
   onAudioCoverStrength: (v: number) => void;
   coverNoiseStrength: number;
   onCoverNoiseStrength: (v: number) => void;
+  noFsq: boolean;
+  onNoFsqChange: (v: boolean) => void;
   tempoScale: number;
   onTempoScale: (v: number) => void;
   pitchShift: number;
@@ -39,6 +41,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
     artists, isLoadingArtists, selectedArtistId, onSelectArtist,
     artistPresets, selectedPreset, onSelectPreset,
     audioCoverStrength, onAudioCoverStrength, coverNoiseStrength, onCoverNoiseStrength,
+    noFsq, onNoFsqChange,
     tempoScale, onTempoScale, pitchShift, onPitchShift, analysis, bpmCorrection, keyOverride,
     artistCaption, onArtistCaptionChange,
     canGenerate, isGenerating, genProgress, genStage, onGenerate, onCancel,
@@ -176,6 +179,23 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
         <EditableSlider label="Source Timbre" value={coverNoiseStrength} min={0} max={1} step={0.05}
           onChange={onCoverNoiseStrength} formatDisplay={v => v.toFixed(2)}
           helpText="How much of the original artist's sound is preserved" />
+        {/* NoFSQ toggle */}
+        <div className="flex items-center justify-between px-1 py-1">
+          <div>
+            <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">NoFSQ Mode</span>
+            <p className="text-[10px] text-zinc-500 leading-tight mt-0.5">Skip quantization — more faithful to source</p>
+          </div>
+          <button
+            onClick={() => onNoFsqChange(!noFsq)}
+            className={`relative w-9 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${
+              noFsq ? 'bg-cyan-500' : 'bg-zinc-300 dark:bg-zinc-700'
+            }`}
+          >
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${
+              noFsq ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`} />
+          </button>
+        </div>
         <EditableSlider label="Tempo Scale" value={tempoScale} min={0.5} max={2.0} step={0.05}
           onChange={onTempoScale}
           formatDisplay={v => {

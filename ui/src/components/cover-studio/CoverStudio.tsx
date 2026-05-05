@@ -60,6 +60,7 @@ export const CoverStudio: React.FC = () => {
   const [pitchShift, setPitchShift] = useState(() => restore<number>('pitchShift', 0));
   const [bpmCorrection, setBpmCorrection] = useState(() => restore<number>('bpmCorrection', 1));
   const [keyOverride, setKeyOverride] = useState<string | null>(() => restore<string | null>('keyOverride', null));
+  const [noFsq, setNoFsq] = useState(() => restore<boolean>('noFsq', false));
 
   // ── Generation ──
   const [isGenerating, setIsGenerating] = useState(false);
@@ -122,6 +123,7 @@ export const CoverStudio: React.FC = () => {
   useEffect(() => { persist('pitchShift', pitchShift); }, [pitchShift]);
   useEffect(() => { persist('bpmCorrection', bpmCorrection); }, [bpmCorrection]);
   useEffect(() => { persist('keyOverride', keyOverride); }, [keyOverride]);
+  useEffect(() => { persist('noFsq', noFsq); }, [noFsq]);
   useEffect(() => { persist('sepLevel', sepLevel); }, [sepLevel]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
@@ -325,7 +327,7 @@ export const CoverStudio: React.FC = () => {
         title: songArtist
           ? `${songTitle || 'Cover'} (${songArtist} Cover)`
           : (songTitle || 'Cover'),
-        taskType: 'cover',
+        taskType: noFsq ? 'cover-nofsq' : 'cover',
         sourceAudioUrl: effectiveSourceUrl,
         audioCoverStrength,
         coverNoiseStrength,
@@ -559,6 +561,7 @@ export const CoverStudio: React.FC = () => {
           onSelectPreset={(p) => { setSelectedPreset(p); applyPresetToGlobal(p); }}
           audioCoverStrength={audioCoverStrength} onAudioCoverStrength={setAudioCoverStrength}
           coverNoiseStrength={coverNoiseStrength} onCoverNoiseStrength={setCoverNoiseStrength}
+          noFsq={noFsq} onNoFsqChange={setNoFsq}
           tempoScale={tempoScale} onTempoScale={setTempoScale}
           pitchShift={pitchShift} onPitchShift={setPitchShift}
           analysis={analysis}
