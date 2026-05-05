@@ -17,6 +17,7 @@
 #include "solver-gl2s.h"
 #include "solver-rfsolver.h"
 #include "solver-unipc.h"
+#include "solver-aflops.h"
 
 #include <cstring>
 
@@ -54,6 +55,8 @@ static const SolverInfo SOLVER_REGISTRY[] = {
     {"rfsolver",       "RF-Solver (2 NFE)",         solver_rfsolver_step,   2,  2, true,  false, false},
     {"unipc",          "UniPC (2 NFE)",              solver_unipc_step,      2,  2, true,  true,  false},
     {"unipc_p",        "UniPC Predictor (1 NFE)",    solver_unipc_p_step,    1,  2, false, true,  false},
+    {"aflops",          "A-FloPS (1 NFE)",             solver_aflops_step,     1,  2, false, true,  false},
+    {"aflops2",         "A-FloPS Midpoint (2 NFE)",    solver_aflops2_step,    2,  2, true,  false, false},
 };
 
 static const int SOLVER_REGISTRY_SIZE = (int) (sizeof(SOLVER_REGISTRY) / sizeof(SOLVER_REGISTRY[0]));

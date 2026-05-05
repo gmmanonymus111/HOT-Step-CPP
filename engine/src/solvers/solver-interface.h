@@ -67,6 +67,11 @@ struct SolverState {
     };
     std::vector<UniPCRecord> unipc_history;  // last N data predictions (max order)
 
+    // ── A-FloPS: residual velocity history ──────────────────────
+    std::vector<float> aflops_prev_w;      // [n] previous step's residual velocity
+    float              aflops_prev_t     = 0.0f; // source timestep of previous w
+    float              aflops_prev_t_dst = 0.0f; // destination timestep of previous step
+
     // ── Scratch buffer for multi-eval solvers ────────────────────
     // Pre-allocated by the sampler loop, sized [n_total].
     // Multi-eval solvers (RK4, Heun, etc.) use this for intermediate xt.

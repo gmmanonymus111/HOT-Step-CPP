@@ -1,0 +1,202 @@
+#pragma once
+// solver-aflops.h: A-FloPS (Adaptive Flow Path Sampler)
+//
+// From "A-FloPS: Accelerating Diffusion Models via Adaptive Flow Path Sampler"
+// (arXiv:2509.00036). Training-free accelerated sampler that decomposes the
+// velocity field into a linear drift (solved exactly) and a smooth residual
+// (approximated via high-order interpolation).
+//
+// Adapted for ACE-Step flow matching where x_t = (1-t)*x_0 + t*ε,
+// so v_t = dx/dt = ε - x_0.  Since ACE-Step is natively flow-matching,
+// the diffusion→FM reparameterisation is a no-op; only the adaptive
+// velocity decomposition is applied.
+//
+// Key idea:
+//   v_t = -x_t / (1-t) + w_t        [decompose into linear drift + residual]
+//
+//   The linear ODE dx/dt = -x/(1-t) is solved exactly:
+//     x_linear(t_prev) = ((1-t_prev)/(1-t_curr)) * x_t
+//
+//   The residual w_t is assumed smooth (slowly varying), so its integral
+//   contribution is approximated:
+//     Δ = -(1-t_prev) * ∫[t_curr→t_prev] w_s/(1-s) ds
+//       ≈ -(1-t_prev) * w_t * ln((1-t_prev)/(1-t_curr))   [1st order]
+//
+// Two variants:
+//   aflops   — 1 NFE per step, stateful 2nd-order using previous residual
+//   aflops2  — 2 NFE per step, midpoint-corrected (no state needed)
+//
+// The multistep variant (aflops) stores the previous residual velocity w_{t-1}
+// for Adams-Bashforth-like 2nd-order correction of the residual integral.
+
+#include "solver-interface.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Clamp sigma to avoid division by zero at boundaries
+static inline float aflops_clamp_alpha(float t) {
+    // alpha = 1 - t.  Clamp to [eps, 1-eps]
+    float a = 1.0f - t;
+    return std::max(1e-6f, std::min(a, 1.0f - 1e-6f));
+}
+
+
+// ── A-FloPS 1-NFE (stateful, multistep) ──────────────────────────────────────
+//
+// Step 1: Euler on residual (no history)
+// Step 2+: 2nd-order AB-like correction using stored previous w
+//
+// The exponential integrator update formula:
+//   x_{t_prev} = α_prev/α_curr * x_t - α_prev * w_eff * ln(α_prev/α_curr)
+//
+// where α = 1-t and w_eff is either:
+//   w (1st order, step 1)  or  interpolated from w and prev_w (step 2+)
+
+static void solver_aflops_step(float *       xt,
+                                const float * vt,
+                                float         t_curr,
+                                float         t_prev,
+                                int           n,
+                                SolverState & state,
+                                SolverModelFn /*model_fn*/,
+                                float *       /*vt_buf*/) {
+    float alpha_curr = aflops_clamp_alpha(t_curr);
+    float alpha_prev = aflops_clamp_alpha(t_prev);
+
+    // Ratio of (1-t) values:  > 1 because t_prev < t_curr
+    float alpha_ratio = alpha_prev / alpha_curr;
+    // Integration coefficient (positive since alpha_prev > alpha_curr)
+    float log_ratio = logf(alpha_ratio);
+
+    // ── 1. Compute residual velocity w = v + x/(1-t) ────────────────────
+    // w_t is what remains after removing the linear drift -x/(1-t)
+    // We store w in prev_w for next step's 2nd-order correction
+    std::vector<float> w(n);
+    float inv_alpha = 1.0f / alpha_curr;
+    for (int i = 0; i < n; i++) {
+        w[i] = vt[i] + xt[i] * inv_alpha;
+    }
+
+    // ── 2. Compute effective w for the residual integral ─────────────────
+    bool has_prev = !state.aflops_prev_w.empty();
+
+    if (has_prev) {
+        // 2nd-order: Adams-Bashforth-like weighted average of current and
+        // previous residual velocities.  This extrapolates w to the midpoint
+        // of the current interval, reducing truncation error from O(h²) to O(h³).
+        //
+        // For uniform steps this is (3/2)*w - (1/2)*w_prev, but we use
+        // step-ratio correction for non-uniform schedules.
+        float dt      = t_curr - t_prev;                    // current step size
+        float dt_prev = state.aflops_prev_t - state.aflops_prev_t_dst;  // previous step size
+        float r = (dt_prev > 1e-8f) ? dt / dt_prev : 1.0f;
+        float c1 = 1.0f + 0.5f * r;    // weight for current w
+        float c0 = 0.5f * r;            // weight for previous w (subtracted)
+
+        for (int i = 0; i < n; i++) {
+            float w_eff = c1 * w[i] - c0 * state.aflops_prev_w[i];
+            xt[i] = alpha_ratio * xt[i] - alpha_prev * w_eff * log_ratio;
+        }
+    } else {
+        // 1st order: constant-w assumption (exponential Euler)
+        for (int i = 0; i < n; i++) {
+            xt[i] = alpha_ratio * xt[i] - alpha_prev * w[i] * log_ratio;
+        }
+    }
+
+    // ── 3. Store residual for next step ──────────────────────────────────
+    state.aflops_prev_w = std::move(w);
+    state.aflops_prev_t     = t_curr;
+    state.aflops_prev_t_dst = t_prev;
+}
+
+
+// ── A-FloPS 2-NFE (midpoint-corrected, stateless) ────────────────────────────
+//
+// Uses a midpoint evaluation to get a 2nd-order accurate estimate of the
+// residual integral without needing history from previous steps.
+//
+// Algorithm:
+//   1. Compute w at t_curr
+//   2. Euler half-step to midpoint using exponential integrator
+//   3. Evaluate model at midpoint → get v_mid
+//   4. Compute w_mid from v_mid and x_mid
+//   5. Full step using w_mid (2nd-order accurate)
+
+static void solver_aflops2_step(float *       xt,
+                                 const float * vt,
+                                 float         t_curr,
+                                 float         t_prev,
+                                 int           n,
+                                 SolverState & state,
+                                 SolverModelFn model_fn,
+                                 float *       vt_buf) {
+    if (!model_fn || t_curr < 1e-8f) {
+        // Fallback to Euler if no model callback or degenerate timestep
+        float dt = t_curr - t_prev;
+        for (int i = 0; i < n; i++) {
+            xt[i] -= vt[i] * dt;
+        }
+        return;
+    }
+
+    float alpha_curr = aflops_clamp_alpha(t_curr);
+    float alpha_prev = aflops_clamp_alpha(t_prev);
+
+    // ── 1. Compute w at t_curr ──────────────────────────────────────────
+    // Save vt before model_fn overwrites vt_buf (they alias)
+    if ((int) state.prev_vt.size() < n) {
+        state.prev_vt.resize(n);
+    }
+    memcpy(state.prev_vt.data(), vt, n * sizeof(float));
+    const float * v_curr = state.prev_vt.data();
+
+    float inv_alpha_curr = 1.0f / alpha_curr;
+
+    // w_curr = v + x / (1-t)
+    // Store in scratch for the w values
+    std::vector<float> w_curr(n);
+    for (int i = 0; i < n; i++) {
+        w_curr[i] = v_curr[i] + xt[i] * inv_alpha_curr;
+    }
+
+    // ── 2. Half-step to midpoint using exponential integrator ────────────
+    float t_mid = 0.5f * (t_curr + t_prev);
+    float alpha_mid = aflops_clamp_alpha(t_mid);
+    float alpha_ratio_half = alpha_mid / alpha_curr;
+    float log_ratio_half = logf(alpha_ratio_half);
+
+    // Ensure scratch buffer for midpoint
+    if ((int) state.xt_scratch.size() < n) {
+        state.xt_scratch.resize(n);
+    }
+    float * x_mid = state.xt_scratch.data();
+
+    for (int i = 0; i < n; i++) {
+        x_mid[i] = alpha_ratio_half * xt[i] - alpha_mid * w_curr[i] * log_ratio_half;
+    }
+
+    // ── 3. Evaluate model at midpoint ────────────────────────────────────
+    model_fn(x_mid, t_mid);
+    // vt_buf now contains v_mid
+
+    // ── 4. Compute w_mid from midpoint evaluation ────────────────────────
+    float inv_alpha_mid = 1.0f / alpha_mid;
+    std::vector<float> w_mid(n);
+    for (int i = 0; i < n; i++) {
+        w_mid[i] = vt_buf[i] + x_mid[i] * inv_alpha_mid;
+    }
+
+    // ── 5. Full step using midpoint residual (2nd-order accurate) ────────
+    float alpha_ratio_full = alpha_prev / alpha_curr;
+    float log_ratio_full = logf(alpha_ratio_full);
+
+    for (int i = 0; i < n; i++) {
+        xt[i] = alpha_ratio_full * xt[i] - alpha_prev * w_mid[i] * log_ratio_full;
+    }
+}
