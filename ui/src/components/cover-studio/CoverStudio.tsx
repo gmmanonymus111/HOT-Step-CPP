@@ -60,9 +60,11 @@ export const CoverStudio: React.FC = () => {
   const [tempoScale, setTempoScale] = useState(() => restore<number>('tempoScale', 1.0));
   const [pitchShift, setPitchShift] = useState(() => restore<number>('pitchShift', 0));
   const [bpmCorrection, setBpmCorrection] = useState(() => restore<number>('bpmCorrection', 1));
+  const [bpmOverride, setBpmOverride] = useState<number | null>(() => restore<number | null>('bpmOverride', null));
   const [keyOverride, setKeyOverride] = useState<string | null>(() => restore<string | null>('keyOverride', null));
   const [noFsq, setNoFsq] = useState(() => restore<boolean>('noFsq', false));
   const [sourceLatentUrl, setSourceLatentUrl] = useState(() => restore<string>('sourceLatentUrl', ''));
+  const [vocalLanguage, setVocalLanguage] = useState(() => restore<string>('coverVocalLanguage', 'en'));
 
   // ── Generation ──
   const [isGenerating, setIsGenerating] = useState(false);
@@ -124,9 +126,11 @@ export const CoverStudio: React.FC = () => {
   useEffect(() => { persist('tempoScale', tempoScale); }, [tempoScale]);
   useEffect(() => { persist('pitchShift', pitchShift); }, [pitchShift]);
   useEffect(() => { persist('bpmCorrection', bpmCorrection); }, [bpmCorrection]);
+  useEffect(() => { persist('bpmOverride', bpmOverride); }, [bpmOverride]);
   useEffect(() => { persist('keyOverride', keyOverride); }, [keyOverride]);
   useEffect(() => { persist('noFsq', noFsq); }, [noFsq]);
   useEffect(() => { persist('sourceLatentUrl', sourceLatentUrl); }, [sourceLatentUrl]);
+  useEffect(() => { persist('coverVocalLanguage', vocalLanguage); }, [vocalLanguage]);
   useEffect(() => { persist('sepLevel', sepLevel); }, [sepLevel]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
@@ -313,7 +317,7 @@ export const CoverStudio: React.FC = () => {
         }
       }
       const selectedArtist = artists.find(a => a.id === selectedArtistId);
-      const sourceBpm = (analysis?.bpm || 120) * bpmCorrection;
+      const sourceBpm = bpmOverride != null ? bpmOverride : ((analysis?.bpm || 120) * bpmCorrection);
       const sourceKey = keyOverride || analysis?.key || 'C major';
       const targetBpm = Math.round(sourceBpm * tempoScale);
       const targetKey = pitchShift !== 0 ? transposeKey(sourceKey, pitchShift) : sourceKey;
@@ -338,6 +342,7 @@ export const CoverStudio: React.FC = () => {
         keyScale: targetKey,
         duration: 0,
         instrumental: false,
+        vocalLanguage,
         source: 'cover-studio',
         artistName: selectedArtist?.name || songArtist || '',
         sourceArtist: songArtist || '',
@@ -517,7 +522,9 @@ export const CoverStudio: React.FC = () => {
           isUploading={isUploading} isAnalyzing={isAnalyzing}
           onFileSelected={handleFileSelected} onClear={handleClearSource}
           bpmCorrection={bpmCorrection} onBpmCorrectionChange={setBpmCorrection}
+          bpmOverride={bpmOverride} onBpmOverrideChange={setBpmOverride}
           keyOverride={keyOverride} onKeyOverrideChange={setKeyOverride}
+          vocalLanguage={vocalLanguage} onVocalLanguageChange={setVocalLanguage}
           advancedMode={advancedMode} onAdvancedModeChange={setAdvancedMode}
           sepLevel={sepLevel} onSepLevelChange={setSepLevel}
           isSeparating={isSeparating} sepProgress={sepProgress} sepMessage={sepMessage}

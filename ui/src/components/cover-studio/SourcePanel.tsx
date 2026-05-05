@@ -6,6 +6,19 @@ import { ALL_KEYS } from './coverStudioUtils';
 import { SEPARATION_LEVELS, type SeparationLevel } from '../../services/supersepApi';
 import { LatentImport, type LatentMetadata } from '../shared/LatentImport';
 
+const LANGUAGES = [
+  { value: 'en', label: 'English' },
+  { value: 'zh', label: '中文' },
+  { value: 'ja', label: '日本語' },
+  { value: 'ko', label: '한국어' },
+  { value: 'es', label: 'Español' },
+  { value: 'fr', label: 'Français' },
+  { value: 'de', label: 'Deutsch' },
+  { value: 'ru', label: 'Русский' },
+  { value: 'it', label: 'Italiano' },
+  { value: 'pt', label: 'Português' },
+];
+
 interface SourcePanelProps {
   sourceFileName: string;
   metadata: AudioMetadata | null;
@@ -16,8 +29,12 @@ interface SourcePanelProps {
   onClear: () => void;
   bpmCorrection: number;
   onBpmCorrectionChange: (v: number) => void;
+  bpmOverride: number | null;
+  onBpmOverrideChange: (v: number | null) => void;
   keyOverride: string | null;
   onKeyOverrideChange: (v: string | null) => void;
+  vocalLanguage: string;
+  onVocalLanguageChange: (v: string) => void;
   advancedMode: boolean;
   onAdvancedModeChange: (v: boolean) => void;
   sepLevel: number;
@@ -39,7 +56,9 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
   sourceFileName, metadata, analysis, isUploading, isAnalyzing,
   onFileSelected, onClear,
   bpmCorrection, onBpmCorrectionChange,
+  bpmOverride, onBpmOverrideChange,
   keyOverride, onKeyOverrideChange,
+  vocalLanguage, onVocalLanguageChange,
   advancedMode, onAdvancedModeChange,
   sepLevel, onSepLevelChange,
   isSeparating, sepProgress, sepMessage,
@@ -59,8 +78,9 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
     }
   }, [onFileSelected]);
 
-  const correctedBpm = analysis?.bpm ? Math.round(analysis.bpm * bpmCorrection) : null;
+  const correctedBpm = bpmOverride != null ? bpmOverride : (analysis?.bpm ? Math.round(analysis.bpm * bpmCorrection) : null);
   const effectiveKey = keyOverride || analysis?.key || null;
+  const bpmIsOverridden = bpmOverride != null;
 
   return (
     <div className="w-[320px] flex-shrink-0 overflow-y-auto scrollbar-hide border-r border-zinc-200 dark:border-white/5 p-4 space-y-4">
@@ -151,8 +171,8 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-lg bg-gradient-to-br from-cyan-500/10 to-teal-500/10 border border-cyan-500/20 p-3 text-center">
               <span className="text-[10px] text-zinc-500 block">BPM</span>
-              <span className="text-lg font-bold text-cyan-400">{correctedBpm ?? analysis.bpm}</span>
-              {bpmCorrection !== 1 && (
+              <span className={`text-lg font-bold ${bpmIsOverridden ? 'text-amber-400' : 'text-cyan-400'}`}>{correctedBpm ?? analysis.bpm}</span>
+              {(bpmIsOverridden || bpmCorrection !== 1) && (
                 <span className="text-[9px] text-zinc-500 block">
                   (detected: {analysis.bpm})
                 </span>
@@ -179,9 +199,9 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
               ] as const).map(opt => (
                 <button
                   key={opt.value}
-                  onClick={() => onBpmCorrectionChange(opt.value)}
+                  onClick={() => { onBpmCorrectionChange(opt.value); onBpmOverrideChange(null); }}
                   className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
-                    bpmCorrection === opt.value
+                    bpmCorrection === opt.value && !bpmIsOverridden
                       ? 'bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-500/40'
                       : 'bg-white/5 text-zinc-500 hover:bg-white/10 hover:text-zinc-300'
                   }`}
@@ -190,6 +210,31 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
                 </button>
               ))}
             </div>
+          </div>
+          {/* Free-text BPM override */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Custom:</span>
+            <input
+              type="number"
+              min={20}
+              max={300}
+              placeholder={String(analysis?.bpm ? Math.round(analysis.bpm * bpmCorrection) : 120)}
+              value={bpmOverride ?? ''}
+              onChange={e => {
+                const v = e.target.value.trim();
+                onBpmOverrideChange(v ? parseInt(v, 10) || null : null);
+              }}
+              className={`flex-1 px-2 py-1 rounded-xl bg-zinc-800 border text-xs outline-none transition-colors tabular-nums ${
+                bpmIsOverridden
+                  ? 'border-amber-500/40 text-amber-300 focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20'
+                  : 'border-white/10 text-zinc-300 focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20'
+              }`}
+            />
+            {bpmIsOverridden && (
+              <button onClick={() => onBpmOverrideChange(null)} className="text-zinc-500 hover:text-red-400 transition-colors" title="Clear override">
+                <X className="w-3 h-3" />
+              </button>
+            )}
           </div>
           {/* Key override — Essentia sometimes gets the wrong key */}
           <div className="flex items-center gap-2">
@@ -206,6 +251,19 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
               <option value="">Detected{analysis?.key ? ` (${analysis.key})` : ''}</option>
               {ALL_KEYS.map(k => (
                 <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+          </div>
+          {/* Vocal language */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Language:</span>
+            <select
+              value={vocalLanguage}
+              onChange={e => onVocalLanguageChange(e.target.value)}
+              className="flex-1 px-2 py-1 rounded-xl bg-zinc-800 border border-white/10 text-xs text-zinc-300 outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors cursor-pointer"
+            >
+              {LANGUAGES.map(l => (
+                <option key={l.value} value={l.value}>{l.label}</option>
               ))}
             </select>
           </div>
