@@ -535,11 +535,42 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       : (typeof rawTimbre === 'string' ? rawTimbre : undefined);
     logGeneration(job.id, 'DEBUG', `[Synth Phase] timbreRef=${timbreRef}, masteringRef=${masteringRef}`);
     if (timbreRef) {
-      const refPath = timbreRef.startsWith('/references/')
+      let refPath = timbreRef.startsWith('/references/')
         ? path.join(config.data.dir, 'references', timbreRef.replace('/references/', ''))
         : path.isAbsolute(timbreRef)
           ? timbreRef
           : path.join(config.data.dir, 'references', timbreRef);
+
+      // ── Randomize Timbre Reference ──────────────────────────────
+      // When enabled, pick a random audio file from the same directory as the
+      // configured reference track. The selection is seed-locked: a fixed seed
+      // always picks the same file, a random seed picks randomly.
+      // Mastering still uses the original reference file (only timbre changes).
+      if (job.params.randomizeTimbreRef) {
+        try {
+          const refDir = path.dirname(refPath);
+          const audioExts = new Set(['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma']);
+          const candidates = fs.readdirSync(refDir)
+            .filter(f => audioExts.has(path.extname(f).toLowerCase()))
+            .sort(); // alphabetical sort for deterministic ordering
+
+          if (candidates.length > 1) {
+            const seed = aceReq.seed ?? 0;
+            // Use absolute value to handle negative seeds, modulo for wrapping
+            const idx = Math.abs(seed) % candidates.length;
+            const picked = path.join(refDir, candidates[idx]);
+            logGeneration(job.id, 'INFO',
+              `[Timbre] Randomized: picked "${candidates[idx]}" (${idx + 1}/${candidates.length}, seed=${seed}) from ${refDir}`);
+            refPath = picked;
+          } else {
+            logGeneration(job.id, 'INFO',
+              `[Timbre] Randomize enabled but only ${candidates.length} audio file(s) in ${refDir} — using original`);
+          }
+        } catch (dirErr: any) {
+          logGeneration(job.id, 'WARNING', `[Timbre] Randomize failed (using original): ${dirErr.message}`);
+        }
+      }
+
       logGeneration(job.id, 'DEBUG', `[Synth Phase] Looking for timbre ref at: ${refPath}`);
       if (fs.existsSync(refPath)) {
         refAudioBuf = fs.readFileSync(refPath);

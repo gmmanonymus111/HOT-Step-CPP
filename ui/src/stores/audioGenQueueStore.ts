@@ -530,6 +530,14 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
 
     params.masteringReference = preset.reference_track_path;
     params.timbreReference = true;
+
+    // Randomize Timbre: pick a random track from the same folder instead of the exact file
+    try {
+      const raw = localStorage.getItem('lireek-randomizeTimbreRef');
+      if (raw && JSON.parse(raw) === true) {
+        params.randomizeTimbreRef = true;
+      }
+    } catch { /* ignore */ }
   }
 
   // 5) Submit generation
