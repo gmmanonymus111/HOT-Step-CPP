@@ -60,6 +60,13 @@ struct SolverState {
     int             batch_n  = 1;
     int             n_per    = 0;  // elements per batch item (T * Oc)
 
+    // ── UniPC: data prediction history ──────────────────────────
+    struct UniPCRecord {
+        std::vector<float> model_output;  // [n] data prediction (x0_hat)
+        float              t;             // timestep at which this was computed
+    };
+    std::vector<UniPCRecord> unipc_history;  // last N data predictions (max order)
+
     // ── Scratch buffer for multi-eval solvers ────────────────────
     // Pre-allocated by the sampler loop, sized [n_total].
     // Multi-eval solvers (RK4, Heun, etc.) use this for intermediate xt.
