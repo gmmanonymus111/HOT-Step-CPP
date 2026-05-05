@@ -122,11 +122,15 @@ static void solver_aflops_step(float *       xt,
 // residual integral without needing history from previous steps.
 //
 // Algorithm:
-//   1. Compute w at t_curr
-//   2. Euler half-step to midpoint using exponential integrator
-//   3. Evaluate model at midpoint → get v_mid
-//   4. Compute w_mid from v_mid and x_mid
-//   5. Full step using w_mid (2nd-order accurate)
+//   1. Save v_curr, Euler half-step to midpoint (stable at all α)
+//   2. Evaluate model at midpoint → get v_mid
+//   3. Compute w_mid from v_mid and x_mid
+//   4. Full exponential integrator step using w_mid
+//
+// NOTE: The half-step uses plain Euler rather than the exponential integrator.
+// The exponential form has an O(dt²/α²) correction that explodes near t=1
+// where α = 1-t ≈ 0, producing an x_mid far outside the model's expected
+// input distribution and garbling the midpoint velocity evaluation.
 
 static void solver_aflops2_step(float *       xt,
                                  const float * vt,
@@ -148,7 +152,7 @@ static void solver_aflops2_step(float *       xt,
     float alpha_curr = aflops_clamp_alpha(t_curr);
     float alpha_prev = aflops_clamp_alpha(t_prev);
 
-    // ── 1. Compute w at t_curr ──────────────────────────────────────────
+    // ── 1. Euler half-step to midpoint ───────────────────────────────────
     // Save vt before model_fn overwrites vt_buf (they alias)
     if ((int) state.prev_vt.size() < n) {
         state.prev_vt.resize(n);
@@ -156,20 +160,10 @@ static void solver_aflops2_step(float *       xt,
     memcpy(state.prev_vt.data(), vt, n * sizeof(float));
     const float * v_curr = state.prev_vt.data();
 
-    float inv_alpha_curr = 1.0f / alpha_curr;
-
-    // w_curr = v + x / (1-t)
-    // Store in scratch for the w values
-    std::vector<float> w_curr(n);
-    for (int i = 0; i < n; i++) {
-        w_curr[i] = v_curr[i] + xt[i] * inv_alpha_curr;
-    }
-
-    // ── 2. Half-step to midpoint using exponential integrator ────────────
-    float t_mid = 0.5f * (t_curr + t_prev);
+    float dt      = t_curr - t_prev;
+    float half_dt = dt * 0.5f;
+    float t_mid   = t_curr - half_dt;
     float alpha_mid = aflops_clamp_alpha(t_mid);
-    float alpha_ratio_half = alpha_mid / alpha_curr;
-    float log_ratio_half = logf(alpha_ratio_half);
 
     // Ensure scratch buffer for midpoint
     if ((int) state.xt_scratch.size() < n) {
@@ -178,25 +172,27 @@ static void solver_aflops2_step(float *       xt,
     float * x_mid = state.xt_scratch.data();
 
     for (int i = 0; i < n; i++) {
-        x_mid[i] = alpha_ratio_half * xt[i] - alpha_mid * w_curr[i] * log_ratio_half;
+        x_mid[i] = xt[i] - v_curr[i] * half_dt;
     }
 
-    // ── 3. Evaluate model at midpoint ────────────────────────────────────
+    // ── 2. Evaluate model at midpoint ────────────────────────────────────
     model_fn(x_mid, t_mid);
     // vt_buf now contains v_mid
 
-    // ── 4. Compute w_mid from midpoint evaluation ────────────────────────
+    // ── 3. Compute w_mid from midpoint evaluation ────────────────────────
     float inv_alpha_mid = 1.0f / alpha_mid;
-    std::vector<float> w_mid(n);
+    // Stack-avoid: reuse w storage through prev_vt (no longer needed)
     for (int i = 0; i < n; i++) {
-        w_mid[i] = vt_buf[i] + x_mid[i] * inv_alpha_mid;
+        // w_mid = v_mid + x_mid / (1 - t_mid)
+        x_mid[i] = vt_buf[i] + x_mid[i] * inv_alpha_mid;  // reuse x_mid as w_mid
     }
+    const float * w_mid = x_mid;  // x_mid buffer now holds w_mid
 
-    // ── 5. Full step using midpoint residual (2nd-order accurate) ────────
-    float alpha_ratio_full = alpha_prev / alpha_curr;
-    float log_ratio_full = logf(alpha_ratio_full);
+    // ── 4. Full step using midpoint residual (2nd-order accurate) ────────
+    float alpha_ratio = alpha_prev / alpha_curr;
+    float log_ratio   = logf(alpha_ratio);
 
     for (int i = 0; i < n; i++) {
-        xt[i] = alpha_ratio_full * xt[i] - alpha_prev * w_mid[i] * log_ratio_full;
+        xt[i] = alpha_ratio * xt[i] - alpha_prev * w_mid[i] * log_ratio;
     }
 }
