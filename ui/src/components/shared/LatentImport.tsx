@@ -103,7 +103,7 @@ export const LatentImport: React.FC<LatentImportProps> = ({
       <input
         ref={inputRef}
         type="file"
-        accept=".latent"
+        accept=".latent,.hslat"
         className="hidden"
         onChange={e => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }}
       />

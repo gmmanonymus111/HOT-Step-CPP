@@ -74,10 +74,11 @@ const latentUpload = multer({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB (latents are small — typically <1MB)
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (ext === '.latent' || file.mimetype === 'application/octet-stream') {
+    // Accept .latent, .hslat, or generic octet-stream (browsers often use this for custom extensions)
+    if (ext === '.latent' || ext === '.hslat' || file.mimetype === 'application/octet-stream') {
       cb(null, true);
     } else {
-      cb(new Error(`Invalid file type "${file.originalname}". Expected .latent file.`));
+      cb(new Error(`Invalid file type "${file.originalname}". Expected .latent or .hslat file.`));
     }
   },
 });
