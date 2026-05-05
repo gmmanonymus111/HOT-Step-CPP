@@ -9,6 +9,7 @@ import fs from 'fs';
 import { randomUUID } from 'crypto';
 import multer from 'multer';
 import { config } from '../config.js';
+import { readHslat } from '../services/latentFormat.js';
 
 const router = Router();
 
@@ -90,9 +91,7 @@ router.post('/latent', latentUpload.single('latent'), (req: Request, res: Respon
       return;
     }
 
-    // Import readHslat dynamically to avoid circular deps at module load
-    // (latentFormat is a pure utility, no circular risk, but keeping import local for clarity)
-    const { readHslat } = require('../services/latentFormat.js');
+
 
     const buf = req.file.buffer;
     let metadata: Record<string, unknown> = {};
