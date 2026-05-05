@@ -40,6 +40,15 @@
 #include "spectral-lifter.h"
 #include "supersep.h"
 #include "hot-step-params.h"
+
+// ── Linker guard: verify hot-step-sampler.h is active ────────────────
+// hot-step-sampler.h defines hotstep_sampler_linked_ with external linkage.
+// pipeline-synth-ops.cpp includes it, compiling the symbol into acestep-core.lib.
+// If upstream sync clobbers the include back to dit-sampler.h, this symbol
+// vanishes and the linker fails here — making the regression a build error.
+extern int hotstep_sampler_linked_;
+static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
+
 #include "model-registry.h"
 #include "model-store.h"
 #include "vae.h"

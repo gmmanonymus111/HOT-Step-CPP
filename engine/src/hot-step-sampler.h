@@ -867,3 +867,16 @@ static int dit_ggml_generate(DiTGGML *           model,
     ggml_free(ctx);
     return 0;
 }
+
+// ── Linker sentinel for upstream-sync clobber detection ──────────────
+// This symbol has external linkage and is compiled into whatever TU
+// includes this header (pipeline-synth-ops.cpp).  hot-step-server.cpp
+// references it via extern — if an upstream sync replaces the include
+// with dit-sampler.h, this symbol vanishes and the linker fails with:
+//     "unresolved external symbol hotstep_sampler_linked_"
+// That build error is the signal to re-hook hot-step-sampler.h.
+#if defined(_MSC_VER)
+__declspec(selectany) int hotstep_sampler_linked_ = 1;
+#else
+__attribute__((weak)) int hotstep_sampler_linked_ = 1;
+#endif
