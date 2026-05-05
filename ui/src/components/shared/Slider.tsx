@@ -24,7 +24,7 @@ export const Slider: React.FC<SliderProps> = ({
         {showInput ? (
           <input
             type="number"
-            className="w-16 px-2 py-0.5 text-xs text-right text-zinc-300 bg-zinc-800 border border-white/10 rounded-lg outline-none focus:border-pink-500/50"
+            className="w-16 px-2 py-0.5 text-xs text-right text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 rounded-lg outline-none focus:border-pink-500/50"
             value={value}
             onChange={e => onChange(parseFloat(e.target.value) || min)}
             min={min}
@@ -32,7 +32,7 @@ export const Slider: React.FC<SliderProps> = ({
             step={step}
           />
         ) : (
-          <span className="text-xs text-zinc-400 font-mono">{value}{suffix}</span>
+          <span className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">{value}{suffix}</span>
         )}
       </div>
       <input

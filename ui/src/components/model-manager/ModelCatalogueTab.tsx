@@ -93,21 +93,21 @@ const CollapsibleGroup: React.FC<{
   const installed = group.files.filter(f => f.installed).length;
 
   return (
-    <div className="rounded-xl border border-white/5 bg-zinc-900/50 overflow-hidden">
+    <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-50/80 dark:bg-zinc-900/50 overflow-hidden">
       {/* Group header */}
       <button
         onClick={() => setOpen(!open)}
         className="w-full flex items-center gap-2 px-4 py-3 hover:bg-white/[0.02] transition-colors"
       >
         {open ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
-        <span className="text-sm font-semibold text-zinc-300">{group.name}</span>
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{group.name}</span>
         <span className="text-[10px] text-zinc-600 font-mono">
           {installed}/{group.files.length} installed
         </span>
         {group.info && (
           <button
             onClick={(e) => { e.stopPropagation(); setShowInfo(!showInfo); }}
-            className="ml-auto p-1 rounded-lg hover:bg-white/5 text-zinc-600 hover:text-zinc-400 transition-colors"
+            className="ml-auto p-1 rounded-lg hover:bg-white/5 text-zinc-600 hover:text-zinc-600 dark:text-zinc-400 transition-colors"
             title="About this category"
           >
             <Info size={13} />
@@ -117,7 +117,7 @@ const CollapsibleGroup: React.FC<{
 
       {/* Info panel */}
       {showInfo && group.info && (
-        <div className="px-4 py-2.5 bg-zinc-800/50 border-t border-white/5 text-xs text-zinc-400 leading-relaxed">
+        <div className="px-4 py-2.5 bg-zinc-100/50 dark:bg-zinc-800/50 border-t border-zinc-200 dark:border-white/5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
           {group.info}
         </div>
       )}
@@ -157,7 +157,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
   const renderSimpleGroup = (roleFiles: RegistryFile[], info?: string) => (
     <div className="space-y-3">
       {info && (
-        <div className="rounded-xl bg-zinc-800/50 border border-white/5 px-4 py-3 text-xs text-zinc-400 leading-relaxed">
+        <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
           {info}
         </div>
       )}
@@ -180,7 +180,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
   return (
     <div>
       {/* Tab bar */}
-      <div className="flex gap-1 border-b border-white/5 mb-4">
+      <div className="flex gap-1 border-b border-zinc-200 dark:border-white/5 mb-4">
         {TABS.map(tab => {
           const count = files.filter(f => f.role === tab.id).length;
           const installedCount = files.filter(f => f.role === tab.id && f.installed).length;
@@ -191,7 +191,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
               className={`px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
                 activeTab === tab.id
                   ? 'text-pink-400 border-pink-500'
-                  : 'text-zinc-500 border-transparent hover:text-zinc-300'
+                  : 'text-zinc-500 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300'
               }`}
             >
               {tab.label}
@@ -220,7 +220,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
 
       {activeTab === 'lm' && (
         <div className="space-y-3">
-          <div className="rounded-xl bg-zinc-800/50 border border-white/5 px-4 py-3 text-xs text-zinc-400 leading-relaxed">
+          <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
             {ROLE_INFO.lm}
           </div>
           {lmGroups.map(g => (

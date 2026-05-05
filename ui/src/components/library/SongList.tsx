@@ -14,7 +14,7 @@ import { togglePlay, usePlayback } from '../../stores/playbackStore';
 type SourceFilter = 'all' | 'create' | 'lyric-studio' | 'cover-studio';
 
 const SOURCE_FILTERS: { id: SourceFilter; label: string; color: string }[] = [
-  { id: 'all',           label: 'All',           color: 'text-zinc-300 bg-white/10 border-white/10' },
+  { id: 'all',           label: 'All',           color: 'text-zinc-700 dark:text-zinc-300 bg-white/10 border-zinc-300 dark:border-white/10' },
   { id: 'create',        label: 'Create',        color: 'text-violet-300 bg-violet-500/15 border-violet-500/25' },
   { id: 'lyric-studio',  label: 'Lyric Studio',  color: 'text-pink-300 bg-pink-500/15 border-pink-500/25' },
   { id: 'cover-studio',  label: 'Cover Studio',  color: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
@@ -103,7 +103,7 @@ export const SongList: React.FC<SongListProps> = ({
     return (
       <div className="flex flex-col items-center justify-center py-24 text-zinc-500">
         <Music size={48} className="mb-4 opacity-30" />
-        <div className="text-lg font-medium text-zinc-400">No songs yet</div>
+        <div className="text-lg font-medium text-zinc-600 dark:text-zinc-400">No songs yet</div>
         <div className="text-sm text-zinc-600 mt-1">Create your first track to see it here</div>
       </div>
     );
@@ -124,7 +124,7 @@ export const SongList: React.FC<SongListProps> = ({
           {!selectionMode ? (
             <button
               onClick={() => setSelectionMode(true)}
-              className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
+              className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 px-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
               title="Select tracks"
             >
               Select
@@ -132,7 +132,7 @@ export const SongList: React.FC<SongListProps> = ({
           ) : (
             <button
               onClick={exitSelectionMode}
-              className="text-xs text-zinc-400 hover:text-white px-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
+              className="text-xs text-zinc-600 dark:text-zinc-400 hover:text-white px-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
             >
               <X size={14} />
             </button>
@@ -155,7 +155,7 @@ export const SongList: React.FC<SongListProps> = ({
                   border transition-all duration-200 whitespace-nowrap
                   ${isActive
                     ? f.color
-                    : 'text-zinc-500 bg-transparent border-transparent hover:text-zinc-300 hover:bg-white/5'
+                    : 'text-zinc-500 bg-transparent border-transparent hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5'
                   }
                 `}
               >
@@ -164,7 +164,7 @@ export const SongList: React.FC<SongListProps> = ({
                   <span className={`
                     min-w-[18px] h-4 px-1 rounded-full text-[10px] font-bold
                     flex items-center justify-center
-                    ${isActive ? 'bg-white/15' : 'bg-zinc-800 text-zinc-500'}
+                    ${isActive ? 'bg-white/15' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'}
                   `}>
                     {count}
                   </span>
@@ -177,10 +177,10 @@ export const SongList: React.FC<SongListProps> = ({
 
       {/* Bulk Action Bar */}
       {selectionMode && (
-        <div className="flex items-center gap-2 mb-3 px-3 py-2.5 rounded-xl bg-zinc-800/80 border border-white/5">
+        <div className="flex items-center gap-2 mb-3 px-3 py-2.5 rounded-xl bg-zinc-100/80 dark:bg-zinc-800/80 border border-zinc-200 dark:border-white/5">
           <button
             onClick={allSelected ? deselectAll : selectAll}
-            className="p-1 rounded text-zinc-400 hover:text-white transition-colors"
+            className="p-1 rounded text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
             title={allSelected ? 'Deselect all' : 'Select all'}
           >
             {allSelected
@@ -191,7 +191,7 @@ export const SongList: React.FC<SongListProps> = ({
             }
           </button>
 
-          <span className="text-xs text-zinc-400 font-medium flex-1">
+          <span className="text-xs text-zinc-600 dark:text-zinc-400 font-medium flex-1">
             {selectedIds.size === 0
               ? 'Select tracks'
               : `${selectedIds.size} selected`
@@ -355,7 +355,7 @@ const SongItem: React.FC<SongItemProps> = ({
       )}
 
       {/* Cover Art Thumbnail */}
-      <div className="relative w-11 h-11 rounded-lg bg-zinc-800 flex-shrink-0 flex items-center justify-center overflow-hidden">
+      <div className="relative w-11 h-11 rounded-lg bg-zinc-100 dark:bg-zinc-800 flex-shrink-0 flex items-center justify-center overflow-hidden">
         {song.coverUrl ? (
           <img src={song.coverUrl} alt="" className="w-full h-full object-cover" />
         ) : (
@@ -373,7 +373,7 @@ const SongItem: React.FC<SongItemProps> = ({
                 onPlay();
               }
             }}
-            className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="absolute inset-0 flex items-center justify-center bg-black/30 dark:bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity"
           >
             {isPlaying ? <Pause size={16} className="text-white" /> : <Play size={16} className="text-white ml-0.5" />}
           </button>
@@ -385,7 +385,7 @@ const SongItem: React.FC<SongItemProps> = ({
         {editing ? (
           <input
             ref={inputRef}
-            className="w-full text-sm font-medium bg-zinc-800 border border-pink-500/40 rounded-lg px-2 py-0.5 text-zinc-200 outline-none focus:border-pink-500"
+            className="w-full text-sm font-medium bg-zinc-100 dark:bg-zinc-800 border border-pink-500/40 rounded-lg px-2 py-0.5 text-zinc-800 dark:text-zinc-200 outline-none focus:border-pink-500"
             value={editTitle}
             onChange={e => setEditTitle(e.target.value)}
             onBlur={commitRename}
@@ -397,13 +397,13 @@ const SongItem: React.FC<SongItemProps> = ({
           />
         ) : (
           <div className="flex items-center gap-1 group/title">
-            <div className={`text-sm font-medium truncate ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>
+            <div className={`text-sm font-medium truncate ${isActive ? 'text-pink-400' : 'text-zinc-800 dark:text-zinc-200'}`}>
               {song.title || 'Untitled'}
             </div>
             {onRename && !selectionMode && (
               <button
                 onClick={e => { e.stopPropagation(); setEditTitle(song.title || ''); setEditing(true); }}
-                className="flex-shrink-0 p-0.5 rounded text-zinc-600 hover:text-zinc-300 opacity-0 group-hover/title:opacity-100 transition-opacity"
+                className="flex-shrink-0 p-0.5 rounded text-zinc-600 hover:text-zinc-700 dark:hover:text-zinc-300 opacity-0 group-hover/title:opacity-100 transition-opacity"
                 title="Rename"
               >
                 <Pencil size={11} />
@@ -429,12 +429,12 @@ const SongItem: React.FC<SongItemProps> = ({
           );
         })()}
         {gp?.bpm && (
-          <span className="text-[10px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-800/50">
+          <span className="text-[10px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-100/50 dark:bg-zinc-800/50">
             {gp.bpm} BPM
           </span>
         )}
         {gp?.keyScale && (
-          <span className="text-[10px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-800/50">
+          <span className="text-[10px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-100/50 dark:bg-zinc-800/50">
             {gp.keyScale}
           </span>
         )}
@@ -451,7 +451,7 @@ const SongItem: React.FC<SongItemProps> = ({
           {onAddToPlaylist && (
             <button
               onClick={(e) => { e.stopPropagation(); onAddToPlaylist(); }}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-pink-400 hover:bg-white/10 transition-colors"
+              className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-pink-400 hover:bg-white/10 transition-colors"
               title="Add to Playlist"
             >
               <ListPlus size={15} />
@@ -459,7 +459,7 @@ const SongItem: React.FC<SongItemProps> = ({
           )}
           <button
             onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
           >
             <MoreHorizontal size={16} />
           </button>
@@ -468,12 +468,12 @@ const SongItem: React.FC<SongItemProps> = ({
           {showMenu && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-900 border border-white/10 rounded-xl shadow-xl py-1 min-w-[160px]">
+              <div className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-xl shadow-xl py-1 min-w-[160px]">
 
                 {onReuse && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onReuse(); setShowMenu(false); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                   >
                     <RotateCcw size={14} /> Reuse Prompt
                   </button>
@@ -481,7 +481,7 @@ const SongItem: React.FC<SongItemProps> = ({
                 {onDownload && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onDownload(); setShowMenu(false); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                   >
                     <Download size={14} /> Download
                   </button>
@@ -566,13 +566,13 @@ const SongCard: React.FC<SongCardProps> = ({
           ? 'border-pink-500/40 bg-pink-500/5 ring-1 ring-pink-500/20'
           : isActive
             ? 'border-pink-500/30 bg-pink-500/5'
-            : 'border-white/5 bg-zinc-900/50 hover:border-white/10 hover:bg-zinc-800/50'
+            : 'border-zinc-200 dark:border-white/5 bg-zinc-50/80 dark:bg-zinc-900/50 hover:border-zinc-300 dark:hover:border-zinc-300 dark:border-white/10 hover:bg-zinc-100/50 dark:hover:bg-zinc-100/50 dark:bg-zinc-800/50'
         }
       `}
       onClick={handleClick}
     >
       {/* Album Art Area */}
-      <div className="relative aspect-square bg-zinc-800 flex items-center justify-center overflow-hidden">
+      <div className="relative aspect-square bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center overflow-hidden">
         {song.coverUrl || song.cover_url ? (
           <img src={song.coverUrl || song.cover_url} alt="" className="w-full h-full object-cover" />
         ) : (
@@ -585,7 +585,7 @@ const SongCard: React.FC<SongCardProps> = ({
         {!selectionMode && (
           <button
             onClick={(e) => { e.stopPropagation(); if (isActive) togglePlay(); else onPlay(); }}
-            className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="absolute inset-0 flex items-center justify-center bg-black/20 dark:bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity"
           >
             <div className="w-12 h-12 rounded-full bg-white/15 backdrop-blur-sm flex items-center justify-center border border-white/20">
               {isPlaying
@@ -607,7 +607,7 @@ const SongCard: React.FC<SongCardProps> = ({
         )}
 
         {/* Duration badge */}
-        <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-sm text-[10px] font-mono text-white/80">
+        <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md bg-black/20 dark:bg-black/40 dark:bg-black/70 backdrop-blur-sm text-[10px] font-mono text-white/80">
           {formatDuration(song.duration)}
         </div>
 
@@ -616,29 +616,29 @@ const SongCard: React.FC<SongCardProps> = ({
           <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
-              className="w-7 h-7 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center text-white/70 hover:text-white hover:bg-black/70 transition-colors"
+              className="w-7 h-7 rounded-full bg-black/20 dark:bg-black/50 backdrop-blur-sm flex items-center justify-center text-white/70 hover:text-white hover:bg-black/20 dark:bg-black/40 dark:bg-black/70 transition-colors"
             >
               <MoreHorizontal size={14} />
             </button>
             {showMenu && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-900 border border-white/10 rounded-xl shadow-xl py-1 min-w-[150px]">
+                <div className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-xl shadow-xl py-1 min-w-[150px]">
                   {onReuse && (
                     <button onClick={(e) => { e.stopPropagation(); onReuse(); setShowMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
                       <RotateCcw size={12} /> Reuse Prompt
                     </button>
                   )}
                   {onAddToPlaylist && (
                     <button onClick={(e) => { e.stopPropagation(); onAddToPlaylist(); setShowMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
                       <ListPlus size={12} /> Add to Playlist
                     </button>
                   )}
                   {onDownload && (
                     <button onClick={(e) => { e.stopPropagation(); onDownload(); setShowMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
                       <Download size={12} /> Download
                     </button>
                   )}
@@ -656,7 +656,7 @@ const SongCard: React.FC<SongCardProps> = ({
       {/* Card Body */}
       <div className="px-3 py-2.5">
         {/* Title */}
-        <div className={`text-sm font-semibold truncate ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>
+        <div className={`text-sm font-semibold truncate ${isActive ? 'text-pink-400' : 'text-zinc-800 dark:text-zinc-200'}`}>
           {song.title || 'Untitled'}
         </div>
 
@@ -668,12 +668,12 @@ const SongCard: React.FC<SongCardProps> = ({
         {/* Metadata Row */}
         <div className="flex items-center gap-1.5 mt-2 flex-wrap">
           {bpm && (
-            <span className="text-[9px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/5">
+            <span className="text-[9px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-100/80 dark:bg-zinc-800/80 border border-zinc-200 dark:border-white/5">
               {bpm} BPM
             </span>
           )}
           {keyScale && (
-            <span className="text-[9px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/5">
+            <span className="text-[9px] text-zinc-500 font-medium px-1.5 py-0.5 rounded bg-zinc-100/80 dark:bg-zinc-800/80 border border-zinc-200 dark:border-white/5">
               {keyScale}
             </span>
           )}

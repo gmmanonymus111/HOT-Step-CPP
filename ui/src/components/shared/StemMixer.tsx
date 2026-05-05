@@ -292,7 +292,7 @@ export const StemMixer: React.FC<StemMixerProps> = ({ jobId, stems, controls, on
       <div style={styles.header}>
                 <h3 style={styles.title}>🎛️ Stem Mixer</h3>
         {onClose && (
-           <button onClick={onClose} className="text-zinc-400 hover:text-white transition-colors" style={{ marginLeft: 'auto', marginRight: 16 }}>✕</button>
+           <button onClick={onClose} className="text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors" style={{ marginLeft: 'auto', marginRight: 16 }}>✕</button>
         )}
         <div style={styles.headerButtons}>
           <button

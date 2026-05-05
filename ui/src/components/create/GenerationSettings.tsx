@@ -5,8 +5,8 @@ import React, { useState } from 'react';
 import { ChevronDown, RotateCcw } from 'lucide-react';
 import { Slider } from '../shared/Slider';
 
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
-const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
+const selectClasses = "w-full px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
+const inputClasses = "w-full px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
 
 interface GenerationSettingsProps {
   // DiT
@@ -59,13 +59,13 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
     : props.scheduler;
 
   return (
-    <div className="space-y-1 pt-3 border-t border-white/5">
+    <div className="space-y-1 pt-3 border-t border-zinc-200 dark:border-white/5">
       {/* DiT Settings Accordion */}
       <button
         onClick={() => setDitOpen(!ditOpen)}
         className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors"
       >
-        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Generation Settings</span>
+        <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Generation Settings</span>
         <ChevronDown size={14} className={`text-zinc-500 transition-transform duration-200 ${ditOpen ? 'rotate-180' : ''}`} />
       </button>
 
@@ -92,7 +92,7 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
                 className={`text-[10px] font-bold px-2 py-0.5 rounded-full transition-all ${
                   props.shift === -1
                     ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                    : 'bg-zinc-800 text-zinc-500 border border-white/5 hover:text-zinc-300 hover:border-white/10'
+                    : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border border-zinc-200 dark:border-white/5 hover:text-zinc-700 dark:hover:text-zinc-300 hover:border-zinc-300 dark:hover:border-zinc-300 dark:border-white/10'
                 }`}
               >
                 Auto
@@ -340,11 +340,11 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   <input type="checkbox" checked={props.dcwEnabled}
                     onChange={e => props.onDcwEnabledChange(e.target.checked)}
-                    className="rounded border-zinc-600 bg-zinc-800 text-emerald-500 focus:ring-emerald-500/20" />
+                    className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-emerald-500 focus:ring-emerald-500/20" />
                   <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider">DCW Correction</span>
                 </label>
                 <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
-                  props.dcwEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-700 text-zinc-500'
+                  props.dcwEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-200 dark:bg-zinc-700 text-zinc-500'
                 }`}>
                   {props.dcwEnabled ? 'ON' : 'OFF'}
                 </span>
@@ -417,7 +417,7 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
               <label className="flex items-center gap-1.5 cursor-pointer">
                 <input type="checkbox" checked={props.randomSeed}
                   onChange={e => props.onRandomSeedChange(e.target.checked)}
-                  className="rounded border-zinc-600 bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
+                  className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
                 <span className="text-xs text-zinc-500">Random</span>
               </label>
             </div>
@@ -439,9 +439,9 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
         className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">LM / Thinking</span>
+          <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">LM / Thinking</span>
           <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-            props.skipLm ? 'bg-zinc-700 text-zinc-400' : 'bg-purple-500/20 text-purple-400'
+            props.skipLm ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400' : 'bg-purple-500/20 text-purple-400'
           }`}>
             {props.skipLm ? 'OFF' : 'ON'}
           </span>
@@ -455,8 +455,8 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
           <label className="flex items-center gap-2.5 cursor-pointer">
             <input type="checkbox" checked={!props.skipLm}
               onChange={e => props.onSkipLmChange(!e.target.checked)}
-              className="rounded border-zinc-600 bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
-            <span className="text-sm text-zinc-400">Enable LM Conditioning</span>
+              className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
+            <span className="text-sm text-zinc-600 dark:text-zinc-400">Enable LM Conditioning</span>
           </label>
 
           {!props.skipLm && (
@@ -465,8 +465,8 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input type="checkbox" checked={props.useCotCaption}
                   onChange={e => props.onUseCotCaptionChange(e.target.checked)}
-                  className="rounded border-zinc-600 bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
-                <span className="text-sm text-zinc-400">Chain-of-Thought Caption</span>
+                  className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-pink-500 focus:ring-pink-500/20" />
+                <span className="text-sm text-zinc-600 dark:text-zinc-400">Chain-of-Thought Caption</span>
               </label>
 
               <Slider label="Temperature" value={props.lmTemperature}

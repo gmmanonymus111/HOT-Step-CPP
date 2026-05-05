@@ -48,11 +48,11 @@ export const ArtistSidebar: React.FC<ArtistSidebarProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950/50">
+    <div className="flex flex-col h-full bg-zinc-50 dark:bg-zinc-950/50">
       {/* Back button */}
       <button
         onClick={onBack}
-        className="flex items-center gap-2 px-4 py-3 text-sm text-zinc-400 hover:text-white hover:bg-white/5 border-b border-white/5 transition-colors"
+        className="flex items-center gap-2 px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/5 border-b border-zinc-200 dark:border-white/5 transition-colors"
       >
         <ChevronLeft className="w-4 h-4" />
         All Artists
@@ -94,7 +94,7 @@ export const ArtistSidebar: React.FC<ArtistSidebarProps> = ({
               </div>
 
               <div className="min-w-0 flex-1">
-                <p className={`text-sm font-medium truncate ${isSelected ? 'text-pink-400' : 'text-zinc-300'}`}>
+                <p className={`text-sm font-medium truncate ${isSelected ? 'text-pink-400' : 'text-zinc-700 dark:text-zinc-300'}`}>
                   {artist.name}
                 </p>
                 <p className="text-[11px] text-zinc-500">
@@ -107,7 +107,7 @@ export const ArtistSidebar: React.FC<ArtistSidebarProps> = ({
       </div>
 
       {/* Artist count */}
-      <div className="px-4 py-2 border-t border-white/5 text-[10px] text-zinc-600 text-center">
+      <div className="px-4 py-2 border-t border-zinc-200 dark:border-white/5 text-[10px] text-zinc-600 text-center">
         {artists.length} artist{artists.length !== 1 ? 's' : ''}
       </div>
     </div>

@@ -129,7 +129,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
           </h3>
           <button
             onClick={onClose}
-            className="text-zinc-400 hover:text-zinc-300 transition-colors"
+            className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-700 dark:text-zinc-300 transition-colors"
           >
             <X size={16} />
           </button>
@@ -147,11 +147,11 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
               value={pathInput}
               onChange={(e) => setPathInput(e.target.value)}
               placeholder="Enter path..."
-              className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-pink-500 font-mono"
+              className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-pink-500 font-mono"
             />
             <button
               type="submit"
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:bg-zinc-700 transition-colors"
             >
               Go
             </button>
@@ -168,7 +168,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
         {/* File list */}
         <div className="flex-1 overflow-y-auto" style={{ minHeight: '200px', maxHeight: '400px' }}>
           {loading ? (
-            <div className="flex items-center justify-center py-12 text-zinc-400">
+            <div className="flex items-center justify-center py-12 text-zinc-600 dark:text-zinc-400">
               <Loader2 size={20} className="animate-spin mr-2" />
               <span className="text-xs">Loading...</span>
             </div>
@@ -183,7 +183,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
                 >
                   {entry.type === 'dir' ? (
                     entry.name === '..' ? (
-                      <ChevronUp size={16} className="text-zinc-400 flex-shrink-0" />
+                      <ChevronUp size={16} className="text-zinc-600 dark:text-zinc-400 flex-shrink-0" />
                     ) : (
                       <Folder size={16} className="text-amber-500 flex-shrink-0" />
                     )
@@ -192,8 +192,8 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
                   )}
                   <span className={`text-xs truncate flex-1 ${
                     entry.type === 'dir'
-                      ? 'text-zinc-300 font-medium'
-                      : 'text-zinc-400'
+                      ? 'text-zinc-700 dark:text-zinc-300 font-medium'
+                      : 'text-zinc-600 dark:text-zinc-400'
                   }`}>
                     {entry.name}
                   </span>
@@ -213,7 +213,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
                 </button>
               ))}
               {entries.length === 0 && !loading && (
-                <div className="py-8 text-center text-xs text-zinc-400">
+                <div className="py-8 text-center text-xs text-zinc-600 dark:text-zinc-400">
                   {filter === 'adapters' ? 'No .safetensors files found' : 'No matching files found'}
                 </div>
               )}
@@ -247,7 +247,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
             )}
             <button
               onClick={onClose}
-              className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+              className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-600 transition-colors"
             >
               Cancel
             </button>

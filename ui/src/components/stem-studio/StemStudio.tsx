@@ -267,7 +267,7 @@ export const StemStudio: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
 
         {/* Left — Source Audio + Optional Fields */}
-        <div className="flex flex-col gap-4 p-4 overflow-y-auto border-r border-white/5 flex-shrink-0" style={{ width: 300 }}>
+        <div className="flex flex-col gap-4 p-4 overflow-y-auto border-r border-zinc-200 dark:border-white/5 flex-shrink-0" style={{ width: 300 }}>
           <SourceSelector
             sourceAudioUrl={sourceAudioUrl}
             sourceFileName={sourceFileName}
@@ -275,7 +275,7 @@ export const StemStudio: React.FC = () => {
           />
 
           {/* Optional: style hint + lyrics */}
-          <div className="border-t border-white/5 pt-3">
+          <div className="border-t border-zinc-200 dark:border-white/5 pt-3">
             <details>
               <summary className="text-xs text-zinc-500 cursor-pointer font-medium">Optional: Style &amp; Lyrics (improves extraction)</summary>
               <div className="flex flex-col gap-2 mt-2.5">
@@ -285,14 +285,14 @@ export const StemStudio: React.FC = () => {
                   value={style}
                   onChange={e => setStyle(e.target.value)}
                   placeholder="e.g. indie rock, distorted guitar, raw vocals"
-                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-300 text-xs outline-none focus:border-purple-500/40 transition-colors"
+                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-700 dark:text-zinc-300 text-xs outline-none focus:border-purple-500/40 transition-colors"
                 />
                 <label className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lyrics</label>
                 <textarea
                   value={lyrics}
                   onChange={e => setLyrics(e.target.value)}
                   placeholder="Paste lyrics here to improve vocal extraction..."
-                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-300 text-xs outline-none resize-y font-[inherit] focus:border-purple-500/40 transition-colors"
+                  className="px-2.5 py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-zinc-700 dark:text-zinc-300 text-xs outline-none resize-y font-[inherit] focus:border-purple-500/40 transition-colors"
                   rows={4}
                 />
               </div>
@@ -301,7 +301,7 @@ export const StemStudio: React.FC = () => {
         </div>
 
         {/* Center — Track Selection + Mixer */}
-        <div className="flex-1 flex flex-col gap-4 p-4 overflow-y-auto border-r border-white/5">
+        <div className="flex-1 flex flex-col gap-4 p-4 overflow-y-auto border-r border-zinc-200 dark:border-white/5">
           {/* Model selector for Extract */}
           {mode === 'extract' && !modelsLoading && baseModels.length === 0 && (
             <div style={styles.noModelsWarning}>
@@ -387,7 +387,7 @@ export const StemStudio: React.FC = () => {
         </div>
 
         {/* Right — Recent Extractions + Queue */}
-        <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden flex flex-col" style={{ width: sidebarWidth }}>
+        <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden flex flex-col" style={{ width: sidebarWidth }}>
           <Section
             title="Recent Extractions"
             icon={<Clock className="w-3 h-3" />}

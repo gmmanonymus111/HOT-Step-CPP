@@ -134,14 +134,14 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
   };
 
   return (
-    <div className="space-y-1 pt-3 border-t border-white/5">
+    <div className="space-y-1 pt-3 border-t border-zinc-200 dark:border-white/5">
       {/* Accordion header */}
       <button
         onClick={onToggle}
         className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Adapters</span>
+          <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Adapters</span>
           {adapter && (
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Adapter active" />
           )}
@@ -152,11 +152,11 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
       {isOpen && (
         <div className="px-3 pb-3 space-y-3">
           {/* Simple / Advanced toggle */}
-          <div className="flex rounded-xl overflow-hidden border border-white/10">
+          <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
             <button
               onClick={() => onAdvancedAdaptersChange(false)}
               className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                !advancedAdapters ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                !advancedAdapters ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
               }`}
             >
               Simple
@@ -164,7 +164,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
             <button
               onClick={() => onAdvancedAdaptersChange(true)}
               className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                advancedAdapters ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                advancedAdapters ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
               }`}
             >
               Advanced
@@ -183,11 +183,11 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     value={adapter}
                     onChange={(e) => onAdapterChange(e.target.value)}
                     placeholder="Path to .safetensors file..."
-                    className="flex-1 px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors font-mono text-xs"
+                    className="flex-1 px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors font-mono text-xs"
                   />
                   <button
                     onClick={() => setFileBrowserOpen(true)}
-                    className="px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
+                    className="px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors"
                     title="Browse for adapter file"
                   >
                     <FolderOpen size={14} />
@@ -204,7 +204,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   </span>
                   <button
                     onClick={() => onAdapterChange('')}
-                    className="text-zinc-500 hover:text-zinc-300 transition-colors flex-shrink-0"
+                    className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
                     title="Clear adapter"
                   >
                     <X size={12} />
@@ -227,7 +227,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Adapter Scale</label>
-                      <span className="text-xs text-zinc-400 font-mono">{adapterScale.toFixed(2)}</span>
+                      <span className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">{adapterScale.toFixed(2)}</span>
                     </div>
                     <input type="range" value={adapterScale}
                       onChange={e => onAdapterScaleChange(parseFloat(e.target.value))}
@@ -237,11 +237,11 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   {/* Loading Mode */}
                   <div>
                     <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Loading Mode</label>
-                    <div className="flex rounded-xl overflow-hidden border border-white/10">
+                    <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
                       <button
                         onClick={() => onAdapterModeChange('merge')}
                         className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                          adapterMode === 'merge' ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Merge
@@ -249,7 +249,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                       <button
                         onClick={() => onAdapterModeChange('runtime')}
                         className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                          adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Runtime LoRA ⚡
@@ -278,19 +278,19 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     value={adapterFolder}
                     onChange={(e) => onAdapterFolderChange(e.target.value)}
                     placeholder="Path to folder with adapters..."
-                    className="flex-1 px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors font-mono text-xs"
+                    className="flex-1 px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors font-mono text-xs"
                   />
                   <button
                     onClick={() => handleScan()}
                     disabled={!adapterFolder || scanning}
-                    className="px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                    className="px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Scan folder"
                   >
                     <Search size={14} className={scanning ? 'animate-spin' : ''} />
                   </button>
                   <button
                     onClick={() => setFileBrowserOpen(true)}
-                    className="px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
+                    className="px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors"
                     title="Browse for folder"
                   >
                     <FolderOpen size={14} />
@@ -307,7 +307,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
 
               {/* Available adapters list */}
               {adapterFiles.length > 0 && (
-                <div className="rounded-xl bg-zinc-900/50 border border-white/5 overflow-hidden" style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                <div className="rounded-xl bg-zinc-50/80 dark:bg-zinc-900/50 border border-zinc-200 dark:border-white/5 overflow-hidden" style={{ maxHeight: '200px', overflowY: 'auto' }}>
                   {adapterFiles.map((file) => {
                     const isActive = adapter === file.path;
                     return (
@@ -323,7 +323,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                         ) : (
                           <Circle size={8} className="text-zinc-600 flex-shrink-0" />
                         )}
-                        <span className={`text-xs truncate flex-1 ${isActive ? 'text-emerald-400 font-medium' : 'text-zinc-400'}`}>
+                        <span className={`text-xs truncate flex-1 ${isActive ? 'text-emerald-400 font-medium' : 'text-zinc-600 dark:text-zinc-400'}`}>
                           {file.name}
                         </span>
                         <span className="text-zinc-600 flex-shrink-0" style={{ fontSize: '10px' }}>
@@ -351,7 +351,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     </span>
                     <button
                       onClick={() => onAdapterChange('')}
-                      className="text-zinc-500 hover:text-zinc-300 transition-colors flex-shrink-0"
+                      className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
                       title="Deselect adapter"
                     >
                       <X size={12} />
@@ -371,7 +371,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Adapter Scale</label>
-                      <span className="text-xs text-zinc-400 font-mono">{adapterScale.toFixed(2)}</span>
+                      <span className="text-xs text-zinc-600 dark:text-zinc-400 font-mono">{adapterScale.toFixed(2)}</span>
                     </div>
                     <input type="range" value={adapterScale}
                       onChange={e => onAdapterScaleChange(parseFloat(e.target.value))}
@@ -381,11 +381,11 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   {/* Loading Mode */}
                   <div>
                     <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Loading Mode</label>
-                    <div className="flex rounded-xl overflow-hidden border border-white/10">
+                    <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
                       <button
                         onClick={() => onAdapterModeChange('merge')}
                         className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                          adapterMode === 'merge' ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Merge
@@ -393,7 +393,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                       <button
                         onClick={() => onAdapterModeChange('runtime')}
                         className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                          adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Runtime LoRA ⚡
@@ -409,7 +409,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   {/* Group Scales Toggle (Advanced only) */}
                   <button
                     onClick={() => setShowGroupScales(!showGroupScales)}
-                    className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                    className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
                   >
                     <ChevronDown size={12} className={`transition-transform duration-200 ${showGroupScales ? 'rotate-180' : ''}`} />
                     Group Scales
@@ -419,7 +419,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   </button>
 
                   {showGroupScales && (
-                    <div className="rounded-xl bg-zinc-900/50 border border-white/5 p-3 space-y-3">
+                    <div className="rounded-xl bg-zinc-50/80 dark:bg-zinc-900/50 border border-zinc-200 dark:border-white/5 p-3 space-y-3">
                       {GROUP_INFO.map(({ key, label, help }) => (
                         <div key={key}>
                           <div className="flex items-center justify-between mb-1">

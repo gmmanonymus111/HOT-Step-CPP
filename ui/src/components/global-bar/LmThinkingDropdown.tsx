@@ -8,7 +8,7 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
 
-const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
+const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
 
 export const LmThinkingDropdown: React.FC = () => {
   const gp = useGlobalParams();
@@ -25,7 +25,7 @@ export const LmThinkingDropdown: React.FC = () => {
     <div className="space-y-3">
       {/* CoT Caption */}
       <div className="flex items-center justify-between">
-        <span className="text-sm text-zinc-400">Chain-of-Thought Caption</span>
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">Chain-of-Thought Caption</span>
         <ToggleSwitch checked={gp.useCotCaption} onChange={gp.setUseCotCaption} accentColor="purple" />
       </div>
 

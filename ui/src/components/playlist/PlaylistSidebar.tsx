@@ -39,12 +39,12 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
   }, [playlist.items]);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950/80 backdrop-blur-sm">
+    <div className="flex flex-col h-full bg-zinc-50/80 dark:bg-zinc-950/80 backdrop-blur-sm">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-white/5 flex-shrink-0">
         <div className="flex items-center gap-2">
           <ListMusic className="w-4 h-4 text-pink-400" />
-          <span className="text-xs font-bold text-zinc-200 uppercase tracking-wider">Playlist</span>
+          <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider">Playlist</span>
           {playlist.items.length > 0 && (
             <span className="text-[10px] text-zinc-500 font-normal">
               {playlist.items.length} · {totalDuration}
@@ -71,7 +71,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
       <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide">
         {playlist.items.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center px-6 py-8 gap-3">
-            <div className="w-14 h-14 rounded-full bg-zinc-900 flex items-center justify-center border border-white/5">
+            <div className="w-14 h-14 rounded-full bg-white dark:bg-zinc-900 flex items-center justify-center border border-zinc-200 dark:border-white/5">
               <Music className="w-6 h-6 text-zinc-700" />
             </div>
             <div>
@@ -104,18 +104,18 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
 
                   {/* Cover art */}
                   {item.coverUrl ? (
-                    <div className="w-9 h-9 rounded-md overflow-hidden flex-shrink-0 bg-zinc-800">
+                    <div className="w-9 h-9 rounded-md overflow-hidden flex-shrink-0 bg-zinc-100 dark:bg-zinc-800">
                       <img src={item.coverUrl} alt="" className="w-full h-full object-cover" />
                     </div>
                   ) : (
-                    <div className="w-9 h-9 rounded-md flex-shrink-0 bg-zinc-800 flex items-center justify-center">
+                    <div className="w-9 h-9 rounded-md flex-shrink-0 bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center">
                       <Music className="w-3.5 h-3.5 text-zinc-600" />
                     </div>
                   )}
 
                   {/* Title / Artist */}
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handlePlay(item)}>
-                    <p className={`text-[11px] font-medium truncate leading-tight ${isPlaying ? 'text-pink-300' : 'text-zinc-200'}`}>
+                    <p className={`text-[11px] font-medium truncate leading-tight ${isPlaying ? 'text-pink-300' : 'text-zinc-800 dark:text-zinc-200'}`}>
                       {item.title || 'Untitled'}
                     </p>
                     {item.artistName && (
@@ -173,7 +173,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
 
       {/* Footer */}
       {playlist.items.length > 0 && (
-        <div className="flex items-center justify-between px-4 py-2 border-t border-white/5 flex-shrink-0">
+        <div className="flex items-center justify-between px-4 py-2 border-t border-zinc-200 dark:border-white/5 flex-shrink-0">
           <button onClick={() => handlePlay(playlist.items[0])}
             className="flex items-center gap-1.5 text-[10px] font-semibold text-pink-400 hover:text-pink-300 transition-colors">
             <Play className="w-3 h-3" /> Play All

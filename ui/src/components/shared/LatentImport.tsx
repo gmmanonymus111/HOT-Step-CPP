@@ -83,14 +83,14 @@ export const LatentImport: React.FC<LatentImportProps> = ({
             <X className="w-3 h-3" />
           </button>
         </div>
-        <p className="text-[10px] text-zinc-400 truncate" title={loadedFilename}>{loadedFilename}</p>
+        <p className="text-[10px] text-zinc-600 dark:text-zinc-400 truncate" title={loadedFilename}>{loadedFilename}</p>
         {loadedMeta && (
           <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-zinc-500">
-            {loadedMeta.bpm != null && <span>BPM: <b className="text-zinc-300">{loadedMeta.bpm}</b></span>}
-            {loadedMeta.key && <span>Key: <b className="text-zinc-300">{loadedMeta.key}</b></span>}
-            {loadedMeta.duration != null && <span>Dur: <b className="text-zinc-300">{loadedMeta.duration.toFixed(1)}s</b></span>}
-            {loadedMeta.seed != null && <span>Seed: <b className="text-zinc-300">{loadedMeta.seed}</b></span>}
-            {loadedMeta.adapter && <span>Adapter: <b className="text-zinc-300 truncate max-w-[80px] inline-block align-bottom">{loadedMeta.adapter}</b></span>}
+            {loadedMeta.bpm != null && <span>BPM: <b className="text-zinc-700 dark:text-zinc-300">{loadedMeta.bpm}</b></span>}
+            {loadedMeta.key && <span>Key: <b className="text-zinc-700 dark:text-zinc-300">{loadedMeta.key}</b></span>}
+            {loadedMeta.duration != null && <span>Dur: <b className="text-zinc-700 dark:text-zinc-300">{loadedMeta.duration.toFixed(1)}s</b></span>}
+            {loadedMeta.seed != null && <span>Seed: <b className="text-zinc-700 dark:text-zinc-300">{loadedMeta.seed}</b></span>}
+            {loadedMeta.adapter && <span>Adapter: <b className="text-zinc-700 dark:text-zinc-300 truncate max-w-[80px] inline-block align-bottom">{loadedMeta.adapter}</b></span>}
           </div>
         )}
       </div>
@@ -110,7 +110,7 @@ export const LatentImport: React.FC<LatentImportProps> = ({
       <button
         onClick={() => inputRef.current?.click()}
         disabled={isUploading}
-        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-dashed border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/5 text-zinc-500 hover:text-cyan-400 text-xs transition-all disabled:opacity-50"
+        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-dashed border-zinc-300 dark:border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/5 text-zinc-500 hover:text-cyan-400 text-xs transition-all disabled:opacity-50"
       >
         {isUploading ? (
           <>

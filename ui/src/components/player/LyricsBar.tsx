@@ -74,11 +74,11 @@ export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime, isP
     if (lines.length === 0) return null;
 
     return (
-        <div className="flex-shrink-0 border-t border-white/5 bg-black/80 backdrop-blur-sm z-30 transition-all duration-300">
+        <div className="flex-shrink-0 border-t border-zinc-200 dark:border-white/5 bg-black/80 backdrop-blur-sm z-30 transition-all duration-300">
             {/* Collapse/Expand toggle tab */}
             <button
                 onClick={() => setExpanded(!expanded)}
-                className="w-full flex items-center justify-center gap-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                className="w-full flex items-center justify-center gap-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors"
             >
                 <Music size={11} className="text-pink-500/60" />
                 <span className="font-medium tracking-wide uppercase text-[10px]">Lyrics</span>

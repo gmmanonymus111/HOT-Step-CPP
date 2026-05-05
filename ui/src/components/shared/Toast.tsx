@@ -41,12 +41,12 @@ export const Toast: React.FC<ToastProps> = ({ message, type, isVisible, onClose,
     <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100]">
       <div className={`
         toast-in flex items-center gap-3 px-4 py-3 rounded-xl
-        bg-zinc-900/95 backdrop-blur-lg border ${borderColors[type]}
+        bg-white/95 dark:bg-zinc-900/95 backdrop-blur-lg border ${borderColors[type]}
         shadow-xl min-w-[300px] max-w-[500px]
       `}>
         {icons[type]}
-        <span className="text-sm text-white flex-1">{message}</span>
-        <button onClick={onClose} className="text-zinc-400 hover:text-white transition-colors">
+        <span className="text-sm text-zinc-900 dark:text-white flex-1">{message}</span>
+        <button onClick={onClose} className="text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors">
           <X size={14} />
         </button>
       </div>

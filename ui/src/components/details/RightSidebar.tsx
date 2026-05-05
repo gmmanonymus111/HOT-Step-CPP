@@ -29,11 +29,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
-        <h3 className="text-sm font-semibold text-zinc-300 truncate">Song Details</h3>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-white/5">
+        <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 truncate">Song Details</h3>
         <button
           onClick={onClose}
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+          className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
         >
           <X size={16} />
         </button>
@@ -42,7 +42,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto hide-scrollbar p-4 space-y-4">
         {/* Cover Art Placeholder */}
-        <div className="aspect-square w-full rounded-xl bg-gradient-to-br from-pink-500/20 to-purple-600/20 border border-white/5 flex items-center justify-center">
+        <div className="aspect-square w-full rounded-xl bg-gradient-to-br from-pink-500/20 to-purple-600/20 border border-zinc-200 dark:border-white/5 flex items-center justify-center">
           {song.coverUrl ? (
             <img src={song.coverUrl} alt={song.title} className="w-full h-full object-cover rounded-xl" />
           ) : (
@@ -54,7 +54,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
         <div>
           <h2 className="text-lg font-bold text-white leading-tight">{song.title || 'Untitled'}</h2>
           {song.style && (
-            <p className="mt-1 text-sm text-zinc-400 line-clamp-2">{song.style}</p>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 line-clamp-2">{song.style}</p>
           )}
         </div>
 
@@ -69,14 +69,14 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           </button>
           <button
             onClick={() => onReuse(song)}
-            className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+            className="p-2.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
             title="Reuse Prompt"
           >
             <RotateCcw size={16} />
           </button>
           <button
             onClick={() => onDelete(song)}
-            className="p-2.5 rounded-xl bg-zinc-800 hover:bg-red-900/50 text-zinc-300 hover:text-red-400 transition-colors"
+            className="p-2.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 text-zinc-700 dark:text-zinc-300 hover:text-red-400 transition-colors"
             title="Delete"
           >
             <Trash2 size={16} />
@@ -84,7 +84,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           {onDownload && (
             <button
               onClick={() => onDownload(song)}
-              className="p-2.5 rounded-xl bg-zinc-800 hover:bg-emerald-900/50 text-zinc-300 hover:text-emerald-400 transition-colors"
+              className="p-2.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-zinc-700 dark:text-zinc-300 hover:text-emerald-400 transition-colors"
               title="Download"
             >
               <Download size={16} />
@@ -135,7 +135,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
         {song.lyrics && (
           <div className="space-y-2">
             <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Lyrics</h4>
-            <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed bg-zinc-900/50 rounded-xl p-3 border border-white/5 max-h-64 overflow-y-auto">
+            <pre className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed bg-zinc-50/80 dark:bg-zinc-900/50 rounded-xl p-3 border border-zinc-200 dark:border-white/5 max-h-64 overflow-y-auto">
               {song.lyrics}
             </pre>
           </div>
@@ -146,11 +146,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 };
 
 const MetaBadge: React.FC<{ icon: React.ReactNode; label: string; value: string }> = ({ icon, label, value }) => (
-  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/50 border border-white/5">
+  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5">
     <div className="text-zinc-500">{icon}</div>
     <div className="min-w-0">
       <div className="text-[10px] text-zinc-500 uppercase tracking-wider">{label}</div>
-      <div className="text-sm text-zinc-200 font-medium truncate">{value}</div>
+      <div className="text-sm text-zinc-800 dark:text-zinc-200 font-medium truncate">{value}</div>
     </div>
   </div>
 );
@@ -158,6 +158,6 @@ const MetaBadge: React.FC<{ icon: React.ReactNode; label: string; value: string 
 const InfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="flex items-center justify-between text-sm">
     <span className="text-zinc-500">{label}</span>
-    <span className="text-zinc-200 font-medium truncate ml-4 text-right">{value}</span>
+    <span className="text-zinc-800 dark:text-zinc-200 font-medium truncate ml-4 text-right">{value}</span>
   </div>
 );

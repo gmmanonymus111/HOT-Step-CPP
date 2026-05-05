@@ -104,7 +104,7 @@ const SelectRow: React.FC<{
       id={id}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="px-3 py-1.5 rounded-lg bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 outline-none cursor-pointer min-w-[100px]"
+      className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 outline-none cursor-pointer min-w-[100px]"
     >
       {options.map(o => (
         <option key={o.value} value={o.value}>{o.label}</option>
@@ -754,7 +754,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <button
                   onClick={() => setStemClearConfirm(false)}
                   disabled={stemClearing}
-                  className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  className="px-3 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
                 >
                   Cancel
@@ -825,7 +825,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <button
                   onClick={() => setNukeConfirm(false)}
                   disabled={nukeRunning}
-                  className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  className="px-3 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
                 >
                   Cancel
@@ -889,7 +889,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <button
                   onClick={() => setNukeLyricsConfirm(false)}
                   disabled={nukeLyricsRunning}
-                  className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  className="px-3 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
                 >
                   Cancel
@@ -953,7 +953,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <button
                   onClick={() => setNukeProfilesConfirm(false)}
                   disabled={nukeProfilesRunning}
-                  className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  className="px-3 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
                 >
                   Cancel

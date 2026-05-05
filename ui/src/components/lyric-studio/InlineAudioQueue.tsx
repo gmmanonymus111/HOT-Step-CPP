@@ -94,7 +94,7 @@ export const InlineAudioQueue: React.FC = () => {
 
       {queued.length > 0 && (
         <>
-          <GroupLabel label="Queued" color="text-zinc-400" />
+          <GroupLabel label="Queued" color="text-zinc-600 dark:text-zinc-400" />
           {queued.map(item => (
             <QueueItemRow key={item.id} item={item} isPlayingInMain={currentSongId === item.id} onPlay={handlePlay} />
           ))}
@@ -151,7 +151,7 @@ const QueueItemRow: React.FC<QueueItemRowProps> = ({ item, isPlayingInMain, onPl
   const borderColor = isSucceeded ? 'border-green-500/20'
     : isFailed ? 'border-red-500/20'
     : isRunning ? 'border-pink-500/20'
-    : 'border-white/5';
+    : 'border-zinc-200 dark:border-white/5';
 
   return (
     <div className={`rounded-lg border ${borderColor} bg-white/[0.02] px-3 py-2 transition-all ${isPlayingInMain ? 'ring-1 ring-pink-500/40 bg-pink-500/5' : ''}`}>
@@ -172,7 +172,7 @@ const QueueItemRow: React.FC<QueueItemRowProps> = ({ item, isPlayingInMain, onPl
         </div>
 
         <div className="flex-1 min-w-0">
-          <p className={`text-xs font-medium truncate ${isPlayingInMain ? 'text-pink-300' : 'text-zinc-200'}`}>
+          <p className={`text-xs font-medium truncate ${isPlayingInMain ? 'text-pink-300' : 'text-zinc-800 dark:text-zinc-200'}`}>
             {item.generation.title || 'Untitled'}
           </p>
           <p className="text-[10px] text-zinc-500 truncate">{item.artistName}</p>

@@ -41,7 +41,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
           Style Description
         </label>
         <textarea
-          className="w-full px-3 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-none transition-colors"
+          className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-none transition-colors"
           placeholder="Dreamy indie folk, warm acoustic guitar, soft female vocals, intricate fingerpicking..."
           value={caption}
           onChange={e => onCaptionChange(e.target.value)}
@@ -53,7 +53,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
       <div>
         <button
           onClick={() => setShowMetadata(!showMetadata)}
-          className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider hover:text-zinc-300 transition-colors mb-1.5"
+          className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors mb-1.5"
         >
           {showMetadata
             ? <ChevronDown size={12} className="text-zinc-500" />
@@ -71,7 +71,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
                 <label className="block text-[10px] text-zinc-600 mb-0.5">Artist</label>
                 <input
                   type="text"
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
                   placeholder="Optional"
                   value={artist}
                   onChange={e => onArtistChange(e.target.value)}
@@ -81,7 +81,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
                 <label className="block text-[10px] text-zinc-600 mb-0.5">Title</label>
                 <input
                   type="text"
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
                   placeholder="Optional"
                   value={title}
                   onChange={e => onTitleChange(e.target.value)}
@@ -92,7 +92,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
               <label className="block text-[10px] text-zinc-600 mb-0.5">Subject</label>
               <input
                 type="text"
-                className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
+                className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
                 placeholder="Optional — what the song is about"
                 value={subject}
                 onChange={e => onSubjectChange(e.target.value)}
@@ -111,12 +111,12 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
             onChange={e => onInstrumentalChange(e.target.checked)}
             className="sr-only peer"
           />
-          <div className="w-8 h-4.5 bg-zinc-700 rounded-full peer-checked:bg-pink-500 transition-colors" />
+          <div className="w-8 h-4.5 bg-zinc-200 dark:bg-zinc-700 rounded-full peer-checked:bg-pink-500 transition-colors" />
           <div className="absolute top-0.5 left-0.5 w-3.5 h-3.5 bg-white rounded-full transition-transform peer-checked:translate-x-3.5" />
         </div>
         <div className="flex items-center gap-1.5">
           <Music size={14} className="text-zinc-500" />
-          <span className="text-sm text-zinc-400 group-hover:text-zinc-300 transition-colors">
+          <span className="text-sm text-zinc-600 dark:text-zinc-400 group-hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
             Instrumental (no vocals)
           </span>
         </div>
@@ -129,7 +129,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
             Lyrics
           </label>
           <textarea
-            className="w-full px-3 py-2.5 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-vertical transition-colors font-mono leading-relaxed"
+            className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-vertical transition-colors font-mono leading-relaxed"
             placeholder={`[Verse 1]\nWalking through the morning light\nEvery shadow fading bright\n\n[Chorus]\nWe're alive, we're alive tonight...`}
             value={lyrics}
             onChange={e => onLyricsChange(e.target.value)}

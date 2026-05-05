@@ -37,12 +37,12 @@ function formatEta(bytes: number, speed: number): string {
 }
 
 const statusColors: Record<string, string> = {
-  queued: 'bg-zinc-600 text-zinc-300',
+  queued: 'bg-zinc-600 text-zinc-700 dark:text-zinc-300',
   downloading: 'bg-sky-500/20 text-sky-400',
   paused: 'bg-amber-500/20 text-amber-400',
   completed: 'bg-emerald-500/20 text-emerald-400',
   failed: 'bg-red-500/20 text-red-400',
-  cancelled: 'bg-zinc-600 text-zinc-400',
+  cancelled: 'bg-zinc-600 text-zinc-600 dark:text-zinc-400',
 };
 
 export const DownloadProgressBar: React.FC<Props> = ({ job, onCancel, onResume, compact }) => {
@@ -52,13 +52,13 @@ export const DownloadProgressBar: React.FC<Props> = ({ job, onCancel, onResume, 
   const canResume = job.status === 'paused' || job.status === 'failed';
 
   return (
-    <div className={`rounded-xl border border-white/5 bg-zinc-800/50 ${compact ? 'p-2' : 'p-3'}`}>
+    <div className={`rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-100/50 dark:bg-zinc-800/50 ${compact ? 'p-2' : 'p-3'}`}>
       {/* Header row */}
       <div className="flex items-center gap-2 mb-1.5">
         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${statusColors[job.status] || statusColors.queued}`}>
           {job.status === 'downloading' ? `${pct.toFixed(0)}%` : job.status.toUpperCase()}
         </span>
-        <span className={`${compact ? 'text-xs' : 'text-sm'} text-zinc-300 font-medium truncate flex-1`}>
+        <span className={`${compact ? 'text-xs' : 'text-sm'} text-zinc-700 dark:text-zinc-300 font-medium truncate flex-1`}>
           {job.filename}
         </span>
         <div className="flex items-center gap-1 flex-shrink-0">
@@ -78,7 +78,7 @@ export const DownloadProgressBar: React.FC<Props> = ({ job, onCancel, onResume, 
       </div>
 
       {/* Progress bar */}
-      <div className="h-1.5 rounded-full bg-zinc-700/50 overflow-hidden">
+      <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700/50 overflow-hidden">
         <div
           className={`h-full rounded-full transition-all duration-300 ${
             isActive ? 'bg-gradient-to-r from-sky-500 to-sky-400' :

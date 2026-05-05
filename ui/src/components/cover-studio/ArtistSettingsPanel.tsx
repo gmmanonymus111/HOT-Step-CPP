@@ -66,7 +66,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
         ) : artists.length === 0 ? (
           <div className="text-center py-4">
             <p className="text-xs text-zinc-500">No trained artists available.</p>
-            <p className="text-[10px] text-zinc-400 mt-1">Describe the target style below, or add artists in Lyric Studio for adapter-powered covers.</p>
+            <p className="text-[10px] text-zinc-600 dark:text-zinc-400 mt-1">Describe the target style below, or add artists in Lyric Studio for adapter-powered covers.</p>
           </div>
         ) : (
           <div className="grid grid-cols-5 gap-2 max-h-[240px] overflow-y-auto scrollbar-hide">
@@ -116,7 +116,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
                   return <option key={p.lsId} value={idx}>{p.album}</option>;
                 })}
               </select>
-              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-400 pointer-events-none" />
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-600 dark:text-zinc-400 pointer-events-none" />
             </div>
           </div>
         )}
@@ -222,7 +222,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
             <span className="text-cyan-400 font-medium">{genStage || 'Generating...'}</span>
             <span className="text-zinc-500 font-mono">{genProgress}%</span>
           </div>
-          <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
+          <div className="w-full h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
             <div className="h-full bg-gradient-to-r from-cyan-500 to-teal-500 transition-all duration-500 rounded-full"
               style={{ width: `${genProgress}%` }} />
           </div>
@@ -236,7 +236,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
           className={`w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl text-sm font-bold transition-all duration-300 shadow-lg
             ${canGenerate
               ? 'bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white shadow-cyan-500/20 hover:shadow-cyan-400/30 hover:scale-[1.02]'
-              : 'bg-zinc-200 dark:bg-white/5 text-zinc-400 cursor-not-allowed shadow-none'}`}>
+              : 'bg-zinc-200 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 cursor-not-allowed shadow-none'}`}>
           <Disc3 className="w-4 h-4" />
           Generate Cover
         </button>

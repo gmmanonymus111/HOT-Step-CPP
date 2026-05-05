@@ -35,11 +35,11 @@ export const EditableSlider: React.FC<EditableSliderProps> = ({
               setEditing(false);
             }}
             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-            className="w-20 px-1.5 py-0.5 text-[10px] text-right bg-black/20 border border-cyan-500/50 rounded text-white outline-none font-mono"
+            className="w-20 px-1.5 py-0.5 text-[10px] text-right bg-zinc-200 dark:bg-black/20 border border-cyan-500/50 rounded text-white outline-none font-mono"
           />
         ) : (
           <span
-            className="text-[10px] text-zinc-400 font-mono cursor-pointer hover:text-cyan-400 transition-colors"
+            className="text-[10px] text-zinc-600 dark:text-zinc-400 font-mono cursor-pointer hover:text-cyan-400 transition-colors"
             onClick={() => { setEditing(true); setEditVal(String(value)); }}
             title="Click to edit"
           >{display}</span>

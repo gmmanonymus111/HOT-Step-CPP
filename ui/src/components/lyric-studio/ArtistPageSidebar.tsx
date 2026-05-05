@@ -56,7 +56,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950/50 overflow-hidden">
+    <div className="flex flex-col h-full bg-zinc-50 dark:bg-zinc-950/50 overflow-hidden">
       {/* Artist header — only shown when artist context available */}
       {artist && (
         <>
@@ -75,7 +75,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           </div>
           <div className="px-4 py-3 -mt-6 relative z-10 flex-shrink-0">
             <h2 className="text-base font-bold text-white leading-tight">{artist.name}</h2>
-            <p className="text-xs text-zinc-400 mt-0.5">
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
               {(albumCount ?? 0)} album{(albumCount ?? 0) !== 1 ? 's' : ''}
             </p>
           </div>
@@ -93,7 +93,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
         </button>
         <button
           onClick={onOpenPromptEditor}
-          className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white text-xs transition-colors"
+          className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-white text-xs transition-colors"
           title="Edit System Prompts"
         >
           <Code2 className="w-3.5 h-3.5" />
@@ -106,7 +106,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
         {/* ── Download Filename Prepend ─────────────────────────── */}
         <div>
           <div
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold"
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-zinc-200 dark:border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold"
           >
             <span className="flex items-center gap-1.5">
               <Download className="w-3 h-3" />
@@ -119,7 +119,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
               value={filenamePrepend}
               onChange={e => setFilenamePrepend(e.target.value)}
               placeholder="e.g. MyLabel - "
-              className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-pink-500 transition-colors"
+              className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-pink-500 transition-colors"
             />
             <p className="text-[10px] text-zinc-600 mt-1 leading-tight">
               Prepended to download filenames, e.g. <span className="text-zinc-500">{filenamePrepend || '...'}</span>Artist - Song.flac
@@ -130,7 +130,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
         {/* ── LLM Duration Override ───────────────────────────── */}
         <div>
           <label
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5 cursor-pointer hover:bg-white/[0.06] transition-colors"
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-zinc-200 dark:border-white/5 cursor-pointer hover:bg-white/[0.06] transition-colors"
           >
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
               <Clock className="w-3 h-3" />
@@ -140,7 +140,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
               type="checkbox"
               checked={useLlmDuration}
               onChange={e => setUseLlmDuration(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 text-pink-500 focus:ring-pink-500 focus:ring-offset-0 cursor-pointer"
+              className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-pink-500 focus:ring-pink-500 focus:ring-offset-0 cursor-pointer"
             />
           </label>
           <p className="text-[10px] text-zinc-600 mt-1 px-1 leading-tight">
@@ -154,7 +154,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
         {/* ── Randomize Timbre Reference ────────────────────────── */}
         <div>
           <label
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5 cursor-pointer hover:bg-white/[0.06] transition-colors"
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] border border-zinc-200 dark:border-white/5 cursor-pointer hover:bg-white/[0.06] transition-colors"
           >
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
               <Shuffle className="w-3 h-3" />
@@ -164,7 +164,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
               type="checkbox"
               checked={randomizeTimbre}
               onChange={e => setRandomizeTimbre(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer"
+              className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer"
             />
           </label>
           <p className="text-[10px] text-zinc-600 mt-1 px-1 leading-tight">
@@ -179,7 +179,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
         <div>
           <button
             onClick={() => setLlmExpanded(!llmExpanded)}
-            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold transition-colors"
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-zinc-200 dark:border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold transition-colors"
           >
             <span>LLM Models</span>
             {llmExpanded

@@ -11,8 +11,8 @@ import { ToggleSwitch } from './BarSection';
 import { formatScheduler } from './modelLabels';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
-const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
+const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
+const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
 
 export const GenerationDropdown: React.FC = () => {
   const gp = useGlobalParams();
@@ -51,7 +51,7 @@ export const GenerationDropdown: React.FC = () => {
             className={`text-[10px] font-bold px-2 py-0.5 rounded-full transition-all ${
               gp.shift === -1
                 ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                : 'bg-zinc-800 text-zinc-500 border border-white/5 hover:text-zinc-300 hover:border-white/10'
+                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border border-zinc-200 dark:border-white/5 hover:text-zinc-700 dark:text-zinc-300 hover:border-zinc-300 dark:border-white/10'
             }`}
           >
             Auto

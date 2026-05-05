@@ -131,14 +131,14 @@ export const ScaleOverridePresets: React.FC<ScaleOverridePresetsProps> = ({
         <select
           value={selectedIdx}
           onChange={e => handleSelect(parseInt(e.target.value, 10))}
-          className={`flex-1 bg-black/30 border border-white/10 rounded-md px-2 py-1 ${textSize} text-zinc-300 focus:outline-none focus:border-pink-500 transition-colors cursor-pointer appearance-none`}
+          className={`flex-1 bg-black/30 border border-zinc-300 dark:border-white/10 rounded-md px-2 py-1 ${textSize} text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-pink-500 transition-colors cursor-pointer appearance-none`}
           style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%23888\' stroke-width=\'2\'%3E%3Cpath d=\'M6 9l6 6 6-6\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
         >
-          <option value={-1} className="bg-zinc-900">
+          <option value={-1} className="bg-white dark:bg-zinc-900">
             {presets.length === 0 ? 'No presets saved' : '— Select preset —'}
           </option>
           {presets.map((p, i) => (
-            <option key={i} value={i} className="bg-zinc-900">
+            <option key={i} value={i} className="bg-white dark:bg-zinc-900">
               {p.name}
             </option>
           ))}
@@ -180,7 +180,7 @@ export const ScaleOverridePresets: React.FC<ScaleOverridePresetsProps> = ({
             }}
             placeholder="Preset name..."
             autoFocus
-            className={`flex-1 bg-black/30 border border-emerald-500/30 rounded-md px-2 py-1 ${textSize} text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500 transition-colors`}
+            className={`flex-1 bg-black/30 border border-emerald-500/30 rounded-md px-2 py-1 ${textSize} text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-emerald-500 transition-colors`}
           />
           <button
             onClick={handleSave}
@@ -192,7 +192,7 @@ export const ScaleOverridePresets: React.FC<ScaleOverridePresetsProps> = ({
           </button>
           <button
             onClick={() => { setSaving(false); setNewName(''); }}
-            className="p-1 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+            className="p-1 rounded-md text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5 transition-colors"
             title="Cancel"
           >
             <X className="w-3.5 h-3.5" />

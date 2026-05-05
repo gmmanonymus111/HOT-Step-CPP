@@ -10,6 +10,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useAuth } from './context/AuthContext';
 import { GlobalParamsProvider, useGlobalParams } from './context/GlobalParamsContext';
 import { usePersistedState } from './hooks/usePersistedState';
+import { useTheme } from './hooks/useTheme';
 import { songApi } from './services/api';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { CreatePanel } from './components/create/CreatePanel';
@@ -132,14 +133,14 @@ const RestartingOverlay: React.FC = () => {
   }, []);
 
   return (
-    <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black text-white">
+    <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-white dark:bg-black text-zinc-900 dark:text-white">
       {/* Animated spinner */}
       <div className="relative mb-8">
         <div className="w-16 h-16 rounded-full border-4 border-amber-500/20" />
         <div className="absolute inset-0 w-16 h-16 rounded-full border-4 border-transparent border-t-amber-400 animate-spin" />
       </div>
       <h1 className="text-2xl font-bold mb-2">Restarting HOT-Step CPP</h1>
-      <p className="text-zinc-400 text-lg">{status}{dots}</p>
+      <p className="text-zinc-600 dark:text-zinc-400 text-lg">{status}{dots}</p>
       <p className="text-zinc-600 text-sm mt-4">The page will reload automatically when the server is ready.</p>
     </div>
   );
@@ -164,6 +165,9 @@ const AppContent: React.FC = () => {
 
   // Settings state (persisted)
   const [settings, setSettings] = usePersistedState<AppSettings>('ace-settings', DEFAULT_SETTINGS);
+
+  // Theme state
+  const { theme, toggleTheme } = useTheme();
 
   // Playlist sidebar (persisted)
   const [showPlaylist, setShowPlaylist] = usePersistedState('ace-showPlaylist', false);
@@ -356,7 +360,7 @@ const AppContent: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-suno text-zinc-400">
+      <div className="flex h-screen items-center justify-center bg-white dark:bg-suno text-zinc-600 dark:text-zinc-400">
         <div className="text-center">
           <div className="text-4xl mb-4">⚡</div>
           <div className="text-lg font-medium">Loading HOT-Step...</div>
@@ -367,10 +371,10 @@ const AppContent: React.FC = () => {
 
   if (isShutdown) {
     return (
-      <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black text-white">
+      <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-white dark:bg-black text-zinc-900 dark:text-white">
         <div className="text-6xl mb-6">👋</div>
         <h1 className="text-2xl font-bold mb-2">HOT-Step CPP has shut down</h1>
-        <p className="text-zinc-400">You may now close this browser tab.</p>
+        <p className="text-zinc-600 dark:text-zinc-400">You may now close this browser tab.</p>
       </div>
     );
   }
@@ -545,7 +549,7 @@ const AppContent: React.FC = () => {
           <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
         </div>
         {/* Activity Sidebar — Recent Songs + Queue */}
-        <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden" style={{ width: activitySidebarWidth }}>
+        <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden" style={{ width: activitySidebarWidth }}>
           <ActivitySidebar
             source="create"
             showToast={showToast}
@@ -637,6 +641,8 @@ const AppContent: React.FC = () => {
               },
             });
           }}
+          theme={theme}
+          onToggleTheme={toggleTheme}
           showTerminal={showTerminal}
           onToggleTerminal={() => setShowTerminal(prev => !prev)}
         />
@@ -673,7 +679,7 @@ const AppContent: React.FC = () => {
               <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
             </div>
             <div
-              className="flex-shrink-0 h-full border-l border-white/5"
+              className="flex-shrink-0 h-full border-l border-zinc-200 dark:border-white/5"
               style={{ width: playlistWidth }}
             >
               <PlaylistSidebar onClose={() => setShowPlaylist(false)} />
@@ -709,7 +715,7 @@ const AppContent: React.FC = () => {
               <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-emerald-400 transition-colors" />
             </div>
             <div
-              className="flex-shrink-0 h-full border-l border-white/5"
+              className="flex-shrink-0 h-full border-l border-zinc-200 dark:border-white/5"
               style={{ width: terminalWidth }}
             >
               <TerminalPanel onClose={() => setShowTerminal(false)} />
@@ -719,7 +725,7 @@ const AppContent: React.FC = () => {
       </div>
 
       {/* ── Bottom Player Area: Markers → Waveform → Transport ── */}
-      <div className="flex-shrink-0 bg-zinc-950 border-t border-white/5">
+      <div className="flex-shrink-0 bg-white dark:bg-zinc-950 border-t border-zinc-200 dark:border-white/5">
         {/* Collapsible visualisation area — animates up when playing, down when paused/stopped.
             Uses CSS Grid 0fr→1fr trick so the transition tracks actual content height perfectly,
             unlike max-height which over-shoots and makes the expand feel instant. */}

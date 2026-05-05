@@ -192,7 +192,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
               Showing songs from: <strong>{filteredGenerations[0]?.title || 'Untitled'}</strong>
             </span>
             <button onClick={onClearFilter}
-              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-white hover:bg-white/10 transition-colors">
+              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/10 transition-colors">
               <X className="w-3 h-3" /> Clear
             </button>
           </div>
@@ -203,7 +203,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
             <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
               <Headphones className="w-7 h-7 text-zinc-600" />
             </div>
-            <h3 className="text-base font-semibold text-zinc-400 mb-2">
+            <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">
               {filterGenerationId ? 'No songs generated from these lyrics yet' : 'No generated songs yet'}
             </h3>
             <p className="text-sm text-zinc-500 max-w-xs">
@@ -215,14 +215,14 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
             const isExpanded = expandedGenId === group.generation.id;
             return (
               <div key={group.generation.id}
-                className={`rounded-xl border border-white/5 hover:border-white/10 overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}>
+                className={`rounded-xl border border-zinc-200 dark:border-white/5 hover:border-zinc-300 dark:border-white/10 overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}>
                 <button className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/[0.02] transition-colors"
                   onClick={() => setExpandedGenId(isExpanded ? null : group.generation.id)}>
                   {isExpanded
                     ? <ChevronDown className="w-4 h-4 text-zinc-500 flex-shrink-0" />
                     : <ChevronRight className="w-4 h-4 text-zinc-500 flex-shrink-0" />}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-zinc-200 truncate">{group.generation.title || 'Untitled'}</p>
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{group.generation.title || 'Untitled'}</p>
                     <p className="text-xs text-zinc-500 mt-0.5">
                       {group.generation.subject || group.generation.caption?.slice(0, 60) || 'No caption'}
                     </p>
@@ -234,7 +234,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
                 </button>
 
                 {isExpanded && (
-                  <div className="border-t border-white/5">
+                  <div className="border-t border-zinc-200 dark:border-white/5">
                     {group.songs.length === 0 ? (
                       <p className="px-4 py-6 text-sm text-zinc-500 text-center">
                         Audio generation is pending or failed. Check the queue.
@@ -253,7 +253,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
                               </button>
                               <AddToPlaylistButton song={song} artistName={artistName} />
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm text-zinc-300 truncate">{song.title || `Song ${idx + 1}`}</p>
+                                <p className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{song.title || `Song ${idx + 1}`}</p>
                                 {song.duration && (
                                   <p className="text-[11px] text-zinc-500 flex items-center gap-1">
                                     <Clock className="w-3 h-3" />

@@ -113,7 +113,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
         <Scissors size={14} className="text-cyan-400 flex-shrink-0" />
 
         {/* Instruction / status */}
-        <span className="text-[11px] text-zinc-400 flex-shrink-0">
+        <span className="text-[11px] text-zinc-600 dark:text-zinc-400 flex-shrink-0">
           {isCropping ? (
             <span className="text-amber-400 animate-pulse">Cropping...</span>
           ) : (
@@ -159,7 +159,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
                 onCancel();
                 // Re-enter trim mode (cancel + re-enable handled by parent)
               }}
-              className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/5 transition-colors"
+              className="p-1 rounded text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
               title="Reset markers"
               disabled={isCropping}
             >
@@ -194,7 +194,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
               </button>
               <button
                 onClick={() => setShowConfirm(false)}
-                className="p-0.5 rounded text-zinc-500 hover:text-white transition-colors"
+                className="p-0.5 rounded text-zinc-500 hover:text-zinc-900 dark:hover:text-white transition-colors"
               >
                 <X size={12} />
               </button>
@@ -204,7 +204,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
           {/* Cancel trim mode */}
           <button
             onClick={onCancel}
-            className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/5 transition-colors"
+            className="p-1 rounded text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
             title="Exit trim mode"
             disabled={isCropping}
           >

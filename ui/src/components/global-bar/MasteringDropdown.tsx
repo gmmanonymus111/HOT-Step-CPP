@@ -81,7 +81,7 @@ export const MasteringDropdown: React.FC = () => {
         </label>
         {references.length > 0 ? (
           <select
-            className="w-full px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 outline-none transition-colors cursor-pointer"
+            className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 outline-none transition-colors cursor-pointer"
             value={gp.masteringReference}
             onChange={e => gp.setMasteringReference(e.target.value)}
           >
@@ -127,8 +127,8 @@ export const MasteringDropdown: React.FC = () => {
           htmlFor="mastering-ref-upload-bar"
           className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer transition-all ${
             uploading
-              ? 'bg-zinc-800 text-zinc-500 border-white/5 cursor-wait'
-              : 'bg-zinc-800 text-zinc-400 border-white/10 hover:border-amber-500/30 hover:text-amber-400'
+              ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border-zinc-200 dark:border-white/5 cursor-wait'
+              : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-white/10 hover:border-amber-500/30 hover:text-amber-400'
           }`}
         >
           {uploading ? (
@@ -144,7 +144,7 @@ export const MasteringDropdown: React.FC = () => {
         <div className="flex items-center justify-between mt-1">
           <div className="flex items-center gap-1.5">
             <Music2 size={14} className="text-teal-400" />
-            <span className="text-sm text-zinc-400">Also use as timbre reference</span>
+            <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
           </div>
           <ToggleSwitch checked={gp.timbreReference} onChange={gp.setTimbreReference} accentColor="amber" />
         </div>

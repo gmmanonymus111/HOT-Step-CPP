@@ -85,7 +85,7 @@ const RowSelector: React.FC<{
           const prov = providers.find(p => p.id === pid);
           onSelectionChange(pid, prov?.default_model || '');
         }}
-        className="w-full px-2 py-1.5 rounded bg-zinc-800 border border-white/10 text-[11px] text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
+        className="w-full px-2 py-1.5 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-[11px] text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
         title={`${label} Provider`}
       >
         {providers.map(p => (
@@ -95,7 +95,7 @@ const RowSelector: React.FC<{
       <select
         value={selectedModel}
         onChange={e => onSelectionChange(selectedProvider, e.target.value)}
-        className="w-full px-2 py-1.5 rounded bg-zinc-800 border border-white/10 text-[11px] text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
+        className="w-full px-2 py-1.5 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-[11px] text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
         title={`${label} Model`}
       >
         {models.map(m => (
@@ -262,7 +262,7 @@ export const ProviderSelector: React.FC<ProviderSelectorProps> = ({
 
   return (
     <div className={`flex ${compact ? 'flex-row items-center gap-2' : 'flex-col gap-2'}`}>
-      {!compact && <label className="text-xs font-medium text-zinc-400 uppercase tracking-wider">{label}</label>}
+      {!compact && <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">{label}</label>}
       <div className={`flex ${compact ? 'flex-row' : 'flex-row'} gap-2 flex-1`}>
         <select
           value={selectedProvider}
@@ -272,7 +272,7 @@ export const ProviderSelector: React.FC<ProviderSelectorProps> = ({
             const prov = providers.find(p => p.id === pid);
             if (prov?.default_model) onModelChange(prov.default_model);
           }}
-          className="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-white/10 text-sm text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
+          className="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
           title="LLM Provider"
         >
           {providers.map(p => (
@@ -282,7 +282,7 @@ export const ProviderSelector: React.FC<ProviderSelectorProps> = ({
         <select
           value={selectedModel}
           onChange={e => onModelChange(e.target.value)}
-          className="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-800 border border-white/10 text-sm text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
+          className="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white focus:outline-none focus:border-pink-500/50 appearance-none cursor-pointer"
           title="Model"
         >
           {models.map(m => (

@@ -96,7 +96,7 @@ export const SpectrumAnalyzer: React.FC<SpectrumAnalyzerProps> = ({
   return (
     <div
       ref={containerRef}
-      className="w-full flex-shrink-0 bg-zinc-950"
+      className="w-full flex-shrink-0 bg-white dark:bg-zinc-950"
       style={{
         height: visible ? 75 : 0,
         marginBottom: visible ? 15 : 0,

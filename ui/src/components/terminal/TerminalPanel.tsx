@@ -29,11 +29,11 @@ function getLineColor(text: string): string {
   if (text.includes('[Adapter]')) return 'text-cyan-400';
   if (text.includes('[VAE]') || text.includes('vae_decode')) return 'text-emerald-400';
   if (text.includes('[FSQ]')) return 'text-teal-400';
-  if (text.includes('[Server]')) return 'text-zinc-400';
+  if (text.includes('[Server]')) return 'text-zinc-600 dark:text-zinc-400';
   if (text.includes('[Mastering]')) return 'text-amber-400';
   if (/ERROR|FAIL/i.test(text)) return 'text-red-400';
   if (/WARNING|WARN/i.test(text)) return 'text-yellow-400';
-  return 'text-zinc-300';
+  return 'text-zinc-700 dark:text-zinc-300';
 }
 
 /** Format timestamp once at line creation time, not on every render */
@@ -155,20 +155,20 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ onClose }) => {
     : 0;
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-[#0d0d0f]">
+    <div className="h-full flex flex-col overflow-hidden bg-white dark:bg-[#0d0d0f]">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3 border-b border-white/5 bg-zinc-900/80">
+      <div className="flex items-center justify-between px-3 py-3 border-b border-zinc-200 dark:border-white/5 bg-zinc-100/80 dark:bg-zinc-900/80">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             {connected
               ? <Wifi size={12} className="text-green-400" />
               : <WifiOff size={12} className="text-red-400" />}
-            <span className="text-xs font-semibold text-zinc-400">Terminal</span>
+            <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">Terminal</span>
           </div>
 
           {/* VRAM badge */}
           {vram && vram.total_mb > 0 && (
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-zinc-800/80 border border-white/5">
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-zinc-100/80 dark:bg-zinc-800/80 border border-zinc-200 dark:border-white/5">
               <Cpu size={11} className="text-zinc-500" />
               <div className="flex items-center gap-1">
                 <span className="text-[10px] text-zinc-500">VRAM</span>
@@ -179,7 +179,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ onClose }) => {
                 }`}>
                   {(vram.used_mb / 1024).toFixed(1)} / {(vram.total_mb / 1024).toFixed(1)} GB
                 </span>
-                <div className="w-12 h-1 rounded-full bg-zinc-700 overflow-hidden">
+                <div className="w-12 h-1 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${
                       vramPercent > 90 ? 'bg-red-500' :
@@ -216,7 +216,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ onClose }) => {
           )}
           <button
             onClick={clear}
-            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+            className="p-1 rounded text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5 transition-colors"
             title="Clear"
           >
             <Trash2 size={12} />
@@ -232,19 +232,19 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({ onClose }) => {
       </div>
 
       {/* Search bar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 bg-zinc-900/50">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/80 dark:bg-zinc-900/50">
         <Search size={12} className="text-zinc-500 flex-shrink-0" />
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Filter logs..."
-          className="flex-1 bg-transparent text-xs text-zinc-300 placeholder:text-zinc-600 outline-none font-mono"
+          className="flex-1 bg-transparent text-xs text-zinc-700 dark:text-zinc-300 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 outline-none font-mono"
         />
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="p-0.5 text-zinc-500 hover:text-zinc-300 transition-colors"
+            className="p-0.5 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
           >
             <X size={11} />
           </button>

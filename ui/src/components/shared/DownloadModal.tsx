@@ -106,18 +106,18 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 transition-opacity"
+        className="fixed inset-0 bg-black/30 dark:bg-black/60 backdrop-blur-sm z-50 transition-opacity"
         onClick={onClose}
       />
 
       {/* Modal */}
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
         <div
-          className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md pointer-events-auto animate-in fade-in zoom-in-95 duration-200"
+          className="bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-2xl shadow-2xl w-full max-w-md pointer-events-auto animate-in fade-in zoom-in-95 duration-200"
           onClick={e => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-white/5">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20">
                 <Download size={18} className="text-emerald-400" />
@@ -129,7 +129,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             </div>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+              className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
             >
               <X size={18} />
             </button>
@@ -139,7 +139,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
           <div className="px-5 py-4 space-y-4">
             {/* Format Selection */}
             <div>
-              <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
+              <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
                 Format
               </label>
               <div className="grid grid-cols-4 gap-2">
@@ -154,7 +154,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                     className={`flex flex-col items-center gap-1 px-3 py-2.5 rounded-xl border transition-all ${
                       format === f
                         ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                        : 'bg-zinc-800/50 border-white/5 text-zinc-400 hover:border-white/10 hover:text-zinc-300'
+                        : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:border-white/10 hover:text-zinc-700 dark:hover:text-zinc-300'
                     }`}
                   >
                     <FileAudio size={16} />
@@ -168,7 +168,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             {/* Bitrate (lossy formats only) */}
             {isLossy && (
               <div>
-                <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
+                <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
                   Bitrate
                 </label>
                 <div className="grid grid-cols-4 gap-2">
@@ -179,7 +179,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                       className={`px-3 py-2 rounded-xl border text-xs font-mono font-bold transition-all ${
                         bitrate === b
                           ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                          : 'bg-zinc-800/50 border-white/5 text-zinc-400 hover:border-white/10 hover:text-zinc-300'
+                          : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:border-white/10 hover:text-zinc-700 dark:hover:text-zinc-300'
                       }`}
                     >
                       {b}k
@@ -192,7 +192,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             {/* Version (if mastered exists) */}
             {hasMastered && (
               <div>
-                <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
+                <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
                   Version
                 </label>
                 <div className="grid grid-cols-3 gap-2">
@@ -209,7 +209,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                           ? v.key === 'mastered'
                             ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
                             : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                          : 'bg-zinc-800/50 border-white/5 text-zinc-400 hover:border-white/10 hover:text-zinc-300'
+                          : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:border-white/10 hover:text-zinc-700 dark:hover:text-zinc-300'
                       }`}
                     >
                       {v.icon}
@@ -221,7 +221,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             )}
           </div>
 
-          <div className="px-5 py-4 border-t border-white/5 space-y-2">
+          <div className="px-5 py-4 border-t border-zinc-200 dark:border-white/5 space-y-2">
             <button
               onClick={handleDownload}
               disabled={downloading}

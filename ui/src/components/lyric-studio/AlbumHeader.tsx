@@ -36,11 +36,11 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950/50">
+    <div className="flex flex-col h-full bg-zinc-50 dark:bg-zinc-950/50">
       {/* Back button */}
       <button
         onClick={onBack}
-        className="flex items-center gap-2 px-4 py-3 text-sm text-zinc-400 hover:text-white hover:bg-white/5 border-b border-white/5 transition-colors"
+        className="flex items-center gap-2 px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/5 border-b border-zinc-200 dark:border-white/5 transition-colors"
       >
         <ChevronLeft className="w-4 h-4" />
         Albums
@@ -63,7 +63,7 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
 
       {/* Info */}
       <div className="px-4 py-4 -mt-8 relative z-10">
-        <p className="text-xs text-zinc-400 uppercase tracking-wider mb-1 font-semibold">
+        <p className="text-xs text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-1 font-semibold">
           {artist.name}
         </p>
         <h2 className="text-lg font-bold text-white leading-tight mb-3">
@@ -71,24 +71,24 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
         </h2>
 
         <div className="space-y-2 text-sm">
-          <div className="flex items-center gap-2 text-zinc-400">
+          <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
             <FileText className="w-3.5 h-3.5" />
             <span>{songs.length} source lyrics</span>
           </div>
           {profileCount > 0 && (
-            <div className="flex items-center gap-2 text-zinc-400">
+            <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
               <Users className="w-3.5 h-3.5" />
               <span>{profileCount} profile{profileCount !== 1 ? 's' : ''}</span>
             </div>
           )}
           {generationCount > 0 && (
-            <div className="flex items-center gap-2 text-zinc-400">
+            <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
               <Music2 className="w-3.5 h-3.5" />
               <span>{generationCount} generated lyric{generationCount !== 1 ? 's' : ''}</span>
             </div>
           )}
           {songCount > 0 && (
-            <div className="flex items-center gap-2 text-zinc-400">
+            <div className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
               <Headphones className="w-3.5 h-3.5" />
               <span>{songCount} generated song{songCount !== 1 ? 's' : ''}</span>
             </div>
@@ -103,7 +103,7 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
       <div className="px-4 pb-2">
         <button
           onClick={onOpenPreset}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm text-zinc-300 hover:text-white font-medium transition-all"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-zinc-300 dark:border-white/10 text-sm text-zinc-700 dark:text-zinc-300 hover:text-white font-medium transition-all"
         >
           <Settings2 className="w-4 h-4" />
           Album Preset
@@ -114,7 +114,7 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
       <div className="px-4 pb-4">
         <button
           onClick={() => setLlmExpanded(!llmExpanded)}
-          className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold transition-colors"
+          className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-zinc-200 dark:border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold transition-colors"
         >
           <span>LLM Models</span>
           {llmExpanded

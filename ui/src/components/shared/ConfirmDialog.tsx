@@ -28,17 +28,17 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     <div className="fixed inset-0 z-[150] flex items-center justify-center">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm drawer-backdrop-in"
+        className="absolute inset-0 bg-black/30 dark:bg-black/60 backdrop-blur-sm drawer-backdrop-in"
         onClick={onCancel}
       />
       {/* Dialog */}
-      <div className="relative bg-zinc-900 border border-white/10 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl drawer-slide-in-right">
-        <h3 className="text-lg font-bold text-white mb-2">{title}</h3>
-        <p className="text-sm text-zinc-300 mb-6">{message}</p>
+      <div className="relative bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl drawer-slide-in-right">
+        <h3 className="text-lg font-bold text-zinc-900 dark:text-white mb-2">{title}</h3>
+        <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-6">{message}</p>
         <div className="flex items-center justify-end gap-3">
           <button
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-200 font-semibold hover:bg-zinc-700 transition-colors"
+            className="px-4 py-2 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 font-semibold hover:bg-zinc-300 dark:hover:bg-zinc-700 transition-colors"
           >
             Cancel
           </button>

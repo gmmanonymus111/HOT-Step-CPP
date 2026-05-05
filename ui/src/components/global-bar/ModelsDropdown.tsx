@@ -10,7 +10,7 @@ import { formatDitModel, formatLmModel, formatVaeModel, formatEmbeddingModel } f
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import type { AceModels } from '../../types';
 
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-800 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
+const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 
 export const ModelsDropdown: React.FC = () => {
   const gp = useGlobalParams();
@@ -81,7 +81,7 @@ export const ModelsDropdown: React.FC = () => {
       )}
 
       {/* Get More Models */}
-      <div className="border-t border-white/5 pt-3 mt-1">
+      <div className="border-t border-zinc-200 dark:border-white/5 pt-3 mt-1">
         <button
           onClick={() => setShowModelManager(true)}
           className="w-full px-3 py-2 rounded-xl bg-pink-500/10 border border-pink-500/20

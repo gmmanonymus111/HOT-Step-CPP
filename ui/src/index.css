@@ -27,6 +27,12 @@
   --bg-tertiary-dark: #18181b;
   --bg-hover-dark: #27272a;
 
+  /* Backgrounds — light mode */
+  --bg-primary-light: #ffffff;
+  --bg-secondary-light: #fafafa;
+  --bg-tertiary-light: #f4f4f5;
+  --bg-hover-light: #e4e4e7;
+
   /* Layout */
   --sidebar-width: 240px;
   --player-height: 80px;
@@ -79,6 +85,15 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #52525b;
+}
+
+/* Light-mode scrollbar */
+:root:not(.dark) ::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+}
+
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
 }
 
 /* ========================================
@@ -263,6 +278,15 @@ input[type="range"]::-webkit-slider-thumb {
 input[type="range"]::-webkit-slider-thumb:hover {
   background: #db2777;
   box-shadow: 0 0 16px rgba(236, 72, 153, 0.4);
+}
+
+/* Light-mode range slider */
+:root:not(.dark) input[type="range"] {
+  background: #e4e4e7;
+}
+
+:root:not(.dark) input[type="range"]::-webkit-slider-thumb {
+  border-color: #ffffff;
 }
 
 /* ========================================

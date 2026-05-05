@@ -105,17 +105,17 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
   const currentPrompt = prompts.find(p => p.name === selected);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-zinc-900 rounded-2xl border border-white/10 shadow-2xl w-[900px] h-[95vh] flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/60 backdrop-blur-sm">
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-300 dark:border-white/10 shadow-2xl w-[900px] h-[95vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-white/5">
           <div className="flex items-center gap-2">
             <Code2 className="w-5 h-5 text-cyan-400" />
             <h2 className="text-lg font-bold text-white">System Prompts</h2>
           </div>
           <div className="flex items-center gap-2">
             {toast && <span className="text-xs text-green-400">{toast}</span>}
-            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white transition-colors">
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -123,7 +123,7 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
 
         <div className="flex flex-1 min-h-0">
           {/* Sidebar */}
-          <div className="w-56 flex-shrink-0 border-r border-white/5 overflow-y-auto py-2">
+          <div className="w-56 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-y-auto py-2">
             {loading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="w-5 h-5 animate-spin text-zinc-500" />
@@ -136,7 +136,7 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
                   className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
                     selected === p.name
                       ? 'bg-white/10 text-white border-l-2 border-cyan-400'
-                      : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200 border-l-2 border-transparent'
+                      : 'text-zinc-600 dark:text-zinc-400 hover:bg-white/5 hover:text-zinc-800 dark:text-zinc-200 border-l-2 border-transparent'
                   }`}
                 >
                   <span className="truncate">{FRIENDLY_NAMES[p.name] || p.name}</span>
@@ -152,9 +152,9 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
           <div className="flex-1 flex flex-col min-w-0">
             {selected ? (
               <>
-                <div className="flex items-center justify-between px-4 py-2 border-b border-white/5">
+                <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-white/5">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-300">{FRIENDLY_NAMES[selected] || selected}</span>
+                    <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{FRIENDLY_NAMES[selected] || selected}</span>
                     {currentPrompt?.source === 'file' && (
                       <span className="text-[10px] text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded">customized</span>
                     )}
@@ -165,7 +165,7 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
                   <div className="flex items-center gap-1.5">
                     {currentPrompt?.has_default && currentPrompt?.source === 'file' && (
                       <button onClick={handleReset}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors"
                         title="Reset to default"
                       >
                         <RotateCcw className="w-3 h-3" /> Reset
@@ -182,7 +182,7 @@ export const PromptEditor: React.FC<Props> = ({ open, onClose }) => {
                 <textarea
                   value={editContent}
                   onChange={(e) => { setEditContent(e.target.value); setDirty(true); }}
-                  className="flex-1 p-4 bg-black/40 text-sm text-zinc-200 font-mono leading-relaxed resize-none focus:outline-none"
+                  className="flex-1 p-4 bg-black/20 dark:bg-black/40 text-sm text-zinc-800 dark:text-zinc-200 font-mono leading-relaxed resize-none focus:outline-none"
                   spellCheck={false}
                   style={{ minHeight: 0 }}
                 />

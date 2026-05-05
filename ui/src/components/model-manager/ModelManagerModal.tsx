@@ -95,12 +95,12 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-start justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/20 dark:bg-black/40 dark:bg-black/70 backdrop-blur-sm" onClick={onClose} />
 
       {/* Modal */}
-      <div className="relative w-full max-w-5xl max-h-[90vh] mt-[5vh] mx-4 rounded-2xl bg-zinc-900 border border-white/10 shadow-2xl flex flex-col overflow-hidden">
+      <div className="relative w-full max-w-5xl max-h-[90vh] mt-[5vh] mx-4 rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 shadow-2xl flex flex-col overflow-hidden">
         {/* ── Header ───────────────────────────────────────── */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/5 flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-white/5 flex-shrink-0">
           <div>
             <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
               <HardDrive size={18} className="text-pink-400" />
@@ -109,7 +109,7 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
             <p className="text-xs text-zinc-500 mt-0.5">Download and manage GGUF models from HuggingFace</p>
           </div>
           <button onClick={onClose}
-            className="p-2 rounded-xl hover:bg-white/5 text-zinc-500 hover:text-zinc-300 transition-colors">
+            className="p-2 rounded-xl hover:bg-white/5 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
             <X size={18} />
           </button>
         </div>
@@ -155,7 +155,7 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
 
               {/* ── Starter Packs ────────────────────────── */}
               <div>
-                <h3 className="text-sm font-semibold text-zinc-300 mb-1">Starter Packs</h3>
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">Starter Packs</h3>
                 <p className="text-xs text-zinc-600 mb-4">Get up and running quickly — each pack includes everything you need to generate music.</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                   {registry.packs.map(pack => (
@@ -171,11 +171,11 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
               </div>
 
               {/* ── Divider ──────────────────────────────── */}
-              <div className="border-t border-white/5" />
+              <div className="border-t border-zinc-200 dark:border-white/5" />
 
               {/* ── Full Catalogue ────────────────────────── */}
               <div>
-                <h3 className="text-sm font-semibold text-zinc-300 mb-1">All Models</h3>
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">All Models</h3>
                 <p className="text-xs text-zinc-600 mb-4">Browse the complete model catalogue — {registry.files.length} models across 5 categories.</p>
                 <ModelCatalogueTab
                   files={registry.files}
@@ -191,7 +191,7 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
         </div>
 
         {/* ── Footer ──────────────────────────────────────── */}
-        <div className="flex items-center justify-between px-6 py-3 border-t border-white/5 bg-zinc-900/80 flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-3 border-t border-zinc-200 dark:border-white/5 bg-white dark:bg-zinc-900/80 flex-shrink-0">
           <div className="flex items-center gap-4 text-[10px] text-zinc-600 font-mono">
             <span className="flex items-center gap-1">
               <FolderOpen size={11} />

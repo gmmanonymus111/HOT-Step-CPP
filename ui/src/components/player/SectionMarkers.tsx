@@ -104,7 +104,7 @@ export const SectionMarkers: React.FC<SectionMarkersProps> = ({ audioUrl, durati
   const deduped = markers.filter((m, i) => i === 0 || m.label !== markers[i - 1].label);
 
   return (
-    <div className="relative w-full h-5 bg-black/40 overflow-hidden select-none flex-shrink-0">
+    <div className="relative w-full h-5 bg-black/20 dark:bg-black/40 overflow-hidden select-none flex-shrink-0">
       {deduped.map((marker, i) => {
         const leftPct = (marker.time / duration) * 100;
         const nextTime = i + 1 < deduped.length ? deduped[i + 1].time : duration;
@@ -120,7 +120,7 @@ export const SectionMarkers: React.FC<SectionMarkersProps> = ({ audioUrl, durati
             <div className="absolute left-0 top-0 bottom-0 w-px bg-white/20" />
             {/* Label */}
             <span
-              className="text-[9px] font-bold uppercase tracking-wider text-zinc-400 pl-1.5 truncate"
+              className="text-[9px] font-bold uppercase tracking-wider text-zinc-600 dark:text-zinc-400 pl-1.5 truncate"
               title={marker.label}
             >
               {marker.label}

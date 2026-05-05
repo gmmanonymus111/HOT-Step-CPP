@@ -19,6 +19,16 @@
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* ── Light-mode overrides ──────────────────────────────────── */
+
+:root:not(.dark) .settings-panel::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+:root:not(.dark) .settings-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
 /* Section */
 .settings-section {
   margin-bottom: 2rem;
@@ -459,5 +469,139 @@
 
 .env-select:focus {
   border-color: rgba(236, 72, 153, 0.5);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   Light-mode overrides — map rgba(255,255,255,*) to rgba(0,0,0,*)
+   ════════════════════════════════════════════════════════════════ */
+
+/* Section header */
+:root:not(.dark) .settings-section-header {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+:root:not(.dark) .settings-section-title {
+  color: rgba(0, 0, 0, 0.6);
+}
+
+/* Setting row */
+:root:not(.dark) .setting-row {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+:root:not(.dark) .setting-row:hover {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+:root:not(.dark) .setting-label {
+  color: rgba(0, 0, 0, 0.85);
+}
+
+:root:not(.dark) .setting-description {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+/* Title */
+:root:not(.dark) .settings-title {
+  color: #18181b;
+}
+
+:root:not(.dark) .settings-subtitle {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+/* Stats */
+:root:not(.dark) .settings-stats {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+:root:not(.dark) .settings-stat-label {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+/* Toggle track */
+:root:not(.dark) .toggle-track {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+:root:not(.dark) .toggle-switch:hover .toggle-track {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* Placement buttons */
+:root:not(.dark) .placement-button-group {
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
+:root:not(.dark) .placement-button {
+  color: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.03);
+  border-right-color: rgba(0, 0, 0, 0.08);
+}
+
+:root:not(.dark) .placement-button:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: rgba(0, 0, 0, 0.7);
+}
+
+/* Env input / select */
+:root:not(.dark) .env-input {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: rgba(0, 0, 0, 0.85);
+}
+
+:root:not(.dark) .env-input::placeholder {
+  color: rgba(0, 0, 0, 0.25);
+}
+
+:root:not(.dark) .env-select {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: rgba(0, 0, 0, 0.85);
+}
+
+/* Env browse button */
+:root:not(.dark) .env-browse-btn {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: rgba(0, 0, 0, 0.5);
+}
+
+:root:not(.dark) .env-browse-btn:hover {
+  background: rgba(236, 72, 153, 0.1);
+  border-color: rgba(236, 72, 153, 0.3);
+  color: #ec4899;
+}
+
+/* Password toggle */
+:root:not(.dark) .env-password-toggle {
+  color: rgba(0, 0, 0, 0.3);
+}
+
+:root:not(.dark) .env-password-toggle:hover {
+  color: rgba(0, 0, 0, 0.7);
+}
+
+/* Save bar */
+:root:not(.dark) .env-save-bar {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+/* Subsection header */
+:root:not(.dark) .env-subsection-title {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+:root:not(.dark) .env-subsection-chevron {
+  color: rgba(0, 0, 0, 0.3);
+}
+
+:root:not(.dark) .env-subsection-header:hover {
+  color: rgba(0, 0, 0, 0.85);
 }
 

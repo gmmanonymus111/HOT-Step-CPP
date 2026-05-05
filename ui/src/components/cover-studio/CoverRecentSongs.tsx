@@ -155,16 +155,16 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
             <div key={song.id}
               className={`flex items-center gap-2.5 rounded-lg hover:bg-white/[0.06] transition-colors text-left group px-2 overflow-hidden relative cursor-pointer ${isCurrent ? 'bg-cyan-500/10 ring-1 ring-cyan-500/30' : ''}`}
               onClick={() => handlePlay(song)}>
-              <div className="w-14 h-14 rounded-md flex-shrink-0 overflow-hidden bg-zinc-800 relative">
+              <div className="w-14 h-14 rounded-md flex-shrink-0 overflow-hidden bg-zinc-100 dark:bg-zinc-800 relative">
                 <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-cyan-900/40 to-purple-900/40">
                   <Music className="w-5 h-5 text-cyan-500/60" />
                 </div>
-                <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute inset-0 bg-black/20 dark:bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                   <Play className="w-4 h-4 text-white ml-0.5" />
                 </div>
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-zinc-200 truncate leading-snug">
+                <p className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate leading-snug">
                   {song.title || 'Untitled Cover'}
                 </p>
                 {targetArtist && (
@@ -177,12 +177,12 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
               <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                 <CoverAddToPlaylistBtn song={song} />
                 <button onClick={(e) => handleDownloadClick(e, song)}
-                  className="p-1.5 rounded-md bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+                  className="p-1.5 rounded-md bg-zinc-100/80 dark:bg-zinc-800/80 hover:bg-zinc-300 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   title="Download">
                   <Download className="w-3 h-3" />
                 </button>
                 <button onClick={(e) => handleDelete(e, song)}
-                  className="p-1.5 rounded-md bg-zinc-800/80 hover:bg-red-900/60 text-zinc-400 hover:text-red-400 transition-colors"
+                  className="p-1.5 rounded-md bg-zinc-100/80 dark:bg-zinc-800/80 hover:bg-red-100 dark:hover:bg-red-900/60 text-zinc-600 dark:text-zinc-400 hover:text-red-400 transition-colors"
                   title="Delete">
                   <Trash2 className="w-3 h-3" />
                 </button>
@@ -234,7 +234,7 @@ const CoverAddToPlaylistBtn: React.FC<{ song: Song }> = ({ song }) => {
     <button onClick={toggle}
       className={`p-1.5 rounded-md transition-colors ${
         inPlaylist ? 'bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
-          : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-cyan-400'
+          : 'bg-zinc-100/80 dark:bg-zinc-800/80 hover:bg-zinc-300 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400 hover:text-cyan-400'
       }`}
       title={inPlaylist ? 'Remove from playlist' : 'Add to playlist'}>
       {inPlaylist ? <Check className="w-3 h-3" /> : <ListPlus className="w-3 h-3" />}

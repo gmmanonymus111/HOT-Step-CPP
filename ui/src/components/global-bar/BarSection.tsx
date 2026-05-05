@@ -109,7 +109,7 @@ export const BarSection: React.FC<BarSectionProps> = ({
           {icon}
         </span>
         <span className={`text-[11px] font-semibold uppercase tracking-wider flex-shrink-0 hidden xl:inline transition-colors duration-150 ${
-          isOpen ? 'text-zinc-200' : 'text-zinc-400'
+          isOpen ? 'text-zinc-800 dark:text-zinc-200' : 'text-zinc-600 dark:text-zinc-400'
         }`}>
           {label}
         </span>
@@ -128,7 +128,7 @@ export const BarSection: React.FC<BarSectionProps> = ({
       {isOpen && (
         <div
           className="absolute top-full left-0 z-50 w-full min-w-[300px] max-h-[calc(100vh-120px)] overflow-y-auto
-                     bg-zinc-900 border border-white/10 border-t-0 rounded-b-xl shadow-2xl shadow-black/60
+                     bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 border-t-0 rounded-b-xl shadow-2xl shadow-black/30 dark:shadow-black/60
                      global-bar-dropdown-enter hide-scrollbar"
         >
           <div className="p-4 space-y-3">
@@ -169,7 +169,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, a
       }}
       className={`
         relative inline-flex h-4 w-8 items-center rounded-full transition-colors duration-200 flex-shrink-0
-        ${checked ? activeColor : 'bg-zinc-700'}
+        ${checked ? activeColor : 'bg-zinc-200 dark:bg-zinc-700'}
       `}
     >
       <span

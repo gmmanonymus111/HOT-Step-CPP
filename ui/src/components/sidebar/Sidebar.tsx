@@ -2,7 +2,7 @@
 // Ported from hot-step-9000, simplified for current cpp feature set.
 
 import React from 'react';
-import { Disc, Library, Mic, Guitar, Scissors, Settings, Power, Terminal, RotateCcw } from 'lucide-react';
+import { Disc, Library, Mic, Guitar, Scissors, Settings, Power, Terminal, RotateCcw, Sun, Moon } from 'lucide-react';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
 interface SidebarProps {
@@ -10,6 +10,8 @@ interface SidebarProps {
   onViewChange: (view: string) => void;
   onQuit: () => void;
   onRestart?: () => void;
+  theme?: 'dark' | 'light';
+  onToggleTheme?: () => void;
   showTerminal?: boolean;
   onToggleTerminal?: () => void;
 }
@@ -19,6 +21,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onViewChange,
   onQuit,
   onRestart,
+  theme = 'dark',
+  onToggleTheme,
   showTerminal = false,
   onToggleTerminal,
 }) => {
@@ -32,11 +36,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Collapse / Expand toggle (logo moved to GlobalParamBar) */}
       <div className={`mb-6 flex items-center ${isOpen ? 'px-3' : 'justify-center'}`}>
         <button
-          className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center transition-all flex-shrink-0"
+          className="w-8 h-8 rounded-lg bg-zinc-200 dark:bg-white/5 hover:bg-zinc-300 dark:hover:bg-white/10 flex items-center justify-center transition-all flex-shrink-0"
           onClick={() => setIsOpen(!isOpen)}
           title={isOpen ? 'Collapse' : 'Expand'}
         >
-          <svg className={`w-4 h-4 text-zinc-400 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className={`w-4 h-4 text-zinc-600 dark:text-zinc-400 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
         </button>
@@ -89,6 +93,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isExpanded={isOpen}
         />
 
+        {/* Theme toggle */}
+        {onToggleTheme && (
+          <button onClick={onToggleTheme}
+            className={`w-full rounded-xl flex items-center gap-3 transition-all duration-200
+              ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
+              text-zinc-500 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5`}
+            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+            <div className="flex-shrink-0">
+              {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+            </div>
+            {isOpen && <span className="text-sm font-medium whitespace-nowrap">
+              {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+            </span>}
+          </button>
+        )}
+
         <div className="mt-auto flex flex-col gap-2">
           {/* Terminal toggle */}
           {onToggleTerminal && (
@@ -99,7 +119,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
                 ${showTerminal
                   ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
-                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}
+                  : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 hover:bg-white/5'}
               `}
               title={showTerminal ? 'Hide Terminal' : 'Show Terminal'}
             >

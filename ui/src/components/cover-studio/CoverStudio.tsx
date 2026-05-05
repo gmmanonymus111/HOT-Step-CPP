@@ -509,7 +509,7 @@ export const CoverStudio: React.FC = () => {
     <div className="flex flex-col w-full h-full bg-zinc-50 dark:bg-suno overflow-hidden">
       {/* Toast */}
       {toast && (
-        <div className="absolute top-16 right-6 z-50 px-4 py-2 rounded-xl bg-zinc-900 text-white text-sm shadow-xl border border-white/10 animate-in fade-in slide-in-from-top-2">
+        <div className="absolute top-16 right-6 z-50 px-4 py-2 rounded-xl bg-white dark:bg-zinc-900 text-white text-sm shadow-xl border border-zinc-300 dark:border-white/10 animate-in fade-in slide-in-from-top-2">
           {toast}
         </div>
       )}
@@ -548,8 +548,8 @@ export const CoverStudio: React.FC = () => {
         />
 
         {/* Center: Lyrics */}
-        <div className="flex-1 flex flex-col overflow-hidden border-r border-white/5">
-          <div className="flex-shrink-0 px-4 py-3 border-b border-white/5">
+        <div className="flex-1 flex flex-col overflow-hidden border-r border-zinc-200 dark:border-white/5">
+          <div className="flex-shrink-0 px-4 py-3 border-b border-zinc-200 dark:border-white/5">
             <div className="flex items-center justify-between gap-2">
               {/* Artist + Title inputs */}
               <div className="flex-1 flex gap-2">
@@ -606,7 +606,7 @@ export const CoverStudio: React.FC = () => {
           <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
         </div>
         {/* Right: Recent Covers + Queue */}
-        <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden" style={{ width: sidebarWidth }}>
+        <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden" style={{ width: sidebarWidth }}>
           <ActivitySidebar
             showToast={showToast}
             source="cover-studio"

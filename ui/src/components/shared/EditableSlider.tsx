@@ -74,9 +74,9 @@ export const EditableSlider: React.FC<EditableSliderProps> = ({
     <div className={`space-y-2 ${disabled ? 'opacity-50' : ''}`}>
       <div className="flex items-center justify-between">
         <div className="relative flex items-center group/tip">
-          <label className="text-xs font-medium text-zinc-300 cursor-default" title={title}>{label}</label>
+          <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300 cursor-default" title={title}>{label}</label>
           {tooltip && (
-            <div className="absolute left-0 bottom-full mb-1.5 hidden group-hover/tip:block z-50 w-56 bg-zinc-800 text-zinc-100 text-[10px] leading-relaxed rounded-lg px-2.5 py-2 shadow-xl border border-white/10 pointer-events-none">
+            <div className="absolute left-0 bottom-full mb-1.5 hidden group-hover/tip:block z-50 w-56 bg-zinc-100 dark:bg-zinc-800 text-zinc-100 text-[10px] leading-relaxed rounded-lg px-2.5 py-2 shadow-xl border border-zinc-300 dark:border-white/10 pointer-events-none">
               {tooltip}
             </div>
           )}
@@ -85,15 +85,15 @@ export const EditableSlider: React.FC<EditableSliderProps> = ({
           <input type="number" value={inputValue} onChange={handleInputChange}
             onBlur={handleInputBlur} onKeyDown={handleInputKeyDown}
             onFocus={() => setIsEditing(true)} min={min} max={max} step={step} autoFocus
-            className="text-xs font-mono text-white bg-zinc-800 border border-pink-500 px-2 py-0.5 rounded-lg w-20 text-right shadow-sm focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            className="text-xs font-mono text-white bg-zinc-100 dark:bg-zinc-800 border border-pink-500 px-2 py-0.5 rounded-lg w-20 text-right shadow-sm focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
           />
         ) : (
           <span onClick={() => !disabled && setIsEditing(true)}
-            className={`text-xs font-mono text-zinc-200 bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-lg transition-all shadow-sm ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-700'}`}
+            className={`text-xs font-mono text-zinc-800 dark:text-zinc-200 bg-zinc-100 dark:bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-lg transition-all shadow-sm ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-200 dark:bg-zinc-700'}`}
           >{displayValue}</span>
         )}
       </div>
-      <div className="relative h-2 bg-zinc-800 rounded-full shadow-inner">
+      <div className="relative h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full shadow-inner">
         <input type="range" min={min} max={max} step={step} value={effectiveValue}
           onChange={handleRangeChange} onPointerUp={handleRangeCommit} onTouchEnd={handleRangeCommit}
           className={`absolute inset-0 w-full h-full opacity-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}

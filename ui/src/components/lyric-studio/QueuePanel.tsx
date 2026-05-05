@@ -309,15 +309,15 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-        <div className="bg-zinc-900 rounded-2xl border border-white/10 shadow-2xl w-[680px] max-h-[85vh] flex flex-col">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/60 backdrop-blur-sm">
+        <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-300 dark:border-white/10 shadow-2xl w-[680px] max-h-[85vh] flex flex-col">
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-white/5">
             <div className="flex items-center gap-2">
               <ListOrdered className="w-5 h-5 text-pink-400" />
               <h2 className="text-lg font-bold text-white">Bulk Operations</h2>
             </div>
-            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white transition-colors">
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -325,26 +325,26 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           {/* Mode tabs */}
           <div className="flex items-center gap-2 px-6 pt-4">
             <button onClick={() => { setMode('profile'); setSelected(new Set()); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'profile' ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'}`}>
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'profile' ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Sparkles className="w-3.5 h-3.5" /> Build Profiles
             </button>
             <button onClick={() => { setMode('generate'); setSelected(new Set()); loadGenerationCounts(); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'generate' ? 'bg-green-500/20 text-green-300' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'}`}>
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'generate' ? 'bg-green-500/20 text-green-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Wand2 className="w-3.5 h-3.5" /> Generate Lyrics
             </button>
             <button onClick={() => { setMode('presets'); setSelected(new Set()); loadPresets(); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'presets' ? 'bg-pink-500/20 text-pink-300' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'}`}>
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'presets' ? 'bg-pink-500/20 text-pink-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Settings2 className="w-3.5 h-3.5" /> Assign Presets
             </button>
             <button onClick={() => { setMode('fetch-lyrics'); setSelected(new Set()); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'fetch-lyrics' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'}`}>
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'fetch-lyrics' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Search className="w-3.5 h-3.5" /> Fetch Lyrics
             </button>
           </div>
 
           {/* ══ Presets mode config panel ══ */}
           {mode === 'presets' && (
-            <div className="px-6 pt-3 pb-2 space-y-3 border-b border-white/5">
+            <div className="px-6 pt-3 pb-2 space-y-3 border-b border-zinc-200 dark:border-white/5">
               <div className="flex items-center gap-3 text-[10px] font-semibold">
                 <span className="text-green-400">{presetStats.complete} ✓ complete</span>
                 <span className="text-amber-400">{presetStats.partial} ⚠ partial</span>
@@ -354,7 +354,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500 pointer-events-none" />
                 <input type="text" value={presetFilter} onChange={e => setPresetFilter(e.target.value)}
                   placeholder="Filter by artist or album…"
-                  className="w-full bg-black/20 border border-white/10 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-pink-500/50 transition-colors" />
+                  className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-pink-500/50 transition-colors" />
                 {presetFilter && (
                   <button onClick={() => setPresetFilter('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-white/10 text-zinc-500 hover:text-white transition-colors">
                     <X className="w-3 h-3" />
@@ -363,13 +363,13 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               </div>
               {/* Adapter path */}
               <div className="space-y-1.5">
-                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300">
+                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
                   <Zap className="w-3.5 h-3.5 text-pink-400" /> Adapter to Apply
                 </div>
                 <div className="flex gap-2">
                   <input type="text" value={adapterPath} onChange={e => setAdapterPath(e.target.value)}
                     placeholder="Path to .safetensors adapter file"
-                    className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-pink-500 transition-colors" />
+                    className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-pink-500 transition-colors" />
                   <button onClick={() => { setBrowserTarget('adapter'); setBrowserOpen(true); }}
                     className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-pink-900/20 text-pink-400 hover:bg-pink-900/30 transition-colors flex items-center gap-1 flex-shrink-0">
                     <FolderSearch size={12} /> Browse
@@ -386,7 +386,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               {adapterPath && (
                 <div className="space-y-1">
                   <button onClick={() => setGroupsExpanded(!groupsExpanded)}
-                    className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500 hover:text-zinc-300 transition-colors uppercase tracking-wider">
+                    className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors uppercase tracking-wider">
                     {groupsExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                     Group Scales
                   </button>
@@ -402,13 +402,13 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               )}
               {/* Reference track */}
               <div className="space-y-1.5">
-                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300">
+                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
                   <Music className="w-3.5 h-3.5 text-amber-400" /> Reference Track to Apply
                 </div>
                 <div className="flex gap-2">
                   <input type="text" value={matcheringPath} onChange={e => setMatcheringPath(e.target.value)}
                     placeholder="Path to reference audio (.wav, .mp3, .flac)"
-                    className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500 transition-colors" />
+                    className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-amber-500 transition-colors" />
                   <button onClick={() => { setBrowserTarget('matchering'); setBrowserOpen(true); }}
                     className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-900/20 text-amber-400 hover:bg-amber-900/30 transition-colors flex items-center gap-1 flex-shrink-0">
                     <FolderSearch size={12} /> Browse
@@ -426,22 +426,22 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
 
           {/* ══ Fetch Lyrics mode config panel ══ */}
           {mode === 'fetch-lyrics' && (
-            <div className="px-6 pt-3 pb-2 space-y-3 border-b border-white/5">
+            <div className="px-6 pt-3 pb-2 space-y-3 border-b border-zinc-200 dark:border-white/5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <button onClick={() => setFetchInputMode('paste')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${fetchInputMode === 'paste' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}>
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${fetchInputMode === 'paste' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 hover:bg-white/5'}`}>
                     <ClipboardPaste className="w-3 h-3" /> Paste
                   </button>
                   <button onClick={() => setFetchInputMode('structured')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${fetchInputMode === 'structured' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}>
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${fetchInputMode === 'structured' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 hover:bg-white/5'}`}>
                     <LayoutList className="w-3 h-3" /> Rows
                   </button>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Max songs</span>
                   <input type="number" value={fetchMaxSongs} onChange={e => setFetchMaxSongs(Math.max(1, Math.min(200, parseInt(e.target.value) || 50)))} min={1} max={200}
-                    className="w-14 px-2 py-1 rounded-lg bg-black/20 border border-white/10 text-xs text-white text-center font-mono focus:outline-none focus:border-cyan-500/50 transition-all" />
+                    className="w-14 px-2 py-1 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-xs text-white text-center font-mono focus:outline-none focus:border-cyan-500/50 transition-all" />
                 </div>
               </div>
               {fetchInputMode === 'paste' && (
@@ -449,7 +449,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                   <textarea value={pasteText} onChange={e => setPasteText(e.target.value)}
                     placeholder={`Paste one entry per line:\nArtist | Album\nArtist | Album\n\nAlso supports:\nArtist - Album\nArtist (fetches top songs)`}
                     rows={6} disabled={fetchRunning}
-                    className="w-full bg-black/20 border border-white/10 rounded-xl px-3 py-2.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all resize-none font-mono leading-relaxed disabled:opacity-50" />
+                    className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-xl px-3 py-2.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all resize-none font-mono leading-relaxed disabled:opacity-50" />
                   <p className="text-[10px] text-zinc-600">{parsePasteText(pasteText).length} entries detected · lines starting with # are ignored</p>
                 </div>
               )}
@@ -458,9 +458,9 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                   {structuredRows.map((row, idx) => (
                     <div key={idx} className="flex items-center gap-1.5">
                       <input type="text" value={row.artist} onChange={e => updateStructuredRow(idx, 'artist', e.target.value)} placeholder="Artist" disabled={fetchRunning}
-                        className="flex-1 bg-black/20 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all disabled:opacity-50" />
+                        className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all disabled:opacity-50" />
                       <input type="text" value={row.album} onChange={e => updateStructuredRow(idx, 'album', e.target.value)} placeholder="Album (optional)" disabled={fetchRunning}
-                        className="flex-1 bg-black/20 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all disabled:opacity-50" />
+                        className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 transition-all disabled:opacity-50" />
                       <button onClick={() => removeStructuredRow(idx)} disabled={fetchRunning || structuredRows.length <= 1}
                         className="p-1 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:pointer-events-none">
                         <Trash2 className="w-3 h-3" />
@@ -522,7 +522,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                             const need = Math.max(0, genFillTarget - genCt);
                             return need > 0
                               ? <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-green-900/30 text-green-400 flex-shrink-0">+{need}</span>
-                              : <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 flex-shrink-0">✓ full</span>;
+                              : <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 flex-shrink-0">✓ full</span>;
                           })()}
                         </div>
                         <span className="text-[10px] text-zinc-500">{profile.provider}/{profile.model} · {new Date(profile.created_at).toLocaleDateString()}</span>
@@ -557,7 +557,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                         <div className="flex items-center gap-2">
                           <span className="text-sm text-white truncate">{ls.artist_name}</span>
                           <span className="text-[10px] text-zinc-600">—</span>
-                          <span className="text-sm text-zinc-300 truncate">{ls.album || 'Top Songs'}</span>
+                          <span className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{ls.album || 'Top Songs'}</span>
                           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${badge.color}`}>{badge.icon} {badge.label}</span>
                         </div>
                         <div className="flex items-center gap-2 mt-0.5">
@@ -599,34 +599,34 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 cursor-pointer select-none">
                   <input type="checkbox" checked={genFillMode} onChange={e => setGenFillMode(e.target.checked)} className="accent-green-500" />
-                  <span className="text-xs text-zinc-400">Fill to target</span>
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">Fill to target</span>
                 </label>
                 {genFillMode ? (
                   <>
                     <input type="number" min={1} max={100} value={genFillTarget}
                       onChange={e => setGenFillTarget(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                      className="w-16 px-2 py-1 rounded-lg bg-zinc-800 border border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
+                      className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
                     <span className="text-[10px] text-zinc-500">each profile gets enough gens to reach this total</span>
                   </>
                 ) : (
                   <>
-                    <span className="text-xs text-zinc-400">Per profile:</span>
+                    <span className="text-xs text-zinc-600 dark:text-zinc-400">Per profile:</span>
                     <input type="number" min={1} max={20} value={genCount}
                       onChange={e => setGenCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
-                      className="w-16 px-2 py-1 rounded-lg bg-zinc-800 border border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
+                      className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
                   </>
                 )}
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-zinc-400">Hide profiles with ≥</span>
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">Hide profiles with ≥</span>
                 <input type="number" min={0} value={genFilterThreshold}
                   onChange={e => setGenFilterThreshold(e.target.value)}
                   placeholder="—"
-                  className="w-16 px-2 py-1 rounded-lg bg-zinc-800 border border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50 placeholder-zinc-600" />
-                <span className="text-xs text-zinc-400">existing gens</span>
+                  className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50 placeholder-zinc-400 dark:placeholder-zinc-600" />
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">existing gens</span>
                 {genFilterThreshold.trim() !== '' && (
                   <button onClick={() => setGenFilterThreshold('')}
-                    className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors">clear</button>
+                    className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors">clear</button>
                 )}
                 {genCountsLoading && <Loader2 className="w-3 h-3 animate-spin text-zinc-500" />}
               </div>
@@ -634,12 +634,12 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           )}
 
           {/* Action bar */}
-          <div className="px-6 py-3 border-t border-white/5 flex items-center justify-between">
+          <div className="px-6 py-3 border-t border-zinc-200 dark:border-white/5 flex items-center justify-between">
             {mode === 'fetch-lyrics' ? (
               <>
                 <div className="flex items-center gap-2">
                   {fetchQueue.length > 0 && !fetchRunning && (
-                    <button onClick={clearFetchQueue} className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors">Clear Results</button>
+                    <button onClick={clearFetchQueue} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">Clear Results</button>
                   )}
                   {fetchQueue.length > 0 && (
                     <span className="text-[10px] text-zinc-500">
@@ -667,19 +667,19 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <button onClick={selectAll} className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors">Select All</button>
+                  <button onClick={selectAll} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">Select All</button>
                   {mode === 'presets' && (
                     <>
                       <button onClick={selectMissing} className="px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors">Select Missing</button>
                       <button onClick={selectIncomplete} className="px-3 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors">Select Incomplete</button>
                     </>
                   )}
-                  <button onClick={() => setSelected(new Set())} className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors">Clear</button>
+                  <button onClick={() => setSelected(new Set())} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">Clear</button>
                 </div>
                 {mode === 'presets' ? (
                   <div className="flex items-center gap-2">
                     <button onClick={loadPresets} disabled={presetsLoading}
-                      className="p-2 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors disabled:opacity-50" title="Refresh preset data">
+                      className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors disabled:opacity-50" title="Refresh preset data">
                       <RefreshCw className={`w-3.5 h-3.5 ${presetsLoading ? 'animate-spin' : ''}`} />
                     </button>
                     <button onClick={handleApplyPresets}
@@ -702,9 +702,9 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
 
           {/* Queue status */}
           {queueItems.length > 0 && (
-            <div className="px-6 py-3 border-t border-white/5">
+            <div className="px-6 py-3 border-t border-zinc-200 dark:border-white/5">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Queue Progress</span>
+                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Queue Progress</span>
                 <button onClick={clearQueue} className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors">Clear Finished</button>
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-hide">
@@ -714,7 +714,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                     {item.status === 'running' && <Loader2 className="w-3 h-3 animate-spin text-pink-400" />}
                     {item.status === 'done' && <CheckCircle className="w-3 h-3 text-green-400" />}
                     {item.status === 'error' && <AlertCircle className="w-3 h-3 text-red-400" />}
-                    <span className="text-zinc-300 flex-1 truncate">{item.label}</span>
+                    <span className="text-zinc-700 dark:text-zinc-300 flex-1 truncate">{item.label}</span>
                     {item.count && item.count > 1 && <span className="text-[10px] text-zinc-500">{item.countCompleted || 0}/{item.count}</span>}
                     {item.status === 'pending' && (
                       <button onClick={() => removeFromQueue(item.id)} className="p-0.5 rounded hover:bg-red-500/20 text-zinc-500 hover:text-red-400 transition-colors">

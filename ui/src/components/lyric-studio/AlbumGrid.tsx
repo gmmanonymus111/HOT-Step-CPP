@@ -68,7 +68,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-xl font-bold text-white">Albums</h2>
-          <p className="text-sm text-zinc-400 mt-0.5">{artistName}</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-0.5">{artistName}</p>
         </div>
         <div className="flex items-center gap-3">
           {onCuratedProfile && albums.length >= 2 && (
@@ -90,16 +90,16 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
               <ChevronDown className="w-3.5 h-3.5 opacity-70" />
             </button>
             {addMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 z-30 min-w-[180px] rounded-xl bg-zinc-900 border border-white/10 shadow-2xl py-1 animate-in fade-in slide-in-from-top-1">
+              <div className="absolute right-0 top-full mt-1 z-30 min-w-[180px] rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 shadow-2xl py-1 animate-in fade-in slide-in-from-top-1">
                 <button
-                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                   onClick={() => { setAddMenuOpen(false); onAddAlbum(); }}
                 >
                   <Search className="w-3.5 h-3.5" />
                   Fetch from Genius
                 </button>
                 <button
-                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                   onClick={() => { setAddMenuOpen(false); onAddManual(); }}
                 >
                   <PenLine className="w-3.5 h-3.5" />
@@ -116,7 +116,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
           <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-4">
             <Disc3 className="w-8 h-8 text-zinc-600" />
           </div>
-          <h3 className="text-base font-semibold text-zinc-400 mb-2">No albums yet</h3>
+          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No albums yet</h3>
           <p className="text-sm text-zinc-500 max-w-xs mb-4">
             Fetch lyrics for an album or add one manually.
           </p>
@@ -130,7 +130,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
             </button>
             <button
               onClick={onAddManual}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 hover:text-white text-sm font-semibold transition-all"
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-zinc-300 dark:border-white/10 text-zinc-700 dark:text-zinc-300 hover:text-white text-sm font-semibold transition-all"
             >
               <PenLine className="w-4 h-4" />
               Add Manually
@@ -162,8 +162,8 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                       style={{ background: gradient(album.album || String(album.id)) }}
                     />
                     {/* Decorative vinyl record */}
-                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full border border-white/5 opacity-20">
-                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[30%] h-[30%] rounded-full border border-white/10" />
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full border border-zinc-200 dark:border-white/5 opacity-20">
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[30%] h-[30%] rounded-full border border-zinc-300 dark:border-white/10" />
                     </div>
                   </>
                 )}
@@ -176,7 +176,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                   <h3 className="text-sm font-bold text-white truncate mb-2 drop-shadow-lg">
                     {album.album || 'Top Songs'}
                   </h3>
-                  <div className="flex items-center gap-3 text-xs text-zinc-300/70">
+                  <div className="flex items-center gap-3 text-xs text-zinc-700 dark:text-zinc-300/70">
                     <span className="flex items-center gap-1">
                       <FileText className="w-3 h-3" />
                       {songCount} songs
@@ -189,7 +189,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
 
                 {/* Context menu button */}
                 <button
-                  className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/50 text-white/60 hover:text-white hover:bg-black/70 opacity-0 group-hover:opacity-100 transition-all z-10"
+                  className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/20 dark:bg-black/50 text-white/60 hover:text-white hover:bg-black/20 dark:bg-black/40 dark:bg-black/70 opacity-0 group-hover:opacity-100 transition-all z-10"
                   onClick={(e) => {
                     e.stopPropagation();
                     setMenuOpenId(menuOpenId === album.id ? null : album.id);
@@ -201,12 +201,12 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                 {/* Context menu */}
                 {menuOpenId === album.id && (
                   <div
-                    className="absolute top-10 right-2 z-20 min-w-[160px] rounded-xl bg-zinc-900 border border-white/10 shadow-2xl py-1 animate-in fade-in slide-in-from-top-1"
+                    className="absolute top-10 right-2 z-20 min-w-[160px] rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 shadow-2xl py-1 animate-in fade-in slide-in-from-top-1"
                     onClick={(e) => e.stopPropagation()}
                   >
                     {onRefreshImage && (
                       <button
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                         onClick={() => { onRefreshImage(album); setMenuOpenId(null); }}
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
@@ -215,7 +215,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                     )}
                     {onSetImage && (
                       <button
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors"
                         onClick={() => {
                           setMenuOpenId(null);
                           const url = prompt(`Paste an image URL for "${album.album || 'Album'}":`, album.image_url || '');
@@ -226,7 +226,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                         Set Custom Image
                       </button>
                     )}
-                    <div className="border-t border-white/5 my-1" />
+                    <div className="border-t border-zinc-200 dark:border-white/5 my-1" />
                     <button
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
                       onClick={() => { onDeleteAlbum(album); setMenuOpenId(null); }}
@@ -242,13 +242,13 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
 
           {/* Add new album card — dropdown */}
           <div
-            className="relative aspect-square rounded-2xl border-2 border-dashed border-white/10 hover:border-pink-500/30 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 hover:bg-white/[0.02] group"
+            className="relative aspect-square rounded-2xl border-2 border-dashed border-zinc-300 dark:border-white/10 hover:border-pink-500/30 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 hover:bg-white/[0.02] group"
             onClick={() => setAddMenuOpen(!addMenuOpen)}
           >
             <div className="w-10 h-10 rounded-full bg-white/5 group-hover:bg-pink-500/10 flex items-center justify-center mb-2 transition-colors">
               <Plus className="w-5 h-5 text-zinc-500 group-hover:text-pink-400 transition-colors" />
             </div>
-            <span className="text-xs text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors">
+            <span className="text-xs text-zinc-500 group-hover:text-zinc-700 dark:text-zinc-300 font-medium transition-colors">
               Add Album
             </span>
           </div>

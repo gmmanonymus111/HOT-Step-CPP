@@ -129,11 +129,11 @@ export const GlobalParamBar: React.FC = () => {
   }, []);
 
   return (
-    <div className="flex-shrink-0 relative z-40 bg-zinc-900/95 border-b border-white/5"
+    <div className="flex-shrink-0 relative z-40 bg-white/95 dark:bg-zinc-900/95 border-b border-zinc-200 dark:border-white/5"
          style={{ backdropFilter: 'blur(20px)' }}>
       <div className="flex items-stretch">
         {/* Logo */}
-        <div className="flex items-center gap-2.5 px-5 flex-shrink-0 border-r border-white/5" style={{ width: '210px' }}>
+        <div className="flex items-center gap-2.5 px-5 flex-shrink-0 border-r border-zinc-200 dark:border-white/5" style={{ width: '210px' }}>
           <div className="w-7 h-7 rounded-full bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center shadow-lg flex-shrink-0">
             <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -225,7 +225,7 @@ export const GlobalParamBar: React.FC = () => {
         </div>
 
         {/* Right — Export/Import + VRAM */}
-        <div className="flex items-center gap-2 flex-shrink-0 px-3 border-l border-white/5" style={{ width: '210px' }}>
+        <div className="flex items-center gap-2 flex-shrink-0 px-3 border-l border-zinc-200 dark:border-white/5" style={{ width: '210px' }}>
           <button onClick={handleExport} title="Export preset"
             className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-emerald-400 transition-colors">
             <Upload size={13} />

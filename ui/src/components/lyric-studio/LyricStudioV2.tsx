@@ -578,10 +578,10 @@ export const LyricStudioV2: React.FC = () => {
 
   // ── Render ──
   return (
-    <div className="h-full w-full flex flex-col relative bg-zinc-950">
+    <div className="h-full w-full flex flex-col relative bg-white dark:bg-zinc-950">
       {/* Toast */}
       {toast && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-2.5 rounded-xl bg-zinc-800/90 backdrop-blur-sm border border-white/10 text-sm text-white shadow-2xl ls2-slide-up">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-2.5 rounded-xl bg-zinc-100/90 dark:bg-zinc-800/90 backdrop-blur-sm border border-zinc-300 dark:border-white/10 text-sm text-white shadow-2xl ls2-slide-up">
           {toast}
         </div>
       )}
@@ -601,23 +601,23 @@ export const LyricStudioV2: React.FC = () => {
       <div className="flex-1 overflow-hidden">
         {nav.level === 'artists' && (
           <div className="h-full flex ls2-fade-in">
-            <div className="w-48 flex-shrink-0 border-r border-white/5 overflow-hidden">
+            <div className="w-48 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
               <ArtistSidebar artists={artists} selectedArtistId={-1}
                 onSelectArtist={handleSelectArtist} onBack={handleBackToArtists}
                 artistIdsWithAdapters={artistIdsWithAdapters} />
             </div>
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Header bar — spans above ArtistPageSidebar + Grid, matches ContentTabs height */}
-              <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-white/5 bg-zinc-950/30">
-                <span className="text-sm font-medium text-zinc-400">All Artists</span>
+              <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/30 dark:bg-zinc-950/30">
+                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">All Artists</span>
                 {artists.length > 0 && (
-                  <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-400">
+                  <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-600 dark:text-zinc-400">
                     {artists.length}
                   </span>
                 )}
               </div>
               <div className="flex-1 flex min-h-0">
-                <div className="w-64 flex-shrink-0 border-r border-white/5 overflow-hidden">
+                <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
                   <ArtistPageSidebar onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} />
                 </div>
                 <div className="flex-1 overflow-y-auto">
@@ -637,7 +637,7 @@ export const LyricStudioV2: React.FC = () => {
             >
               <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
             </div>
-            <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden" style={{ width: lsRightPanelWidth }}>
+            <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden" style={{ width: lsRightPanelWidth }}>
               <ActivitySidebar source="lyric-studio" showToast={showToast}
                 refreshKey={recordingsRefreshKey} compact={compactRight} />
             </div>
@@ -646,23 +646,23 @@ export const LyricStudioV2: React.FC = () => {
 
         {nav.level === 'albums' && nav.selectedArtist && (
           <div className="h-full flex ls2-fade-in">
-            <div className="w-48 flex-shrink-0 border-r border-white/5 overflow-hidden">
+            <div className="w-48 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
               <ArtistSidebar artists={artists} selectedArtistId={nav.selectedArtist.id}
                 onSelectArtist={handleSelectArtist} onBack={handleBackToArtists}
                 artistIdsWithAdapters={artistIdsWithAdapters} />
             </div>
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Header bar — spans above ArtistPageSidebar + Grid, matches ContentTabs height */}
-              <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-white/5 bg-zinc-950/30">
-                <span className="text-sm font-medium text-zinc-400">{nav.selectedArtist.name}</span>
+              <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/30 dark:bg-zinc-950/30">
+                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">{nav.selectedArtist.name}</span>
                 {albums.length > 0 && (
-                  <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-400">
+                  <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-600 dark:text-zinc-400">
                     {albums.length}
                   </span>
                 )}
               </div>
               <div className="flex-1 flex min-h-0">
-                <div className="w-64 flex-shrink-0 border-r border-white/5 overflow-hidden">
+                <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
                   <ArtistPageSidebar artist={nav.selectedArtist} albumCount={albums.length}
                     onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} />
                 </div>
@@ -684,7 +684,7 @@ export const LyricStudioV2: React.FC = () => {
             >
               <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
             </div>
-            <div className="h-full flex-shrink-0 border-l border-white/5 overflow-hidden" style={{ width: lsRightPanelWidth }}>
+            <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden" style={{ width: lsRightPanelWidth }}>
               <ActivitySidebar source="lyric-studio" showToast={showToast}
                 refreshKey={recordingsRefreshKey} compact={compactRight} />
             </div>
@@ -695,12 +695,12 @@ export const LyricStudioV2: React.FC = () => {
           <div className="h-full flex flex-col ls2-fade-in">
             <div className="flex-1 flex min-h-0">
               {/* Left: artist sidebar + album header */}
-              <div className="w-48 flex-shrink-0 border-r border-white/5 overflow-hidden">
+              <div className="w-48 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
                 <ArtistSidebar artists={artists} selectedArtistId={nav.selectedArtist.id}
                   onSelectArtist={handleSelectArtist} onBack={handleBackToArtists}
                   artistIdsWithAdapters={artistIdsWithAdapters} />
               </div>
-              <div className="w-64 flex-shrink-0 border-r border-white/5 overflow-hidden relative">
+              <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden relative">
                 <div className="relative z-[1] h-full">
                   <AlbumHeader
                     artist={nav.selectedArtist} album={nav.selectedAlbum}
@@ -775,7 +775,7 @@ export const LyricStudioV2: React.FC = () => {
               </div>
 
               {/* Right: sidebar panel */}
-              <div className="flex-shrink-0 border-l border-white/5 overflow-hidden flex flex-col relative" style={{ width: lsRightPanelWidth }}>
+              <div className="flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden flex flex-col relative" style={{ width: lsRightPanelWidth }}>
                 <div className="relative z-[1] flex-1 min-h-0 overflow-hidden">
                   <ActivitySidebar source="lyric-studio"
                     showToast={showToast}

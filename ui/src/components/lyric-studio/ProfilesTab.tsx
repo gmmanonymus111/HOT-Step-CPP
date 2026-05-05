@@ -90,7 +90,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
         <button
           onClick={handleBuild}
           disabled={building}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
         >
           {building ? (
             <>
@@ -125,7 +125,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
           <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
             <Users className="w-7 h-7 text-zinc-600" />
           </div>
-          <h3 className="text-base font-semibold text-zinc-400 mb-2">No profiles yet</h3>
+          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No profiles yet</h3>
           <p className="text-sm text-zinc-500 max-w-xs">
             Build a stylistic profile from the source lyrics to start generating.
           </p>
@@ -138,7 +138,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
             return (
               <div
                 key={profile.id}
-                className={`group rounded-xl border border-white/5 hover:border-white/10 bg-white/[0.01] overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
+                className={`group rounded-xl border border-zinc-200 dark:border-white/5 hover:border-zinc-300 dark:border-white/10 bg-white/[0.01] overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
               >
               <div
                 className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/[0.02] transition-colors"
@@ -160,7 +160,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                       )}
                     </div>
                     {themes && themes.length > 0 && (
-                      <p className="text-xs text-zinc-400 truncate">
+                      <p className="text-xs text-zinc-600 dark:text-zinc-400 truncate">
                         {themes.slice(0, 4).join(', ')}
                       </p>
                     )}
@@ -171,7 +171,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                   <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <button
                       onClick={() => handleDelete(profile)}
-                      className="p-2 rounded-lg hover:bg-red-500/10 text-zinc-400 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                      className="p-2 rounded-lg hover:bg-red-500/10 text-zinc-600 dark:text-zinc-400 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
                       title="Delete profile"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -181,7 +181,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
 
                 {/* Expanded profile detail */}
                 {selectedProfile?.id === profile.id && data && (
-                  <div className="border-t border-white/5 p-4 space-y-4">
+                  <div className="border-t border-zinc-200 dark:border-white/5 p-4 space-y-4">
                     {/* Themes */}
                     {data.themes?.length > 0 && (
                       <div>
@@ -238,7 +238,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     ].filter(s => s.value).map((section, i) => (
                       <div key={i}>
                         <span className={`text-[10px] uppercase tracking-wider font-semibold ${section.color}`}>{section.label}</span>
-                        <p className="text-sm text-zinc-300 mt-1 leading-relaxed">{section.value}</p>
+                        <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1 leading-relaxed">{section.value}</p>
                       </div>
                     ))}
 
@@ -251,7 +251,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                         <div className="mt-2 space-y-1">
                           {Object.entries(data.song_subjects).map(([title, subject]: [string, any]) => (
                             <div key={title} className="flex gap-2 text-xs">
-                              <span className="text-zinc-400 font-medium shrink-0 w-32 truncate" title={title}>{title}</span>
+                              <span className="text-zinc-600 dark:text-zinc-400 font-medium shrink-0 w-32 truncate" title={title}>{title}</span>
                               <span className="text-zinc-500">{subject}</span>
                             </div>
                           ))}
@@ -262,12 +262,12 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Detailed stats */}
                     {(data.meter_stats || data.vocabulary_stats || data.repetition_stats || data.rhyme_quality) && (
                       <details>
-                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-300">Detailed Stats</summary>
+                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">Detailed Stats</summary>
                         <div className="mt-2 grid grid-cols-2 gap-3">
                           {data.meter_stats && (
-                            <div className="p-3 rounded-lg bg-white/5 border border-white/5">
+                            <div className="p-3 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                               <span className="text-[10px] text-blue-400 uppercase tracking-wider font-semibold">Meter</span>
-                              <div className="text-xs text-zinc-400 mt-1 space-y-0.5">
+                              <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-0.5">
                                 <div>Avg syllables: {data.meter_stats.avg_syllables_per_line}/line</div>
                                 <div>σ = {data.meter_stats.syllable_std_dev}</div>
                                 <div>Words: {data.meter_stats.avg_words_per_line}/line</div>
@@ -275,9 +275,9 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                             </div>
                           )}
                           {data.vocabulary_stats && (
-                            <div className="p-3 rounded-lg bg-white/5 border border-white/5">
+                            <div className="p-3 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                               <span className="text-[10px] text-green-400 uppercase tracking-wider font-semibold">Vocabulary</span>
-                              <div className="text-xs text-zinc-400 mt-1 space-y-0.5">
+                              <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-0.5">
                                 <div>TTR: {data.vocabulary_stats.type_token_ratio}</div>
                                 <div>{data.vocabulary_stats.total_words} words ({data.vocabulary_stats.unique_words} unique)</div>
                                 <div>Contractions: {data.vocabulary_stats.contraction_pct}%</div>
@@ -285,18 +285,18 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                             </div>
                           )}
                           {data.repetition_stats && (
-                            <div className="p-3 rounded-lg bg-white/5 border border-white/5">
+                            <div className="p-3 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                               <span className="text-[10px] text-pink-400 uppercase tracking-wider font-semibold">Repetition</span>
-                              <div className="text-xs text-zinc-400 mt-1 space-y-0.5">
+                              <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-0.5">
                                 <div>Chorus: {data.repetition_stats.chorus_repetition_pct}% repeated</div>
                                 <div>Pattern: {data.repetition_stats.pattern}</div>
                               </div>
                             </div>
                           )}
                           {data.rhyme_quality && (
-                            <div className="p-3 rounded-lg bg-white/5 border border-white/5">
+                            <div className="p-3 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                               <span className="text-[10px] text-purple-400 uppercase tracking-wider font-semibold">Rhyme Quality</span>
-                              <div className="text-xs text-zinc-400 mt-1 space-y-0.5">
+                              <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-0.5">
                                 <div>Perfect: {data.rhyme_quality.perfect}</div>
                                 <div>Slant: {data.rhyme_quality.slant}</div>
                                 <div>Assonance: {data.rhyme_quality.assonance}</div>
@@ -310,8 +310,8 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Raw summary */}
                     {data.raw_summary && (
                       <details>
-                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-300">Full Summary</summary>
-                        <div className="mt-2 p-3 rounded-lg bg-black/40 border border-white/5 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto">
+                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">Full Summary</summary>
+                        <div className="mt-2 p-3 rounded-lg bg-black/20 dark:bg-black/40 border border-zinc-200 dark:border-white/5 text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto">
                           {data.raw_summary}
                         </div>
                       </details>

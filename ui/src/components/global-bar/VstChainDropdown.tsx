@@ -55,7 +55,7 @@ const PluginSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           onChange={e => setFilter(e.target.value)}
           placeholder="Search plugins..."
           autoFocus
-          className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-zinc-800 border border-white/10 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20 outline-none transition-colors"
+          className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-600 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20 outline-none transition-colors"
         />
       </div>
 
@@ -84,7 +84,7 @@ const PluginSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             >
               <Plus size={12} className={`flex-shrink-0 ${inChain.has(plugin.uid) ? 'text-zinc-600' : 'text-violet-400'}`} />
               <div className="min-w-0 flex-1">
-                <div className="text-xs text-zinc-200 truncate">{plugin.name}</div>
+                <div className="text-xs text-zinc-800 dark:text-zinc-200 truncate">{plugin.name}</div>
                 <div className="text-[10px] text-zinc-500 truncate">{plugin.vendor} · {plugin.subcategories}</div>
               </div>
             </button>
@@ -120,7 +120,7 @@ const ChainRow: React.FC<{
       className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border transition-all ${
         entry.enabled
           ? 'bg-violet-500/5 border-violet-500/20'
-          : 'bg-zinc-800/50 border-white/5 opacity-50'
+          : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 opacity-50'
       }`}
     >
       {/* Drag handle placeholder + reorder buttons */}
@@ -128,14 +128,14 @@ const ChainRow: React.FC<{
         <button
           onClick={() => reorderChain(index, index - 1)}
           disabled={index === 0}
-          className="p-0 text-zinc-600 hover:text-zinc-300 disabled:opacity-20 transition-colors"
+          className="p-0 text-zinc-600 hover:text-zinc-700 dark:text-zinc-300 disabled:opacity-20 transition-colors"
         >
           <ChevronUp size={10} />
         </button>
         <button
           onClick={() => reorderChain(index, index + 1)}
           disabled={index >= total - 1}
-          className="p-0 text-zinc-600 hover:text-zinc-300 disabled:opacity-20 transition-colors"
+          className="p-0 text-zinc-600 hover:text-zinc-700 dark:text-zinc-300 disabled:opacity-20 transition-colors"
         >
           <ChevronDown size={10} />
         </button>
@@ -148,7 +148,7 @@ const ChainRow: React.FC<{
 
       {/* Plugin name */}
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-zinc-200 truncate">{entry.name}</div>
+        <div className="text-xs text-zinc-800 dark:text-zinc-200 truncate">{entry.name}</div>
         <div className="text-[10px] text-zinc-500 truncate">{entry.vendor}</div>
       </div>
 
@@ -246,8 +246,8 @@ export const VstChainDropdown: React.FC = () => {
             monitoring
               ? 'bg-violet-500/15 border-violet-500/40 text-violet-300 hover:bg-violet-500/25'
               : hasTrack
-                ? 'bg-zinc-800 border-white/10 text-zinc-400 hover:border-violet-500/30 hover:text-violet-400'
-                : 'bg-zinc-800/50 border-white/5 text-zinc-600 cursor-not-allowed'
+                ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:border-violet-500/30 hover:text-violet-400'
+                : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 text-zinc-600 cursor-not-allowed'
           }`}
         >
           {monitoring ? (
@@ -292,13 +292,13 @@ export const VstChainDropdown: React.FC = () => {
 
       {/* Add plugin */}
       {showSearch ? (
-        <div className="border-t border-white/5 pt-2">
+        <div className="border-t border-zinc-200 dark:border-white/5 pt-2">
           <PluginSearch onClose={() => setShowSearch(false)} />
         </div>
       ) : (
         <button
           onClick={() => setShowSearch(true)}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-zinc-800 text-zinc-400 border border-white/10 hover:border-violet-500/30 hover:text-violet-400 transition-all"
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-300 dark:border-white/10 hover:border-violet-500/30 hover:text-violet-400 transition-all"
         >
           <Plus size={14} /> Add Plugin
         </button>

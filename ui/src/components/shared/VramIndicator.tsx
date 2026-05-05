@@ -55,7 +55,7 @@ export const VramIndicator: React.FC<VramIndicatorProps> = ({
         <span className={`text-[10px] font-mono font-medium ${colorText}`}>
           {(vram.used_mb / 1024).toFixed(1)}/{(vram.total_mb / 1024).toFixed(1)}
         </span>
-        <div className="w-10 h-1 rounded-full bg-zinc-700 overflow-hidden">
+        <div className="w-10 h-1 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-500 ${colorBg}`}
             style={{ width: `${percent}%` }}

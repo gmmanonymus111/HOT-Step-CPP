@@ -37,14 +37,14 @@ export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCan
   const isDownloading = downloadJob && (downloadJob.status === 'downloading' || downloadJob.status === 'queued' || downloadJob.status === 'paused' || downloadJob.status === 'failed');
 
   return (
-    <div className="group rounded-xl border border-white/5 bg-zinc-800/30 hover:bg-zinc-800/60 hover:border-white/10 transition-all p-3">
+    <div className="group rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-100/30 dark:bg-zinc-800/30 hover:bg-zinc-100 dark:bg-zinc-800/60 hover:border-zinc-300 dark:border-white/10 transition-all p-3">
       {/* Main row */}
       <div className="flex items-center gap-3">
         {/* Name + quant badge */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
-            <span className="text-sm font-medium text-zinc-200">{file.displayName}</span>
-            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${quantColors[file.quant] || 'bg-zinc-700 text-zinc-400 border-zinc-600'}`}>
+            <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">{file.displayName}</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${quantColors[file.quant] || 'bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400 border-zinc-600'}`}>
               {file.quant}
             </span>
             {file.tags.includes('recommended') && (
@@ -72,7 +72,7 @@ export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCan
                     Delete
                   </button>
                   <button onClick={() => setConfirmDelete(false)}
-                    className="text-[10px] px-2 py-1 rounded bg-zinc-700 text-zinc-400 hover:bg-zinc-600 transition-colors">
+                    className="text-[10px] px-2 py-1 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-600 transition-colors">
                     Cancel
                   </button>
                 </div>

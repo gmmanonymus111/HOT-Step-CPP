@@ -36,7 +36,7 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
     <div className={`rounded-2xl border p-5 transition-all ${
       allInstalled
         ? 'bg-emerald-500/5 border-emerald-500/20'
-        : 'bg-zinc-800/50 border-white/5 hover:border-pink-500/20 hover:bg-zinc-800/80'
+        : 'bg-zinc-100/50 dark:bg-zinc-800/50 border-zinc-200 dark:border-white/5 hover:border-pink-500/20 hover:bg-zinc-100/80 dark:bg-zinc-800/80'
     }`}>
       {/* Header */}
       <div className="flex items-start gap-3 mb-3">
@@ -44,7 +44,7 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
           <Package size={18} className={allInstalled ? 'text-emerald-400' : 'text-pink-400'} />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-bold text-zinc-200">{pack.name}</h3>
+          <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-200">{pack.name}</h3>
           <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">{pack.description}</p>
         </div>
       </div>
@@ -58,7 +58,7 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
             ) : (
               <Download size={11} className="text-zinc-600 flex-shrink-0" />
             )}
-            <span className={`truncate ${f.installed ? 'text-zinc-400' : 'text-zinc-300'}`}>
+            <span className={`truncate ${f.installed ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-700 dark:text-zinc-300'}`}>
               {f.displayName}
             </span>
             <span className="text-zinc-600 font-mono text-[10px] ml-auto flex-shrink-0">

@@ -84,17 +84,17 @@ export const Player: React.FC<PlayerProps> = ({
 
   if (!currentSong) {
     return (
-      <div className="h-14 flex-shrink-0 bg-zinc-950 flex items-center justify-center">
+      <div className="h-14 flex-shrink-0 bg-white dark:bg-zinc-950 flex items-center justify-center">
         <span className="text-sm text-zinc-600">Select a song to play</span>
       </div>
     );
   }
 
   return (
-    <div className="h-14 flex-shrink-0 bg-zinc-950 flex items-center px-4 gap-4">
+    <div className="h-14 flex-shrink-0 bg-white dark:bg-zinc-950 flex items-center px-4 gap-4">
       {/* Left: Song Info */}
       <div className="flex items-center gap-3 w-[240px] flex-shrink-0">
-        <div className="w-12 h-12 rounded-lg bg-zinc-800 flex items-center justify-center overflow-hidden flex-shrink-0">
+        <div className="w-12 h-12 rounded-lg bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center overflow-hidden flex-shrink-0">
           {currentSong.coverUrl ? (
             <img src={currentSong.coverUrl} alt="" className="w-full h-full object-cover" />
           ) : (
@@ -102,7 +102,7 @@ export const Player: React.FC<PlayerProps> = ({
           )}
         </div>
         <div className="min-w-0">
-          <div className="text-sm font-medium text-white truncate">{currentSong.title || 'Untitled'}</div>
+          <div className="text-sm font-medium text-zinc-900 dark:text-white truncate">{currentSong.title || 'Untitled'}</div>
           <div className="text-xs text-zinc-500 truncate">
             {currentSong.caption || currentSong.style || ''}
           </div>
@@ -114,36 +114,36 @@ export const Player: React.FC<PlayerProps> = ({
         <span className="text-[10px] text-zinc-500 font-mono w-10 text-right flex-shrink-0">{formatTime(currentTime)}</span>
         <button
           onClick={onToggleShuffle}
-          className={`p-1.5 rounded-lg transition-colors ${isShuffle ? 'text-pink-400' : 'text-zinc-500 hover:text-white'}`}
+          className={`p-1.5 rounded-lg transition-colors ${isShuffle ? 'text-pink-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
           title="Shuffle"
         >
           <Shuffle size={16} />
         </button>
-        <button onClick={onPrevious} className="p-1.5 rounded-lg text-zinc-400 hover:text-white transition-colors">
+        <button onClick={onPrevious} className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors">
           <SkipBack size={18} />
         </button>
         <button
           onClick={onTogglePlay}
-          className="w-9 h-9 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform"
+          className="w-9 h-9 rounded-full bg-zinc-900 dark:bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-md"
         >
           {isPlaying
-            ? <Pause size={18} className="text-black" fill="black" />
-            : <Play size={18} className="text-black ml-0.5" fill="black" />
+            ? <Pause size={18} className="text-white dark:text-black" fill="currentColor" />
+            : <Play size={18} className="text-white dark:text-black ml-0.5" fill="currentColor" />
           }
         </button>
-        <button onClick={onNext} className="p-1.5 rounded-lg text-zinc-400 hover:text-white transition-colors">
+        <button onClick={onNext} className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors">
           <SkipForward size={18} />
         </button>
         <button
           onClick={onToggleRepeat}
-          className={`p-1.5 rounded-lg transition-colors ${repeatMode !== 'none' ? 'text-pink-400' : 'text-zinc-500 hover:text-white'}`}
+          className={`p-1.5 rounded-lg transition-colors ${repeatMode !== 'none' ? 'text-pink-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
           title={repeatMode === 'one' ? 'Repeat One' : repeatMode === 'all' ? 'Repeat All' : 'Repeat Off'}
         >
           {repeatMode === 'one' ? <Repeat1 size={16} /> : <Repeat size={16} />}
         </button>
         <button
           onClick={onToggleSpectrum}
-          className={`p-1.5 rounded-lg transition-colors ${spectrumEnabled ? 'text-purple-400' : 'text-zinc-500 hover:text-white'}`}
+          className={`p-1.5 rounded-lg transition-colors ${spectrumEnabled ? 'text-purple-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
           title={spectrumEnabled ? 'Spectrum Analyzer On' : 'Spectrum Analyzer Off'}
         >
           <Activity size={16} />
@@ -160,7 +160,7 @@ export const Player: React.FC<PlayerProps> = ({
             const idx = rates.indexOf(playbackRate);
             onPlaybackRateChange(rates[(idx + 1) % rates.length]);
           }}
-          className="text-xs text-zinc-500 hover:text-white px-1.5 py-0.5 rounded font-mono transition-colors"
+          className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-white px-1.5 py-0.5 rounded font-mono transition-colors"
           title="Playback Speed"
         >
           {playbackRate}x
@@ -216,7 +216,7 @@ export const Player: React.FC<PlayerProps> = ({
         <div className="flex items-center gap-1.5 group flex-shrink-0">
           <button
             onClick={() => onVolumeChange(volume > 0 ? 0 : 0.8)}
-            className="text-zinc-400 hover:text-white transition-colors"
+            className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors"
           >
             {volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
           </button>
@@ -235,7 +235,7 @@ export const Player: React.FC<PlayerProps> = ({
         {onReusePrompt && (
           <button
             onClick={onReusePrompt}
-            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-colors"
+            className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
             title="Reuse Prompt"
           >
             <RotateCcw size={14} />

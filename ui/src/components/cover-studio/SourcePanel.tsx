@@ -129,7 +129,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
-              <Upload className="w-8 h-8 text-zinc-400" />
+              <Upload className="w-8 h-8 text-zinc-600 dark:text-zinc-400" />
               <span className="text-xs text-zinc-500">Drop audio file or click to browse</span>
               <span className="text-[10px] text-zinc-600">MP3, WAV, FLAC, OGG, M4A</span>
             </div>
@@ -203,7 +203,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
                   className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all ${
                     bpmCorrection === opt.value && !bpmIsOverridden
                       ? 'bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-500/40'
-                      : 'bg-white/5 text-zinc-500 hover:bg-white/10 hover:text-zinc-300'
+                      : 'bg-white/5 text-zinc-500 hover:bg-white/10 hover:text-zinc-700 dark:text-zinc-300'
                   }`}
                 >
                   {opt.label}
@@ -224,10 +224,10 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
                 const v = e.target.value.trim();
                 onBpmOverrideChange(v ? parseInt(v, 10) || null : null);
               }}
-              className={`flex-1 px-2 py-1 rounded-xl bg-zinc-800 border text-xs outline-none transition-colors tabular-nums ${
+              className={`flex-1 px-2 py-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 border text-xs outline-none transition-colors tabular-nums ${
                 bpmIsOverridden
                   ? 'border-amber-500/40 text-amber-300 focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20'
-                  : 'border-white/10 text-zinc-300 focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20'
+                  : 'border-zinc-300 dark:border-white/10 text-zinc-700 dark:text-zinc-300 focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20'
               }`}
             />
             {bpmIsOverridden && (
@@ -242,10 +242,10 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             <select
               value={keyOverride || ''}
               onChange={e => onKeyOverrideChange(e.target.value || null)}
-              className={`flex-1 px-2 py-1 rounded-xl bg-zinc-800 border text-xs outline-none transition-colors cursor-pointer ${
+              className={`flex-1 px-2 py-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 border text-xs outline-none transition-colors cursor-pointer ${
                 keyOverride
                   ? 'border-teal-500/40 text-teal-300 focus:border-teal-500/60 focus:ring-1 focus:ring-teal-500/20'
-                  : 'border-white/10 text-zinc-300 focus:border-teal-500/50 focus:ring-1 focus:ring-teal-500/20'
+                  : 'border-zinc-300 dark:border-white/10 text-zinc-700 dark:text-zinc-300 focus:border-teal-500/50 focus:ring-1 focus:ring-teal-500/20'
               }`}
             >
               <option value="">Detected{analysis?.key ? ` (${analysis.key})` : ''}</option>
@@ -260,7 +260,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             <select
               value={vocalLanguage}
               onChange={e => onVocalLanguageChange(e.target.value)}
-              className="flex-1 px-2 py-1 rounded-xl bg-zinc-800 border border-white/10 text-xs text-zinc-300 outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors cursor-pointer"
+              className="flex-1 px-2 py-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-xs text-zinc-700 dark:text-zinc-300 outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors cursor-pointer"
             >
               {LANGUAGES.map(l => (
                 <option key={l.value} value={l.value}>{l.label}</option>
@@ -271,13 +271,13 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
       )}
 
       {/* Advanced Mode */}
-      <div className="border-t border-white/5 pt-4 space-y-3">
+      <div className="border-t border-zinc-200 dark:border-white/5 pt-4 space-y-3">
         <button
           onClick={() => onAdvancedModeChange(!advancedMode)}
           className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
             advancedMode
               ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-              : 'bg-white/5 text-zinc-400 border border-white/10 hover:border-white/20'
+              : 'bg-white/5 text-zinc-600 dark:text-zinc-400 border border-zinc-300 dark:border-white/10 hover:border-zinc-400 dark:hover:border-white/20'
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
@@ -289,7 +289,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             <select
               value={sepLevel}
               onChange={(e) => onSepLevelChange(parseInt(e.target.value))}
-              className="w-full px-2 py-1.5 rounded-xl bg-zinc-800 border border-white/10 text-xs text-zinc-300 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors cursor-pointer"
+              className="w-full px-2 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-xs text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors cursor-pointer"
             >
               {SEPARATION_LEVELS.map(l => (
                 <option key={l.value} value={l.value}>{l.label} — {l.description}</option>

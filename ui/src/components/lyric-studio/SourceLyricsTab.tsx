@@ -28,7 +28,7 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
         <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
           <FileText className="w-7 h-7 text-zinc-600" />
         </div>
-        <h3 className="text-base font-semibold text-zinc-400 mb-2">No source lyrics</h3>
+        <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No source lyrics</h3>
         <p className="text-sm text-zinc-500 max-w-xs mb-4">
           Add songs manually or fetch lyrics from Genius.
         </p>
@@ -66,7 +66,7 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
         return (
           <div
             key={idx}
-            className={`rounded-xl border border-white/5 overflow-hidden transition-colors hover:border-white/10 ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
+            className={`rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden transition-colors hover:border-zinc-300 dark:border-white/10 ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
           >
             {/* Song header */}
             <button
@@ -77,7 +77,7 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
                 ? <ChevronDown className="w-4 h-4 text-zinc-500 flex-shrink-0" />
                 : <ChevronRight className="w-4 h-4 text-zinc-500 flex-shrink-0" />
               }
-              <span className="flex-1 text-sm font-medium text-zinc-200 truncate">
+              <span className="flex-1 text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
                 {song.title}
               </span>
               <span className="text-xs text-zinc-500">
@@ -87,21 +87,21 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
 
             {/* Expanded content */}
             {isExpanded && (
-              <div className="border-t border-white/5">
+              <div className="border-t border-zinc-200 dark:border-white/5">
                 <div className="px-4 py-3">
                   {isEditing ? (
                     <textarea
                       value={editText}
                       onChange={e => setEditText(e.target.value)}
-                      className="w-full h-80 text-sm text-zinc-200 bg-black/30 border border-white/10 rounded-lg p-3 font-sans leading-relaxed resize-y focus:outline-none focus:border-indigo-500/50"
+                      className="w-full h-80 text-sm text-zinc-800 dark:text-zinc-200 bg-black/30 border border-zinc-300 dark:border-white/10 rounded-lg p-3 font-sans leading-relaxed resize-y focus:outline-none focus:border-indigo-500/50"
                     />
                   ) : (
-                    <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed max-h-96 overflow-y-auto">
+                    <pre className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed max-h-96 overflow-y-auto">
                       {lyrics || '(No lyrics available)'}
                     </pre>
                   )}
                 </div>
-                <div className="flex items-center gap-2 px-4 py-2 border-t border-white/5 bg-white/[0.01]">
+                <div className="flex items-center gap-2 px-4 py-2 border-t border-zinc-200 dark:border-white/5 bg-white/[0.01]">
                   {isEditing ? (
                     <>
                       <button
@@ -116,7 +116,7 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
                       </button>
                       <button
                         onClick={() => setEditingIdx(null)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:bg-white/5 transition-colors"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:bg-white/5 transition-colors"
                       >
                         <X className="w-3 h-3" />
                         Cancel

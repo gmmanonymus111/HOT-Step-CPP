@@ -27,16 +27,16 @@ interface SectionProps {
 }
 
 export const Section: React.FC<SectionProps> = ({
-  title, icon, count, countColor = 'bg-zinc-700 text-zinc-300', defaultOpen = true, children,
+  title, icon, count, countColor = 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-300', defaultOpen = true, children,
 }) => {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="flex flex-col overflow-hidden"
       style={{ flex: open ? '1 1 0%' : '0 0 auto', minHeight: open ? 0 : 'auto' }}>
       <button onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-4 py-3 min-h-[44px] border-b border-white/5 bg-zinc-950/50 hover:bg-zinc-950/80 transition-colors flex-shrink-0">
+        className="flex items-center gap-2 px-4 py-3 min-h-[44px] border-b border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-zinc-950/50 hover:bg-zinc-50/80 dark:bg-zinc-950/80 transition-colors flex-shrink-0">
         {open ? <ChevronDown className="w-3 h-3 text-zinc-500" /> : <ChevronRight className="w-3 h-3 text-zinc-500" />}
-        <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">
           {icon} {title}
         </span>
         {count !== undefined && count > 0 && (

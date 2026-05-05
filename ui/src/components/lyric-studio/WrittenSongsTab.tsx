@@ -127,7 +127,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
         <button
           onClick={handleQuickGenerate}
           disabled={generating || profiles.length === 0}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
         >
           {generating ? (
             <>
@@ -146,7 +146,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
           <select
             value={genCount}
             onChange={(e) => setGenCount(parseInt(e.target.value))}
-            className="px-2 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:border-emerald-500/50"
+            className="px-2 py-1.5 rounded-lg bg-white/5 border border-zinc-300 dark:border-white/10 text-sm text-white focus:outline-none focus:border-emerald-500/50"
           >
             {[1, 2, 3, 4, 5, 8, 10].map(n => (
               <option key={n} value={n}>{n}</option>
@@ -190,7 +190,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
           <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
             <Music2 className="w-7 h-7 text-zinc-600" />
           </div>
-          <h3 className="text-base font-semibold text-zinc-400 mb-2">No generated lyrics yet</h3>
+          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No generated lyrics yet</h3>
           <p className="text-sm text-zinc-500 max-w-xs">
             Generate lyrics from a profile to see them here.
           </p>
@@ -203,7 +203,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
             return (
               <div
                 key={gen.id}
-                className={`rounded-xl border border-white/5 hover:border-white/10 overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
+                className={`rounded-xl border border-zinc-200 dark:border-white/5 hover:border-zinc-300 dark:border-white/10 overflow-hidden transition-colors ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
               >
                 {/* Header */}
                 <button
@@ -215,7 +215,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                     : <ChevronRight className="w-4 h-4 text-zinc-500 flex-shrink-0" />
                   }
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-zinc-200 truncate">
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
                       {gen.title || 'Untitled'}
                     </p>
                     <p className="text-xs text-zinc-500 mt-0.5">
@@ -257,7 +257,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
 
                 {/* Expanded content */}
                 {isExpanded && (
-                  <div className="border-t border-white/5">
+                  <div className="border-t border-zinc-200 dark:border-white/5">
                     <div className="p-4 space-y-4">
                       {/* Editable title */}
                       <div className="flex items-center gap-3">
@@ -272,7 +272,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
 
                       {/* Metadata grid */}
                       <div className="grid grid-cols-2 gap-3">
-                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-white/5">
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                           <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Subject</label>
                           <input
                             className="w-full bg-transparent text-sm text-amber-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-amber-500/50 transition-colors"
@@ -280,7 +280,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                             onBlur={(e) => { if (e.target.value !== (gen.subject || '')) handleSaveField(gen.id, 'subject', e.target.value); }}
                           />
                         </div>
-                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-white/5">
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                           <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">BPM</label>
                           <input
                             type="number"
@@ -289,7 +289,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                             onBlur={(e) => { const v = parseInt(e.target.value) || 0; if (v !== gen.bpm) handleSaveField(gen.id, 'bpm', v); }}
                           />
                         </div>
-                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-white/5">
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                           <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Key</label>
                           <input
                             className="w-full bg-transparent text-sm text-blue-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-blue-500/50 transition-colors"
@@ -297,7 +297,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                             onBlur={(e) => { if (e.target.value !== (gen.key || '')) handleSaveField(gen.id, 'key', e.target.value); }}
                           />
                         </div>
-                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-white/5">
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                           <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Duration (seconds)</label>
                           <input
                             type="number"
@@ -309,10 +309,10 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                       </div>
 
                       {/* Editable caption */}
-                      <div className="px-3 py-2 rounded-lg bg-white/5 border border-white/5">
+                      <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                         <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Caption</label>
                         <textarea
-                          className="w-full bg-transparent text-sm text-zinc-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-pink-500/50 transition-colors resize-none"
+                          className="w-full bg-transparent text-sm text-zinc-700 dark:text-zinc-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-pink-500/50 transition-colors resize-none"
                           rows={2}
                           defaultValue={gen.caption || ''}
                           onBlur={(e) => { if (e.target.value !== (gen.caption || '')) handleSaveField(gen.id, 'caption', e.target.value); }}
@@ -358,9 +358,9 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
 
                       {/* Editable lyrics */}
                       <div>
-                        <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-2">Lyrics</h3>
+                        <h3 className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">Lyrics</h3>
                         <textarea
-                          className="w-full p-4 rounded-xl bg-black/40 border border-white/5 text-sm text-zinc-200 font-mono leading-relaxed focus:outline-none focus:border-pink-500/30 resize-y transition-colors"
+                          className="w-full p-4 rounded-xl bg-black/20 dark:bg-black/40 border border-zinc-200 dark:border-white/5 text-sm text-zinc-800 dark:text-zinc-200 font-mono leading-relaxed focus:outline-none focus:border-pink-500/30 resize-y transition-colors"
                           style={{ minHeight: '300px' }}
                           defaultValue={gen.lyrics || ''}
                           onBlur={(e) => { if (e.target.value !== (gen.lyrics || '')) handleSaveField(gen.id, 'lyrics', e.target.value); }}

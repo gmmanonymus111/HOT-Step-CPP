@@ -40,7 +40,7 @@ interface MetadataSectionProps {
   onVocalLanguageChange: (v: string) => void;
 }
 
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
+const selectClasses = "w-full px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 
 export const MetadataSection: React.FC<MetadataSectionProps> = ({
   bpm, onBpmChange, keyScale, onKeyScaleChange,
@@ -49,7 +49,7 @@ export const MetadataSection: React.FC<MetadataSectionProps> = ({
   vocalLanguage, onVocalLanguageChange,
 }) => {
   return (
-    <div className="space-y-3 pt-3 border-t border-white/5">
+    <div className="space-y-3 pt-3 border-t border-zinc-200 dark:border-white/5">
       <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Music Parameters</h4>
 
       <div className="grid grid-cols-2 gap-3">

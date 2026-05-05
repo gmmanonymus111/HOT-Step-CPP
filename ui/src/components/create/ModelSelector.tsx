@@ -16,7 +16,7 @@ interface ModelSelectorProps {
   onVaeModelChange: (v: string) => void;
 }
 
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
+const selectClasses = "w-full px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 
 export const ModelSelector: React.FC<ModelSelectorProps> = ({
   ditModel, onDitModelChange, lmModel, onLmModelChange,
@@ -36,13 +36,13 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   const vaeModels = models?.models?.vae || [];
 
   return (
-    <div className="space-y-1 pt-3 border-t border-white/5">
+    <div className="space-y-1 pt-3 border-t border-zinc-200 dark:border-white/5">
       {/* Accordion header */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors"
       >
-        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Models</span>
+        <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Models</span>
         <ChevronDown size={14} className={`text-zinc-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 

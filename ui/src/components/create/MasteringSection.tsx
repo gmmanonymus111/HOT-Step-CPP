@@ -82,15 +82,15 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
   }, [token, masteringReference, onMasteringReferenceChange]);
 
   return (
-    <div className="space-y-1 pt-3 border-t border-white/5">
+    <div className="space-y-1 pt-3 border-t border-zinc-200 dark:border-white/5">
       <button
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Mastering</span>
+          <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Mastering</span>
           <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-            masteringEnabled ? 'bg-amber-500/20 text-amber-400' : 'bg-zinc-700 text-zinc-400'
+            masteringEnabled ? 'bg-amber-500/20 text-amber-400' : 'bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400'
           }`}>
             {masteringEnabled ? 'ON' : 'OFF'}
           </span>
@@ -106,9 +106,9 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
               type="checkbox"
               checked={masteringEnabled}
               onChange={e => onMasteringEnabledChange(e.target.checked)}
-              className="rounded border-zinc-600 bg-zinc-800 text-amber-500 focus:ring-amber-500/20"
+              className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-amber-500 focus:ring-amber-500/20"
             />
-            <span className="text-sm text-zinc-400">Apply Reference Mastering</span>
+            <span className="text-sm text-zinc-600 dark:text-zinc-400">Apply Reference Mastering</span>
             <Sparkles size={14} className="text-amber-400 ml-auto" />
           </label>
 
@@ -121,7 +121,7 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
                 </label>
                 {references.length > 0 ? (
                   <select
-                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-sm text-zinc-200 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 outline-none transition-colors cursor-pointer"
+                    className="w-full px-3 py-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 outline-none transition-colors cursor-pointer"
                     value={masteringReference}
                     onChange={e => onMasteringReferenceChange(e.target.value)}
                   >
@@ -167,8 +167,8 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
                   htmlFor="mastering-ref-upload"
                   className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer transition-all ${
                     uploading
-                      ? 'bg-zinc-800 text-zinc-500 border-white/5 cursor-wait'
-                      : 'bg-zinc-900 text-zinc-400 border-white/10 hover:border-amber-500/30 hover:text-amber-400'
+                      ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border-zinc-200 dark:border-white/5 cursor-wait'
+                      : 'bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-white/10 hover:border-amber-500/30 hover:text-amber-400'
                   }`}
                 >
                   {uploading ? (
@@ -186,9 +186,9 @@ export const MasteringSection: React.FC<MasteringSectionProps> = ({
                     type="checkbox"
                     checked={timbreReference}
                     onChange={e => onTimbreReferenceChange(e.target.checked)}
-                    className="rounded border-zinc-600 bg-zinc-800 text-teal-500 focus:ring-teal-500/20"
+                    className="rounded border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-teal-500 focus:ring-teal-500/20"
                   />
-                  <span className="text-sm text-zinc-400">Also use as timbre reference</span>
+                  <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
                   <Music2 size={14} className="text-teal-400 ml-auto" />
                 </label>
               )}
