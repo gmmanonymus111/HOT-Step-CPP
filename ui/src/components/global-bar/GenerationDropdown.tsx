@@ -80,6 +80,7 @@ export const GenerationDropdown: React.FC = () => {
             <option value="jkass_fast">JKASS Fast</option>
             <option value="stork2">STORK 2</option>
             <option value="stork4">STORK 4</option>
+            <option value="unipc_p">UniPC Predictor</option>
             <option value="sde">SDE (Stochastic)</option>
           </optgroup>
           <optgroup label="── Multi Evaluation ──">
@@ -91,6 +92,7 @@ export const GenerationDropdown: React.FC = () => {
             <option value="dop853">DOP853 (13 NFE)</option>
                 <option value="gl2s">Gauss-Legendre 2s (6 NFE)</option>
                 <option value="rfsolver">RF-Solver (2 NFE)</option>
+                <option value="unipc">UniPC (2 NFE)</option>
           </optgroup>
         </select>
       </div>
@@ -505,6 +507,7 @@ export const GenerationBadge: React.FC = () => {
     rk4: 'RK4', rk5: 'RK5', sde: 'SDE', jkass_fast: 'JKASS',
     jkass_quality: 'JKASSq', stork2: 'STORK2', stork4: 'STORK4',
     dopri5: 'DOPRI5', dop853: 'DOP853', dpm2m_ada: 'DPM++A', gl2s: 'GL2s', rfsolver: 'RFSolv',
+    unipc: 'UniPC', unipc_p: 'UniPC-P',
   };
   const guidanceLabels: Record<string, string> = {
     apg: 'APG', cfg_pp: 'CFG++', dynamic_cfg: 'DynCFG', rescaled_cfg: 'rCFG',

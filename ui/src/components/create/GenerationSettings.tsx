@@ -121,6 +121,7 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
                 <option value="jkass_fast">JKASS Fast</option>
                 <option value="stork2">STORK 2</option>
                 <option value="stork4">STORK 4</option>
+                <option value="unipc_p">UniPC Predictor</option>
                 <option value="sde">SDE (Stochastic)</option>
               </optgroup>
               <optgroup label="── Multi Evaluation ──">
@@ -132,6 +133,7 @@ export const GenerationSettings: React.FC<GenerationSettingsProps> = (props) => 
                 <option value="dop853">DOP853 (13 NFE)</option>
                 <option value="gl2s">Gauss-Legendre 2s (6 NFE)</option>
                 <option value="rfsolver">RF-Solver (2 NFE)</option>
+                <option value="unipc">UniPC (2 NFE)</option>
               </optgroup>
             </select>
           </div>
