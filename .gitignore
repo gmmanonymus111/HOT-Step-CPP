@@ -87,3 +87,5 @@ server/restart-loop.cmd
 # Local-only content
 benchmark-results/
 docs/
+
+docs/plans/
