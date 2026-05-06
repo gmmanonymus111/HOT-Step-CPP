@@ -13,6 +13,9 @@
 #include "guidance/guidance-registry.h"
 #include "hot-step-params.h"
 #include "philox.h"
+#include "sampler-dcw.h"
+#include "sampler-repaint.h"
+#include "sampler-schedule.h"
 #include "schedulers/scheduler-registry.h"
 #include "solvers/solver-registry.h"
 
@@ -83,139 +86,16 @@ static int dit_ggml_generate(DiTGGML *           model,
     temporal_smoothing = g_hotstep_params.temporal_smoothing;
 
     // ── Custom timesteps override (highest priority) ────────────────────
-    // If custom_timesteps CSV is provided, it completely replaces the schedule.
-    // This takes priority over BOTH the upstream shifted-linear schedule AND
-    // the sideband scheduler override below.
     std::vector<float> custom_ts_schedule;
-    bool custom_ts_active = false;
-    if (!g_hotstep_params.custom_timesteps.empty()) {
-        // Parse CSV floats: "0.97,0.76,...,0.085,0" → vector
-        const char * p = g_hotstep_params.custom_timesteps.c_str();
-        while (*p) {
-            while (*p == ' ' || *p == ',') p++;
-            if (!*p) break;
-            char * end = nullptr;
-            float v = strtof(p, &end);
-            if (end == p) break;  // no parse progress
-            custom_ts_schedule.push_back(v);
-            p = end;
-        }
-        // Drop trailing 0 (x0 endpoint) — sampler handles final step separately
-        if (!custom_ts_schedule.empty() && custom_ts_schedule.back() == 0.0f) {
-            custom_ts_schedule.pop_back();
-        }
-        if (!custom_ts_schedule.empty()) {
-            num_steps = (int) custom_ts_schedule.size();
-            schedule = custom_ts_schedule.data();
-            custom_ts_active = true;
-            fprintf(stderr, "[DiT] Custom timesteps: %d steps (overrides scheduler)\n", num_steps);
-        }
+    bool custom_ts_active = sampler_parse_custom_timesteps(custom_ts_schedule, num_steps);
+    if (custom_ts_active) {
+        schedule = custom_ts_schedule.data();
     }
 
     // ── Scheduler override ────────────────────────────────────────────────
-    // The upstream ops_build_schedule() creates a shifted-linear schedule.
-    // If a custom scheduler is configured (and no custom_timesteps), rebuild here.
     std::vector<float> custom_schedule;
     if (!custom_ts_active && !g_hotstep_params.scheduler.empty()) {
-        custom_schedule.resize(num_steps);
-        // Extract shift from the existing schedule (shift warp was already applied
-        // by upstream, but we need the raw shift for our scheduler functions).
-        // We get it from the SynthState via the global — but the sampler doesn't
-        // have access to SynthState. Instead, just recompute from schedule[0]:
-        //   schedule[0] = shift*1/(1+(shift-1)*1) = 1.0 regardless of shift.
-        // So we can't extract shift from the schedule. Use the upstream value.
-        // The shift is embedded in the schedule already; our schedulers apply
-        // their own shift, so we need the raw shift value. We'll read it from
-        // the first schedule value: if schedule[0] != 1.0, it was shifted.
-        // Actually, for shifted-linear: t_0 = shift*1/(1+(shift-1)) = 1.0 always.
-        // We need to infer shift or just use a reasonable default.
-        // PRAGMATIC: pass shift=1.0 and let our scheduler handle it,
-        // since the upstream schedule was already shift-warped and we're replacing it entirely.
-        // The shift value from ops_resolve_params is in SynthState.shift,
-        // but we can back-calculate if schedule was built with shifted-linear:
-        //   t_1 = shift * u / (1 + (shift-1)*u)  where u = 1 - 1/N
-        //   solving: shift = t1*(1-u) / (u*(1-t1))
-        float shift_val = 1.0f; // default
-        if (num_steps >= 2 && schedule[0] > 0.0f) {
-            float u = 1.0f - 1.0f / (float) num_steps;
-            float t1 = schedule[1];
-            if (t1 > 0.0f && t1 < 1.0f && u > 0.0f) {
-                float denom = u * (1.0f - t1);
-                if (denom > 1e-8f) {
-                    shift_val = t1 * (1.0f - u) / denom;
-                    if (shift_val < 0.5f) shift_val = 1.0f;
-                    if (shift_val > 10.0f) shift_val = 3.0f;
-                }
-            }
-        }
-
-        const std::string & ss = g_hotstep_params.scheduler;
-
-        // Composite scheduler dispatch (ported from old ops_build_schedule)
-        if (ss.rfind("composite:", 0) == 0) {
-            const char * body = ss.c_str() + 10;
-            const char * plus = strchr(body, '+');
-            if (plus) {
-                std::string name_a(body, plus - body);
-                const char * after_plus = plus + 1;
-                const char * colon1 = strchr(after_plus, ':');
-                std::string name_b;
-                float crossover = 0.0f, split = 0.5f;
-                if (colon1) {
-                    name_b = std::string(after_plus, colon1 - after_plus);
-                    crossover = (float) atof(colon1 + 1);
-                    const char * colon2 = strchr(colon1 + 1, ':');
-                    if (colon2) split = (float) atof(colon2 + 1);
-                } else {
-                    name_b = std::string(after_plus);
-                }
-                if (crossover < 0.0f) crossover = 0.0f;
-                if (crossover > 1.0f) crossover = 1.0f;
-                if (split < 0.0f) split = 0.0f;
-                if (split > 1.0f) split = 1.0f;
-
-                const SchedulerInfo * sa = scheduler_lookup(name_a.c_str());
-                const SchedulerInfo * sb = scheduler_lookup(name_b.c_str());
-                if (!sa) sa = scheduler_lookup("linear");
-                if (!sb) sb = scheduler_lookup("linear");
-
-                std::vector<float> va(num_steps), vb(num_steps);
-                sa->fn(va.data(), num_steps, shift_val);
-                sb->fn(vb.data(), num_steps, shift_val);
-
-                float zone_lo = split - crossover * 0.5f;
-                float zone_hi = split + crossover * 0.5f;
-                for (int i = 0; i < num_steps; i++) {
-                    float frac = (float) i / (float) num_steps;
-                    float w;
-                    if (crossover < 1e-6f || frac <= zone_lo) {
-                        w = (frac < split) ? 0.0f : 1.0f;
-                    } else if (frac >= zone_hi) {
-                        w = 1.0f;
-                    } else {
-                        w = (frac - zone_lo) / (zone_hi - zone_lo);
-                    }
-                    custom_schedule[i] = (1.0f - w) * va[i] + w * vb[i];
-                }
-                for (int i = 1; i < num_steps; i++) {
-                    if (custom_schedule[i] > custom_schedule[i-1])
-                        custom_schedule[i] = custom_schedule[i-1];
-                }
-                scheduler_clamp(custom_schedule.data(), num_steps);
-                fprintf(stderr, "[DiT] Custom schedule: composite %s+%s (cross=%.2f, split=%.2f), shift=%.2f\n",
-                        sa->display_name, sb->display_name, crossover, split, shift_val);
-            }
-        } else {
-            // Standard scheduler lookup
-            const SchedulerInfo * sched = scheduler_lookup(ss.c_str());
-            if (!sched) {
-                fprintf(stderr, "[DiT] WARNING: unknown scheduler '%s', using linear\n", ss.c_str());
-                sched = scheduler_lookup("linear");
-            }
-            sched->fn(custom_schedule.data(), num_steps, shift_val);
-            fprintf(stderr, "[DiT] Custom schedule: %s (%s), shift=%.2f\n",
-                    sched->display_name, sched->name, shift_val);
-        }
+        sampler_build_scheduler_override(custom_schedule, num_steps, schedule);
         schedule = custom_schedule.data();
     }
 
@@ -689,92 +569,13 @@ static int dit_ggml_generate(DiTGGML *           model,
                 solver_state, evaluate_velocity, vt.data()
             );
 
-            // ── DCW correction (Differential Correction in Wavelet domain) ──
-            // Sampler-side correction for SNR-t bias in flow matching.
-            // Matches upstream acestepcpp reference (dwt-haar.h + dit-sampler.h).
-            //
-            // 4 modes with per-mode t-modulation:
-            //   low:    s = t_curr * dcw_scaler          (strong at high noise)
-            //   high:   s = (1 - t_curr) * dcw_scaler    (strong near clean)
-            //   double: low = t_curr * scaler, high = (1 - t_curr) * high_scaler
-            //   pix:    s = dcw_scaler                    (constant, no modulation)
-            //
-            // ODE-only: denoised = xt_after - vt * t_next (reconstructed from
-            // post-step xt, since xt_before = xt + vt * dt for Euler ODE so
-            // denoised = xt_before - vt * t_curr = xt_after - vt * t_next).
-            if (g_hotstep_params.dcw_enabled) {
-                const std::string & dcw_mode = g_hotstep_params.dcw_mode;
-                bool is_low    = (dcw_mode == "low");
-                bool is_high   = (dcw_mode == "high");
-                bool is_double = (dcw_mode == "double");
-                bool is_pix    = (dcw_mode == "pix");
-                if (!is_low && !is_high && !is_double && !is_pix) {
-                    is_low = true;  // fallback to safest mode
-                }
+            // ── DCW correction ──
+            sampler_apply_dcw(xt.data(), vt.data(), N, T, Oc, t_curr, t_next, step);
 
-                // Per-mode effective scaler, modulated as the paper prescribes
-                float s_low      = t_curr * g_hotstep_params.dcw_scaler;
-                float s_high     = (1.0f - t_curr) * g_hotstep_params.dcw_scaler;
-                float s_double_h = (1.0f - t_curr) * g_hotstep_params.dcw_high_scaler;
-                float s_pix      = g_hotstep_params.dcw_scaler;  // constant per paper
-
-                // Scratch buffers for DWT (allocated once, reused per batch)
-                int Tl = (T + 1) / 2;
-                std::vector<float> denoised(n_per);
-                std::vector<float> tmp_xL(Tl * Oc), tmp_xH(Tl * Oc);
-                std::vector<float> tmp_yL(Tl * Oc), tmp_yH(Tl * Oc);
-
-                for (int b = 0; b < N; b++) {
-                    float * xt_b       = xt.data() + b * n_per;
-                    const float * vt_b = vt.data() + b * n_per;
-
-                    // Denoised from POST-step xt (matches upstream C++ exactly)
-                    for (int i = 0; i < n_per; i++) {
-                        denoised[i] = xt_b[i] - vt_b[i] * t_next;
-                    }
-
-                    if (is_low) {
-                        dcw_haar_low_inplace(xt_b, denoised.data(), T, Oc, s_low,
-                                             tmp_xL.data(), tmp_xH.data(),
-                                             tmp_yL.data(), tmp_yH.data());
-                    } else if (is_high) {
-                        dcw_haar_high_inplace(xt_b, denoised.data(), T, Oc, s_high,
-                                              tmp_xL.data(), tmp_xH.data(),
-                                              tmp_yL.data(), tmp_yH.data());
-                    } else if (is_double) {
-                        dcw_haar_double_inplace(xt_b, denoised.data(), T, Oc, s_low, s_double_h,
-                                                tmp_xL.data(), tmp_xH.data(),
-                                                tmp_yL.data(), tmp_yH.data());
-                    } else {  // is_pix
-                        dcw_pix_inplace(xt_b, denoised.data(), T, Oc, s_pix);
-                    }
-                }
-
-                if (step == 0) {
-                    fprintf(stderr, "[DCW] mode=%s scaler=%.4f high_scaler=%.4f "
-                            "(eff_low=%.4f eff_high=%.4f at t=%.3f)\n",
-                            dcw_mode.c_str(), g_hotstep_params.dcw_scaler,
-                            g_hotstep_params.dcw_high_scaler,
-                            s_low, s_double_h, t_curr);
-                }
-            }
-
-            // repaint injection: replace preserved regions with noised source.
-            if (repaint_src && repaint_t1 > repaint_t0) {
-                int injection_cutoff = (int) (repaint_injection_ratio * (float) num_steps + 0.5f);
-                if (step < injection_cutoff) {
-                    for (int b = 0; b < N; b++) {
-                        for (int t = 0; t < T; t++) {
-                            if (t < repaint_t0 || t >= repaint_t1) {
-                                for (int ch = 0; ch < Oc; ch++) {
-                                    int idx = b * n_per + t * Oc + ch;
-                                    xt[idx] = t_next * noise[idx] + (1.0f - t_next) * repaint_src[t * Oc + ch];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // ── Repaint injection ──
+            sampler_repaint_inject(xt.data(), noise, repaint_src, N, T, Oc,
+                                   repaint_t0, repaint_t1, repaint_injection_ratio,
+                                   step, num_steps, t_next);
         }
 
         // debug dump (sample 0 only)
@@ -794,35 +595,8 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
 
     // Boundary blend: smooth repaint zone edges in latent space.
-    // Python: apply_repaint_boundary_blend(x_gen, clean_src, repaint_mask, crossfade_frames)
-    // soft_mask[t] = 1.0 inside [t0,t1), ramp at edges, 0.0 outside.
-    // x_gen[t] = soft_mask[t]*x_gen[t] + (1-soft_mask[t])*repaint_src[t]
-    if (repaint_src && repaint_t1 > repaint_t0 && repaint_crossfade_frames > 0) {
-        int cf         = repaint_crossfade_frames;
-        int fade_start = repaint_t0 - cf > 0 ? repaint_t0 - cf : 0;
-        int fade_end   = repaint_t1 + cf < T ? repaint_t1 + cf : T;
-        for (int t = fade_start; t < fade_end; t++) {
-            if (t >= repaint_t0 && t < repaint_t1) {
-                continue;  // inside zone: keep generated output unchanged
-            }
-            float m;
-            if (t < repaint_t0) {
-                // left ramp: [fade_start, t0) -> 0..1 excluding endpoints
-                int rl = repaint_t0 - fade_start;
-                m      = (float) (t - fade_start + 1) / (float) (rl + 1);
-            } else {
-                // right ramp: [t1, fade_end) -> 1..0 excluding endpoints
-                int rl = fade_end - repaint_t1;
-                m      = (float) (fade_end - t) / (float) (rl + 1);
-            }
-            for (int b = 0; b < N; b++) {
-                for (int ch = 0; ch < Oc; ch++) {
-                    int idx     = b * n_per + t * Oc + ch;
-                    output[idx] = m * output[idx] + (1.0f - m) * repaint_src[t * Oc + ch];
-                }
-            }
-        }
-    }
+    sampler_repaint_blend(output, repaint_src, N, T, Oc,
+                          repaint_t0, repaint_t1, repaint_crossfade_frames);
 
     // Batch diagnostic: report per-sample stats to catch corruption
     if (N >= 2) {
