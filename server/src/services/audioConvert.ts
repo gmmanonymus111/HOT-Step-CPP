@@ -20,19 +20,76 @@ const ffmpegPath: string | null = ffmpegPathImport as unknown as string | null;
 const ENGINE_NATIVE_EXTS = new Set(['.wav', '.mp3']);
 
 /**
+ * Check if a WAV file is in the format the C++ engine can decode:
+ * PCM (format=1), 16-bit, any sample rate / channel count.
+ *
+ * Returns true if the WAV is engine-compatible, false if it needs conversion
+ * (e.g. 24-bit, 32-bit float, or non-PCM formats like ADPCM).
+ */
+function isEngineCompatibleWav(filePath: string): boolean {
+  try {
+    // Read enough of the header to find the fmt chunk
+    const fd = fs.openSync(filePath, 'r');
+    const hdr = Buffer.alloc(128);
+    fs.readSync(fd, hdr, 0, 128, 0);
+    fs.closeSync(fd);
+
+    // Validate RIFF/WAVE container
+    if (hdr.toString('ascii', 0, 4) !== 'RIFF' || hdr.toString('ascii', 8, 12) !== 'WAVE') {
+      return false;
+    }
+
+    // Search for the "fmt " chunk (usually at offset 12, but not always)
+    for (let offset = 12; offset < 100; offset++) {
+      if (hdr.toString('ascii', offset, offset + 4) === 'fmt ') {
+        // fmt chunk found — read audio format and bits per sample
+        const fmtOffset = offset + 8; // skip "fmt " + chunk size (4 bytes)
+        const audioFormat = hdr.readUInt16LE(fmtOffset);       // 1 = PCM, 3 = IEEE float
+        const bitsPerSample = hdr.readUInt16LE(fmtOffset + 14); // offset 14 within fmt data
+
+        if (audioFormat === 1 && bitsPerSample === 16) {
+          return true;  // PCM 16-bit — engine can decode this
+        }
+
+        // Log why it's incompatible
+        const sampleRate = hdr.readUInt32LE(fmtOffset + 4);
+        const channels = hdr.readUInt16LE(fmtOffset + 2);
+        console.log(`[audioConvert] WAV needs conversion: format=${audioFormat} bits=${bitsPerSample} rate=${sampleRate} ch=${channels}`);
+        return false;
+      }
+    }
+
+    // No fmt chunk found — not a valid WAV
+    return false;
+  } catch {
+    // Can't read header — safer to convert
+    return false;
+  }
+}
+
+/**
  * Ensure the audio file at `filePath` is in a format the engine can decode.
- * If it's already WAV or MP3, returns the original buffer unchanged.
- * Otherwise, converts to 48 kHz stereo WAV via ffmpeg and returns that buffer.
+ * - MP3: returned as-is (engine decodes natively)
+ * - WAV 16-bit PCM: returned as-is
+ * - WAV 24/32-bit, float, or non-PCM: converted to 48 kHz stereo PCM16 via ffmpeg
+ * - Other formats (FLAC, OGG, M4A, etc.): converted via ffmpeg
  *
  * Converted files are cached as `<original>.engine.wav` next to the original.
  */
 export function ensureEngineFormat(filePath: string): Buffer {
   const ext = path.extname(filePath).toLowerCase();
 
-  // Already engine-compatible — read and return
-  if (ENGINE_NATIVE_EXTS.has(ext)) {
+  // MP3: always engine-compatible
+  if (ext === '.mp3') {
     return fs.readFileSync(filePath);
   }
+
+  // WAV: only compatible if 16-bit PCM
+  if (ext === '.wav' && isEngineCompatibleWav(filePath)) {
+    return fs.readFileSync(filePath);
+  }
+
+  // Everything else needs conversion (or WAV with non-16-bit format)
 
   // Check for cached conversion
   const wavPath = filePath + '.engine.wav';
@@ -43,10 +100,16 @@ export function ensureEngineFormat(filePath: string): Buffer {
 
   // Convert via ffmpeg-static
   if (!ffmpegPath) {
+    // Last resort: if it's a WAV we can't convert, return it anyway and hope for the best
+    if (ext === '.wav') {
+      console.warn(`[audioConvert] ffmpeg not available — returning non-16-bit WAV as-is (engine may reject it)`);
+      return fs.readFileSync(filePath);
+    }
     throw new Error('ffmpeg-static not available — cannot convert non-WAV/MP3 audio');
   }
 
-  console.log(`[audioConvert] Converting ${path.basename(filePath)} → WAV (48kHz stereo)...`);
+  const label = ext === '.wav' ? 'non-16-bit WAV' : ext.slice(1).toUpperCase();
+  console.log(`[audioConvert] Converting ${path.basename(filePath)} (${label}) → WAV (48kHz/16-bit/stereo)...`);
   const t0 = Date.now();
 
   try {
