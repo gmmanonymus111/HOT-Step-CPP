@@ -1,0 +1,134 @@
+// generation/postProcessing.ts — Post-generation processing chain
+//
+// PP-VAE re-encode, Spectral Lifter, VST chain, and mastering.
+// Operates on a COPY of the raw WAV — raw generation is never modified.
+
+import fs from 'fs';
+import path from 'path';
+import { config } from '../../config.js';
+import { aceClient } from '../../services/aceClient.js';
+import { runMastering } from '../../routes/mastering.js';
+import { applyVstChain } from '../../routes/vst.js';
+
+type LogFn = (level: 'INFO' | 'DEBUG' | 'WARNING' | 'ERROR', msg: string) => void;
+type StageFn = (stage: string) => void;
+
+interface PostProcessParams {
+  postProcessingEnabled?: boolean;
+  ppVaeReencode?: boolean;
+  ppVaeBlend?: number;
+  spectralLifterEnabled?: boolean;
+  slDenoiseStrength?: number;
+  slNoiseFloor?: number;
+  slHfMix?: number;
+  slTransientBoost?: number;
+  slShimmerReduction?: number;
+  masteringEnabled?: boolean;
+  masteringReference?: string;
+}
+
+/** Run the full post-processing chain on a list of audio files. Returns parallel array of mastered URLs. */
+export async function runPostProcessingChain(
+  audioUrls: string[],
+  params: PostProcessParams,
+  totalTracks: number,
+  jobId: string,
+  log: LogFn,
+  setStage: StageFn
+): Promise<string[]> {
+  const ppMasterOn = params.postProcessingEnabled !== false;
+  const ppVaeOn = ppMasterOn && !!params.ppVaeReencode;
+  const spectralLifterOn = ppMasterOn && !!params.spectralLifterEnabled;
+  const masteringRef = params.masteringReference;
+  const masteringOn = ppMasterOn && !!masteringRef && !!params.masteringEnabled;
+  const masteredUrls: string[] = [];
+
+  for (let i = 0; i < audioUrls.length; i++) {
+    const audioUrl = audioUrls[i];
+    const audioFilename = path.basename(audioUrl);
+    const rawWavPath = path.join(config.data.audioDir, audioFilename);
+
+    if (!rawWavPath.endsWith('.wav')) { masteredUrls.push(''); continue; }
+
+    const ext2 = path.extname(audioFilename);
+    const base2 = path.basename(audioFilename, ext2);
+    const processedFilename = `${base2}_mastered${ext2}`;
+    const processedPath = path.join(config.data.audioDir, processedFilename);
+
+    fs.copyFileSync(rawWavPath, processedPath);
+    let anyStageRan = false;
+
+    if (ppVaeOn) {
+      setStage(`PP-VAE Re-encode${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+      try {
+        const wavBuf = fs.readFileSync(processedPath);
+        const blend = params.ppVaeBlend ?? 0;
+        const processed = await aceClient.submitPpVaeReencode(wavBuf, blend);
+        fs.writeFileSync(processedPath, processed);
+        anyStageRan = true;
+        log('INFO', `[PP-VAE] Re-encoded ${audioFilename}`);
+      } catch (ppErr: any) {
+        log('WARNING', `[PP-VAE] Failed (non-fatal): ${ppErr.message}`);
+      }
+    }
+
+    if (spectralLifterOn) {
+      setStage(`Spectral Lifter${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+      try {
+        const wavBuf = fs.readFileSync(processedPath);
+        const slParams = {
+          denoise_strength: params.slDenoiseStrength ?? 0.3,
+          noise_floor: params.slNoiseFloor ?? 0.1,
+          hf_mix: params.slHfMix ?? 0.0,
+          transient_boost: params.slTransientBoost ?? 0.0,
+          shimmer_reduction: params.slShimmerReduction ?? 6.0,
+        };
+        const processed = await aceClient.submitSpectralLifter(wavBuf, slParams);
+        fs.writeFileSync(processedPath, processed);
+        anyStageRan = true;
+        log('INFO', `[Spectral Lifter] Applied to ${audioFilename}`);
+      } catch (slErr: any) {
+        log('WARNING', `[Spectral Lifter] Failed (non-fatal): ${slErr.message}`);
+      }
+    }
+
+    if (ppMasterOn) {
+      try {
+        const applied = await applyVstChain(processedPath);
+        if (applied) {
+          anyStageRan = true;
+          log('INFO', `[VST] Chain applied to ${processedFilename}`);
+        }
+      } catch (vstErr: any) {
+        log('WARNING', `[VST] Chain failed (non-fatal): ${vstErr.message}`);
+      }
+    }
+
+    if (masteringOn && masteringRef) {
+      setStage(`Mastering${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+      try {
+        const refPath = masteringRef.startsWith('/references/')
+          ? path.join(config.data.dir, 'references', masteringRef.replace('/references/', ''))
+          : path.isAbsolute(masteringRef)
+            ? masteringRef
+            : path.join(config.data.dir, 'references', masteringRef);
+        const tempMastered = processedPath + '.mastered.wav';
+        await runMastering(processedPath, refPath, tempMastered);
+        fs.renameSync(tempMastered, processedPath);
+        anyStageRan = true;
+        log('INFO', `[Mastering] Applied to ${processedFilename}`);
+      } catch (masterErr: any) {
+        log('WARNING', `[Mastering] Failed (non-fatal): ${masterErr.message}`);
+      }
+    }
+
+    if (anyStageRan) {
+      masteredUrls.push(`/audio/${processedFilename}`);
+    } else {
+      try { fs.unlinkSync(processedPath); } catch {}
+      masteredUrls.push('');
+    }
+  }
+
+  return masteredUrls;
+}

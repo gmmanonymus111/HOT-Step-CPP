@@ -9,7 +9,6 @@
 // LM results are cached by seed+params to skip the LM phase on repeats.
 
 import { Router } from 'express';
-import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -18,14 +17,13 @@ import { getDb } from '../db/database.js';
 import { config } from '../config.js';
 import { getUserId } from './auth.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
-import { runMastering, convertToWav } from './mastering.js';
-import { applyVstChain } from './vst.js';
-// NOTE: Spectral Lifter is now native C++ in the engine (spectral-lifter.h).
-// The Python subprocess wrapper (spectralLifter.ts) is deprecated.
 import { autoTrimSilence } from '../services/autoTrim.js';
-import { ensureEngineFormat, timeStretchPitchShift } from '../services/audioConvert.js';
-import { writeHslat, readHslat, latentFrameCount, latentDuration, type HslatMetadata } from '../services/latentFormat.js';
+import { writeHslat, latentFrameCount, latentDuration, type HslatMetadata } from '../services/latentFormat.js';
 import { subscribeLines, pushLog } from './logs.js';
+import { translateParams } from '../services/generation/translateParams.js';
+import { computeLmCacheKey, getLmCache, setLmCache, getLmCacheSize, type LmCacheEntry } from '../services/generation/lmCache.js';
+import { loadSourceAudio, loadSourceLatent, applyTempoAndPitch, loadTimbreReference } from '../services/generation/sourceAudio.js';
+import { runPostProcessingChain } from '../services/generation/postProcessing.js';
 
 const router = Router();
 
@@ -54,187 +52,7 @@ interface GenerationJob {
 
 const jobs = new Map<string, GenerationJob>();
 
-// ── LM Audio Code Cache ─────────────────────────────────────
-// Caches ONLY LM-generated output fields (audio_codes, caption, lyrics,
-// metadata) keyed by seed + LM-affecting params. Non-LM parameters
-// (DiT, adapter, DCW, latent, denoise, etc.) are NEVER cached — they
-// always come from the current request. This prevents stale parameter
-// leakage when users change generation settings between runs.
-interface LmCacheEntry {
-  audio_codes: string;
-  caption: string;
-  lyrics: string;
-  bpm: number;
-  duration: number;
-  keyscale: string;
-  timesignature: string;
-}
-const LM_CACHE_MAX = 20;
-const lmCache = new Map<string, { lmOutputs: LmCacheEntry[]; timestamp: number }>();
-
-/** Compute a stable hash key from LM-affecting parameters */
-function computeLmCacheKey(req: AceRequest): string {
-  const keyObj = {
-    seed: req.seed,
-    caption: req.caption,
-    lyrics: req.lyrics,
-    bpm: req.bpm,
-    duration: req.duration,
-    keyscale: req.keyscale,
-    timesignature: req.timesignature,
-    vocal_language: req.vocal_language,
-    lm_model: req.lm_model,
-    lm_batch_size: req.lm_batch_size,
-    lm_temperature: req.lm_temperature,
-    lm_cfg_scale: req.lm_cfg_scale,
-    lm_top_p: req.lm_top_p,
-    lm_top_k: req.lm_top_k,
-    lm_negative_prompt: req.lm_negative_prompt,
-    use_cot_caption: req.use_cot_caption,
-  };
-  return crypto.createHash('sha256')
-    .update(JSON.stringify(keyObj))
-    .digest('hex')
-    .substring(0, 16);
-}
-
-/** Evict oldest entries when cache exceeds max size */
-function evictLmCache(): void {
-  if (lmCache.size <= LM_CACHE_MAX) return;
-  // Sort by timestamp, evict oldest
-  const entries = [...lmCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
-  const toRemove = entries.slice(0, lmCache.size - LM_CACHE_MAX);
-  for (const [key] of toRemove) {
-    lmCache.delete(key);
-  }
-}
-
-/** Translate frontend params to AceRequest format */
-function translateParams(params: any): AceRequest {
-  const req: AceRequest = {
-    caption: params.prompt || params.songDescription || params.caption || params.style || '',
-  };
-
-  // Lyrics / instrumental
-  if (params.instrumental) {
-    req.lyrics = '[Instrumental]';
-  } else if (params.lyrics) {
-    req.lyrics = params.lyrics;
-  }
-
-  // Metadata
-  if (params.bpm) req.bpm = params.bpm;
-  if (params.duration) {
-    // If auto-trim is enabled, add the buffer to the generation duration.
-    // The server will trim back to the natural ending after generation.
-    const buffer = (params.autoTrimEnabled && params.durationBuffer) ? params.durationBuffer : 0;
-    req.duration = params.duration + buffer;
-  }
-  if (params.keyScale) req.keyscale = params.keyScale;
-  if (params.timeSignature) {
-    // Engine FSM expects beat count only ('2','3','4','6'), not 'X/Y' format.
-    // Strip denominator: '6/8' → '6', '3/4' → '3', '4' → '4'.
-    const ts = String(params.timeSignature);
-    req.timesignature = ts.includes('/') ? ts.split('/')[0] : ts;
-  }
-  if (params.vocalLanguage) req.vocal_language = params.vocalLanguage;
-
-  // Seed — always resolve to a concrete value.
-  // When randomSeed is true, generate a random seed here so the engine gets a
-  // deterministic (but random) seed that we can record in the DB for
-  // reproducibility.  When false, use the user's explicit seed.
-  if (params.randomSeed) {
-    req.seed = Math.floor(Math.random() * 2_147_483_647);
-  } else if (params.seed !== undefined) {
-    req.seed = params.seed;
-  }
-
-  // Batch
-  if (params.batchSize) req.lm_batch_size = params.batchSize;
-
-  // LM params
-  if (params.lmTemperature !== undefined) req.lm_temperature = params.lmTemperature;
-  if (params.lmCfgScale !== undefined) req.lm_cfg_scale = params.lmCfgScale;
-  if (params.lmTopP !== undefined) req.lm_top_p = params.lmTopP;
-  if (params.lmTopK !== undefined) req.lm_top_k = params.lmTopK;
-  if (params.lmNegativePrompt) req.lm_negative_prompt = params.lmNegativePrompt;
-
-  // DiT params
-  if (params.inferenceSteps) req.inference_steps = params.inferenceSteps;
-  if (params.guidanceScale !== undefined) req.guidance_scale = params.guidanceScale;
-  if (params.shift !== undefined) req.shift = params.shift;
-  if (params.inferMethod) req.infer_method = params.inferMethod;
-  if (params.scheduler) req.scheduler = params.scheduler;
-  if (params.guidanceMode) req.guidance_mode = params.guidanceMode;
-
-  // Cover/repaint
-  if (params.taskType) req.task_type = params.taskType;
-  if (params.audioCoverStrength !== undefined) req.audio_cover_strength = params.audioCoverStrength;
-  if (params.coverNoiseStrength !== undefined) req.cover_noise_strength = params.coverNoiseStrength;
-  if (params.repaintingStart !== undefined) req.repainting_start = params.repaintingStart;
-  if (params.repaintingEnd !== undefined) req.repainting_end = params.repaintingEnd;
-  if (params.trackName) req.track = params.trackName;
-
-  // CoT
-  if (params.useCotCaption !== undefined) req.use_cot_caption = params.useCotCaption;
-
-  // Model routing
-  if (params.ditModel) req.synth_model = params.ditModel;
-  if (params.lmModel) req.lm_model = params.lmModel;
-  if (params.vaeModel) req.vae_model = params.vaeModel;
-  if (params.loraPath) req.adapter = params.loraPath;
-  if (params.loraScale !== undefined) req.adapter_scale = params.loraScale;
-  if (params.adapterGroupScales) req.adapter_group_scales = params.adapterGroupScales;
-  if (params.adapterMode) req.adapter_mode = params.adapterMode;
-
-  // Trigger word — inject adapter filename into caption
-  if (params.triggerWord && params.triggerPlacement && params.loraPath) {
-    const tw = params.triggerWord;
-    const caption = req.caption || '';
-    switch (params.triggerPlacement) {
-      case 'prepend': req.caption = caption ? `${tw}, ${caption}` : tw; break;
-      case 'append':  req.caption = caption ? `${caption}, ${tw}` : tw; break;
-      case 'replace': req.caption = tw; break;
-    }
-  }
-
-  // Solver sub-parameters
-  if (params.storkSubsteps !== undefined) req.stork_substeps = params.storkSubsteps;
-  if (params.beatStability !== undefined) req.beat_stability = params.beatStability;
-  if (params.frequencyDamping !== undefined) req.frequency_damping = params.frequencyDamping;
-  if (params.temporalSmoothing !== undefined) req.temporal_smoothing = params.temporalSmoothing;
-
-  // Guidance sub-parameters
-  if (params.apgMomentum !== undefined) req.apg_momentum = params.apgMomentum;
-  if (params.apgNormThreshold !== undefined) req.apg_norm_threshold = params.apgNormThreshold;
-
-  // DCW (Differential Correction in Wavelet domain)
-  if (params.dcwEnabled !== undefined) req.dcw_enabled = params.dcwEnabled;
-  if (params.dcwMode) req.dcw_mode = params.dcwMode;
-  if (params.dcwScaler !== undefined) req.dcw_scaler = params.dcwScaler;
-  if (params.dcwHighScaler !== undefined) req.dcw_high_scaler = params.dcwHighScaler;
-
-  // Latent post-processing
-  if (params.latentShift !== undefined) req.latent_shift = params.latentShift;
-  if (params.latentRescale !== undefined) req.latent_rescale = params.latentRescale;
-  if (params.customTimesteps) req.custom_timesteps = params.customTimesteps;
-
-  // Post-VAE spectral denoiser (HOT-Step)
-  if (params.denoiseStrength !== undefined) req.denoise_strength = params.denoiseStrength;
-  if (params.denoiseSmoothing !== undefined) req.denoise_smoothing = params.denoiseSmoothing;
-  if (params.denoiseMix !== undefined) req.denoise_mix = params.denoiseMix;
-
-
-  // NOTE: PP-VAE re-encode (ppVaeReencode) is NOT sent to /synth.
-  // It runs as a separate post-processing step via POST /pp-vae-reencode
-  // on the mastered copy only — raw generation stays pristine.
-
-  // NOTE: Spectral Lifter params (sl_*) are NOT sent to /synth.
-  // SL runs as a separate post-processing step via POST /spectral-lifter
-  // on the mastered copy only — raw generation stays pristine.
-
-  return req;
-}
+// translateParams is now imported from ../services/generation/translateParams.ts
 
 /** Poll ace-server job until completion */
 async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal): Promise<void> {
@@ -304,7 +122,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     if (needsLm) {
       const cacheKey = computeLmCacheKey(aceReq);
       const useLmCache = job.params.cacheLmCodes !== false; // default true
-      const cached = useLmCache ? lmCache.get(cacheKey) : undefined;
+      const cached = useLmCache ? getLmCache(cacheKey) : undefined;
 
       if (cached) {
         // Cache hit — reconstruct full AceRequests from current params
@@ -409,9 +227,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
             keyscale: r.keyscale || '',
             timesignature: r.timesignature || '',
           }));
-          lmCache.set(cacheKey, { lmOutputs, timestamp: Date.now() });
-          evictLmCache();
-          logGeneration(job.id, 'INFO', `[LM Phase] Cached LM outputs (key=${cacheKey}, cache size=${lmCache.size})`);
+          setLmCache(cacheKey, lmOutputs);
+          logGeneration(job.id, 'INFO', `[LM Phase] Cached LM outputs (key=${cacheKey}, cache size=${getLmCacheSize()})`);
         }
 
         job.progress = 40;
@@ -479,154 +296,27 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     const coResident = job.params.coResident === true;
 
     // ── Source audio (for cover/repaint/lego/extract tasks) ──
-    // Cover-like tasks need the source audio as the "audio" multipart field
-    // (maps to src_audio in the C++ engine). This is separate from timbre.
+    const log = (level: 'INFO' | 'DEBUG' | 'WARNING' | 'ERROR', msg: string) => logGeneration(job.id, level, msg);
     let srcAudioBuf: Buffer | undefined;
     if (isCoverTask && job.params.sourceAudioUrl) {
-      const srcUrl = job.params.sourceAudioUrl;
-      // URL patterns (e.g. /references/uuid.flac) must be checked BEFORE
-      // path.isAbsolute — on Windows, '/foo' is absolute (current drive root)
-      // and would bypass the data-dir resolution.
-      const srcPath = srcUrl.startsWith('/references/')
-        ? path.join(config.data.dir, 'references', srcUrl.replace('/references/', ''))
-        : srcUrl.startsWith('/audio/')
-          ? path.join(config.data.audioDir, srcUrl.replace('/audio/', ''))
-          : path.isAbsolute(srcUrl)
-            ? srcUrl
-            : path.join(config.data.dir, srcUrl);
-      logGeneration(job.id, 'DEBUG', `[Synth Phase] Looking for source audio at: ${srcPath}`);
-      if (fs.existsSync(srcPath)) {
-        try {
-          srcAudioBuf = ensureEngineFormat(srcPath);
-          logGeneration(job.id, 'INFO', `[Synth Phase] Source audio (cover): ${srcPath} (${(srcAudioBuf.length / 1024 / 1024).toFixed(1)} MB)`);
-        } catch (convErr: any) {
-          logGeneration(job.id, 'WARNING', `[Synth Phase] Audio conversion failed: ${convErr.message}`);
-          // Fall back to raw file — engine may still handle it
-          srcAudioBuf = fs.readFileSync(srcPath);
-        }
-      } else {
-        logGeneration(job.id, 'WARNING', `[Synth Phase] Source audio not found: ${srcPath}`);
-      }
+      srcAudioBuf = loadSourceAudio(job.params.sourceAudioUrl, job.id, log);
     }
 
     // ── Source latent (alternative to source audio — skips VAE encode) ──
     let srcLatentBuf: Buffer | undefined;
     if (job.params.sourceLatentUrl) {
-      const latentUrl = job.params.sourceLatentUrl as string;
-      const latentPath = latentUrl.startsWith('/audio/')
-        ? path.join(config.data.audioDir, latentUrl.replace('/audio/', ''))
-        : path.isAbsolute(latentUrl) ? latentUrl : path.join(config.data.dir, latentUrl);
-      if (fs.existsSync(latentPath)) {
-        try {
-          const fileContents = fs.readFileSync(latentPath);
-          const parsed = readHslat(fileContents);
-          srcLatentBuf = parsed.rawLatent;
-          if (srcLatentBuf.length % 256 !== 0) {
-            logGeneration(job.id, 'WARNING', `[Latent] Invalid latent file size (${srcLatentBuf.length} bytes), ignoring`);
-            srcLatentBuf = undefined;
-          } else {
-            logGeneration(job.id, 'INFO',
-              `[Latent] Source latent loaded: ${latentPath} (${latentFrameCount(srcLatentBuf)} frames, ${latentDuration(srcLatentBuf).toFixed(1)}s)`);
-          }
-        } catch (latErr: any) {
-          logGeneration(job.id, 'WARNING', `[Latent] Failed to read source latent: ${latErr.message}`);
-        }
-      } else {
-        logGeneration(job.id, 'WARNING', `[Latent] Source latent not found: ${latentPath}`);
-      }
+      srcLatentBuf = loadSourceLatent(job.params.sourceLatentUrl as string, log);
     }
 
     // ── Tempo/pitch pre-processing (cover source audio) ──────
-    // The Python ACE-Step backend handles tempo_scale/pitch_shift natively
-    // via release_task, but the C++ engine doesn't. Pre-process with ffmpeg.
-    const tempoScale = job.params.tempoScale as number | undefined;
-    const pitchShift = job.params.pitchShift as number | undefined;
-    if (srcAudioBuf && ((tempoScale && tempoScale !== 1.0) || (pitchShift && pitchShift !== 0))) {
-      try {
-        logGeneration(job.id, 'INFO', `[Synth Phase] Pre-processing source audio: tempo=${tempoScale ?? 1.0}x, pitch=${pitchShift ?? 0}st`);
-        srcAudioBuf = timeStretchPitchShift(srcAudioBuf, tempoScale ?? 1.0, pitchShift ?? 0);
-        logGeneration(job.id, 'INFO', `[Synth Phase] Pre-processed source audio: ${(srcAudioBuf.length / 1024 / 1024).toFixed(1)} MB`);
-      } catch (err: any) {
-        logGeneration(job.id, 'WARNING', `[Synth Phase] Tempo/pitch pre-processing failed: ${err.message}`);
-        // Continue with original audio — user still gets a cover, just without tempo/pitch change
-      }
+    if (srcAudioBuf) {
+      srcAudioBuf = applyTempoAndPitch(srcAudioBuf, job.params.tempoScale, job.params.pitchShift, log);
     }
 
-    // Timbre reference goes into the "ref_audio" multipart field. Only used
-    // when timbreReference is enabled (boolean true → use mastering ref file,
-    // or explicit string path). sourceAudioUrl is NOT a timbre reference.
+    // ── Timbre reference ──
     let refAudioBuf: Buffer | undefined;
     const masteringRef = job.params.masteringReference;
-    const rawTimbre = job.params.timbreReference;
-    const timbreRef = (rawTimbre === true && typeof masteringRef === 'string')
-      ? masteringRef
-      : (typeof rawTimbre === 'string' ? rawTimbre : undefined);
-    logGeneration(job.id, 'DEBUG', `[Synth Phase] timbreRef=${timbreRef}, masteringRef=${masteringRef}`);
-    if (timbreRef) {
-      let refPath = timbreRef.startsWith('/references/')
-        ? path.join(config.data.dir, 'references', timbreRef.replace('/references/', ''))
-        : path.isAbsolute(timbreRef)
-          ? timbreRef
-          : path.join(config.data.dir, 'references', timbreRef);
-
-      // ── Randomize Timbre Reference ──────────────────────────────
-      // When enabled, pick a random audio file from the same directory as the
-      // configured reference track. The selection is seed-locked: a fixed seed
-      // always picks the same file, a random seed picks randomly.
-      // Mastering still uses the original reference file (only timbre changes).
-      if (job.params.randomizeTimbreRef) {
-        try {
-          const refDir = path.dirname(refPath);
-          const audioExts = new Set(['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma']);
-          const candidates = fs.readdirSync(refDir)
-            .filter(f => audioExts.has(path.extname(f).toLowerCase()))
-            .sort(); // alphabetical sort for deterministic ordering
-
-          if (candidates.length > 1) {
-            const seed = aceReq.seed ?? 0;
-            // Use absolute value to handle negative seeds, modulo for wrapping
-            const idx = Math.abs(seed) % candidates.length;
-            const picked = path.join(refDir, candidates[idx]);
-            logGeneration(job.id, 'INFO',
-              `[Timbre] Randomized: picked "${candidates[idx]}" (${idx + 1}/${candidates.length}, seed=${seed}) from ${refDir}`);
-            refPath = picked;
-          } else {
-            logGeneration(job.id, 'INFO',
-              `[Timbre] Randomize enabled but only ${candidates.length} audio file(s) in ${refDir} — using original`);
-          }
-        } catch (dirErr: any) {
-          logGeneration(job.id, 'WARNING', `[Timbre] Randomize failed (using original): ${dirErr.message}`);
-        }
-      }
-
-      logGeneration(job.id, 'DEBUG', `[Synth Phase] Looking for timbre ref at: ${refPath}`);
-      if (fs.existsSync(refPath)) {
-        // Engine only supports WAV and MP3 natively — convert other formats
-        const refExt = path.extname(refPath).toLowerCase();
-        let readPath = refPath;
-        let tempWav: string | undefined;
-        if (refExt !== '.wav' && refExt !== '.mp3') {
-          try {
-            tempWav = path.join(config.data.dir, `timbre_temp_${job.id}.wav`);
-            logGeneration(job.id, 'INFO', `[Synth Phase] Converting timbre ref ${refExt} → WAV via ffmpeg`);
-            await convertToWav(refPath, tempWav);
-            readPath = tempWav;
-          } catch (convErr: any) {
-            logGeneration(job.id, 'WARNING', `[Synth Phase] Timbre ref conversion failed (${convErr.message}), sending raw file`);
-            readPath = refPath;
-            tempWav = undefined;
-          }
-        }
-        refAudioBuf = fs.readFileSync(readPath);
-        logGeneration(job.id, 'INFO', `[Synth Phase] Timbre reference: ${refPath} (${(refAudioBuf.length / 1024 / 1024).toFixed(1)} MB)`);
-        // Clean up temp conversion file
-        if (tempWav && fs.existsSync(tempWav)) {
-          try { fs.unlinkSync(tempWav); } catch {}
-        }
-      } else {
-        logGeneration(job.id, 'WARNING', `[Synth Phase] Timbre reference file not found: ${refPath}`);
-      }
-    }
+    refAudioBuf = await loadTimbreReference(job.params, masteringRef, aceReq.seed, job.id, log);
 
     // When mastering is enabled, request wav32 (float) from the engine.
     const synthFormat = (job.params.masteringEnabled && job.params.masteringReference) ? 'wav32' : 'wav16';
@@ -848,103 +538,15 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
     // ── Post-processing chain ─────────────────────────────────
     // Raw WAV (audio_url) is NEVER modified. Post-processing runs on a copy.
-    // The master toggle (postProcessingEnabled) gates the entire chain server-side.
-    const ppMasterOn = job.params.postProcessingEnabled !== false;
-    const ppVaeOn = ppMasterOn && !!job.params.ppVaeReencode;
-    const spectralLifterOn = ppMasterOn && !!job.params.spectralLifterEnabled;
-    const masteringOn = ppMasterOn && !!masteringRef && !!job.params.masteringEnabled;
-
     job.progress = 89;
     job.stage = 'Post-processing...';
 
     try {
-      for (let i = 0; i < audioUrls.length; i++) {
-        const audioUrl = audioUrls[i];
-        const audioFilename = path.basename(audioUrl);
-        const rawWavPath = path.join(config.data.audioDir, audioFilename);
-
-        if (!rawWavPath.endsWith('.wav')) { masteredUrls.push(''); continue; }
-
-        const ext2 = path.extname(audioFilename);
-        const base2 = path.basename(audioFilename, ext2);
-        const processedFilename = `${base2}_mastered${ext2}`;
-        const processedPath = path.join(config.data.audioDir, processedFilename);
-
-        fs.copyFileSync(rawWavPath, processedPath);
-        let anyStageRan = false;
-
-        if (ppVaeOn) {
-          job.stage = `PP-VAE Re-encode${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`;
-          try {
-            const wavBuf = fs.readFileSync(processedPath);
-            const blend = job.params.ppVaeBlend ?? 0;
-            const processed = await aceClient.submitPpVaeReencode(wavBuf, blend);
-            fs.writeFileSync(processedPath, processed);
-            anyStageRan = true;
-            logGeneration(job.id, 'INFO', `[PP-VAE] Re-encoded ${audioFilename}`);
-          } catch (ppErr: any) {
-            logGeneration(job.id, 'WARNING', `[PP-VAE] Failed (non-fatal): ${ppErr.message}`);
-          }
-        }
-
-        if (spectralLifterOn) {
-          job.stage = `Spectral Lifter${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`;
-          try {
-            const wavBuf = fs.readFileSync(processedPath);
-            const slParams = {
-              denoise_strength: job.params.slDenoiseStrength ?? 0.3,
-              noise_floor: job.params.slNoiseFloor ?? 0.1,
-              hf_mix: job.params.slHfMix ?? 0.0,
-              transient_boost: job.params.slTransientBoost ?? 0.0,
-              shimmer_reduction: job.params.slShimmerReduction ?? 6.0,
-            };
-            const processed = await aceClient.submitSpectralLifter(wavBuf, slParams);
-            fs.writeFileSync(processedPath, processed);
-            anyStageRan = true;
-            logGeneration(job.id, 'INFO', `[Spectral Lifter] Applied to ${audioFilename}`);
-          } catch (slErr: any) {
-            logGeneration(job.id, 'WARNING', `[Spectral Lifter] Failed (non-fatal): ${slErr.message}`);
-          }
-        }
-
-        if (ppMasterOn) {
-          try {
-            const applied = await applyVstChain(processedPath);
-            if (applied) {
-              anyStageRan = true;
-              logGeneration(job.id, 'INFO', `[VST] Chain applied to ${processedFilename}`);
-            }
-          } catch (vstErr: any) {
-            logGeneration(job.id, 'WARNING', `[VST] Chain failed (non-fatal): ${vstErr.message}`);
-          }
-        }
-
-        if (masteringOn) {
-          job.stage = `Mastering${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`;
-          job.progress = 95;
-          try {
-            const refPath = masteringRef.startsWith('/references/')
-              ? path.join(config.data.dir, 'references', masteringRef.replace('/references/', ''))
-              : path.isAbsolute(masteringRef)
-                ? masteringRef
-                : path.join(config.data.dir, 'references', masteringRef);
-            const tempMastered = processedPath + '.mastered.wav';
-            await runMastering(processedPath, refPath, tempMastered);
-            fs.renameSync(tempMastered, processedPath);
-            anyStageRan = true;
-            logGeneration(job.id, 'INFO', `[Mastering] Applied to ${processedFilename}`);
-          } catch (masterErr: any) {
-            logGeneration(job.id, 'WARNING', `[Mastering] Failed (non-fatal): ${masterErr.message}`);
-          }
-        }
-
-        if (anyStageRan) {
-          masteredUrls.push(`/audio/${processedFilename}`);
-        } else {
-          try { fs.unlinkSync(processedPath); } catch {}
-          masteredUrls.push('');
-        }
-      }
+      const ppResults = await runPostProcessingChain(
+        audioUrls, job.params, totalTracks, job.id,
+        log, (stage) => { job.stage = stage; }
+      );
+      masteredUrls.push(...ppResults);
     } catch (err: any) {
       logGeneration(job.id, 'WARNING', `[Post-Processing] Chain failed: ${err.message}`);
     }
