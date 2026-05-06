@@ -21,6 +21,7 @@ import { generateApi, modelApi } from '../../services/api';
 import { TrackPicker, type TrackName } from './TrackPicker';
 import { LayerStack, type LayerInfo } from './LayerStack';
 import { RecentBuilds } from './RecentBuilds';
+import { PreviewPlayer } from './PreviewPlayer';
 import { Section } from '../shared/ActivitySidebar';
 import { InlineAudioQueue } from '../lyric-studio/InlineAudioQueue';
 import { useAudioGenQueue } from '../../stores/audioGenQueueStore';
@@ -61,6 +62,10 @@ export const StemBuilder: React.FC = () => {
 
   // ── Iterative composition ──
   const [layers, setLayers] = useState<LayerInfo[]>([]);
+
+  // ── Preview player ──
+  const [previewStemUrl, setPreviewStemUrl] = useState('');
+  const [previewLabel, setPreviewLabel] = useState('');
 
   // ── Sidebar ──
   const [sidebarWidth, setSidebarWidth] = usePersistedState('hs-activitySidebarWidth', 320);
@@ -140,11 +145,10 @@ export const StemBuilder: React.FC = () => {
     showToast(`Using ${layer.trackName} output as new source`);
   }, []);
 
-  // ── Play layer audio ──
+  // ── Preview layer audio (opens in dual-track player) ──
   const handlePlayLayer = useCallback((layer: LayerInfo) => {
-    // Simple: open in new tab or use the global player
-    const audio = new Audio(layer.audioUrl);
-    audio.play().catch(() => {});
+    setPreviewStemUrl(layer.audioUrl);
+    setPreviewLabel(layer.trackName.replace('_', ' '));
   }, []);
 
   // ── Use recent build as source ──
@@ -156,10 +160,10 @@ export const StemBuilder: React.FC = () => {
     showToast(`Loaded "${build.title}" as source`);
   }, []);
 
-  // ── Play recent build ──
-  const handlePlayRecent = useCallback((build: { audioUrl: string }) => {
-    const audio = new Audio(build.audioUrl);
-    audio.play().catch(() => {});
+  // ── Preview recent build (opens in dual-track player) ──
+  const handlePlayRecent = useCallback((build: { audioUrl: string; trackName?: string }) => {
+    setPreviewStemUrl(build.audioUrl);
+    setPreviewLabel((build as any).trackName?.replace('_', ' ') || 'stem');
   }, []);
 
   // ── Generate ──
@@ -231,7 +235,7 @@ export const StemBuilder: React.FC = () => {
             setActiveJobId(null);
             setRefreshTrigger(p => p + 1);
 
-            // Add to layer stack
+            // Add to layer stack + auto-open preview
             const audioUrl = s.result?.audioUrls?.[0] || '';
             if (audioUrl) {
               setLayers(prev => [...prev, {
@@ -241,6 +245,9 @@ export const StemBuilder: React.FC = () => {
                 songId: s.result?.songIds?.[0],
                 timestamp: Date.now(),
               }]);
+              // Auto-open preview player with the new stem
+              setPreviewStemUrl(audioUrl);
+              setPreviewLabel(selectedTrack.replace('_', ' '));
             }
 
             showToast(`${selectedTrack} layer complete!`);
@@ -486,6 +493,16 @@ export const StemBuilder: React.FC = () => {
                 {buildModel ? '✓ Base model' : '○ Need base model'}
               </span>
             </div>
+          )}
+
+          {/* Preview Player — dual-track (source + stem) */}
+          {previewStemUrl && sourceAudioUrl && (
+            <PreviewPlayer
+              sourceUrl={sourceAudioUrl}
+              stemUrl={previewStemUrl}
+              stemLabel={previewLabel}
+              onClose={() => setPreviewStemUrl('')}
+            />
           )}
 
           {/* Layer Stack */}
