@@ -190,9 +190,21 @@ export const StemBuilder: React.FC = () => {
         title: `${selectedTrack.replace('_', ' ')} layer`,
         // Force base model — override whatever's in global params
         ditModel: buildModel,
-        // Disable adapter for lego by default
+        // ── Force-disable adapters (same isolation as StemStudio extract) ──
         loraPath: '',
         loraScale: 0,
+        adapterGroupScales: undefined,
+        adapterMode: undefined,
+        // ── Force-disable mastering/timbre (not applicable to lego) ──
+        masteringEnabled: false,
+        masteringReference: undefined,
+        timbreReference: undefined,
+        // ── Source conditioning ──
+        audioCoverStrength: 1.0,  // full source conditioning for lego
+        // ── Clear metadata — let engine infer from source audio ──
+        bpm: 0,
+        keyScale: '',
+        timeSignature: '',
       };
 
       const res = await generateApi.submit(params as any, token);
