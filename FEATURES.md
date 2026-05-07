@@ -156,16 +156,16 @@ Neural audio source separation with a 4-stage ONNX pipeline and interactive stem
 
 ## Stem Builder
 
-Compose and generate new arrangements from separated stems:
+Generatively create new instrument stems for source tracks using the DiT engine:
 
 | Feature | Description |
 |---------|-------------|
-| **Layer Composition** | Select individual stems (vocals, drums, bass, guitar, piano, other) from Stem Studio extractions and layer them into a custom arrangement. |
-| **Per-Stem Volume** | Independent volume sliders for each stem in the composition — build your mix before generation. |
-| **Preview Player** | Real-time multi-track audio preview of the stem mix with synchronized playback across all layers. |
-| **Source Audio Browser** | Browse source audio from the song library with search and mastered/unmastered toggle for selecting extraction sources. |
-| **Iterative Generation** | Generate new audio from the mixed stem arrangement using the full engine pipeline — effectively a remix workflow. |
-| **Seamless Integration** | Works directly with stems extracted by Stem Studio — no file management needed. |
+| **Generative Stem Creation** | Select a source audio file and generate new AI-created instrument layers (vocals, drums, bass, guitar, piano) that complement the original track. |
+| **Instrument Layer Selection** | Choose which stems to generate — add missing instruments or create alternative takes for existing ones. |
+| **Per-Stem Preview** | Real-time audio preview of generated stems alongside the source track with per-stem volume controls. |
+| **Source Audio Browser** | Browse source audio from the song library with search and mastered/unmastered toggle. |
+| **Iterative Layering** | Build up arrangements by generating stems one at a time — each new layer is created in the context of the existing mix. |
+| **Full Pipeline Integration** | Generated stems pass through the complete engine pipeline including post-processing, mastering, and format export. |
 
 ---
 

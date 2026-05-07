@@ -28,7 +28,7 @@ HOT-Step CPP extends the base acestep.cpp engine with 80+ features across infere
 
 🔪 **Stem Studio** — 4-stage neural stem separation powered by SuperSep. BS-RoFormer for primary 6-stem splits, Mel-Band RoFormer for lead/backing vocal isolation, MDX23C for drum sub-separation, and HTDemucs for instrument refinement. Interactive mixer with multi-solo, per-stem volume controls, and ZIP export. Sequential VRAM management keeps peak usage under 3 GB.
 
-🧱 **Stem Builder** — Compose new arrangements from separated stems. Layer individual stems (vocals, drums, bass, guitar, piano) with per-track volume controls and real-time preview. Generate fresh audio from your custom stem mix — remix, isolate, or recombine at will.
+🧱 **Stem Builder** — Generatively create new instrument stems for source tracks using the DiT engine. Select a source audio file, choose which instrument layers to generate (vocals, drums, bass, guitar, piano), and the engine creates fresh stems that complement the original. Build up arrangements by iteratively adding AI-generated layers.
 
 🔊 **Audio Post-Processing** — Spectral denoiser (Wiener-filter), Spectral Lifter (native C++), PP-VAE neural audio polish, duration buffer with auto-trim for clean endings, and configurable fade-out.
 
