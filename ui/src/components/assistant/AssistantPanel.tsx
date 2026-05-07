@@ -25,6 +25,7 @@ import './AssistantPanel.css';
 
 interface AssistantPanelProps {
   onClose: () => void;
+  activeView?: string;
 }
 
 interface DisplayMessage {
@@ -38,7 +39,7 @@ interface DisplayMessage {
 
 let messageIdCounter = 0;
 
-export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
+export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose, activeView }) => {
   // ── Provider state ──
   const [providers, setProviders] = useState<AssistantProvider[]>([]);
   const [selectedProvider, setSelectedProvider] = usePersistedState('hs-assistant-provider', '');
@@ -128,6 +129,8 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
     };
     const currentSettings = {
       ...globalParams.getGlobalParams(),
+      // Active mode/view
+      _activeView: activeView || 'create',
       // Content fields (stored in localStorage by CreatePanel)
       caption: readLS('hs-caption', ''),
       lyrics: readLS('hs-lyrics', ''),

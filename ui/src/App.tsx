@@ -736,7 +736,7 @@ const AppContent: React.FC = () => {
               className="flex-shrink-0 h-full border-l border-zinc-200 dark:border-white/5"
               style={{ width: assistantWidth }}
             >
-              <AssistantPanel onClose={() => setShowAssistant(false)} />
+              <AssistantPanel onClose={() => setShowAssistant(false)} activeView={activeView} />
             </div>
           </>
         )}

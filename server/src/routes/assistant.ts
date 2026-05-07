@@ -51,11 +51,32 @@ function initSse(res: Response): (type: string, data: any) => void {
 
 function buildSystemPrompt(currentSettings: Record<string, any>): string {
   const knowledge = loadKnowledge();
-  const settingsJson = JSON.stringify(currentSettings, null, 2);
+
+  // Extract and label the active view for the LLM
+  const viewLabels: Record<string, string> = {
+    create: 'Create (text-to-music)',
+    lyric: 'Lyric Studio (AI songwriting)',
+    cover: 'Cover Studio (reference-based covers)',
+    stems: 'Stem Studio (audio separation)',
+    stemBuilder: 'Stem Builder (stem composition)',
+    settings: 'Settings',
+  };
+  const activeView = currentSettings._activeView || 'create';
+  const modeLabel = viewLabels[activeView] || activeView;
+
+  // Remove internal-only fields before serializing
+  const { _activeView, ...settingsForLLM } = currentSettings;
+  const settingsJson = JSON.stringify(settingsForLLM, null, 2);
 
   return `${knowledge}
 
 ---
+
+## User's Current Mode
+
+The user is currently in: **${modeLabel}**
+
+Tailor your responses to this mode. For example, if they're in Cover Studio, focus on cover-related settings and workflow. If they're in Create mode, focus on generation parameters and lyrics.
 
 ## User's Current Configuration
 
