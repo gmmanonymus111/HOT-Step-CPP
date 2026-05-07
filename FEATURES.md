@@ -154,6 +154,40 @@ Neural audio source separation with a 4-stage ONNX pipeline and interactive stem
 
 ---
 
+## Stem Builder
+
+Compose and generate new arrangements from separated stems:
+
+| Feature | Description |
+|---------|-------------|
+| **Layer Composition** | Select individual stems (vocals, drums, bass, guitar, piano, other) from Stem Studio extractions and layer them into a custom arrangement. |
+| **Per-Stem Volume** | Independent volume sliders for each stem in the composition — build your mix before generation. |
+| **Preview Player** | Real-time multi-track audio preview of the stem mix with synchronized playback across all layers. |
+| **Source Audio Browser** | Browse source audio from the song library with search and mastered/unmastered toggle for selecting extraction sources. |
+| **Iterative Generation** | Generate new audio from the mixed stem arrangement using the full engine pipeline — effectively a remix workflow. |
+| **Seamless Integration** | Works directly with stems extracted by Stem Studio — no file management needed. |
+
+---
+
+## AI Assistant
+
+In-app LLM-powered assistant with full context awareness:
+
+| Feature | Description |
+|---------|-------------|
+| **Streaming Chat Sidebar** | Toggleable chat panel with SSE-streamed responses, markdown rendering, and thinking/response separation. |
+| **Full Settings Awareness** | Every message includes a JSON snapshot of all engine parameters, content fields (lyrics, caption, BPM, duration, key, time signature, language), and active mode. |
+| **Mode-Aware Guidance** | Automatically detects which studio the user is in (Create, Lyric Studio, Cover Studio, Stem Studio, Stem Builder) and tailors advice to that workflow. |
+| **Actionable Suggestions** | LLM responses can include structured action blocks that the user can preview as diffs and apply individually or in bulk — settings update reactively. |
+| **Content Editing** | Can write, rewrite, or update lyrics, style descriptions, and other content fields directly via action blocks with one-click apply. |
+| **Per-Action Apply** | Each suggested change has its own Apply button — cherry-pick individual settings without accepting the full batch. Applied items show a checkmark and dim out. |
+| **Thinking Separation** | LLM chain-of-thought is separated from the response and displayed in a collapsible "💭 Thought process" block — visible but visually distinct. |
+| **Multi-Provider Support** | Uses the same LLM provider registry as Lyric Studio — supports Gemini, LM Studio, OpenAI-compatible endpoints, etc. Provider and model selection persisted independently. |
+| **Knowledge Base** | Static knowledge base covering all engine parameters, solvers, schedulers, guidance modes, adapters, post-processing, troubleshooting, and lyric formatting rules. |
+| **Markdown Rendering** | Lightweight built-in renderer for headers, bold, italic, inline code, fenced code blocks, lists, and horizontal rules — no external dependencies. |
+
+---
+
 ## Timbre & Audio Conditioning
 
 | Feature | Description |
