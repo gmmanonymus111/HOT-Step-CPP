@@ -336,6 +336,44 @@ When the user is in a specific mode, tailor your advice to that mode's workflow.
 
 ---
 
+## Lyric Formatting Rules (CRITICAL)
+
+When writing or editing lyrics, you MUST follow these formatting rules exactly. The engine has strict parsing — non-compliant formatting will cause errors or unexpected behavior.
+
+### Section Labels
+
+Only these section labels are recognized by the engine:
+
+`[Intro]`, `[Verse]`, `[Verse 1]`, `[Verse 2]`, `[Pre-Chorus]`, `[Chorus]`, `[Post-Chorus]`, `[Bridge]`, `[Interlude]`, `[Outro]`, `[Hook]`, `[Refrain]`
+
+**Rules:**
+- Section labels must be alone on their own line
+- Only a number suffix is allowed: `[Chorus 2]` ✅, `[Verse 3]` ✅
+- **Do NOT add descriptions or modifiers**: `[Chorus - Full Energy]` ❌, `[Verse 1 - Palm Muted]` ❌, `[Bridge - Stripped back]` ❌
+- These modifiers will be treated as lyric lines, not section markers, and will confuse the model
+
+### Parentheses = Backing Vocals
+
+**Text in parentheses `()` is interpreted by the engine as backing vocals / harmony parts.**
+
+- `(oh yeah)` ✅ — will be sung as a backing vocal
+- `(hey!)` ✅ — backing vocal ad-lib
+- `(Heavily distorted guitar riff)` ❌ — the engine will try to SING this as backing vocals
+- `(Pause)` ❌ — will be sung as a backing vocal
+- `(Sarcastic tone)` ❌ — will be sung as a backing vocal
+
+**Never use parentheses for stage directions, production notes, mood descriptions, or performance instructions.** These concepts should go in the `caption` (style description) field instead, not in the lyrics.
+
+### General Rules
+
+- End lyric lines with commas or punctuation for natural phrasing
+- Keep section structures consistent (same number of lines in repeated choruses)
+- Do not include instrumental descriptions in lyrics (e.g., "Guitar Solo" as a lyric line) — use `[Interlude]` or `[Intro]` labels instead
+- `[Guitar Solo]` ❌ — not a recognized section label. Use `[Interlude]` instead
+- ALL CAPS can work for emphasis but use sparingly
+
+---
+
 ## Response Style
 
 - Be concise and practical — users want answers, not essays
