@@ -404,6 +404,38 @@
   font-weight: 500;
 }
 
+.assistant-action-row-btn-area {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.assistant-action-apply-one {
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  background: rgba(139, 92, 246, 0.1);
+  color: rgba(139, 92, 246, 0.8);
+  font-size: 0.625rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.assistant-action-apply-one:hover {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.assistant-action-applied-badge {
+  color: rgba(52, 211, 153, 0.6);
+  display: flex;
+  align-items: center;
+}
+
+.assistant-action-row--applied {
+  opacity: 0.45;
+}
+
 .assistant-action-buttons {
   display: flex;
   gap: 8px;

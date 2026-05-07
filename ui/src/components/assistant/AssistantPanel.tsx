@@ -33,7 +33,7 @@ interface DisplayMessage {
   content: string;
   rawContent?: string;  // original LLM output (with thinking tags) for re-parsing
   actions?: AssistantAction[];
-  actionsApplied?: boolean;
+  appliedKeys?: Set<string>;  // tracks which action keys have been applied
 }
 
 let messageIdCounter = 0;
@@ -198,8 +198,11 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
   const handleApply = useCallback((msgId: number, actions: AssistantAction[]) => {
     const count = applyActions(actions);
     console.log(`[Assistant] Applied ${count} setting changes`);
+    const newKeys = new Set(actions.map(a => a.set));
     setMessages(prev => prev.map(m =>
-      m.id === msgId ? { ...m, actionsApplied: true } : m
+      m.id === msgId
+        ? { ...m, appliedKeys: new Set([...(m.appliedKeys || []), ...newKeys]) }
+        : m
     ));
   }, [applyActions]);
 
@@ -331,8 +334,8 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
                 {msg.role === 'assistant' && msg.actions && msg.actions.length > 0 && (
                   <ActionCard
                     actions={msg.actions}
-                    applied={msg.actionsApplied || false}
-                    onApply={() => handleApply(msg.id, msg.actions!)}
+                    appliedKeys={msg.appliedKeys || new Set()}
+                    onApplySelected={(selectedActions) => handleApply(msg.id, selectedActions)}
                     previewActions={previewActions}
                   />
                 )}
@@ -402,13 +405,15 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
 
 interface ActionCardProps {
   actions: AssistantAction[];
-  applied: boolean;
-  onApply: () => void;
+  appliedKeys: Set<string>;
+  onApplySelected: (actions: AssistantAction[]) => void;
   previewActions: (actions: AssistantAction[]) => ActionDiff[];
 }
 
-const ActionCard: React.FC<ActionCardProps> = ({ actions, applied, onApply, previewActions }) => {
+const ActionCard: React.FC<ActionCardProps> = ({ actions, appliedKeys, onApplySelected, previewActions }) => {
   const diffs = previewActions(actions);
+  const allApplied = actions.every(a => appliedKeys.has(a.set));
+  const unapplied = actions.filter(a => !appliedKeys.has(a.set));
 
   // Format a value for display
   const fmt = (v: any): string => {
@@ -425,25 +430,42 @@ const ActionCard: React.FC<ActionCardProps> = ({ actions, applied, onApply, prev
         Suggested Changes
       </div>
       <div className="assistant-action-diff">
-        {diffs.map((d) => (
-          <div key={d.key} className="assistant-action-row">
-            <span className="assistant-action-label">{d.label}</span>
-            <span className="assistant-action-from">{fmt(d.from)}</span>
-            <ArrowRight size={10} className="assistant-action-arrow" />
-            <span className="assistant-action-to">{fmt(d.to)}</span>
-          </div>
-        ))}
+        {diffs.map((d) => {
+          const isApplied = appliedKeys.has(d.key);
+          const action = actions.find(a => a.set === d.key);
+          return (
+            <div key={d.key} className={`assistant-action-row ${isApplied ? 'assistant-action-row--applied' : ''}`}>
+              <span className="assistant-action-label">{d.label}</span>
+              <span className="assistant-action-from">{fmt(d.from)}</span>
+              <ArrowRight size={10} className="assistant-action-arrow" />
+              <span className="assistant-action-to">{fmt(d.to)}</span>
+              <span className="assistant-action-row-btn-area">
+                {isApplied ? (
+                  <span className="assistant-action-applied-badge"><Check size={10} /></span>
+                ) : action ? (
+                  <button
+                    className="assistant-action-apply-one"
+                    onClick={() => onApplySelected([action])}
+                    title={`Apply ${d.label}`}
+                  >
+                    Apply
+                  </button>
+                ) : null}
+              </span>
+            </div>
+          );
+        })}
       </div>
       <div className="assistant-action-buttons">
-        {applied ? (
+        {allApplied ? (
           <button className="assistant-apply-btn assistant-apply-btn--applied" disabled>
             <span style={{ display: 'flex', alignItems: 'center', gap: '4px', justifyContent: 'center' }}>
-              <Check size={12} /> Applied
+              <Check size={12} /> All Applied
             </span>
           </button>
         ) : (
-          <button className="assistant-apply-btn" onClick={onApply}>
-            Apply All
+          <button className="assistant-apply-btn" onClick={() => onApplySelected(unapplied)}>
+            Apply All ({unapplied.length})
           </button>
         )}
       </div>
