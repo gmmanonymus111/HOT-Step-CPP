@@ -13,6 +13,8 @@ import {
   chatStream,
   parseActions,
   stripActionBlocks,
+  stripThinkingBlocks,
+  extractThinkingAndResponse,
   getProviders,
   type ChatMessage,
   type AssistantAction,
@@ -28,6 +30,7 @@ interface DisplayMessage {
   id: number;
   role: 'user' | 'assistant' | 'error';
   content: string;
+  rawContent?: string;  // original LLM output (with thinking tags) for re-parsing
   actions?: AssistantAction[];
   actionsApplied?: boolean;
 }
@@ -136,13 +139,16 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
       },
       // onComplete
       (fullText) => {
-        const actions = parseActions(fullText);
-        const displayContent = stripActionBlocks(fullText);
+        // Parse actions from the clean (non-thinking) text
+        const cleanText = stripThinkingBlocks(fullText);
+        const actions = parseActions(cleanText);
+        const displayContent = stripActionBlocks(cleanText);
 
         const assistantMsg: DisplayMessage = {
           id: ++messageIdCounter,
           role: 'assistant',
           content: displayContent,
+          rawContent: fullText,  // keep raw for thinking extraction
           actions: actions.length > 0 ? actions : undefined,
         };
         setMessages(prev => [...prev, assistantMsg]);
@@ -285,32 +291,60 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
         </div>
       ) : (
         <div className="assistant-messages" ref={scrollRef}>
-          {messages.map((msg) => (
-            <React.Fragment key={msg.id}>
-              {/* Message bubble */}
-              <div className={`assistant-msg assistant-msg--${msg.role}`}>
-                {msg.content}
-              </div>
+          {messages.map((msg) => {
+            // Extract thinking for assistant messages
+            const parsed = msg.role === 'assistant' && msg.rawContent
+              ? extractThinkingAndResponse(msg.rawContent)
+              : null;
 
-              {/* Action card */}
-              {msg.role === 'assistant' && msg.actions && msg.actions.length > 0 && (
-                <ActionCard
-                  actions={msg.actions}
-                  applied={msg.actionsApplied || false}
-                  onApply={() => handleApply(msg.id, msg.actions!)}
-                  previewActions={previewActions}
-                />
-              )}
-            </React.Fragment>
-          ))}
+            return (
+              <React.Fragment key={msg.id}>
+                {/* Thinking block (collapsible) */}
+                {parsed?.thinking && (
+                  <ThinkingBlock thinking={parsed.thinking} isStreaming={false} />
+                )}
+
+                {/* Message bubble */}
+                <div className={`assistant-msg assistant-msg--${msg.role}`}>
+                  {msg.content}
+                </div>
+
+                {/* Action card */}
+                {msg.role === 'assistant' && msg.actions && msg.actions.length > 0 && (
+                  <ActionCard
+                    actions={msg.actions}
+                    applied={msg.actionsApplied || false}
+                    onApply={() => handleApply(msg.id, msg.actions!)}
+                    previewActions={previewActions}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
 
           {/* Streaming message */}
-          {isStreaming && streamingText && (
-            <div className="assistant-msg assistant-msg--assistant assistant-msg--streaming">
-              {streamingText}
-              <span className="assistant-cursor" />
-            </div>
-          )}
+          {isStreaming && streamingText && (() => {
+            const parsed = extractThinkingAndResponse(streamingText);
+            const isStillThinking = parsed.thinking && !parsed.response;
+            return (
+              <>
+                {parsed.thinking && (
+                  <ThinkingBlock thinking={parsed.thinking} isStreaming={isStillThinking || false} />
+                )}
+                {parsed.response && (
+                  <div className="assistant-msg assistant-msg--assistant assistant-msg--streaming">
+                    {parsed.response}
+                    <span className="assistant-cursor" />
+                  </div>
+                )}
+                {!parsed.response && !parsed.thinking && (
+                  <div className="assistant-msg assistant-msg--assistant assistant-msg--streaming">
+                    <span className="assistant-cursor" />
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {/* Streaming but no text yet */}
           {isStreaming && !streamingText && (
@@ -398,3 +432,27 @@ const ActionCard: React.FC<ActionCardProps> = ({ actions, applied, onApply, prev
     </div>
   );
 };
+
+// ── Thinking Block sub-component ──────────────────────────────────────────────
+
+interface ThinkingBlockProps {
+  thinking: string;
+  isStreaming: boolean;
+}
+
+const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isStreaming }) => (
+  <details className="assistant-thinking" open={isStreaming}>
+    <summary className="assistant-thinking-summary">
+      <svg className="thinking-chevron" width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+        <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      </svg>
+      <span className={isStreaming ? 'assistant-thinking-label' : ''}>
+        💭 {isStreaming ? 'Thinking...' : 'Thought process'}
+      </span>
+    </summary>
+    <div className="assistant-thinking-content">
+      {thinking}
+      {isStreaming && <span className="assistant-cursor" />}
+    </div>
+  </details>
+);

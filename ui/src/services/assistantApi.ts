@@ -134,6 +134,71 @@ export function stripActionBlocks(text: string): string {
 }
 
 /**
+ * Strip LLM thinking/reasoning blocks from text.
+ * Matches the same patterns as the server-side stripThinkingBlocks in postprocess.ts.
+ * Handles: <think>, <analysis>, <reasoning>, <reflection>, <thought>, <|channel>thought
+ */
+export function stripThinkingBlocks(text: string): string {
+  // Closed thinking tags (complete blocks)
+  let result = text.replace(/<think>[\s\S]*?<\/think>/g, '');
+  result = result.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
+  result = result.replace(/<reasoning>[\s\S]*?<\/reasoning>/g, '');
+  result = result.replace(/<reflection>[\s\S]*?<\/reflection>/g, '');
+  result = result.replace(/<thought>[\s\S]*?<\/thought>/g, '');
+  result = result.replace(/<\|channel>thought[\s\S]*?<channel\|>/g, '');
+
+  // Unclosed thinking tags (stream still going — strip from open tag to end)
+  result = result.replace(/<(?:think|analysis|reasoning|reflection|thought)>[\s\S]*/g, '');
+  result = result.replace(/<\|channel>thought[\s\S]*/g, '');
+
+  // Strip CoT-style headers (e.g. "Thinking Process:\n...\n---")
+  const cotMatch = result.match(/^(?:\s*\*+\s*)?(?:Thinking Process|Thought Process|Thinking|Reasoning):\s*[\s\S]*?(?:---|[*]{3,}|={3,})\s*/i);
+  if (cotMatch) result = result.slice(cotMatch[0].length);
+
+  return result.trim();
+}
+
+/**
+ * Extract thinking content and response separately from LLM output.
+ * Returns both parts so the UI can render thinking in a distinct visual style.
+ */
+export function extractThinkingAndResponse(text: string): { thinking: string | null; response: string } {
+  // Try each known thinking tag format
+  const patterns: { open: RegExp; close: RegExp; openStr: RegExp }[] = [
+    { open: /<think>/,           close: /<\/think>/,    openStr: /<think>/ },
+    { open: /<thought>/,         close: /<\/thought>/,  openStr: /<thought>/ },
+    { open: /<analysis>/,        close: /<\/analysis>/,  openStr: /<analysis>/ },
+    { open: /<reasoning>/,       close: /<\/reasoning>/, openStr: /<reasoning>/ },
+    { open: /<reflection>/,      close: /<\/reflection>/, openStr: /<reflection>/ },
+    { open: /<\|channel>thought/, close: /<channel\|>/,  openStr: /<\|channel>thought/ },
+  ];
+
+  for (const { open, close, openStr } of patterns) {
+    const openMatch = open.exec(text);
+    if (!openMatch) continue;
+
+    const afterOpen = text.slice(openMatch.index + openMatch[0].length);
+    const closeMatch = close.exec(afterOpen);
+
+    if (closeMatch) {
+      // Complete thinking block — extract content between tags
+      const thinking = afterOpen.slice(0, closeMatch.index).trim();
+      const beforeThink = text.slice(0, openMatch.index).trim();
+      const afterThink = afterOpen.slice(closeMatch.index + closeMatch[0].length).trim();
+      const response = (beforeThink + ' ' + afterThink).trim();
+      return { thinking: thinking || null, response };
+    } else {
+      // Unclosed tag — still streaming thinking, everything after tag is thinking
+      const thinking = afterOpen.trim();
+      const response = text.slice(0, openMatch.index).trim();
+      return { thinking: thinking || null, response };
+    }
+  }
+
+  return { thinking: null, response: text };
+}
+
+/**
  * Fetch available LLM providers for the assistant.
  */
 export async function getProviders(): Promise<AssistantProvider[]> {

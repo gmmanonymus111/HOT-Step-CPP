@@ -160,6 +160,73 @@
   50% { opacity: 0; }
 }
 
+/* ── Thinking block (collapsible) ───────────────────────────────────── */
+
+.assistant-thinking {
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.assistant-thinking[open] {
+  border-color: rgba(139, 92, 246, 0.1);
+}
+
+.assistant-thinking-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: rgba(139, 92, 246, 0.6);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: color 0.15s ease;
+}
+
+.assistant-thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
+.assistant-thinking-summary:hover {
+  color: rgba(139, 92, 246, 0.9);
+}
+
+.assistant-thinking-summary .thinking-chevron {
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.assistant-thinking[open] .thinking-chevron {
+  transform: rotate(90deg);
+}
+
+.assistant-thinking-content {
+  padding: 6px 10px 10px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.35);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  border-top: 1px solid rgba(255, 255, 255, 0.03);
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.assistant-thinking-label {
+  animation: thinkingPulse 1.5s ease infinite;
+}
+
+@keyframes thinkingPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 /* ── Action cards ───────────────────────────────────────────────────── */
 
 .assistant-action-card {
