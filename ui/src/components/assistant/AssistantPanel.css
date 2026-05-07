@@ -144,6 +144,125 @@
   font-size: 0.75rem;
 }
 
+/* ── Simple Markdown rendering ──────────────────────────────────────── */
+
+.smd-root {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.smd-spacer {
+  height: 6px;
+}
+
+.smd-p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.smd-h1 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 8px 0 4px;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.smd-h2 {
+  font-size: 0.875rem;
+  font-weight: 700;
+  margin: 8px 0 2px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.smd-h3 {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin: 6px 0 2px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.smd-bold {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.smd-italic {
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.smd-inline-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.75rem;
+  color: rgba(236, 72, 153, 0.9);
+}
+
+.smd-code-block {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  color: rgba(255, 255, 255, 0.75);
+  position: relative;
+}
+
+.smd-code-lang {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 0.6rem;
+  color: rgba(255, 255, 255, 0.2);
+  text-transform: uppercase;
+}
+
+.smd-ul, .smd-ol {
+  margin: 2px 0;
+  padding-left: 18px;
+}
+
+.smd-li {
+  margin: 1px 0;
+  line-height: 1.5;
+}
+
+.smd-ul .smd-li {
+  list-style-type: '›  ';
+}
+
+.smd-ul .smd-li::marker {
+  color: rgba(139, 92, 246, 0.5);
+}
+
+.smd-ol .smd-li::marker {
+  color: rgba(139, 92, 246, 0.5);
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.smd-hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin: 6px 0;
+}
+
+/* Light mode overrides */
+[data-theme="light"] .smd-h1,
+[data-theme="light"] .smd-h2,
+[data-theme="light"] .smd-h3 { color: rgba(0, 0, 0, 0.85); }
+[data-theme="light"] .smd-bold { color: rgba(0, 0, 0, 0.9); }
+[data-theme="light"] .smd-inline-code { background: rgba(0, 0, 0, 0.06); color: rgba(190, 40, 100, 0.9); }
+[data-theme="light"] .smd-code-block { background: rgba(0, 0, 0, 0.04); border-color: rgba(0, 0, 0, 0.08); color: rgba(0, 0, 0, 0.7); }
+
 /* Streaming cursor */
 .assistant-cursor {
   display: inline-block;

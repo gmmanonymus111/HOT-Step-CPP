@@ -9,6 +9,7 @@ import { X, Send, Trash2, Sparkles, ArrowRight, Check } from 'lucide-react';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { useAssistantActions, type ActionDiff } from '../../hooks/useAssistantActions';
+import { SimpleMarkdown } from './SimpleMarkdown';
 import {
   chatStream,
   parseActions,
@@ -306,7 +307,10 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
 
                 {/* Message bubble */}
                 <div className={`assistant-msg assistant-msg--${msg.role}`}>
-                  {msg.content}
+                  {msg.role === 'assistant'
+                    ? <SimpleMarkdown content={msg.content} />
+                    : msg.content
+                  }
                 </div>
 
                 {/* Action card */}
@@ -333,7 +337,7 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
                 )}
                 {parsed.response && (
                   <div className="assistant-msg assistant-msg--assistant assistant-msg--streaming">
-                    {parsed.response}
+                    <SimpleMarkdown content={parsed.response} />
                     <span className="assistant-cursor" />
                   </div>
                 )}
