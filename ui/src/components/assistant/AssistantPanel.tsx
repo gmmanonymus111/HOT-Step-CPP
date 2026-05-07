@@ -122,8 +122,22 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
     setIsStreaming(true);
     setStreamingText('');
 
-    // Get current settings snapshot
-    const currentSettings = globalParams.getGlobalParams();
+    // Get current settings snapshot (engine params + content fields from localStorage)
+    const readLS = <T,>(key: string, fallback: T): T => {
+      try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+    };
+    const currentSettings = {
+      ...globalParams.getGlobalParams(),
+      // Content fields (stored in localStorage by CreatePanel)
+      caption: readLS('hs-caption', ''),
+      lyrics: readLS('hs-lyrics', ''),
+      instrumental: readLS('hs-instrumental', false),
+      bpm: readLS('hs-bpm', 0),
+      duration: readLS('hs-duration', -1),
+      keyScale: readLS('hs-keyScale', ''),
+      timeSignature: readLS('hs-timeSignature', ''),
+      vocalLanguage: readLS('hs-vocalLanguage', 'en'),
+    };
 
     // Start streaming
     const abort = chatStream(
