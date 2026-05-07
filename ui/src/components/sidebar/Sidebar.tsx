@@ -2,7 +2,7 @@
 // Ported from hot-step-9000, simplified for current cpp feature set.
 
 import React from 'react';
-import { Disc, Library, Mic, Guitar, Scissors, Layers, Settings, Power, Terminal, RotateCcw, Sun, Moon } from 'lucide-react';
+import { Disc, Library, Mic, Guitar, Scissors, Layers, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles } from 'lucide-react';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
 interface SidebarProps {
@@ -14,6 +14,8 @@ interface SidebarProps {
   onToggleTheme?: () => void;
   showTerminal?: boolean;
   onToggleTerminal?: () => void;
+  showAssistant?: boolean;
+  onToggleAssistant?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -25,6 +27,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleTheme,
   showTerminal = false,
   onToggleTerminal,
+  showAssistant = false,
+  onToggleAssistant,
 }) => {
   const [isOpen, setIsOpen] = usePersistedState('hs-sidebar-open', true);
 
@@ -134,6 +138,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex-shrink-0"><Terminal size={20} /></div>
               {isOpen && (
                 <span className="text-sm font-medium whitespace-nowrap">Terminal</span>
+              )}
+            </button>
+          )}
+
+          {/* Assistant toggle */}
+          {onToggleAssistant && (
+            <button
+              onClick={onToggleAssistant}
+              className={`
+                w-full rounded-xl flex items-center gap-3 transition-all duration-200
+                ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
+                ${showAssistant
+                  ? 'bg-violet-500/10 text-violet-400 hover:bg-violet-500/15'
+                  : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5'}
+              `}
+              title={showAssistant ? 'Hide Assistant' : 'Show Assistant'}
+            >
+              <div className="flex-shrink-0"><Sparkles size={20} /></div>
+              {isOpen && (
+                <span className="text-sm font-medium whitespace-nowrap">Assistant</span>
               )}
             </button>
           )}

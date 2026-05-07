@@ -29,6 +29,7 @@ import { ConfirmDialog } from './components/shared/ConfirmDialog';
 import { DownloadModal } from './components/shared/DownloadModal';
 import { SettingsPanel, type AppSettings, DEFAULT_SETTINGS } from './components/settings/SettingsPanel';
 import { TerminalPanel } from './components/terminal/TerminalPanel';
+import { AssistantPanel } from './components/assistant/AssistantPanel';
 import { LyricStudioV2 } from './components/lyric-studio/LyricStudioV2';
 import { CoverStudio } from './components/cover-studio/CoverStudio';
 import { StemStudio } from './components/stem-studio/StemStudio';
@@ -165,6 +166,10 @@ const AppContent: React.FC = () => {
   // Terminal panel state (persisted)
   const [showTerminal, setShowTerminal] = usePersistedState('ace-showTerminal', false);
   const [terminalWidth, setTerminalWidth] = usePersistedState('ace-terminalWidth', 450);
+
+  // Assistant panel state (persisted)
+  const [showAssistant, setShowAssistant] = usePersistedState('hs-showAssistant', false);
+  const [assistantWidth, setAssistantWidth] = usePersistedState('hs-assistantWidth', 420);
 
   // Settings state (persisted)
   const [settings, setSettings] = usePersistedState<AppSettings>('ace-settings', DEFAULT_SETTINGS);
@@ -656,6 +661,8 @@ const AppContent: React.FC = () => {
           onToggleTheme={toggleTheme}
           showTerminal={showTerminal}
           onToggleTerminal={() => setShowTerminal(prev => !prev)}
+          showAssistant={showAssistant}
+          onToggleAssistant={() => setShowAssistant(prev => !prev)}
         />
 
         <main className="flex-1 flex overflow-hidden relative">
@@ -694,6 +701,42 @@ const AppContent: React.FC = () => {
               style={{ width: playlistWidth }}
             >
               <PlaylistSidebar onClose={() => setShowPlaylist(false)} />
+            </div>
+          </>
+        )}
+
+        {/* Assistant Panel — between playlist and terminal, resizable */}
+        {showAssistant && (
+          <>
+            <div
+              className="flex-shrink-0 w-1.5 h-full cursor-col-resize group z-20 flex items-center hover:bg-violet-500/20 active:bg-violet-500/30 transition-colors"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startW = assistantWidth;
+                const onMove = (ev: MouseEvent) => {
+                  const newW = Math.min(700, Math.max(320, startW + startX - ev.clientX));
+                  setAssistantWidth(newW);
+                };
+                const onUp = () => {
+                  document.removeEventListener('mousemove', onMove);
+                  document.removeEventListener('mouseup', onUp);
+                  document.body.style.cursor = '';
+                  document.body.style.userSelect = '';
+                };
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+              }}
+            >
+              <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-violet-400 transition-colors" />
+            </div>
+            <div
+              className="flex-shrink-0 h-full border-l border-zinc-200 dark:border-white/5"
+              style={{ width: assistantWidth }}
+            >
+              <AssistantPanel onClose={() => setShowAssistant(false)} />
             </div>
           </>
         )}

@@ -36,6 +36,7 @@ import supersepRoutes from './routes/supersep.js';
 import settingsRoutes from './routes/settings.js';
 import modelManagerRoutes from './routes/modelManager.js';
 import stemStudioRoutes from './routes/stemStudio.js';
+import assistantRoutes from './routes/assistant.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -81,6 +82,7 @@ app.use('/api/supersep', supersepRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/model-manager', modelManagerRoutes);
 app.use('/api/stem-studio', stemStudioRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {
