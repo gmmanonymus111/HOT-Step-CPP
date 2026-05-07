@@ -227,31 +227,37 @@ export const AssistantPanel: React.FC<AssistantPanelProps> = ({ onClose }) => {
       </div>
 
       {/* Provider & model selectors */}
-      <div className="assistant-provider-bar">
-        <select
-          className="assistant-provider-select"
-          value={selectedProvider}
-          onChange={(e) => handleProviderChange(e.target.value)}
-        >
-          {providers.length === 0 && <option value="">Loading...</option>}
-          {providers.map(p => (
-            <option key={p.id} value={p.id} disabled={!p.available}>
-              {p.name}{!p.available ? ' (unavailable)' : ''}
-            </option>
-          ))}
-        </select>
-        <select
-          className="assistant-provider-select"
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-        >
-          {availableModels.map(m => (
-            <option key={m} value={m}>{m}</option>
-          ))}
-          {availableModels.length === 0 && (
-            <option value="">Default</option>
-          )}
-        </select>
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/80 dark:bg-zinc-900/50">
+        <div className="flex-1 min-w-0">
+          <label className="block text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Provider</label>
+          <select
+            className="w-full px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20 outline-none transition-colors cursor-pointer"
+            value={selectedProvider}
+            onChange={(e) => handleProviderChange(e.target.value)}
+          >
+            {providers.length === 0 && <option value="">Loading...</option>}
+            {providers.map(p => (
+              <option key={p.id} value={p.id} disabled={!p.available}>
+                {p.name}{!p.available ? ' (unavailable)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex-1 min-w-0">
+          <label className="block text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Model</label>
+          <select
+            className="w-full px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20 outline-none transition-colors cursor-pointer"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+          >
+            {availableModels.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+            {availableModels.length === 0 && (
+              <option value="">Default</option>
+            )}
+          </select>
+        </div>
       </div>
 
       {/* Messages or welcome screen */}
