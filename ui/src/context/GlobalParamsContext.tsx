@@ -83,6 +83,11 @@ export interface GlobalParams {
   apgNormThreshold: number;
   setApgNormThreshold: (v: number) => void;
 
+  // Dynamic Lua plugin params
+  pluginParams: Record<string, string>;
+  setPluginParam: (key: string, value: string) => void;
+  resetPluginParams: (pluginName: string) => void;
+
   // DCW
   dcwEnabled: boolean;
   setDcwEnabled: (v: boolean) => void;
@@ -220,6 +225,21 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   // Guidance sub-params
   const [apgMomentum, setApgMomentum] = usePersistedState('hs-apgMomentum', 0.75);
   const [apgNormThreshold, setApgNormThreshold] = usePersistedState('hs-apgNormThreshold', 2.5);
+
+  // Dynamic Lua plugin params
+  const [pluginParams, setPluginParamsRaw] = usePersistedState<Record<string, string>>('hs-pluginParams', {});
+  const setPluginParam = useCallback((key: string, value: string) => {
+    setPluginParamsRaw(prev => ({ ...prev, [key]: value }));
+  }, [setPluginParamsRaw]);
+  const resetPluginParams = useCallback((pluginName: string) => {
+    setPluginParamsRaw(prev => {
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!k.startsWith(`${pluginName}:`)) next[k] = v;
+      }
+      return next;
+    });
+  }, [setPluginParamsRaw]);
 
   // DCW
   const [dcwEnabled, setDcwEnabled] = usePersistedState('hs-dcwEnabled', false);
@@ -366,6 +386,9 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       denoiseSmoothing: denoiseStrength > 0 ? denoiseSmoothing : undefined,
       denoiseMix: denoiseStrength > 0 ? denoiseMix : undefined,
 
+      // Lua plugin dynamic params
+      pluginParams: Object.keys(pluginParams).length > 0 ? pluginParams : undefined,
+
       // Duration buffer / auto-trim
       autoTrimEnabled: autoTrimEnabled || undefined,
       durationBuffer: autoTrimEnabled ? durationBuffer : undefined,
@@ -391,6 +414,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     masteringEnabled, masteringReference, timbreReference, timbreAudioPath,
     ppVaeReencode, ppVaeBlend,
     postProcessingEnabled,
+    pluginParams,
     settings,
   ]);
 
@@ -412,6 +436,8 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     frequencyDamping, setFrequencyDamping, temporalSmoothing, setTemporalSmoothing,
     // Guidance sub-params
     apgMomentum, setApgMomentum, apgNormThreshold, setApgNormThreshold,
+    // Dynamic Lua plugin params
+    pluginParams, setPluginParam, resetPluginParams,
     // DCW
     dcwEnabled, setDcwEnabled, dcwMode, setDcwMode,
     dcwScaler, setDcwScaler, dcwHighScaler, setDcwHighScaler,
@@ -460,6 +486,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     storkSubsteps, setStorkSubsteps, beatStability, setBeatStability,
     frequencyDamping, setFrequencyDamping, temporalSmoothing, setTemporalSmoothing,
     apgMomentum, setApgMomentum, apgNormThreshold, setApgNormThreshold,
+    pluginParams, setPluginParam, resetPluginParams,
     dcwEnabled, setDcwEnabled, dcwMode, setDcwMode,
     dcwScaler, setDcwScaler, dcwHighScaler, setDcwHighScaler,
     latentShift, setLatentShift, latentRescale, setLatentRescale,

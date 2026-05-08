@@ -3,7 +3,7 @@
 // Adapted from the DiT section of create/GenerationSettings.tsx.
 // Reads from GlobalParamsContext instead of props.
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { RotateCcw, ChevronDown, Music2, Upload, Trash2 } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
@@ -12,12 +12,15 @@ import { formatScheduler, formatReferenceName } from './modelLabels';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { masteringApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { usePluginRegistry } from '../../hooks/usePluginRegistry';
+import { PluginControls } from './PluginControls';
 
 const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
 
 export const GenerationDropdown: React.FC = () => {
   const gp = useGlobalParams();
+  const { registry, findSolver, findGuidance } = usePluginRegistry();
   const [compositeOpen, setCompositeOpen] = usePersistedState('hs-genAccordion-composite', false);
   const [dcwOpen, setDcwOpen] = usePersistedState('hs-genAccordion-dcw', false);
   const [latentOpen, setLatentOpen] = usePersistedState('hs-genAccordion-latent', false);
@@ -104,70 +107,47 @@ export const GenerationDropdown: React.FC = () => {
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Solver</label>
         <select className={selectClasses} value={gp.inferMethod}
           onChange={e => gp.setInferMethod(e.target.value)}>
-          <optgroup label="── Single Evaluation (1 NFE) ──">
-            <option value="euler">Euler (ODE)</option>
-            <option value="dpm2m">DPM++ 2M</option>
-            <option value="dpm3m">DPM++ 3M</option>
-            <option value="dpm2m_ada">DPM++ 2M Adaptive</option>
-            <option value="jkass_fast">JKASS Fast</option>
-            <option value="stork2">STORK 2</option>
-            <option value="stork4">STORK 4</option>
-            <option value="unipc_p">UniPC Predictor</option>
-            <option value="aflops">A-FloPS</option>
-            <option value="sde">SDE (Stochastic)</option>
-          </optgroup>
-          <optgroup label="── Multi Evaluation ──">
-            <option value="heun">Heun (2 NFE)</option>
-            <option value="jkass_quality">JKASS Quality (2 NFE)</option>
-            <option value="rk4">RK4 (4 NFE)</option>
-            <option value="rk5">RK5 (6 NFE)</option>
-            <option value="dopri5">DOPRI5 Adaptive (7+ NFE)</option>
-            <option value="dop853">DOP853 (13 NFE)</option>
-                <option value="gl2s">Gauss-Legendre 2s (6 NFE)</option>
-                <option value="rfsolver">RF-Solver (2 NFE)</option>
-                <option value="unipc">UniPC (2 NFE)</option>
-                <option value="aflops2">A-FloPS Midpoint (2 NFE)</option>
-          </optgroup>
+          {registry.solvers.length > 0 ? (
+            <>
+              <optgroup label="── Single Evaluation (1 NFE) ──">
+                {registry.solvers.filter(s => (s.nfe ?? 1) === 1).map(s => (
+                  <option key={s.name} value={s.name}>{s.display}</option>
+                ))}
+              </optgroup>
+              <optgroup label="── Multi Evaluation ──">
+                {registry.solvers.filter(s => (s.nfe ?? 1) > 1).map(s => (
+                  <option key={s.name} value={s.name}>{s.display} ({s.nfe} NFE)</option>
+                ))}
+              </optgroup>
+            </>
+          ) : (
+            <>
+              {/* Fallback while registry is loading */}
+              <option value="euler">Euler (ODE)</option>
+              <option value="heun">Heun (2 NFE)</option>
+              <option value="dpm2m">DPM++ 2M</option>
+              <option value="rk4">RK4 (4 NFE)</option>
+            </>
+          )}
         </select>
       </div>
 
-      {/* ── JKASS Fast Sub-Controls ── */}
-      {gp.inferMethod === 'jkass_fast' && (
-        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 space-y-3 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">JKASS Fast Controls</span>
-            <button type="button" onClick={() => {
-              gp.setBeatStability(0.25);
-              gp.setFrequencyDamping(0.4);
-              gp.setTemporalSmoothing(0.13);
-            }} className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 transition-colors">
-              <RotateCcw size={10} /> Reset
-            </button>
-          </div>
-          <Slider label="Beat Stability" value={gp.beatStability}
-            onChange={gp.setBeatStability} min={0} max={1} step={0.01} showInput />
-          <Slider label="Frequency Damping" value={gp.frequencyDamping}
-            onChange={gp.setFrequencyDamping} min={0} max={5} step={0.1} showInput />
-          <Slider label="Temporal Smoothing" value={gp.temporalSmoothing}
-            onChange={gp.setTemporalSmoothing} min={0} max={1} step={0.01} showInput />
-        </div>
-      )}
-
-      {/* ── STORK Sub-Steps ── */}
-      {(gp.inferMethod === 'stork2' || gp.inferMethod === 'stork4') && (
-        <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-3 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">STORK Controls</span>
-            <button type="button" onClick={() => gp.setStorkSubsteps(10)}
-              className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors">
-              <RotateCcw size={10} /> Reset
-            </button>
-          </div>
-          <Slider label="Sub-Steps" value={gp.storkSubsteps}
-            onChange={gp.setStorkSubsteps} min={2} max={50} step={1} showInput />
-          <p className="text-[10px] text-zinc-500">Chebyshev sub-iterations per step. Higher = more stability work (default: 10)</p>
-        </div>
-      )}
+      {/* ── Dynamic Solver Controls ── */}
+      {(() => {
+        const solver = findSolver(gp.inferMethod);
+        if (!solver || solver.params.length === 0) return null;
+        return (
+          <PluginControls
+            pluginName={solver.name}
+            displayName={solver.display}
+            accent={solver.accent}
+            params={solver.params}
+            values={gp.pluginParams}
+            onChange={gp.setPluginParam}
+            onReset={() => gp.resetPluginParams(solver.name)}
+          />
+        );
+      })()}
 
       {/* Scheduler */}
       <div>
@@ -310,14 +290,22 @@ export const GenerationDropdown: React.FC = () => {
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Guidance</label>
         <select className={selectClasses} value={gp.guidanceMode}
           onChange={e => gp.setGuidanceMode(e.target.value)}>
-          <option value="apg">APG (Default)</option>
-          <option value="cfg_pp">CFG++</option>
-          <option value="dynamic_cfg">Dynamic CFG</option>
-          <option value="rescaled_cfg">Rescaled CFG</option>
+          {registry.guidance.length > 0 ? (
+            registry.guidance.map(g => (
+              <option key={g.name} value={g.name}>{g.display}</option>
+            ))
+          ) : (
+            <>
+              <option value="apg">APG (Default)</option>
+              <option value="cfg_pp">CFG++</option>
+              <option value="dynamic_cfg">Dynamic CFG</option>
+              <option value="rescaled_cfg">Rescaled CFG</option>
+            </>
+          )}
         </select>
       </div>
 
-      {/* ── APG Sub-Controls ── */}
+      {/* ── APG Sub-Controls (native C++ path — always show for APG) ── */}
       {gp.guidanceMode === 'apg' && (
         <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-3 space-y-3 transition-all">
           <div className="flex items-center justify-between">
@@ -336,6 +324,23 @@ export const GenerationDropdown: React.FC = () => {
           <p className="text-[10px] text-zinc-500">Momentum smooths guidance across steps. Norm threshold clips gradient magnitude per channel.</p>
         </div>
       )}
+
+      {/* ── Dynamic Guidance Controls (non-APG) ── */}
+      {gp.guidanceMode !== 'apg' && (() => {
+        const guide = findGuidance(gp.guidanceMode);
+        if (!guide || guide.params.length === 0) return null;
+        return (
+          <PluginControls
+            pluginName={guide.name}
+            displayName={guide.display}
+            accent={guide.accent}
+            params={guide.params}
+            values={gp.pluginParams}
+            onChange={gp.setPluginParam}
+            onReset={() => gp.resetPluginParams(guide.name)}
+          />
+        );
+      })()}
 
       {/* ── Timbre Conditioning (Accordion with file picker) ── */}
       <div className={`rounded-xl border transition-all overflow-hidden ${gp.timbreAudioPath ? 'border-teal-500/20 bg-teal-500/5' : 'border-zinc-200 dark:border-white/10 bg-zinc-100/30 dark:bg-zinc-800/30'}`}>
@@ -628,21 +633,18 @@ export const GenerationDropdown: React.FC = () => {
 /** Summary badge for the Generation section */
 export const GenerationBadge: React.FC = () => {
   const gp = useGlobalParams();
+  const { registry } = usePluginRegistry();
 
-  const solverLabels: Record<string, string> = {
-    euler: 'Euler', heun: 'Heun', dpm2m: 'DPM++2M', dpm3m: 'DPM++3M',
-    rk4: 'RK4', rk5: 'RK5', sde: 'SDE', jkass_fast: 'JKASS',
-    jkass_quality: 'JKASSq', stork2: 'STORK2', stork4: 'STORK4',
-    dopri5: 'DOPRI5', dop853: 'DOP853', dpm2m_ada: 'DPM++A', gl2s: 'GL2s', rfsolver: 'RFSolv',
-    unipc: 'UniPC', unipc_p: 'UniPC-P',
-    aflops: 'A-FloPS', aflops2: 'AFloPS2',
-  };
-  const guidanceLabels: Record<string, string> = {
-    apg: 'APG', cfg_pp: 'CFG++', dynamic_cfg: 'DynCFG', rescaled_cfg: 'rCFG',
-  };
+  const solver = useMemo(() => {
+    const s = registry.solvers.find(p => p.name === gp.inferMethod);
+    return s?.display || gp.inferMethod;
+  }, [registry.solvers, gp.inferMethod]);
 
-  const solver = solverLabels[gp.inferMethod] || gp.inferMethod;
-  const guidance = guidanceLabels[gp.guidanceMode] || gp.guidanceMode;
+  const guidance = useMemo(() => {
+    const g = registry.guidance.find(p => p.name === gp.guidanceMode);
+    return g?.display || gp.guidanceMode;
+  }, [registry.guidance, gp.guidanceMode]);
+
   const schedule = formatScheduler(gp.scheduler);
   const shiftLabel = gp.shift === -1 ? 'Auto' : gp.shift.toFixed(1);
   const seedLabel = gp.randomSeed ? 'Rnd' : 'Fix';

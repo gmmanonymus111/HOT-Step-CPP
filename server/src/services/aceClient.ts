@@ -104,11 +104,53 @@ export interface AceRequest {
   pp_vae_reencode?: boolean;
   // LRC timestamp generation (synchronized lyrics)
   get_lrc?: boolean;
+  // Lua plugin dynamic parameters
+  plugin_params?: Record<string, string | number | boolean>;
 }
 
 /** Job status from ace-server */
 export interface AceJobStatus {
   status: 'running' | 'done' | 'failed' | 'cancelled';
+}
+
+/** Plugin parameter schema from Lua plugin metadata */
+export interface PluginParamSchema {
+  key: string;
+  type: 'slider' | 'select' | 'toggle' | 'text';
+  label: string;
+  hint?: string;
+  transform?: string;
+  // slider
+  default?: number | string | boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  // select
+  options?: { value: string; label: string }[];
+  // conditional visibility
+  visible_when?: { key: string; equals: string };
+}
+
+/** Plugin metadata from Lua plugin files */
+export interface PluginInfo {
+  name: string;
+  display: string;
+  description?: string;
+  accent?: string;
+  // solver-specific
+  nfe?: number;
+  order?: number;
+  needs_model?: boolean;
+  stateful?: boolean;
+  stochastic?: boolean;
+  params: PluginParamSchema[];
+}
+
+/** Full plugin registry from GET /plugins */
+export interface PluginRegistry {
+  solvers: PluginInfo[];
+  schedulers: PluginInfo[];
+  guidance: PluginInfo[];
 }
 
 async function aceGet(path: string, timeoutMs = TIMEOUT_QUICK): Promise<Response> {
@@ -155,6 +197,12 @@ export const aceClient = {
   /** GET /props — available models, config, defaults */
   async props(): Promise<AceProps> {
     const res = await aceGet('/props');
+    return res.json();
+  },
+
+  /** GET /plugins — dynamic Lua plugin registry (solvers, schedulers, guidance) */
+  async plugins(): Promise<PluginRegistry> {
+    const res = await aceGet('/plugins');
     return res.json();
   },
 

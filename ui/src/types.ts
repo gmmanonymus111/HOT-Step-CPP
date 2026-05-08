@@ -190,6 +190,9 @@ export interface GenerationParams {
 
   // Source tracking — which UI mode originated the generation
   source?: string;  // 'create' | 'lyric-studio' | 'cover-studio'
+
+  // Lua plugin dynamic params
+  pluginParams?: Record<string, string>;
 }
 
 /** Generation job status from the server */

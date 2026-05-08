@@ -113,5 +113,10 @@ export function translateParams(params: any): AceRequest {
   if (params.denoiseSmoothing !== undefined) req.denoise_smoothing = params.denoiseSmoothing;
   if (params.denoiseMix !== undefined) req.denoise_mix = params.denoiseMix;
 
+  // Lua plugin dynamic params (passthrough from UI)
+  if (params.pluginParams && Object.keys(params.pluginParams).length > 0) {
+    req.plugin_params = params.pluginParams;
+  }
+
   return req;
 }
