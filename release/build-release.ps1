@@ -131,6 +131,24 @@ try {
     Pop-Location
 }
 
+# Rebuild better-sqlite3 native addon for the portable Node.js ABI
+# Dev machine may run Node 24 (ABI 137) but portable bundle ships Node 22 (ABI 127)
+Write-Host "  Rebuilding better-sqlite3 for Node $NodeVersion..."
+$bsqlPkg = Join-Path (Join-Path $ProjectRoot "server") "node_modules\better-sqlite3"
+Push-Location $bsqlPkg
+try {
+    cmd /c "npx prebuild-install --runtime node --target $NodeVersion --arch x64 --platform win32 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "  prebuild-install failed, trying npm rebuild..."
+        Pop-Location
+        Push-Location (Join-Path $ProjectRoot "server")
+        cmd /c "npm rebuild better-sqlite3 2>&1" | Out-Null
+    }
+    Write-Host "  Native addon rebuilt for Node $NodeVersion" -ForegroundColor Green
+} finally {
+    Pop-Location
+}
+
 # Install esbuild in release dir (dev dependency for bundling)
 Write-Host "  Installing esbuild..."
 Push-Location $ReleaseDir
