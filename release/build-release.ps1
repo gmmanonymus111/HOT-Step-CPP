@@ -174,8 +174,8 @@ if (-not $SkipUI) {
 
     Push-Location (Join-Path $ProjectRoot "ui")
     try {
-        npm install 2>&1 | Out-Null
-        npm run build 2>&1
+        cmd /c "npm install 2>&1" | Out-Null
+        cmd /c "npm run build 2>&1"
         if ($LASTEXITCODE -ne 0) { throw "UI build failed" }
     } finally {
         Pop-Location

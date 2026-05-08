@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { modelManagerApi } from '../../services/api';
-import type { ModelRegistry, RegistryFile, StarterPack } from '../../types';
+import type { ModelRegistry, RegistryFile } from '../../types';
 
 export interface PackStatus {
   total: number;

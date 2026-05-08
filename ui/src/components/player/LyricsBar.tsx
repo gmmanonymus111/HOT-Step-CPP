@@ -2,7 +2,7 @@
 // Displayed between the waveform and transport controls when playing.
 // Ported from hot-step-9000.
 
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Music } from 'lucide-react';
 
 interface LrcLine {
@@ -48,7 +48,7 @@ function findCurrentIndex(lines: LrcLine[], time: number): number {
     return result;
 }
 
-export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime, isPlaying }) => {
+export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) => {
     const [fetchedLrc, setFetchedLrc] = useState<string | null>(null);
     const [expanded, setExpanded] = useState(true);
 

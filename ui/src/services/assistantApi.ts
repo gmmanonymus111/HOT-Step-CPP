@@ -164,16 +164,16 @@ export function stripThinkingBlocks(text: string): string {
  */
 export function extractThinkingAndResponse(text: string): { thinking: string | null; response: string } {
   // Try each known thinking tag format
-  const patterns: { open: RegExp; close: RegExp; openStr: RegExp }[] = [
-    { open: /<think>/,           close: /<\/think>/,    openStr: /<think>/ },
-    { open: /<thought>/,         close: /<\/thought>/,  openStr: /<thought>/ },
-    { open: /<analysis>/,        close: /<\/analysis>/,  openStr: /<analysis>/ },
-    { open: /<reasoning>/,       close: /<\/reasoning>/, openStr: /<reasoning>/ },
-    { open: /<reflection>/,      close: /<\/reflection>/, openStr: /<reflection>/ },
-    { open: /<\|channel>thought/, close: /<channel\|>/,  openStr: /<\|channel>thought/ },
+  const patterns: { open: RegExp; close: RegExp }[] = [
+    { open: /<think>/,           close: /<\/think>/ },
+    { open: /<thought>/,         close: /<\/thought>/ },
+    { open: /<analysis>/,        close: /<\/analysis>/ },
+    { open: /<reasoning>/,       close: /<\/reasoning>/ },
+    { open: /<reflection>/,      close: /<\/reflection>/ },
+    { open: /<\|channel>thought/, close: /<channel\|>/ },
   ];
 
-  for (const { open, close, openStr } of patterns) {
+  for (const { open, close } of patterns) {
     const openMatch = open.exec(text);
     if (!openMatch) continue;
 

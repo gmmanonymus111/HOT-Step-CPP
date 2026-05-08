@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Zap, Download, Tag, AlertTriangle, Loader2, Settings2,
-  FolderOpen, Eye, EyeOff, ChevronRight, Save, Scissors,
+  ChevronRight, Save, Scissors,
   Key, Database,
 } from 'lucide-react';
 import { getStemStats, deleteAllJobs, formatBytes, type StemStats } from '../../services/stemStudioApi';

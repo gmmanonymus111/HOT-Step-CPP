@@ -18,7 +18,6 @@ function formatSize(bytes: number): string {
 }
 
 export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, onDownloadPack }) => {
-  const installed = files.filter(f => f.installed);
   const missing = files.filter(f => !f.installed);
   const allInstalled = missing.length === 0;
   const totalSize = files.reduce((a, f) => a + f.sizeBytes, 0);
@@ -26,7 +25,7 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
 
   // Check if any pack files are currently downloading
   const activeJobCount = downloadJobs.filter(j =>
-    files.some(f => f.fileId === j.fileId || f.id === j.fileId) &&
+    files.some(f => f.id === j.fileId) &&
     (j.status === 'downloading' || j.status === 'queued')
   ).length;
 

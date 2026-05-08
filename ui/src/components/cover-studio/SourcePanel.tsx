@@ -3,7 +3,7 @@ import React, { useCallback, useState } from 'react';
 import { Upload, Music, Loader2, X, Layers } from 'lucide-react';
 import type { AudioMetadata, AudioAnalysis } from './coverStudioUtils';
 import { ALL_KEYS } from './coverStudioUtils';
-import { SEPARATION_LEVELS, type SeparationLevel } from '../../services/supersepApi';
+import { SEPARATION_LEVELS } from '../../services/supersepApi';
 import { LatentImport, type LatentMetadata } from '../shared/LatentImport';
 
 const LANGUAGES = [

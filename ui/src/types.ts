@@ -107,6 +107,7 @@ export interface GenerationParams {
   ditModel: string;
   lmModel: string;
   vaeModel: string;
+  embeddingModel?: string;
 
   // Adapter
   loraPath: string;

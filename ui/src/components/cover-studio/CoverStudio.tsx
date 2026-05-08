@@ -10,7 +10,7 @@ import { generateApi } from '../../services/api';
 import { lireekApi, type Artist, type AlbumPreset } from '../../services/lireekApi';
 import {
   startSeparation, waitForCompletion, recombineStems, getStemAudioUrl,
-  SEPARATION_LEVELS, type SeparationLevel,
+  type SeparationLevel,
 } from '../../services/supersepApi';
 import { SourcePanel } from './SourcePanel';
 import { ArtistSettingsPanel } from './ArtistSettingsPanel';
@@ -532,7 +532,7 @@ export const CoverStudio: React.FC = () => {
           keyOverride={keyOverride} onKeyOverrideChange={setKeyOverride}
           vocalLanguage={vocalLanguage} onVocalLanguageChange={setVocalLanguage}
           advancedMode={advancedMode} onAdvancedModeChange={setAdvancedMode}
-          sepLevel={sepLevel} onSepLevelChange={setSepLevel}
+          sepLevel={sepLevel} onSepLevelChange={(v) => setSepLevel(v as SeparationLevel)}
           isSeparating={isSeparating} sepProgress={sepProgress} sepMessage={sepMessage}
           sourceAudioUrl={sourceAudioUrl} onSeparate={handleSeparate}
           hasStems={!!(sepStems && sepStems.length > 0 && sepJobId)}
