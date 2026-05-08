@@ -11,12 +11,27 @@ import {
   EXPOSED_ENV_KEYS,
   RESTART_REQUIRED_KEYS,
   reloadEnvConfig,
+  config,
 } from '../config.js';
 
 const router = Router();
 
 /** Set of exposed keys for fast lookup */
 const exposedSet = new Set<string>(EXPOSED_ENV_KEYS);
+
+/** Map of env keys to their resolved defaults from config.
+ *  When .env doesn't set a value, the Settings UI should still show
+ *  what the server is actually using (e.g. <PROJECT_ROOT>/models). */
+function getResolvedDefaults(): Record<string, string> {
+  return {
+    ACESTEPCPP_MODELS: config.aceServer.models,
+    ACESTEPCPP_ADAPTERS: config.aceServer.adapters,
+    ACESTEPCPP_PORT: String(config.aceServer.port),
+    ACESTEPCPP_HOST: config.aceServer.host,
+    SERVER_PORT: String(config.server.port),
+    DATA_DIR: config.data.dir,
+  };
+}
 
 /**
  * Parse .env content into an ordered array of { key, value, raw } entries.
@@ -44,6 +59,8 @@ function parseEnvLines(content: string): Array<{ key?: string; value?: string; r
  * GET /api/settings/env
  *
  * Returns the current .env values for all exposed keys.
+ * Keys not set in .env are backfilled with their resolved defaults
+ * so the UI always shows the actual path/value the server is using.
  * Also returns the restart-required key list so the UI can badge them.
  */
 router.get('/env', (_req, res) => {
@@ -53,14 +70,15 @@ router.get('/env', (_req, res) => {
       : '';
 
     const lines = parseEnvLines(content);
+    const defaults = getResolvedDefaults();
     const values: Record<string, string> = {};
 
-    // Seed all exposed keys with empty strings so UI always gets full list
+    // Seed all exposed keys with resolved defaults (not empty strings)
     for (const key of EXPOSED_ENV_KEYS) {
-      values[key] = '';
+      values[key] = defaults[key] ?? '';
     }
 
-    // Fill from .env file
+    // Override with explicit .env values
     for (const line of lines) {
       if (line.key && exposedSet.has(line.key)) {
         values[line.key] = line.value ?? '';

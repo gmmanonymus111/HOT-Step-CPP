@@ -16,7 +16,18 @@ export const PROJECT_ROOT = process.env.HOT_STEP_ROOT
   : path.resolve(__dirname, '../..');  // two levels up from server/src/
 
 // Load .env from project root (optional — smart defaults work without it)
-dotenvConfig({ path: path.join(PROJECT_ROOT, '.env') });
+// On first launch, bootstrap .env from .env.example so settings are writable.
+const ENV_PATH = path.join(PROJECT_ROOT, '.env');
+const ENV_EXAMPLE_PATH = path.join(PROJECT_ROOT, '.env.example');
+if (!fs.existsSync(ENV_PATH) && fs.existsSync(ENV_EXAMPLE_PATH)) {
+  try {
+    fs.copyFileSync(ENV_EXAMPLE_PATH, ENV_PATH);
+    console.log('[Config] Created .env from .env.example (first launch)');
+  } catch (e: any) {
+    console.warn('[Config] Could not create .env:', e.message);
+  }
+}
+dotenvConfig({ path: ENV_PATH });
 
 // Smart defaults: resolve paths relative to project root so users can
 // build the engine and drop models in place without editing any config.
