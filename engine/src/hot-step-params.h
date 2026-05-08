@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 // Per-group adapter scale multipliers. Applied on top of the global adapter_scale.
 struct AdapterGroupScales {
@@ -90,6 +91,11 @@ struct HotStepParams {
     // When non-empty, completely overrides both upstream schedule AND sideband scheduler.
     // N values = N-1 steps (trailing 0/endpoint is dropped by sampler).
     std::string custom_timesteps = "";
+
+    // Dynamic plugin parameters (Lua plugin system).
+    // Key format: "pluginName:paramKey", value is string representation.
+    // Populated from the JSON request's plugin_params object.
+    std::unordered_map<std::string, std::string> plugin_params;
 };
 
 // Single-worker-thread global. Set in hot-step-server.cpp before

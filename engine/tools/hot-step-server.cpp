@@ -40,6 +40,7 @@
 #include "spectral-lifter.h"
 #include "supersep.h"
 #include "hot-step-params.h"
+#include "lua-plugin-registry.h"
 
 // ── Linker guard: verify hot-step-sampler.h is active ────────────────
 // hot-step-sampler.h defines hotstep_sampler_linked_ with external linkage.
@@ -505,6 +506,8 @@ struct ServerFields {
     float       denoise_strength  = 0.0f;   // 0 = off, 1 = max
     float       denoise_smoothing = 0.7f;
     float       denoise_mix       = 0.25f;
+    // Lua plugin params: {"pluginName:key": "value", ...}
+    std::unordered_map<std::string, std::string> plugin_params;
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
@@ -627,6 +630,32 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     }
     if ((v = yyjson_obj_get(obj, "denoise_mix")) && yyjson_is_num(v)) {
         sf->denoise_mix = get_num(v);
+    }
+    // Lua plugin params: iterate "plugin_params" object
+    yyjson_val * pp_obj = yyjson_obj_get(obj, "plugin_params");
+    if (pp_obj && yyjson_is_obj(pp_obj)) {
+        sf->plugin_params.clear();
+        yyjson_val * pp_key, * pp_val;
+        yyjson_obj_iter pp_iter;
+        yyjson_obj_iter_init(pp_obj, &pp_iter);
+        while ((pp_key = yyjson_obj_iter_next(&pp_iter))) {
+            pp_val = yyjson_obj_iter_get_val(pp_key);
+            std::string k = yyjson_get_str(pp_key);
+            std::string v_str;
+            if (yyjson_is_str(pp_val)) {
+                v_str = yyjson_get_str(pp_val);
+            } else if (yyjson_is_real(pp_val)) {
+                v_str = std::to_string(yyjson_get_real(pp_val));
+            } else if (yyjson_is_int(pp_val)) {
+                v_str = std::to_string(yyjson_get_int(pp_val));
+            } else if (yyjson_is_bool(pp_val)) {
+                v_str = yyjson_get_bool(pp_val) ? "true" : "false";
+            }
+            sf->plugin_params[k] = v_str;
+        }
+        if (!sf->plugin_params.empty()) {
+            fprintf(stderr, "[DIAG] Parsed %d plugin_params\n", (int) sf->plugin_params.size());
+        }
     }
     yyjson_doc_free(doc);
 }
@@ -901,6 +930,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.latent_shift          = sf.latent_shift;
     g_hotstep_params.latent_rescale        = sf.latent_rescale;
     g_hotstep_params.custom_timesteps      = sf.custom_timesteps;
+    g_hotstep_params.plugin_params         = sf.plugin_params;
     fprintf(stderr, "[Server] HOT-Step params: solver=%s, guidance=%s, scheduler=%s\n",
             sf.solver_name.c_str(), sf.guidance_mode.c_str(),
             sf.scheduler.empty() ? "(default)" : sf.scheduler.c_str());
@@ -1681,6 +1711,18 @@ int main(int argc, char ** argv) {
     // NEVER and lets the working set accumulate across requests.
     g_store = store_create(g_keep_loaded ? EVICT_NEVER : EVICT_STRICT);
 
+    // Initialize Lua plugin system.
+    // engine_dir: derive from executable path (ace-server lives in engine/build/bin/)
+    // project_dir: the top-level project directory (parent of models_dir, or cwd)
+    {
+        std::filesystem::path exe_path = std::filesystem::canonical(argv[0]);
+        // ace-server is in engine/build/bin/ — engine/ is two levels up
+        std::filesystem::path engine_dir = exe_path.parent_path().parent_path().parent_path();
+        // Project root is one more level up from engine/
+        std::filesystem::path project_dir = engine_dir.parent_path();
+        PluginRegistry::instance().init(engine_dir.string(), project_dir.string());
+    }
+
     // setup HTTP server
     httplib::Server svr;
     g_svr = &svr;
@@ -1714,6 +1756,11 @@ int main(int argc, char ** argv) {
     });
     svr.Get("/props", handle_props);
     svr.Get("/logs", handle_logs);
+    // HOT-STEP: Lua plugin registry endpoint
+    svr.Get("/plugins", [](const httplib::Request &, httplib::Response & res) {
+        std::string json = PluginRegistry::instance().to_json();
+        res.set_content(json, "application/json");
+    });
 
     // HOT-STEP: GET /vram — GPU memory usage (CUDA only)
     svr.Get("/vram", [](const httplib::Request &, httplib::Response & res) {

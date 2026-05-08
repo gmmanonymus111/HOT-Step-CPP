@@ -16,9 +16,8 @@
 
 namespace fs = std::filesystem;
 
-// Global plugin param map — set per-request by hot-step-server.cpp
-// Key format: "pluginname:paramkey", value is string representation
-extern std::unordered_map<std::string, std::string> g_plugin_params;
+// Plugin params are stored in g_hotstep_params.plugin_params (hot-step-params.h)
+// and passed to Lua call wrappers directly by the sampler.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Plugin Registry — singleton holding all loaded plugins
@@ -287,6 +286,3 @@ private:
         return j;
     }
 };
-
-// Global plugin params — populated per request
-inline std::unordered_map<std::string, std::string> g_plugin_params;

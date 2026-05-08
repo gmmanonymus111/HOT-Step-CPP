@@ -177,7 +177,9 @@ static void lua_setup_sandbox(lua_State * L) {
     luaL_openlibs(L);
 
     // Remove dangerous modules
-    const char * blacklist[] = {"os", "io", "debug", "package", "dofile", "loadfile"};
+    // Note: "package" is kept (needed for require() of companion data files).
+    // Security: cpath is set to "" during load to block C module loading.
+    const char * blacklist[] = {"os", "io", "debug", "dofile", "loadfile"};
     for (const char * mod : blacklist) {
         lua_pushnil(L);
         lua_setglobal(L, mod);

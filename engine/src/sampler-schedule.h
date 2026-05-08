@@ -6,7 +6,8 @@
 // These are included BY hot-step-sampler.h — not independently compiled.
 
 #include "hot-step-params.h"
-#include "schedulers/scheduler-registry.h"
+#include "lua-plugin-registry.h"
+#include "schedulers/scheduler-registry.h" // kept for scheduler_clamp()
 
 #include <cstdio>
 #include <cstdlib>
@@ -97,14 +98,16 @@ static void sampler_build_scheduler_override(
             if (split < 0.0f) split = 0.0f;
             if (split > 1.0f) split = 1.0f;
 
-            const SchedulerInfo * sa = scheduler_lookup(name_a.c_str());
-            const SchedulerInfo * sb = scheduler_lookup(name_b.c_str());
-            if (!sa) sa = scheduler_lookup("linear");
-            if (!sb) sb = scheduler_lookup("linear");
+            auto & reg = PluginRegistry::instance();
+            LuaPlugin * sa = reg.scheduler_lookup(name_a.c_str());
+            LuaPlugin * sb = reg.scheduler_lookup(name_b.c_str());
+            if (!sa) sa = reg.scheduler_lookup("linear");
+            if (!sb) sb = reg.scheduler_lookup("linear");
 
             std::vector<float> va(num_steps), vb(num_steps);
-            sa->fn(va.data(), num_steps, shift_val);
-            sb->fn(vb.data(), num_steps, shift_val);
+            auto & pp = g_hotstep_params.plugin_params;
+            lua_call_scheduler(*sa, va.data(), num_steps, shift_val, pp);
+            lua_call_scheduler(*sb, vb.data(), num_steps, shift_val, pp);
 
             float zone_lo = split - crossover * 0.5f;
             float zone_hi = split + crossover * 0.5f;
@@ -126,17 +129,19 @@ static void sampler_build_scheduler_override(
             }
             scheduler_clamp(out_schedule.data(), num_steps);
             fprintf(stderr, "[DiT] Custom schedule: composite %s+%s (cross=%.2f, split=%.2f), shift=%.2f\n",
-                    sa->display_name, sb->display_name, crossover, split, shift_val);
+                    sa->display_name.c_str(), sb->display_name.c_str(), crossover, split, shift_val);
         }
     } else {
         // Standard scheduler lookup
-        const SchedulerInfo * sched = scheduler_lookup(ss.c_str());
+        auto & reg = PluginRegistry::instance();
+        LuaPlugin * sched = reg.scheduler_lookup(ss.c_str());
         if (!sched) {
             fprintf(stderr, "[DiT] WARNING: unknown scheduler '%s', using linear\n", ss.c_str());
-            sched = scheduler_lookup("linear");
+            sched = reg.scheduler_lookup("linear");
         }
-        sched->fn(out_schedule.data(), num_steps, shift_val);
+        auto & pp = g_hotstep_params.plugin_params;
+        lua_call_scheduler(*sched, out_schedule.data(), num_steps, shift_val, pp);
         fprintf(stderr, "[DiT] Custom schedule: %s (%s), shift=%.2f\n",
-                sched->display_name, sched->name, shift_val);
+                sched->display_name.c_str(), sched->name.c_str(), shift_val);
     }
 }

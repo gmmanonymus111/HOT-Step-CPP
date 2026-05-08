@@ -10,14 +10,13 @@
 #include "debug.h"
 #include "dit-graph.h"
 #include "dit.h"
-#include "guidance/guidance-registry.h"
+#include "guidance/apg-core.h"
 #include "hot-step-params.h"
+#include "lua-plugin-registry.h"
 #include "philox.h"
 #include "sampler-dcw.h"
 #include "sampler-repaint.h"
 #include "sampler-schedule.h"
-#include "schedulers/scheduler-registry.h"
-#include "solvers/solver-registry.h"
 
 #include <cmath>
 #include <cstdio>
@@ -337,17 +336,18 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
 
-    // ── Solver dispatch setup ─────────────────────────────────────────────
-    const SolverInfo * solver_info = solver_lookup(solver_name);
-    if (!solver_info) {
+    // ── Solver dispatch setup (Lua plugin system) ────────────────────────
+    auto & plugin_reg = PluginRegistry::instance();
+    LuaPlugin * solver_plugin = plugin_reg.solver_lookup(solver_name);
+    if (!solver_plugin) {
         fprintf(stderr, "[DiT] ERROR: unknown solver '%s', falling back to euler\n", solver_name);
-        solver_info = solver_lookup("euler");
+        solver_plugin = plugin_reg.solver_lookup("euler");
     }
     fprintf(stderr, "[DiT] Solver: %s (%s, %d NFE/step, order %d)\n",
-            solver_info->display_name, solver_info->name,
-            solver_info->nfe, solver_info->order);
+            solver_plugin->display_name.c_str(), solver_plugin->name.c_str(),
+            solver_plugin->nfe, solver_plugin->order);
 
-    // Initialize solver state
+    // Initialize solver state (still used by SDE Philox path)
     SolverState solver_state;
     solver_state.seeds            = seeds;
     solver_state.batch_n          = N;
@@ -358,13 +358,16 @@ static int dit_ggml_generate(DiTGGML *           model,
     solver_state.frequency_damping = frequency_damping;
     solver_state.temporal_smoothing = temporal_smoothing;
 
-    // ── Guidance mode dispatch setup ─────────────────────────────────────
-    const GuidanceInfo * guidance_info = guidance_lookup(guidance_mode);
-    if (!guidance_info) {
+    // ── Guidance mode dispatch setup (Lua plugin system) ─────────────────
+    LuaPlugin * guidance_plugin = plugin_reg.guidance_lookup(guidance_mode);
+    if (!guidance_plugin) {
         fprintf(stderr, "[DiT] ERROR: unknown guidance mode '%s', falling back to apg\n", guidance_mode);
-        guidance_info = guidance_lookup("apg");
+        guidance_plugin = plugin_reg.guidance_lookup("apg");
     }
-    fprintf(stderr, "[DiT] Guidance: %s (%s)\n", guidance_info->display_name, guidance_info->name);
+    bool use_apg_native = (guidance_plugin && guidance_plugin->name == "apg");
+    fprintf(stderr, "[DiT] Guidance: %s (%s)%s\n",
+            guidance_plugin->display_name.c_str(), guidance_plugin->name.c_str(),
+            use_apg_native ? " [native APG]" : "");
 
     // Per-step guidance context (updated in the main loop, captured by lambda)
     GuidanceCtx g_ctx = {0, num_steps, 0.0f, 0.0f};
@@ -420,9 +423,16 @@ static int dit_ggml_generate(DiTGGML *           model,
             memcpy(vt_cond.data(), full_output.data(), n_total * sizeof(float));
             memcpy(vt_uncond.data(), full_output.data() + n_total, n_total * sizeof(float));
             for (int b = 0; b < N; b++) {
-                guidance_info->fn(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
-                                  apg_mbufs[b], vt.data() + b * n_per, Oc, T, g_ctx,
-                                  apg_norm_threshold);
+                if (use_apg_native) {
+                    apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
+                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold);
+                } else {
+                    lua_call_guidance(*guidance_plugin,
+                                     vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
+                                     guidance_scale, apg_mbufs[b], vt.data() + b * n_per,
+                                     Oc, T, g_ctx, apg_norm_threshold,
+                                     g_hotstep_params.plugin_params);
+                }
             }
         } else if (do_cfg) {
             ggml_backend_tensor_get(t_output, vt_cond.data(), 0, n_total * sizeof(float));
@@ -442,9 +452,16 @@ static int dit_ggml_generate(DiTGGML *           model,
             ggml_backend_sched_graph_compute(model->sched, gf);
             ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
             for (int b = 0; b < N; b++) {
-                guidance_info->fn(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
-                                  apg_mbufs[b], vt.data() + b * n_per, Oc, T, g_ctx,
-                                  apg_norm_threshold);
+                if (use_apg_native) {
+                    apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
+                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold);
+                } else {
+                    lua_call_guidance(*guidance_plugin,
+                                     vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
+                                     guidance_scale, apg_mbufs[b], vt.data() + b * n_per,
+                                     Oc, T, g_ctx, apg_norm_threshold,
+                                     g_hotstep_params.plugin_params);
+                }
             }
         } else {
             ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
@@ -559,14 +576,16 @@ static int dit_ggml_generate(DiTGGML *           model,
             float t_next = schedule[step + 1];
 
 
-            // ── Modular solver dispatch ──────────────────────────────────
+            // ── Lua solver dispatch ────────────────────────────────────
             // The solver step function modifies xt[] in-place.
             // Multi-eval solvers call evaluate_velocity() via the model_fn
             // callback; single-eval solvers ignore it.
             solver_state.step_index = step;
-            solver_info->step_fn(
+            lua_call_solver_step(
+                *solver_plugin,
                 xt.data(), vt.data(), t_curr, t_next, n_total,
-                solver_state, evaluate_velocity, vt.data()
+                solver_state, evaluate_velocity, vt.data(),
+                g_hotstep_params.plugin_params
             );
 
             // ── DCW correction ──
@@ -591,7 +610,7 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
 
         fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]\n", step + 1, num_steps, t_curr,
-                solver_info->display_name);
+                solver_plugin->display_name.c_str());
     }
 
     // Boundary blend: smooth repaint zone edges in latent space.
