@@ -12,12 +12,15 @@ import path from 'path';
 import https from 'https';
 import http from 'http';
 import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
 import { config } from '../config.js';
-import { createRequire } from 'module';
 
-// Load registry
-const require = createRequire(import.meta.url);
-const registry = require('../data/model-registry.json');
+// Load registry — use fs.readFileSync for bundle compatibility.
+// In dev: data/ is a sibling of the source file's directory.
+// In bundled mode: the JSON is inlined by esbuild or lives at a known path.
+const __modelServiceDir = path.dirname(fileURLToPath(import.meta.url));
+const registryPath = path.join(__modelServiceDir, '..', 'data', 'model-registry.json');
+const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
 
 // ── Types ───────────────────────────────────────────────────
 

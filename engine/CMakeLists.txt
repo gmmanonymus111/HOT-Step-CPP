@@ -27,6 +27,15 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# Static MSVC runtime (/MT) for portable release builds.
+# Eliminates the VC++ Redistributable dependency for end users.
+# Only enable during release builds: -DHOT_STEP_STATIC_RUNTIME=ON
+option(HOT_STEP_STATIC_RUNTIME "Use static MSVC runtime (/MT) for portable builds" OFF)
+if(HOT_STEP_STATIC_RUNTIME AND MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    message(STATUS "MSVC runtime: static (/MT)")
+endif()
+
 # Put executables and backend .so in the same directory (build root).
 # Without this, ggml defaults to bin/ for .so but executables stay in root,
 # and ggml_backend_load_all() can't find the backends at runtime.

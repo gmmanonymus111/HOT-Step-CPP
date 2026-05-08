@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { config } from '../config.js';
+import { config, getFFmpegPath } from '../config.js';
 import { getDb } from '../db/database.js';
 
 const execFileAsync = promisify(execFile);
@@ -49,6 +49,10 @@ async function convertAudio(
   }
 
   // Use ffmpeg for FLAC, Opus, or MP3 fallback
+  const ffmpegPath = getFFmpegPath();
+  if (!ffmpegPath) {
+    throw new Error(`Cannot convert to ${format} — ffmpeg not available`);
+  }
   const args = ['-y', '-i', sourcePath];
 
   switch (format) {
@@ -68,9 +72,9 @@ async function convertAudio(
   args.push(outputPath);
 
   try {
-    await execFileAsync('ffmpeg', args, { timeout: 120_000 });
+    await execFileAsync(ffmpegPath, args, { timeout: 120_000 });
   } catch (err: any) {
-    throw new Error(`ffmpeg conversion failed: ${err.message}. Is ffmpeg installed?`);
+    throw new Error(`ffmpeg conversion failed: ${err.message}`);
   }
 }
 

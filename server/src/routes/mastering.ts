@@ -12,7 +12,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import multer from 'multer';
-import { config } from '../config.js';
+import { config, getFFmpegPath } from '../config.js';
 import { getUserId } from './auth.js';
 import { getDb } from '../db/database.js';
 
@@ -64,16 +64,22 @@ export async function convertToWav(inputPath: string, outputWavPath: string): Pr
   }
 
   // For FLAC, OGG, AAC, etc. — use ffmpeg
+  const ffmpegPath = getFFmpegPath();
+  if (!ffmpegPath) {
+    throw new Error(
+      `Cannot convert ${ext} to WAV. ffmpeg not available — provide a WAV/MP3 file.`
+    );
+  }
   console.log(`[Mastering] Converting ${ext} → WAV via ffmpeg`);
   try {
-    await execFileAsync('ffmpeg', [
+    await execFileAsync(ffmpegPath, [
       '-y', '-i', inputPath,
       '-ac', '2', '-ar', '48000', '-c:a', 'pcm_f32le',
       outputWavPath,
     ], { timeout: 120_000 });
   } catch {
     throw new Error(
-      `Cannot convert ${ext} to WAV. Install ffmpeg or provide a WAV/MP3 file.`
+      `ffmpeg conversion failed for ${ext}. Provide a WAV/MP3 file.`
     );
   }
 }

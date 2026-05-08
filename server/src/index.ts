@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import { spawn, ChildProcess } from 'child_process';
 import { execSync } from 'child_process';
 
-import { config } from './config.js';
+import { config, PROJECT_ROOT } from './config.js';
 import { initLogger, logEngine, closeLogger } from './services/logger.js';
 import { initDb, closeDb } from './db/database.js';
 // lireekDb is now part of the unified hotstep.db — no separate init needed
@@ -110,7 +110,7 @@ app.use('/references', express.static(refsDir, {
   },
 }));
 // Serve React frontend (production only — in dev, Vite handles this)
-const uiDistPath = path.resolve(__dirname, '../../ui/dist');
+const uiDistPath = path.join(PROJECT_ROOT, 'ui', 'dist');
 if (fs.existsSync(uiDistPath)) {
   // Assets with content hashes get long cache; index.html always revalidates
   app.use(express.static(uiDistPath, {

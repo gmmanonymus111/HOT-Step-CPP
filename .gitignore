@@ -90,3 +90,9 @@ docs/
 
 docs/plans/
 scratch/
+
+# Release build artifacts (scripts committed, outputs not)
+release/staging/
+release/out/
+release/.node-cache/
+release/node_modules/

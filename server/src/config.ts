@@ -6,8 +6,14 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Project root is two levels up from server/src/
-const PROJECT_ROOT = path.resolve(__dirname, '../..');
+// ── Portable mode detection ─────────────────────────────────────────
+// When HOT_STEP_ROOT is set (by the release launcher), all paths resolve
+// from the distribution root. Otherwise, fall back to __dirname-based
+// resolution for development mode.
+export const PORTABLE_MODE = !!process.env.HOT_STEP_ROOT;
+export const PROJECT_ROOT = process.env.HOT_STEP_ROOT
+  ? path.resolve(process.env.HOT_STEP_ROOT)
+  : path.resolve(__dirname, '../..');  // two levels up from server/src/
 
 // Load .env from project root (optional — smart defaults work without it)
 dotenvConfig({ path: path.join(PROJECT_ROOT, '.env') });
@@ -15,20 +21,61 @@ dotenvConfig({ path: path.join(PROJECT_ROOT, '.env') });
 // Smart defaults: resolve paths relative to project root so users can
 // build the engine and drop models in place without editing any config.
 //
-// Binary location depends on the CMake generator used:
+// Binary location depends on the layout:
+//   - Portable release: engine/ace-server.exe (flat)
 //   - Visual Studio (multi-config): engine/build/Release/ace-server.exe
 //   - Ninja / Makefiles (single-config): engine/build/ace-server.exe
-// We check both and use whichever exists.
-const BUILD_DIR = path.join(PROJECT_ROOT, 'engine', 'build');
+// We check all and use whichever exists.
+const ENGINE_DIR = path.join(PROJECT_ROOT, 'engine');
+const BUILD_DIR = path.join(ENGINE_DIR, 'build');
 const EXE_CANDIDATES = [
-  path.join(BUILD_DIR, 'Release', 'ace-server.exe'),  // Visual Studio
-  path.join(BUILD_DIR, 'ace-server.exe'),              // Ninja / Makefiles
-  path.join(BUILD_DIR, 'Debug', 'ace-server.exe'),     // VS Debug build
+  path.join(ENGINE_DIR, 'ace-server.exe'),             // Portable release (flat)
+  path.join(BUILD_DIR, 'Release', 'ace-server.exe'),   // Visual Studio
+  path.join(BUILD_DIR, 'ace-server.exe'),               // Ninja / Makefiles
+  path.join(BUILD_DIR, 'Debug', 'ace-server.exe'),      // VS Debug build
 ];
 const DEFAULT_EXE = EXE_CANDIDATES.find(p => fs.existsSync(p)) || EXE_CANDIDATES[0];
 const DEFAULT_MODELS = path.join(PROJECT_ROOT, 'models');
 const DEFAULT_ADAPTERS = path.join(PROJECT_ROOT, 'adapters');
 const DEFAULT_NOISE_SAMPLES = path.join(PROJECT_ROOT, 'noise_samples');
+
+// ── FFmpeg path resolution ──────────────────────────────────────────
+// Portable: bundled ffmpeg.exe alongside the server.
+// Dev mode: ffmpeg-static npm package provides the binary.
+// Uses lazy init — resolved on first call, cached thereafter.
+
+import { createRequire } from 'module';
+
+let _ffmpegPath: string | null | undefined; // undefined = not yet resolved
+
+/** Get the resolved path to ffmpeg. Checks portable location first, then ffmpeg-static. */
+export function getFFmpegPath(): string | null {
+  if (_ffmpegPath !== undefined) return _ffmpegPath;
+
+  // 1. Portable: server/ffmpeg.exe next to the bundled server
+  const portablePath = path.join(PROJECT_ROOT, 'server', 'ffmpeg.exe');
+  if (fs.existsSync(portablePath)) {
+    _ffmpegPath = portablePath;
+    return _ffmpegPath;
+  }
+
+  // 2. Dev: ffmpeg-static npm package
+  try {
+    const require = createRequire(import.meta.url);
+    const ffmpegStatic = require('ffmpeg-static') as string | null;
+    if (ffmpegStatic && fs.existsSync(ffmpegStatic)) {
+      _ffmpegPath = ffmpegStatic;
+      return _ffmpegPath;
+    }
+  } catch {
+    // ffmpeg-static not installed — expected in portable mode
+  }
+
+  // 3. Not found
+  _ffmpegPath = null;
+  return null;
+}
+
 
 export const config = {
   // ace-server configuration

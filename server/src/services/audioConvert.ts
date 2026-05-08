@@ -1,20 +1,20 @@
 /**
- * audioConvert.ts — Convert non-WAV/MP3 audio to WAV using bundled ffmpeg.
+ * audioConvert.ts — Convert non-WAV/MP3 audio to WAV using ffmpeg.
  *
  * The C++ engine (audio-io.h) only decodes WAV and MP3. Source audio from
- * Cover Studio may be FLAC, M4A, OGG, etc. This module converts on-demand
- * using ffmpeg-static (self-contained, no system dependency).
+ * Cover Studio may be FLAC, M4A, OGG, etc. This module converts on-demand.
+ *
+ * FFmpeg is resolved via getFFmpegPath():
+ *   - Portable mode: server/ffmpeg.exe (bundled in release)
+ *   - Dev mode: ffmpeg-static npm package
  *
  * Converted files are cached alongside the original so re-runs skip conversion.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { getFFmpegPath } from '../config.js';
 
-// ffmpeg-static exports the path to the bundled binary
-// @ts-ignore — ffmpeg-static default export is a string path at runtime
-import ffmpegPathImport from 'ffmpeg-static';
-const ffmpegPath: string | null = ffmpegPathImport as unknown as string | null;
 
 /** Extensions the C++ engine can decode natively */
 const ENGINE_NATIVE_EXTS = new Set(['.wav', '.mp3']);
@@ -98,14 +98,15 @@ export function ensureEngineFormat(filePath: string): Buffer {
     return fs.readFileSync(wavPath);
   }
 
-  // Convert via ffmpeg-static
+  // Convert via ffmpeg
+  const ffmpegPath = getFFmpegPath();
   if (!ffmpegPath) {
     // Last resort: if it's a WAV we can't convert, return it anyway and hope for the best
     if (ext === '.wav') {
       console.warn(`[audioConvert] ffmpeg not available — returning non-16-bit WAV as-is (engine may reject it)`);
       return fs.readFileSync(filePath);
     }
-    throw new Error('ffmpeg-static not available — cannot convert non-WAV/MP3 audio');
+    throw new Error('ffmpeg not available — cannot convert non-WAV/MP3 audio');
   }
 
   const label = ext === '.wav' ? 'non-16-bit WAV' : ext.slice(1).toUpperCase();
@@ -156,8 +157,9 @@ export function timeStretchPitchShift(
   tempoScale: number,
   pitchShift: number,
 ): Buffer {
+  const ffmpegPath = getFFmpegPath();
   if (!ffmpegPath) {
-    throw new Error('ffmpeg-static not available — cannot apply tempo/pitch changes');
+    throw new Error('ffmpeg not available — cannot apply tempo/pitch changes');
   }
 
   // Write source to temp file

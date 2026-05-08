@@ -12,7 +12,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import multer from 'multer';
 import { parseBuffer } from 'music-metadata';
-import { config } from '../config.js';
+import { config, getFFmpegPath } from '../config.js';
 
 const router = Router();
 
@@ -74,11 +74,16 @@ router.post('/', async (req: Request, res: Response) => {
     let tmpWav: string | null = null;
 
     if (!SUPPORTED_EXTS.includes(ext)) {
+        const ffmpegPath = getFFmpegPath();
+        if (!ffmpegPath) {
+            res.status(500).json({ error: `Cannot convert ${ext} to WAV — ffmpeg not available` });
+            return;
+        }
         tmpWav = path.join(os.tmpdir(), `essentia_input_${Date.now()}.wav`);
         console.log(`[analyze] Converting ${ext} to WAV via ffmpeg...`);
         try {
             await new Promise<void>((resolve, reject) => {
-                execFile('ffmpeg', ['-y', '-i', audioPath, '-ar', '44100', '-ac', '2', tmpWav!],
+                execFile(ffmpegPath, ['-y', '-i', audioPath, '-ar', '44100', '-ac', '2', tmpWav!],
                     { timeout: 60_000 },
                     (error) => error ? reject(error) : resolve()
                 );
