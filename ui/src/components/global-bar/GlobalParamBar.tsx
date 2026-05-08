@@ -28,6 +28,7 @@ export const GlobalParamBar: React.FC = () => {
   const [showModelManager, setShowModelManager] = useState(false);
 
   useEffect(() => {
+    if (sessionStorage.getItem('mm-auto-dismissed')) return;
     modelApi.list()
       .then((data) => {
         const allModels = [
@@ -35,11 +36,15 @@ export const GlobalParamBar: React.FC = () => {
           ...(data?.models?.lm || []),
           ...(data?.models?.vae || []),
         ];
-        if (allModels.length === 0 && !sessionStorage.getItem('mm-auto-dismissed')) {
+        if (allModels.length === 0) {
           setShowModelManager(true);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // Engine not running (e.g. no models directory configured) — still show
+        // the Model Manager so the user can download models on first launch
+        setShowModelManager(true);
+      });
   }, []);
 
   // ── Preset Export ────────────────────────────────────────────────
