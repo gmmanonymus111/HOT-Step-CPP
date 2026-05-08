@@ -12,6 +12,7 @@ import type { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PORTABLE_MODE, PROJECT_ROOT } from '../config.js';
 import { getProvider, listProviders } from '../services/lireek/llm/registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,9 @@ let knowledgeBase: string | null = null;
 
 function loadKnowledge(): string {
   if (knowledgeBase) return knowledgeBase;
-  const filePath = path.resolve(__dirname, '../data/assistant-knowledge.md');
+  const filePath = PORTABLE_MODE
+    ? path.join(PROJECT_ROOT, 'server', 'data', 'assistant-knowledge.md')
+    : path.resolve(__dirname, '../data/assistant-knowledge.md');
   try {
     knowledgeBase = fs.readFileSync(filePath, 'utf-8');
     console.log(`[Assistant] Knowledge base loaded (${(knowledgeBase.length / 1024).toFixed(1)} KB)`);
