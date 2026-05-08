@@ -55,7 +55,7 @@ const result = await esbuild.build({
 // Print bundle size summary
 const outputs = result.metafile?.outputs || {};
 for (const [file, info] of Object.entries(outputs)) {
-  const sizeKB = ((info as any).bytes / 1024).toFixed(1);
+  const sizeKB = (info.bytes / 1024).toFixed(1);
   console.log(`  ${file}: ${sizeKB} KB`);
 }
 
