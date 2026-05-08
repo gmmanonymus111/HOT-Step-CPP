@@ -67,6 +67,22 @@ class ModelDownloadService extends EventEmitter {
     return config.aceServer.models;
   }
 
+  /** Get the engine directory (where ace-server.exe lives) for runtime DLLs */
+  get engineDir(): string {
+    return path.dirname(config.aceServer.exe);
+  }
+
+  /** Resolve the target directory for a registry file */
+  private getTargetDir(file: RegistryFile): string {
+    if (file.role === 'runtime') {
+      // Runtime DLLs go alongside ace-server.exe
+      return this.engineDir;
+    }
+    return file.subdir
+      ? path.join(this.modelsDir, file.subdir)
+      : this.modelsDir;
+  }
+
   /** Get all files in the registry, enriched with installed status */
   getRegistry(): { packs: typeof registry.packs; files: (RegistryFile & { installed: boolean })[]; modelsDir: string } {
     const installed = this.getInstalledFiles();
@@ -80,26 +96,38 @@ class ModelDownloadService extends EventEmitter {
     };
   }
 
-  /** Scan models directory for installed model files (.gguf and .onnx) */
+  /** Scan models directory for installed model files (.gguf and .onnx),
+   *  and engine directory for runtime DLLs */
   getInstalledFiles(): Set<string> {
     const dir = this.modelsDir;
-    if (!fs.existsSync(dir)) return new Set();
     const files = new Set<string>();
-    // Scan root directory
-    for (const f of fs.readdirSync(dir)) {
-      if (f.endsWith('.gguf') || f.endsWith('.onnx')) files.add(f);
-    }
-    // Scan subdirectories (e.g. supersep/)
-    for (const sub of fs.readdirSync(dir)) {
-      const subPath = path.join(dir, sub);
-      try {
-        if (fs.statSync(subPath).isDirectory()) {
-          for (const f of fs.readdirSync(subPath)) {
-            if (f.endsWith('.gguf') || f.endsWith('.onnx')) files.add(f);
+
+    // Scan models root directory
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.endsWith('.gguf') || f.endsWith('.onnx')) files.add(f);
+      }
+      // Scan subdirectories (e.g. supersep/)
+      for (const sub of fs.readdirSync(dir)) {
+        const subPath = path.join(dir, sub);
+        try {
+          if (fs.statSync(subPath).isDirectory()) {
+            for (const f of fs.readdirSync(subPath)) {
+              if (f.endsWith('.gguf') || f.endsWith('.onnx')) files.add(f);
+            }
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
+
+    // Scan engine directory for runtime DLLs
+    const engDir = this.engineDir;
+    if (fs.existsSync(engDir)) {
+      for (const f of fs.readdirSync(engDir)) {
+        if (f.endsWith('.dll')) files.add(f);
+      }
+    }
+
     return files;
   }
 
@@ -155,8 +183,10 @@ class ModelDownloadService extends EventEmitter {
     job.status = 'cancelled';
     job.abortController?.abort();
 
-    // Clean up .part file
-    const partPath = path.join(this.modelsDir, `${job.filename}.part`);
+    // Clean up .part file — resolve correct directory
+    const file = registry.files.find((f: RegistryFile) => f.id === job.fileId);
+    const targetDir = file ? this.getTargetDir(file) : this.modelsDir;
+    const partPath = path.join(targetDir, `${job.filename}.part`);
     try { fs.unlinkSync(partPath); } catch {}
 
     this.emit('progress');
@@ -175,7 +205,8 @@ class ModelDownloadService extends EventEmitter {
     if (!file) throw new Error(`Registry entry gone for ${job.fileId}`);
 
     // Check .part file for resume offset
-    const partPath = path.join(this.modelsDir, `${job.filename}.part`);
+    const targetDir = this.getTargetDir(file);
+    const partPath = path.join(targetDir, `${job.filename}.part`);
     if (fs.existsSync(partPath)) {
       job.bytesDownloaded = fs.statSync(partPath).size;
     } else {
@@ -189,16 +220,27 @@ class ModelDownloadService extends EventEmitter {
     return jobId;
   }
 
-  /** Delete a model file from disk */
+  /** Delete a model/runtime file from disk */
   deleteFile(filename: string): boolean {
-    // Safety: only known model extensions
-    if (!filename.endsWith('.gguf') && !filename.endsWith('.onnx')) {
-      throw new Error('Can only delete .gguf or .onnx files');
+    // Safety: only known model/runtime extensions
+    if (!filename.endsWith('.gguf') && !filename.endsWith('.onnx') && !filename.endsWith('.dll')) {
+      throw new Error('Can only delete .gguf, .onnx, or .dll files');
     }
 
-    // Check root dir and subdirectories
+    // For DLLs, check engine directory
+    if (filename.endsWith('.dll')) {
+      const filePath = path.join(this.engineDir, filename);
+      const resolved = path.resolve(filePath);
+      if (!resolved.startsWith(path.resolve(this.engineDir))) throw new Error('Path traversal denied');
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        return true;
+      }
+      return false;
+    }
+
+    // Check root dir and subdirectories for models
     const candidates = [path.join(this.modelsDir, filename)];
-    // Also check subdirectories
     try {
       for (const sub of fs.readdirSync(this.modelsDir)) {
         const subPath = path.join(this.modelsDir, sub);
@@ -232,10 +274,8 @@ class ModelDownloadService extends EventEmitter {
   // ── Internal ────────────────────────────────────────────────
 
   private async _executeDownload(job: InternalJob, file: RegistryFile): Promise<void> {
-    // Determine target directory (root or subdirectory)
-    const targetDir = file.subdir
-      ? path.join(this.modelsDir, file.subdir)
-      : this.modelsDir;
+    // Determine target directory based on file role
+    const targetDir = this.getTargetDir(file);
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
