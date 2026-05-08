@@ -229,6 +229,19 @@ New-Item -ItemType Directory -Force (Join-Path $bsqlDst "build\Release") | Out-N
 Copy-Item (Join-Path $bsqlSrc "build\Release\better_sqlite3.node") `
     (Join-Path $bsqlDst "build\Release\better_sqlite3.node")
 
+# Copy better-sqlite3 runtime dependencies: bindings + file-uri-to-path
+$nmSrc = Join-Path (Join-Path $ProjectRoot "server") "node_modules"
+foreach ($dep in @("bindings", "file-uri-to-path")) {
+    $depSrc = Join-Path $nmSrc $dep
+    $depDst = Join-Path $serverOut "node_modules\$dep"
+    if (Test-Path $depSrc) {
+        Copy-Item -Recurse $depSrc $depDst
+        Write-Host "    Copied $dep"
+    } else {
+        Write-Warning "  Missing dependency: $dep"
+    }
+}
+
 # Copy ffmpeg.exe
 $ffmpegSrc = Join-Path (Join-Path (Join-Path $ProjectRoot "server") "node_modules\ffmpeg-static") "ffmpeg.exe"
 if (Test-Path $ffmpegSrc) {
