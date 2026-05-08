@@ -24,7 +24,27 @@ const result = await esbuild.build({
   outfile: path.join(projectRoot, 'release/staging/server/server.mjs'),
 
   // Native addon — can't be bundled into JS. Loaded from local node_modules/.
-  external: ['better-sqlite3'],
+  // Node.js built-ins must also be external — esbuild's ESM CJS-compat shim
+  // can't handle dynamic require("node:events") etc. from Express/other deps.
+  external: [
+    'better-sqlite3',
+    // All Node.js built-in modules (with and without node: prefix)
+    'assert', 'buffer', 'child_process', 'cluster', 'crypto', 'dgram', 'dns',
+    'events', 'fs', 'http', 'http2', 'https', 'module', 'net', 'os', 'path',
+    'perf_hooks', 'process', 'querystring', 'readline', 'repl', 'stream',
+    'string_decoder', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'worker_threads',
+    'zlib', 'constants', 'inspector', 'async_hooks', 'diagnostics_channel',
+    'trace_events', 'wasi',
+    'node:assert', 'node:buffer', 'node:child_process', 'node:cluster',
+    'node:crypto', 'node:dgram', 'node:dns', 'node:events', 'node:fs',
+    'node:http', 'node:http2', 'node:https', 'node:module', 'node:net',
+    'node:os', 'node:path', 'node:perf_hooks', 'node:process',
+    'node:querystring', 'node:readline', 'node:repl', 'node:stream',
+    'node:string_decoder', 'node:tls', 'node:tty', 'node:url', 'node:util',
+    'node:v8', 'node:vm', 'node:worker_threads', 'node:zlib',
+    'node:constants', 'node:inspector', 'node:async_hooks',
+    'node:diagnostics_channel', 'node:trace_events', 'node:wasi',
+  ],
 
   // ffmpeg-static is no longer imported directly — audioConvert.ts uses
   // getFFmpegPath() from config.ts which resolves the path at runtime.
