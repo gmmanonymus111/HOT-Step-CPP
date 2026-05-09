@@ -7,6 +7,7 @@
 //   3. Mastering       — Reference-based mastering (existing MasteringDropdown content)
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Sparkles, AudioWaveform, Zap,
   Upload, Trash2, Music2,
@@ -97,6 +98,7 @@ const formatFileSize = (bytes: number): string => {
 
 const MasteringContent: React.FC = () => {
   const gp = useGlobalParams();
+  const { t } = useTranslation();
   const { token } = useAuth();
   const [references, setReferences] = useState<ReferenceTrack[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -139,7 +141,7 @@ const MasteringContent: React.FC = () => {
   if (!gp.masteringEnabled) {
     return (
       <div className="text-xs text-zinc-500 italic text-center py-2 mt-2">
-        Enable the toggle above to configure mastering.
+        {t('mastering.enableToggle')}
       </div>
     );
   }
@@ -149,7 +151,7 @@ const MasteringContent: React.FC = () => {
       {/* Reference selector */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-          Reference Track
+          {t('mastering.referenceTrack')}
         </label>
         {references.length > 0 ? (
           <select
@@ -157,7 +159,7 @@ const MasteringContent: React.FC = () => {
             value={gp.masteringReference}
             onChange={e => gp.setMasteringReference(e.target.value)}
           >
-            <option value="">Select a reference...</option>
+            <option value="">{t('mastering.selectReference')}</option>
             {references.map(r => (
               <option key={r.name} value={r.name}>
                 {r.name} ({formatFileSize(r.size)})
@@ -166,7 +168,7 @@ const MasteringContent: React.FC = () => {
           </select>
         ) : (
           <div className="text-xs text-zinc-500 italic px-1">
-            No reference tracks uploaded yet
+            {t('mastering.noReferencesYet')}
           </div>
         )}
       </div>
@@ -179,7 +181,7 @@ const MasteringContent: React.FC = () => {
           <button
             onClick={() => handleDelete(gp.masteringReference)}
             className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors flex-shrink-0"
-            title="Delete reference"
+            title={t('mastering.deleteReference')}
           >
             <Trash2 size={12} />
           </button>
@@ -206,7 +208,7 @@ const MasteringContent: React.FC = () => {
           {uploading ? (
             <><span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" /> Uploading...</>
           ) : (
-            <><Upload size={14} /> Upload Reference</>
+            <><Upload size={14} /> {t('mastering.uploadReference')}</>
           )}
         </label>
       </div>
@@ -222,7 +224,7 @@ const MasteringContent: React.FC = () => {
           <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-1.5">
               <Music2 size={14} className="text-teal-400" />
-              <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
+              <span className="text-sm text-zinc-600 dark:text-zinc-400">{t('mastering.alsoTimbreRef')}</span>
             </div>
             <ToggleSwitch checked={gp.timbreReference} onChange={gp.setTimbreReference} accentColor="amber" />
           </div>
@@ -245,6 +247,7 @@ const MasteringContent: React.FC = () => {
 // ── Main Dropdown ───────────────────────────────────────────────
 
 export const PostProcessingDropdown: React.FC = () => {
+  const { t } = useTranslation();
   const gp = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
@@ -264,7 +267,7 @@ export const PostProcessingDropdown: React.FC = () => {
       {ppVaeAvailable && (
         <Accordion
           icon={<AudioWaveform size={14} />}
-          label="PP-VAE Re-encode"
+          label={t('pp.ppVaeReencode')}
           accentColor="emerald"
           persistKey="hs-ppAccordion-ppvae"
           toggle={{ checked: gp.ppVaeReencode, onChange: gp.setPpVaeReencode }}
@@ -298,7 +301,7 @@ export const PostProcessingDropdown: React.FC = () => {
       {/* 1. Spectral Lifter */}
       <Accordion
         icon={<Zap size={14} />}
-        label="Spectral Lifter"
+        label={t('pp.spectralLifter')}
         accentColor="cyan"
         persistKey="hs-ppAccordion-sl"
         toggle={{ checked: gp.spectralLifterEnabled, onChange: gp.setSpectralLifterEnabled }}
@@ -377,7 +380,7 @@ export const PostProcessingDropdown: React.FC = () => {
       {/* 2. VST Chain */}
       <Accordion
         icon={<Sparkles size={14} />}
-        label="VST Chain"
+        label={t('pp.vstChain')}
         accentColor="violet"
         persistKey="hs-ppAccordion-vst"
         badge={vstEnabled > 0 ? (
@@ -394,7 +397,7 @@ export const PostProcessingDropdown: React.FC = () => {
       {/* 3. Mastering */}
       <Accordion
         icon={<AudioWaveform size={14} />}
-        label="Mastering"
+        label={t('pp.mastering')}
         accentColor="amber"
         persistKey="hs-ppAccordion-master"
         toggle={{ checked: gp.masteringEnabled, onChange: gp.setMasteringEnabled }}

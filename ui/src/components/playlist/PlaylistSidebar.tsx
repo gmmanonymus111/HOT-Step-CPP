@@ -6,6 +6,7 @@
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import {
   Play, X, Trash2, ChevronUp, ChevronDown,
@@ -22,6 +23,7 @@ interface PlaylistSidebarProps {
 
 export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => {
   const playlist = usePlaylist();
+  const { t } = useTranslation();
   const pb = usePlayback();
   const currentSongId = pb.currentTrack?.id ?? null;
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
@@ -44,7 +46,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-white/5 flex-shrink-0">
         <div className="flex items-center gap-2">
           <ListMusic className="w-4 h-4 text-pink-400" />
-          <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider">Playlist</span>
+          <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider">{t('playlist.title')}</span>
           {playlist.items.length > 0 && (
             <span className="text-[10px] text-zinc-500 font-normal">
               {playlist.items.length} · {totalDuration}
@@ -55,13 +57,13 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
           {playlist.items.length > 0 && (
             <button onClick={playlist.clear}
               className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-              title="Clear playlist">
+              title={t('playlist.clearPlaylist')}>
               <Trash2 className="w-3 h-3" />
             </button>
           )}
           <button onClick={onClose}
             className="p-1 rounded-md text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
-            title="Close playlist">
+            title={t('playlist.closePlaylist')}>
             <X className="w-3 h-3" />
           </button>
         </div>
@@ -75,7 +77,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
               <Music className="w-6 h-6 text-zinc-700" />
             </div>
             <div>
-              <p className="text-xs text-zinc-500 font-medium mb-1">Playlist empty</p>
+              <p className="text-xs text-zinc-500 font-medium mb-1">{t('playlist.empty')}</p>
               <p className="text-[10px] text-zinc-600 leading-relaxed max-w-[200px]">
                 Click the <ListPlus className="w-3 h-3 inline text-pink-400" /> button next to any track to add it here.
               </p>
@@ -141,19 +143,19 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
                           tags: [],
                         });
                       }}
-                      className="p-0.5 text-zinc-600 hover:text-emerald-400 transition-colors" title="Download">
+                      className="p-0.5 text-zinc-600 hover:text-emerald-400 transition-colors" title={t('playlist.download')}>
                       <Download className="w-3 h-3" />
                     </button>
                     <button onClick={() => playlist.move(item.id, 'up')} disabled={idx === 0}
-                      className="p-0.5 text-zinc-600 hover:text-white transition-colors disabled:opacity-20" title="Move up">
+                      className="p-0.5 text-zinc-600 hover:text-white transition-colors disabled:opacity-20" title={t('playlist.moveUp')}>
                       <ChevronUp className="w-3 h-3" />
                     </button>
                     <button onClick={() => playlist.move(item.id, 'down')} disabled={idx === playlist.items.length - 1}
-                      className="p-0.5 text-zinc-600 hover:text-white transition-colors disabled:opacity-20" title="Move down">
+                      className="p-0.5 text-zinc-600 hover:text-white transition-colors disabled:opacity-20" title={t('playlist.moveDown')}>
                       <ChevronDown className="w-3 h-3" />
                     </button>
                     <button onClick={() => playlist.remove(item.id)}
-                      className="p-0.5 text-zinc-600 hover:text-red-400 transition-colors ml-0.5" title="Remove">
+                      className="p-0.5 text-zinc-600 hover:text-red-400 transition-colors ml-0.5" title={t('playlist.remove')}>
                       <X className="w-3 h-3" />
                     </button>
                   </div>
@@ -176,7 +178,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
         <div className="flex items-center justify-between px-4 py-2 border-t border-zinc-200 dark:border-white/5 flex-shrink-0">
           <button onClick={() => handlePlay(playlist.items[0])}
             className="flex items-center gap-1.5 text-[10px] font-semibold text-pink-400 hover:text-pink-300 transition-colors">
-            <Play className="w-3 h-3" /> Play All
+            <Play className="w-3 h-3" /> {t('playlist.playAll')}
           </button>
           <span className="text-[9px] text-zinc-600 font-mono">{totalDuration}</span>
         </div>

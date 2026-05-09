@@ -4,6 +4,7 @@
 // toggle enable/disable, and launch native plugin GUIs.
 
 import React, { useEffect, useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Plus, Trash2, ExternalLink, Search,
   ChevronUp, ChevronDown, Power, Headphones, Square,
@@ -24,6 +25,7 @@ function formatTime(s: number): string {
 
 const PluginSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { plugins, scanning, scanPlugins, addToChain, chain } = useVstChainStore();
+  const { t } = useTranslation();
   const [filter, setFilter] = useState('');
 
   useEffect(() => {
@@ -64,11 +66,11 @@ const PluginSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         {scanning ? (
           <div className="flex items-center gap-2 justify-center py-4 text-zinc-500">
             <span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs">Scanning VST3 plugins...</span>
+            <span className="text-xs">{t('vst.scanningPlugins')}</span>
           </div>
         ) : filtered.length === 0 ? (
           <div className="text-xs text-zinc-600 text-center py-3 italic">
-            {plugins.length === 0 ? 'No VST3 plugins found' : 'No matches'}
+            {plugins.length === 0 ? t('vst.noPluginsFound') : t('vst.noMatches')}
           </div>
         ) : (
           filtered.map(plugin => (
@@ -98,7 +100,7 @@ const PluginSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         disabled={scanning}
         className="w-full text-[10px] text-zinc-600 hover:text-violet-400 transition-colors py-1"
       >
-        {scanning ? 'Scanning...' : `Rescan (${plugins.length} found)`}
+        {scanning ? t('vst.scanning') : `Rescan (${plugins.length} found)`}
       </button>
     </div>
   );
@@ -155,7 +157,7 @@ const ChainRow: React.FC<{
       {/* Actions */}
       <button
         onClick={() => openGui(entry)}
-        title="Open plugin UI"
+        title={t('vst.openPluginUi')}
         className="p-1 rounded hover:bg-violet-500/10 text-zinc-500 hover:text-violet-400 transition-colors flex-shrink-0"
       >
         <ExternalLink size={12} />
@@ -175,7 +177,7 @@ const ChainRow: React.FC<{
 
       <button
         onClick={() => removeFromChain(entry.uid)}
-        title="Remove from chain"
+        title={t('vst.removeFromChain')}
         className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors flex-shrink-0"
       >
         <Trash2 size={11} />
@@ -194,6 +196,7 @@ export const VstChainDropdown: React.FC = () => {
   } = useVstChainStore();
   const { currentTrack, isPlaying } = usePlayback();
   const [showSearch, setShowSearch] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (!chainLoaded) loadChain();
@@ -233,7 +236,7 @@ export const VstChainDropdown: React.FC = () => {
         </div>
       ) : (
         <div className="text-xs text-zinc-500 italic text-center py-2">
-          No plugins in chain. Add one below.
+          {t('vst.noPluginsInChain')}
         </div>
       )}
 
@@ -257,12 +260,12 @@ export const VstChainDropdown: React.FC = () => {
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500" />
               </span>
               <Square size={12} />
-              Stop Monitor
+              {t('vst.stopMonitor')}
             </>
           ) : (
             <>
               <Headphones size={14} />
-              {hasTrack ? 'Monitor with VST Chain' : 'Play a track first'}
+              {hasTrack ? t('vst.monitorWithVst') : t('vst.playTrackFirst')}
             </>
           )}
         </button>
@@ -300,7 +303,7 @@ export const VstChainDropdown: React.FC = () => {
           onClick={() => setShowSearch(true)}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-300 dark:border-white/10 hover:border-violet-500/30 hover:text-violet-400 transition-all"
         >
-          <Plus size={14} /> Add Plugin
+          <Plus size={14} /> {t('vst.addPlugin')}
         </button>
       )}
 

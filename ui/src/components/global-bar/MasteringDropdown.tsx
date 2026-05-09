@@ -4,6 +4,7 @@
 // This dropdown shows reference track selection and options when mastering is enabled.
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Upload, Trash2, Music2 } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { masteringApi } from '../../services/api';
@@ -25,6 +26,7 @@ const formatFileSize = (bytes: number): string => {
 
 export const MasteringDropdown: React.FC = () => {
   const gp = useGlobalParams();
+  const { t } = useTranslation();
   const { token } = useAuth();
   const [references, setReferences] = useState<ReferenceTrack[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -67,7 +69,7 @@ export const MasteringDropdown: React.FC = () => {
   if (!gp.masteringEnabled) {
     return (
       <div className="text-xs text-zinc-500 italic text-center py-2">
-        Mastering is disabled. Toggle it on in the bar above.
+        {t('mastering.disabled')}
       </div>
     );
   }
@@ -77,7 +79,7 @@ export const MasteringDropdown: React.FC = () => {
       {/* Reference selector */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-          Reference Track
+          {t('mastering.referenceTrack')}
         </label>
         {references.length > 0 ? (
           <select
@@ -85,7 +87,7 @@ export const MasteringDropdown: React.FC = () => {
             value={gp.masteringReference}
             onChange={e => gp.setMasteringReference(e.target.value)}
           >
-            <option value="">Select a reference...</option>
+            <option value="">{t('mastering.selectReference')}</option>
             {references.map(r => (
               <option key={r.name} value={r.name}>
                 {r.name} ({formatFileSize(r.size)})
@@ -94,7 +96,7 @@ export const MasteringDropdown: React.FC = () => {
           </select>
         ) : (
           <div className="text-xs text-zinc-500 italic px-1">
-            No reference tracks uploaded yet
+            {t('mastering.noReferencesYet')}
           </div>
         )}
       </div>
@@ -107,7 +109,7 @@ export const MasteringDropdown: React.FC = () => {
           <button
             onClick={() => handleDelete(gp.masteringReference)}
             className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors flex-shrink-0"
-            title="Delete reference"
+            title={t('mastering.deleteReference')}
           >
             <Trash2 size={12} />
           </button>
@@ -134,7 +136,7 @@ export const MasteringDropdown: React.FC = () => {
           {uploading ? (
             <><span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" /> Uploading...</>
           ) : (
-            <><Upload size={14} /> Upload Reference</>
+            <><Upload size={14} /> {t('mastering.uploadReference')}</>
           )}
         </label>
       </div>
@@ -150,7 +152,7 @@ export const MasteringDropdown: React.FC = () => {
           <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-1.5">
               <Music2 size={14} className="text-teal-400" />
-              <span className="text-sm text-zinc-600 dark:text-zinc-400">Also use as timbre reference</span>
+              <span className="text-sm text-zinc-600 dark:text-zinc-400">{t('mastering.alsoTimbreRef')}</span>
             </div>
             <ToggleSwitch checked={gp.timbreReference} onChange={gp.setTimbreReference} accentColor="amber" />
           </div>
