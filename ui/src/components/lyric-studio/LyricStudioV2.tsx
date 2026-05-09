@@ -13,6 +13,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { lireekApi } from '../../services/lireekApi';
 import type { Artist, LyricsSet, Profile, Generation, SongLyric } from '../../services/lireekApi';
@@ -87,6 +88,7 @@ interface NavState {
 
 export const LyricStudioV2: React.FC = () => {
   const { token } = useAuth();
+  const { t } = useTranslation();
 
   // ── Navigation ──
   const [nav, setNav] = useState<NavState>({ level: 'artists', selectedArtist: null, selectedAlbum: null });
@@ -593,7 +595,7 @@ export const LyricStudioV2: React.FC = () => {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <span>Fetching lyrics for <strong className="text-white">{fetchingLabel}</strong>…</span>
+          <span>{t('lyric.fetchingLyrics')} <strong className="text-white">{fetchingLabel}</strong>…</span>
         </div>
       )}
 
@@ -609,7 +611,7 @@ export const LyricStudioV2: React.FC = () => {
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Header bar — spans above ArtistPageSidebar + Grid, matches ContentTabs height */}
               <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/30 dark:bg-zinc-950/30">
-                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">All Artists</span>
+                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">{t('lyric.allArtists')}</span>
                 {artists.length > 0 && (
                   <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-600 dark:text-zinc-400">
                     {artists.length}

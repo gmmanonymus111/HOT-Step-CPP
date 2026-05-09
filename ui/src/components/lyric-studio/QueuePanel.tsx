@@ -11,6 +11,7 @@
  */
 
 import React, { useState, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   X, Loader2, CheckCircle, AlertCircle, ListOrdered, Sparkles,
   Wand2, Settings2, FolderSearch, ChevronDown, ChevronRight,
@@ -75,6 +76,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   onFetchComplete,
 }) => {
   const stream = useStreamingStore();
+  const { t } = useTranslation();
   const { token: _token } = useAuth();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<QueueMode>('profile');
@@ -315,7 +317,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-white/5">
             <div className="flex items-center gap-2">
               <ListOrdered className="w-5 h-5 text-pink-400" />
-              <h2 className="text-lg font-bold text-white">Bulk Operations</h2>
+              <h2 className="text-lg font-bold text-white">{t('lyric.bulkOperations')}</h2>
             </div>
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors">
               <X className="w-4 h-4" />
@@ -439,7 +441,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                   </button>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Max songs</span>
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wider">{t('lyric.maxSongs')}</span>
                   <input type="number" value={fetchMaxSongs} onChange={e => setFetchMaxSongs(Math.max(1, Math.min(200, parseInt(e.target.value) || 50)))} min={1} max={200}
                     className="w-14 px-2 py-1 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-xs text-white text-center font-mono focus:outline-none focus:border-cyan-500/50 transition-all" />
                 </div>
@@ -494,7 +496,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               ))}</>);
             })() : mode === 'generate' ? (
               profiles.length === 0 ? (
-                <p className="text-zinc-500 text-sm text-center py-4">No profiles available — build profiles first</p>
+                <p className="text-zinc-500 text-sm text-center py-4">{t('lyric.noProfilesAvailable')}</p>
               ) : (() => {
                 const threshold = genFilterThreshold.trim() !== '' ? parseInt(genFilterThreshold) : null;
                 const filtered = profiles.filter(profile => {
@@ -535,7 +537,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               presetsLoading ? (
                 <div className="flex items-center justify-center py-8"><Loader2 className="w-5 h-5 text-zinc-500 animate-spin" /></div>
               ) : lyricsSets.length === 0 ? (
-                <p className="text-zinc-500 text-sm text-center py-4">No albums available</p>
+                <p className="text-zinc-500 text-sm text-center py-4">{t('lyric.noAlbumsAvailable')}</p>
               ) : (() => {
                 const needle = presetFilter.toLowerCase().trim();
                 const filtered = lyricsSets
@@ -545,7 +547,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                     return cmp !== 0 ? cmp : (a.album || '').localeCompare(b.album || '', undefined, { sensitivity: 'base' });
                   });
                 return filtered.length === 0 ? (
-                  <p className="text-zinc-500 text-sm text-center py-4">No albums match "{presetFilter}"</p>
+                  <p className="text-zinc-500 text-sm text-center py-4">{t('lyric.noAlbumsMatch', { filter: presetFilter })}</p>
                 ) : (<>{filtered.map(ls => {
                   const preset = presetMap.get(ls.id);
                   const status = getPresetStatus(preset);
@@ -599,18 +601,18 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 cursor-pointer select-none">
                   <input type="checkbox" checked={genFillMode} onChange={e => setGenFillMode(e.target.checked)} className="accent-green-500" />
-                  <span className="text-xs text-zinc-600 dark:text-zinc-400">Fill to target</span>
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.fillToTarget')}</span>
                 </label>
                 {genFillMode ? (
                   <>
                     <input type="number" min={1} max={100} value={genFillTarget}
                       onChange={e => setGenFillTarget(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
                       className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
-                    <span className="text-[10px] text-zinc-500">each profile gets enough gens to reach this total</span>
+                    <span className="text-[10px] text-zinc-500">{t('lyric.fillToTargetDesc')}</span>
                   </>
                 ) : (
                   <>
-                    <span className="text-xs text-zinc-600 dark:text-zinc-400">Per profile:</span>
+                    <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.perProfile')}</span>
                     <input type="number" min={1} max={20} value={genCount}
                       onChange={e => setGenCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
                       className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50" />
@@ -618,15 +620,15 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                 )}
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-zinc-600 dark:text-zinc-400">Hide profiles with ≥</span>
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.hideProfilesWith')}</span>
                 <input type="number" min={0} value={genFilterThreshold}
                   onChange={e => setGenFilterThreshold(e.target.value)}
                   placeholder="—"
                   className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-green-500/50 placeholder-zinc-400 dark:placeholder-zinc-600" />
-                <span className="text-xs text-zinc-600 dark:text-zinc-400">existing gens</span>
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.existingGens')}</span>
                 {genFilterThreshold.trim() !== '' && (
                   <button onClick={() => setGenFilterThreshold('')}
-                    className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors">clear</button>
+                    className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors">{t('lyric.clear')}</button>
                 )}
                 {genCountsLoading && <Loader2 className="w-3 h-3 animate-spin text-zinc-500" />}
               </div>
@@ -667,11 +669,11 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <button onClick={selectAll} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">Select All</button>
+                  <button onClick={selectAll} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">{t('lyric.selectAll')}</button>
                   {mode === 'presets' && (
                     <>
-                      <button onClick={selectMissing} className="px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors">Select Missing</button>
-                      <button onClick={selectIncomplete} className="px-3 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors">Select Incomplete</button>
+                      <button onClick={selectMissing} className="px-3 py-1.5 rounded-lg text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors">{t('lyric.selectMissing')}</button>
+                      <button onClick={selectIncomplete} className="px-3 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors">{t('lyric.selectIncomplete')}</button>
                     </>
                   )}
                   <button onClick={() => setSelected(new Set())} className="px-3 py-1.5 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors">Clear</button>
@@ -704,8 +706,8 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           {queueItems.length > 0 && (
             <div className="px-6 py-3 border-t border-zinc-200 dark:border-white/5">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Queue Progress</span>
-                <button onClick={clearQueue} className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors">Clear Finished</button>
+                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">{t('lyric.queueProgress')}</span>
+                <button onClick={clearQueue} className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors">{t('lyric.clearFinished')}</button>
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-hide">
                 {queueItems.map(item => (
