@@ -146,6 +146,9 @@ struct LuaPlugin {
     bool stateful      = false;
     bool stochastic    = false;
 
+    // Guidance-specific
+    bool has_post_step = false;  // guidance plugin declares post_step()
+
     // Lua VM state
     lua_State * L = nullptr;
 
@@ -160,7 +163,8 @@ struct LuaPlugin {
           description(std::move(o.description)), accent(std::move(o.accent)),
           filepath(std::move(o.filepath)), params(std::move(o.params)),
           nfe(o.nfe), order(o.order), needs_model(o.needs_model),
-          stateful(o.stateful), stochastic(o.stochastic), L(o.L) {
+          stateful(o.stateful), stochastic(o.stochastic),
+          has_post_step(o.has_post_step), L(o.L) {
         o.L = nullptr;
     }
     LuaPlugin & operator=(LuaPlugin &&) = delete;
@@ -363,6 +367,13 @@ static bool lua_load_plugin(LuaPlugin & plugin, const char * filepath, const cha
                 plugin.needs_model = lua_get_bool(L, tbl, "needs_model", false);
                 plugin.stateful    = lua_get_bool(L, tbl, "stateful", false);
                 plugin.stochastic  = lua_get_bool(L, tbl, "stochastic", false);
+            }
+
+            // Detect post_step() for guidance plugins
+            if (plugin.type == PluginType::Guidance) {
+                lua_getglobal(L, "post_step");
+                plugin.has_post_step = lua_isfunction(L, -1);
+                lua_pop(L, 1);
             }
 
             lua_pop(L, 1);
@@ -608,4 +619,81 @@ static void lua_call_guidance(LuaPlugin & plugin,
                 plugin.name.c_str(), lua_tostring(L, -1));
         lua_pop(L, 1);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Post-step hook for guidance plugins that need model callbacks
+// (e.g. CFG-MP manifold projection)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Model callback type for post_step: evaluates at (xt_in, t_val), writes to bound output buffer
+using PostStepModelFn = std::function<void(const float *, float)>;
+
+static void lua_call_post_step(LuaPlugin & plugin,
+                               float * xt, float t_val, int n,
+                               PostStepModelFn eval_cond_fn,
+                               PostStepModelFn eval_uncond_fn,
+                               float * vt_cond_buf, float * vt_uncond_buf,
+                               const GuidanceCtx & ctx,
+                               const std::unordered_map<std::string, std::string> & params) {
+    lua_State * L = plugin.L;
+    if (!L) return;
+
+    lua_inject_params(L, params, plugin.name);
+
+    // Set context globals (same as guide())
+    lua_pushinteger(L, ctx.step_idx);    lua_setglobal(L, "step_idx");
+    lua_pushinteger(L, ctx.total_steps); lua_setglobal(L, "total_steps");
+    lua_pushnumber(L, (double) ctx.dt);  lua_setglobal(L, "dt");
+    lua_pushnumber(L, (double) ctx.t_curr); lua_setglobal(L, "t_curr");
+
+    lua_getglobal(L, "post_step");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    // Arg 1: xt (mutable)
+    lua_push_floatarray(L, xt, n, false);
+    // Arg 2: t
+    lua_pushnumber(L, (double) t_val);
+    // Arg 3: n
+    lua_pushinteger(L, n);
+
+    // Arg 4: eval_cond closure — calls model with conditioning, writes to vt_cond_buf
+    auto * cond_ptr = new PostStepModelFn(eval_cond_fn);
+    lua_pushlightuserdata(L, cond_ptr);
+    lua_pushcclosure(L, [](lua_State * Ls) -> int {
+        auto * fn = (PostStepModelFn *) lua_touserdata(Ls, lua_upvalueindex(1));
+        LuaFloatArray * arr = (LuaFloatArray *) luaL_checkudata(Ls, 1, LUA_FLOAT_ARRAY_MT);
+        float t = (float) luaL_checknumber(Ls, 2);
+        (*fn)(arr->data, t);
+        return 0;
+    }, 1);
+
+    // Arg 5: eval_uncond closure — calls model without conditioning, writes to vt_uncond_buf
+    auto * uncond_ptr = new PostStepModelFn(eval_uncond_fn);
+    lua_pushlightuserdata(L, uncond_ptr);
+    lua_pushcclosure(L, [](lua_State * Ls) -> int {
+        auto * fn = (PostStepModelFn *) lua_touserdata(Ls, lua_upvalueindex(1));
+        LuaFloatArray * arr = (LuaFloatArray *) luaL_checkudata(Ls, 1, LUA_FLOAT_ARRAY_MT);
+        float t = (float) luaL_checknumber(Ls, 2);
+        (*fn)(arr->data, t);
+        return 0;
+    }, 1);
+
+    // Arg 6: vt_cond output buffer
+    lua_push_floatarray(L, vt_cond_buf, n, false);
+    // Arg 7: vt_uncond output buffer
+    lua_push_floatarray(L, vt_uncond_buf, n, false);
+
+    // 7 args: xt, t, n, eval_cond, eval_uncond, vt_cond, vt_uncond
+    if (lua_pcall(L, 7, 0, 0) != LUA_OK) {
+        fprintf(stderr, "[Plugins] ERROR in guidance '%s' post_step(): %s\n",
+                plugin.name.c_str(), lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+
+    delete cond_ptr;
+    delete uncond_ptr;
 }

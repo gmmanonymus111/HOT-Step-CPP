@@ -248,6 +248,10 @@ static int dit_ggml_generate(DiTGGML *           model,
     std::vector<APGMomentumBuffer> apg_mbufs;
     std::vector<float>             null_enc_buf;
 
+    // Post-step model eval buffers (only for guidance plugins with has_post_step)
+    std::vector<float>             enc_cond_full;    // [H_enc, enc_S, N_graph] all-conditional
+    std::vector<float>             enc_uncond_full;  // [H_enc, enc_S, N_graph] all-unconditional
+
     if (do_cfg) {
         apg_mbufs.reserve(N);
         for (int i = 0; i < N; i++) {
@@ -365,9 +369,47 @@ static int dit_ggml_generate(DiTGGML *           model,
         guidance_plugin = plugin_reg.guidance_lookup("apg");
     }
     bool use_apg_native = (guidance_plugin && guidance_plugin->name == "apg");
-    fprintf(stderr, "[DiT] Guidance: %s (%s)%s\n",
+    fprintf(stderr, "[DiT] Guidance: %s (%s)%s%s\n",
             guidance_plugin->display_name.c_str(), guidance_plugin->name.c_str(),
-            use_apg_native ? " [native APG]" : "");
+            use_apg_native ? " [native APG]" : "",
+            guidance_plugin->has_post_step ? " [post_step]" : "");
+
+    // Build post-step encoding buffers if the guidance plugin needs model callbacks
+    if (guidance_plugin->has_post_step && do_cfg) {
+        enc_cond_full.resize(H_enc * enc_S * N_graph);
+        enc_uncond_full.resize(H_enc * enc_S * N_graph);
+        // null_enc_single is already computed above (inside if(do_cfg))
+        // We need to recompute it here since it was local to that block
+        std::vector<float> null_enc_ps(H_enc * enc_S);
+        {
+            int emb_n = (int) ggml_nelements(model->null_condition_emb);
+            std::vector<float> null_emb(emb_n);
+            if (model->null_condition_emb->type == GGML_TYPE_BF16) {
+                std::vector<uint16_t> bf16_buf(emb_n);
+                ggml_backend_tensor_get(model->null_condition_emb, bf16_buf.data(), 0, emb_n * sizeof(uint16_t));
+                for (int i = 0; i < emb_n; i++) {
+                    uint32_t w = (uint32_t) bf16_buf[i] << 16;
+                    memcpy(&null_emb[i], &w, 4);
+                }
+            } else {
+                ggml_backend_tensor_get(model->null_condition_emb, null_emb.data(), 0, emb_n * sizeof(float));
+            }
+            for (int s = 0; s < enc_S; s++) {
+                memcpy(&null_enc_ps[s * H_enc], null_emb.data(), H_enc * sizeof(float));
+            }
+        }
+        for (int b = 0; b < N_graph; b++) {
+            int src_b = b % N;
+            memcpy(enc_cond_full.data() + b * enc_S * H_enc,
+                   enc_hidden_data + src_b * enc_S * H_enc,
+                   enc_S * H_enc * sizeof(float));
+            memcpy(enc_uncond_full.data() + b * enc_S * H_enc,
+                   null_enc_ps.data(),
+                   enc_S * H_enc * sizeof(float));
+        }
+        fprintf(stderr, "[DiT] Post-step model eval buffers ready for '%s'\n",
+                guidance_plugin->name.c_str());
+    }
 
     // Per-step guidance context (updated in the main loop, captured by lambda)
     GuidanceCtx g_ctx = {0, num_steps, 0.0f, 0.0f};
@@ -466,6 +508,48 @@ static int dit_ggml_generate(DiTGGML *           model,
         } else {
             ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
         }
+    };
+
+    // ── eval_single_pass: run ONE model forward with specified encoding ──────
+    // Used by post_step hooks (CFG-MP etc.) to evaluate at arbitrary positions
+    // with either conditional or unconditional encoding.
+    auto eval_single_pass = [&](const float * xt_in, float t_val,
+                                const std::vector<float> & enc_full,
+                                float * out_buf) {
+        if (t_t) { ggml_backend_tensor_set(t_t, &t_val, 0, sizeof(float)); }
+        if (t_tr) { ggml_backend_tensor_set(t_tr, &t_val, 0, sizeof(float)); }
+
+        // Upload encoding (all N_graph slots, all same type)
+        ggml_backend_tensor_set(t_enc, enc_full.data(), 0,
+                                H_enc * enc_S * N_graph * sizeof(float));
+
+        // Pack xt into all N_graph slots
+        for (int b = 0; b < N_graph; b++) {
+            int src_b = b % N;
+            for (int ti = 0; ti < T; ti++) {
+                memcpy(&input_buf[b * T * in_ch + ti * in_ch + ctx_ch],
+                       &xt_in[src_b * n_per + ti * Oc],
+                       Oc * sizeof(float));
+            }
+        }
+        ggml_backend_tensor_set(t_input, input_buf.data(), 0,
+                                in_ch * T * N_graph * sizeof(float));
+
+        // Re-upload masks/positions (full N_graph)
+        ggml_backend_tensor_set(t_pos, pos_data.data(), 0,
+                                S * N_graph * sizeof(int32_t));
+        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
+                                S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0,
+                                S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                enc_S * S * N_graph * sizeof(uint16_t));
+
+        // Forward pass
+        ggml_backend_sched_graph_compute(model->sched, gf);
+
+        // Read first N samples only
+        ggml_backend_tensor_get(t_output, out_buf, 0, n_total * sizeof(float));
     };
 
     // Flow matching loop
@@ -590,6 +674,24 @@ static int dit_ggml_generate(DiTGGML *           model,
 
             // ── DCW correction ──
             sampler_apply_dcw(xt.data(), vt.data(), N, T, Oc, t_curr, t_next, step);
+
+            // ── Post-step guidance hook (CFG-MP manifold projection etc.) ──
+            if (guidance_plugin->has_post_step && do_cfg && step < num_steps - 1) {
+                // Build eval lambdas that write to vt_cond / vt_uncond
+                PostStepModelFn eval_cond_fn = [&](const float * xt_in, float t_v) {
+                    eval_single_pass(xt_in, t_v, enc_cond_full, vt_cond.data());
+                };
+                PostStepModelFn eval_uncond_fn = [&](const float * xt_in, float t_v) {
+                    eval_single_pass(xt_in, t_v, enc_uncond_full, vt_uncond.data());
+                };
+                lua_call_post_step(
+                    *guidance_plugin,
+                    xt.data(), t_next, n_total,
+                    eval_cond_fn, eval_uncond_fn,
+                    vt_cond.data(), vt_uncond.data(),
+                    g_ctx, g_hotstep_params.plugin_params
+                );
+            }
 
             // ── Repaint injection ──
             sampler_repaint_inject(xt.data(), noise, repaint_src, N, T, Oc,
