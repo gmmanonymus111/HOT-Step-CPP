@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { ModelRow } from './ModelRow';
 import type { RegistryFile, DownloadJob } from '../../types';
 
@@ -108,7 +109,7 @@ const CollapsibleGroup: React.FC<{
           <button
             onClick={(e) => { e.stopPropagation(); setShowInfo(!showInfo); }}
             className="ml-auto p-1 rounded-lg hover:bg-white/5 text-zinc-600 hover:text-zinc-600 dark:text-zinc-400 transition-colors"
-            title="About this category"
+            title={t('models.aboutCategory')}
           >
             <Info size={13} />
           </button>
@@ -145,6 +146,7 @@ const CollapsibleGroup: React.FC<{
 // ── Main component ──────────────────────────────────────────
 
 export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDownload, onCancel, onResume, onDelete }) => {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<RoleTab>('dit');
 
   const ditGroups = useMemo(() => groupDitFiles(files), [files]);

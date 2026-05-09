@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { Download, Trash2, CheckCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { DownloadProgressBar } from './DownloadProgressBar';
 import type { RegistryFile, DownloadJob } from '../../types';
 
@@ -33,6 +34,7 @@ const quantColors: Record<string, string> = {
 };
 
 export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCancel, onResume, onDelete }) => {
+  const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const isDownloading = downloadJob && (downloadJob.status === 'downloading' || downloadJob.status === 'queued' || downloadJob.status === 'paused' || downloadJob.status === 'failed');
 
@@ -49,7 +51,7 @@ export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCan
             </span>
             {file.tags.includes('recommended') && (
               <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-pink-500/15 text-pink-400 border border-pink-500/20 uppercase tracking-wider">
-                Recommended
+                {t('models.recommended')}
               </span>
             )}
           </div>
@@ -69,20 +71,20 @@ export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCan
                 <div className="flex items-center gap-1">
                   <button onClick={() => { onDelete(file.filename); setConfirmDelete(false); }}
                     className="text-[10px] px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors">
-                    Delete
+                    {t('common.delete')}
                   </button>
                   <button onClick={() => setConfirmDelete(false)}
                     className="text-[10px] px-2 py-1 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-600 transition-colors">
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 </div>
               ) : (
                 <>
                   <span className="flex items-center gap-1 text-xs text-emerald-400">
                     <CheckCircle size={12} />
-                    <span className="text-[10px]">Installed</span>
+                    <span className="text-[10px]">{t('models.installed')}</span>
                   </span>
-                  <button onClick={() => setConfirmDelete(true)} title="Delete model"
+                  <button onClick={() => setConfirmDelete(true)} title={t('models.deleteModel')}
                     className="p-1 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-white/5 transition-colors opacity-0 group-hover:opacity-100">
                     <Trash2 size={12} />
                   </button>
@@ -94,7 +96,7 @@ export const ModelRow: React.FC<Props> = ({ file, downloadJob, onDownload, onCan
             <button onClick={() => onDownload(file.id)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 to-pink-600 text-white text-xs font-medium hover:from-pink-400 hover:to-pink-500 transition-all shadow-lg shadow-pink-500/10">
               <Download size={12} />
-              Download
+              {t('models.download')}
             </button>
           )}
         </div>

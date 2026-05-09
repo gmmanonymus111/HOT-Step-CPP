@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { X, Play } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { DownloadJob } from '../../types';
 
 interface Props {
@@ -46,6 +47,7 @@ const statusColors: Record<string, string> = {
 };
 
 export const DownloadProgressBar: React.FC<Props> = ({ job, onCancel, onResume, compact }) => {
+  const { t } = useTranslation();
   const pct = job.totalBytes > 0 ? Math.min(100, (job.bytesDownloaded / job.totalBytes) * 100) : 0;
   const remaining = job.totalBytes - job.bytesDownloaded;
   const isActive = job.status === 'downloading' || job.status === 'queued';
@@ -63,13 +65,13 @@ export const DownloadProgressBar: React.FC<Props> = ({ job, onCancel, onResume, 
         </span>
         <div className="flex items-center gap-1 flex-shrink-0">
           {canResume && (
-            <button onClick={() => onResume(job.jobId)} title="Resume"
+            <button onClick={() => onResume(job.jobId)} title={t('models.resume')}
               className="p-1 rounded-lg hover:bg-white/10 text-amber-400 hover:text-amber-300 transition-colors">
               <Play size={12} />
             </button>
           )}
           {isActive && (
-            <button onClick={() => onCancel(job.jobId)} title="Cancel"
+            <button onClick={() => onCancel(job.jobId)} title={t('common.cancel')}
               className="p-1 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-red-400 transition-colors">
               <X size={12} />
             </button>

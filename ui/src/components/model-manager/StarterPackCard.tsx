@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { Download, CheckCircle, Package } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { RegistryFile, DownloadJob } from '../../types';
 
 interface Props {
@@ -18,6 +19,7 @@ function formatSize(bytes: number): string {
 }
 
 export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, onDownloadPack }) => {
+  const { t } = useTranslation();
   const missing = files.filter(f => !f.installed);
   const allInstalled = missing.length === 0;
   const totalSize = files.reduce((a, f) => a + f.sizeBytes, 0);
@@ -69,15 +71,15 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
 
       {/* Size summary */}
       <div className="text-[10px] text-zinc-600 mb-3 font-mono">
-        {formatSize(totalSize)} total
-        {!allInstalled && <span className="text-zinc-500"> · {formatSize(remainingSize)} remaining</span>}
+        {formatSize(totalSize)} {t('models.total')}
+        {!allInstalled && <span className="text-zinc-500"> · {formatSize(remainingSize)} {t('models.remaining')}</span>}
       </div>
 
       {/* Download button */}
       {allInstalled ? (
         <div className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-emerald-500/10 text-emerald-400 text-xs font-medium">
           <CheckCircle size={14} />
-          All Installed
+          {t('models.allInstalled')}
         </div>
       ) : isDownloading ? (
         <div className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-sky-500/10 text-sky-400 text-xs font-medium animate-pulse">
@@ -89,7 +91,7 @@ export const StarterPackCard: React.FC<Props> = ({ pack, files, downloadJobs, on
           className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-pink-600 text-white text-xs font-medium hover:from-pink-400 hover:to-pink-500 transition-all shadow-lg shadow-pink-500/10"
         >
           <Download size={14} />
-          Download {missing.length} model{missing.length > 1 ? 's' : ''} ({formatSize(remainingSize)})
+          {t('models.download')} {missing.length} model{missing.length > 1 ? 's' : ''} ({formatSize(remainingSize)})
         </button>
       )}
     </div>

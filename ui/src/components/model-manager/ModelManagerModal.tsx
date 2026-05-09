@@ -6,6 +6,7 @@
 import React, { useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { X, HardDrive, FolderOpen, Download } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useModelRegistry } from './useModelRegistry';
 import { useDownloadStream } from './useDownloadStream';
 import { StarterPackCard } from './StarterPackCard';
@@ -24,6 +25,7 @@ function formatSize(bytes: number): string {
 }
 
 export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
+  const { t } = useTranslation();
   const { registry, loading, error, refresh, getPackFiles, installedFiles } = useModelRegistry();
 
   const { jobs, hasActiveDownloads } = useDownloadStream({
@@ -106,7 +108,7 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
               <HardDrive size={18} className="text-pink-400" />
               Model Manager
             </h2>
-            <p className="text-xs text-zinc-500 mt-0.5">Download and manage GGUF models from HuggingFace</p>
+            <p className="text-xs text-zinc-500 mt-0.5">{t('models.subtitle')}</p>
           </div>
           <button onClick={onClose}
             className="p-2 rounded-xl hover:bg-white/5 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
@@ -155,8 +157,8 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
 
               {/* ── Starter Packs ────────────────────────── */}
               <div>
-                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">Starter Packs</h3>
-                <p className="text-xs text-zinc-600 mb-4">Get up and running quickly — each pack includes everything you need to generate music.</p>
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">{t('models.starterPacks')}</h3>
+                <p className="text-xs text-zinc-600 mb-4">{t('models.starterPacksDesc')}</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                   {registry.packs.map(pack => (
                     <StarterPackCard
@@ -175,8 +177,8 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
 
               {/* ── Full Catalogue ────────────────────────── */}
               <div>
-                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">All Models</h3>
-                <p className="text-xs text-zinc-600 mb-4">Browse the complete model catalogue — {registry.files.length} models across 5 categories.</p>
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">{t('models.allModels')}</h3>
+                <p className="text-xs text-zinc-600 mb-4">{t('models.allModelsDesc', { count: registry.files.length })}</p>
                 <ModelCatalogueTab
                   files={registry.files}
                   downloadJobs={jobs}
@@ -197,11 +199,11 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
               <FolderOpen size={11} />
               {registry?.modelsDir || '—'}
             </span>
-            <span>{totalInstalled} models installed</span>
-            <span>{formatSize(totalDiskUsage)} on disk</span>
+            <span>{totalInstalled} {t('models.installed').toLowerCase()}</span>
+            <span>{formatSize(totalDiskUsage)} {t('models.onDisk', { size: '' }).trim()}</span>
           </div>
           {hasActiveDownloads && (
-            <span className="text-[10px] text-sky-400 animate-pulse">Downloads in progress...</span>
+            <span className="text-[10px] text-sky-400 animate-pulse">{t('models.downloadsActive')}</span>
           )}
         </div>
       </div>
