@@ -1,6 +1,7 @@
 // SourceSelector.tsx — Upload or pick existing track for stem extraction
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Upload, Music, Search, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 
 interface Song {
@@ -31,6 +32,7 @@ const SOURCE_FILTERS = [
 
 export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, sourceFileName, onSourceChange }) => {
   const { token } = useAuth();
+  const { t } = useTranslation();
   const [uploadDragging, setUploadDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
@@ -84,7 +86,7 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
 
   return (
     <div style={styles.container}>
-      <h3 style={styles.sectionTitle}>Source Audio</h3>
+      <h3 style={styles.sectionTitle}>{t('stem.sourceAudio')}</h3>
 
       {/* Current selection */}
       {sourceAudioUrl && (
@@ -115,7 +117,7 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
         ) : (
           <>
             <Upload size={20} style={{ color: '#888' }} />
-            <span style={styles.uploadText}>Drop audio file or click to upload</span>
+            <span style={styles.uploadText}>{t('stem.dropAudioOrUpload')}</span>
             <span style={styles.uploadHint}>MP3, WAV, FLAC, AIFF, OGG</span>
           </>
         )}
@@ -123,13 +125,13 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
 
       {/* Divider */}
       <div style={styles.divider}>
-        <span style={styles.dividerText}>or pick from library</span>
+        <span style={styles.dividerText}>{t('stem.orPickFromLibrary')}</span>
       </div>
 
       {/* Song picker toggle */}
       <button onClick={() => setShowPicker(!showPicker)} style={styles.pickerToggle}>
         <Music size={14} />
-        {showPicker ? 'Hide Library' : 'Browse Library'}
+        {showPicker ? t('stem.hideLibrary') : t('stem.browseLibrary')}
       </button>
 
       {/* Song picker */}
@@ -167,7 +169,7 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ sourceAudioUrl, 
           {/* Song list */}
           <div style={styles.songList}>
             {filteredSongs.length === 0 && (
-              <div style={styles.emptyMsg}>No tracks found</div>
+              <div style={styles.emptyMsg}>{t('stem.noTracksFound')}</div>
             )}
             {filteredSongs.map(song => {
               const hasMastered = !!song.mastered_audio_url;

@@ -1,6 +1,7 @@
 // SourcePanel.tsx — Left panel: source audio upload + metadata + analysis
 import React, { useCallback, useState } from 'react';
 import { Upload, Music, Loader2, X, Layers } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { AudioMetadata, AudioAnalysis } from './coverStudioUtils';
 import { ALL_KEYS } from './coverStudioUtils';
 import { SEPARATION_LEVELS } from '../../services/supersepApi';
@@ -66,6 +67,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
   hasStems, onConfigureStems,
   sourceLatentUrl, onLatentLoaded, onLatentClear,
 }) => {
+  const { t } = useTranslation();
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -88,7 +90,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
           <Upload className="w-4 h-4 text-cyan-400" />
-          Source Audio
+          {t('cover.sourceAudio')}
         </div>
         <div
           onDrop={handleDrop}
@@ -114,23 +116,23 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           {isUploading ? (
             <div className="flex flex-col items-center gap-2">
               <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
-              <span className="text-xs text-cyan-400">Uploading...</span>
+              <span className="text-xs text-cyan-400">{t('cover.uploading')}</span>
             </div>
           ) : isAnalyzing ? (
             <div className="flex flex-col items-center gap-2">
               <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
-              <span className="text-xs text-teal-400">Analyzing BPM & Key...</span>
+              <span className="text-xs text-teal-400">{t('cover.analyzingBpmKey')}</span>
             </div>
           ) : sourceFileName ? (
             <div className="flex flex-col items-center gap-2">
               <Music className="w-8 h-8 text-cyan-400" />
               <span className="text-xs text-zinc-600 dark:text-zinc-400 truncate max-w-full">{sourceFileName}</span>
-              <span className="text-[10px] text-zinc-500">Click or drop to replace</span>
+              <span className="text-[10px] text-zinc-500">{t('cover.clickOrDropReplace')}</span>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
               <Upload className="w-8 h-8 text-zinc-600 dark:text-zinc-400" />
-              <span className="text-xs text-zinc-500">Drop audio file or click to browse</span>
+              <span className="text-xs text-zinc-500">{t('cover.dropAudioOrBrowse')}</span>
               <span className="text-[10px] text-zinc-600">MP3, WAV, FLAC, OGG, M4A</span>
             </div>
           )}
@@ -148,7 +150,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
       {metadata && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-medium text-zinc-500 uppercase">Metadata</span>
+            <span className="text-[10px] font-medium text-zinc-500 uppercase">{t('cover.metadata')}</span>
             <button onClick={onClear} className="text-zinc-500 hover:text-red-400 transition-colors" title="Clear">
               <X className="w-3 h-3" />
             </button>
@@ -167,7 +169,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
       {/* Analysis display */}
       {analysis && (
         <div className="space-y-2">
-          <span className="text-[10px] font-medium text-zinc-500 uppercase">Analysis</span>
+          <span className="text-[10px] font-medium text-zinc-500 uppercase">{t('cover.analysis')}</span>
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-lg bg-gradient-to-br from-cyan-500/10 to-teal-500/10 border border-cyan-500/20 p-3 text-center">
               <span className="text-[10px] text-zinc-500 block">BPM</span>
@@ -190,7 +192,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           </div>
           {/* BPM correction — Essentia sometimes halves or doubles the tempo */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Tempo fix:</span>
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">{t('cover.tempoFix')}</span>
             <div className="flex gap-1 flex-1">
               {([
                 { label: '÷2', value: 0.5 },
@@ -213,7 +215,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           </div>
           {/* Free-text BPM override */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Custom:</span>
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">{t('cover.custom')}</span>
             <input
               type="number"
               min={20}
@@ -238,7 +240,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           </div>
           {/* Key override — Essentia sometimes gets the wrong key */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Key fix:</span>
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">{t('cover.keyFix')}</span>
             <select
               value={keyOverride || ''}
               onChange={e => onKeyOverrideChange(e.target.value || null)}
@@ -256,7 +258,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           </div>
           {/* Vocal language */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500 whitespace-nowrap">Language:</span>
+            <span className="text-[10px] text-zinc-500 whitespace-nowrap">{t('cover.language')}</span>
             <select
               value={vocalLanguage}
               onChange={e => onVocalLanguageChange(e.target.value)}
@@ -281,7 +283,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
-          Advanced Mode{advancedMode ? ' (On)' : ''}
+          {t('cover.advancedMode')}{advancedMode ? ' (On)' : ''}
         </button>
 
         {advancedMode && (

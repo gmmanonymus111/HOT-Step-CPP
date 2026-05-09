@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Trash2, Pencil, Music2, Wand2, Play, Loader2, ChevronDown, ChevronRight, Send, FileText, Headphones, Sparkles } from 'lucide-react';
 import { lireekApi, streamRefine, skipThinking } from '../../services/lireekApi';
 import type { Generation, Profile } from '../../services/lireekApi';
@@ -22,6 +23,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
   generationModel, refinementModel,
 }) => {
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const { t } = useTranslation();
   const [generating, setGenerating] = useState(false);
   const [refiningId, setRefiningId] = useState<number | null>(null);
   const [genCount, setGenCount] = useState(1);
@@ -132,17 +134,17 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
           {generating ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              Generating...
+              {t('lyric.generating')}
             </>
           ) : (
             <>
               <Wand2 className="w-4 h-4" />
-              Generate Lyrics
+              {t('lyric.generateLyrics')}
             </>
           )}
         </button>
         <div className="flex items-center gap-2">
-          <label className="text-xs text-zinc-500">Count:</label>
+          <label className="text-xs text-zinc-500">{t('lyric.count')}</label>
           <select
             value={genCount}
             onChange={(e) => setGenCount(parseInt(e.target.value))}
@@ -154,7 +156,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
           </select>
         </div>
         {profiles.length === 0 && (
-          <span className="text-xs text-amber-400/60">Build a profile first</span>
+          <span className="text-xs text-amber-400/60">{t('lyric.buildProfileFirst')}</span>
         )}
       </div>
 
@@ -190,9 +192,9 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
           <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
             <Music2 className="w-7 h-7 text-zinc-600" />
           </div>
-          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No generated lyrics yet</h3>
+          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">{t('lyric.noGeneratedLyricsYet')}</h3>
           <p className="text-sm text-zinc-500 max-w-xs">
-            Generate lyrics from a profile to see them here.
+            {t('lyric.generateFromProfile')}
           </p>
         </div>
       ) : (
@@ -225,7 +227,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {gen.parent_generation_id && (
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 flex items-center gap-0.5">
-                        <Sparkles className="w-2.5 h-2.5" /> Refined
+                        <Sparkles className="w-2.5 h-2.5" /> {t('lyric.refined')}
                       </span>
                     )}
                     <button
@@ -234,7 +236,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                       title="Generate audio from these lyrics"
                     >
                       <Play className="w-3 h-3" />
-                      Audio
+                      {t('lyric.audio')}
                     </button>
                     {onViewRecordings && (
                       <button
@@ -243,7 +245,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                         title="View generated songs from these lyrics"
                       >
                         <Headphones className="w-3 h-3" />
-                        Songs
+                        {t('lyric.songs')}
                       </button>
                     )}
                     {gen.bpm ? (
@@ -326,7 +328,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500/30 to-purple-500/30 text-white hover:from-pink-500/40 hover:to-purple-500/40 text-sm font-semibold transition-all border border-pink-500/20"
                         >
                           <Play className="w-3.5 h-3.5" />
-                          Generate Audio
+                          {t('lyric.generateAudio')}
                         </button>
                         <button
                           onClick={() => handleRefine(gen)}
@@ -335,7 +337,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                           title="Refine these lyrics using the refinement LLM"
                         >
                           {refiningId === gen.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                          Refine
+                          {t('lyric.refine')}
                         </button>
                         {onSendToCreate && (
                           <button
@@ -343,7 +345,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors border border-amber-500/10"
                           >
                             <Send className="w-3.5 h-3.5" />
-                            Send to Create
+                            {t('lyric.sendToCreate')}
                           </button>
                         )}
                         <div className="flex-1" />
@@ -352,13 +354,13 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-500/10 transition-colors"
                         >
                           <Trash2 className="w-3 h-3" />
-                          Delete
+                          {t('common.delete')}
                         </button>
                       </div>
 
                       {/* Editable lyrics */}
                       <div>
-                        <h3 className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">Lyrics</h3>
+                        <h3 className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">{t('lyric.lyrics')}</h3>
                         <textarea
                           className="w-full p-4 rounded-xl bg-black/20 dark:bg-black/40 border border-zinc-200 dark:border-white/5 text-sm text-zinc-800 dark:text-zinc-200 font-mono leading-relaxed focus:outline-none focus:border-pink-500/30 resize-y transition-colors"
                           style={{ minHeight: '300px' }}

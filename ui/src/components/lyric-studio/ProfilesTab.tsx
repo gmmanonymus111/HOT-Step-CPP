@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Trash2, Loader2, Users, Sparkles, ChevronDown, ChevronRight } from 'lucide-react';
 import { lireekApi, streamBuildProfile, skipThinking } from '../../services/lireekApi';
 import type { Profile } from '../../services/lireekApi';
@@ -16,6 +17,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
   lyricsSetId, profiles, onRefresh, showToast, profilingModel,
 }) => {
   const [building, setBuilding] = useState(false);
+  const { t } = useTranslation();
   const [selectedProfile, setSelectedProfile] = useState<Profile | null>(null);
 
   // Inline streaming state (replaces zustand streamingStore)
@@ -95,12 +97,12 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
           {building ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              Building...
+              {t('lyric.building')}
             </>
           ) : (
             <>
               <Sparkles className="w-4 h-4" />
-              Build New Profile
+              {t('lyric.buildNewProfile')}
             </>
           )}
         </button>
@@ -125,9 +127,9 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
           <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mb-4">
             <Users className="w-7 h-7 text-zinc-600" />
           </div>
-          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">No profiles yet</h3>
+          <h3 className="text-base font-semibold text-zinc-600 dark:text-zinc-400 mb-2">{t('lyric.noProfilesYet')}</h3>
           <p className="text-sm text-zinc-500 max-w-xs">
-            Build a stylistic profile from the source lyrics to start generating.
+            {t('lyric.buildProfileDesc')}
           </p>
         </div>
       ) : (
@@ -172,7 +174,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     <button
                       onClick={() => handleDelete(profile)}
                       className="p-2 rounded-lg hover:bg-red-500/10 text-zinc-600 dark:text-zinc-400 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
-                      title="Delete profile"
+                      title={t('lyric.deleteProfile')}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -185,7 +187,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Themes */}
                     {data.themes?.length > 0 && (
                       <div>
-                        <span className="text-[10px] text-amber-400 uppercase tracking-wider font-semibold">Themes</span>
+                        <span className="text-[10px] text-amber-400 uppercase tracking-wider font-semibold">{t('lyric.themes')}</span>
                         <div className="flex flex-wrap gap-1.5 mt-1">
                           {(Array.isArray(data.themes) ? data.themes : [data.themes]).map((t: string, i: number) => (
                             <span key={i} className="px-2 py-0.5 rounded-md text-xs bg-amber-500/15 text-amber-300 border border-amber-500/20">{t}</span>
@@ -197,7 +199,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Common Subjects */}
                     {data.common_subjects?.length > 0 && (
                       <div>
-                        <span className="text-[10px] text-green-400 uppercase tracking-wider font-semibold">Common Subjects</span>
+                        <span className="text-[10px] text-green-400 uppercase tracking-wider font-semibold">{t('lyric.commonSubjects')}</span>
                         <div className="flex flex-wrap gap-1.5 mt-1">
                           {(Array.isArray(data.common_subjects) ? data.common_subjects : [data.common_subjects]).map((s: string, i: number) => (
                             <span key={i} className="px-2 py-0.5 rounded-md text-xs bg-green-500/15 text-green-300 border border-green-500/20">{s}</span>
@@ -209,7 +211,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Subject Categories */}
                     {data.subject_categories?.length > 0 && (
                       <div>
-                        <span className="text-[10px] text-blue-400 uppercase tracking-wider font-semibold">Subject Categories</span>
+                        <span className="text-[10px] text-blue-400 uppercase tracking-wider font-semibold">{t('lyric.subjectCategories')}</span>
                         <div className="flex flex-wrap gap-1.5 mt-1">
                           {(Array.isArray(data.subject_categories) ? data.subject_categories : [data.subject_categories]).map((c: string, i: number) => (
                             <span key={i} className="px-2 py-0.5 rounded-md text-xs bg-blue-500/15 text-blue-300 border border-blue-500/20">{c}</span>
@@ -262,7 +264,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Detailed stats */}
                     {(data.meter_stats || data.vocabulary_stats || data.repetition_stats || data.rhyme_quality) && (
                       <details>
-                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">Detailed Stats</summary>
+                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">{t('lyric.detailedStats')}</summary>
                         <div className="mt-2 grid grid-cols-2 gap-3">
                           {data.meter_stats && (
                             <div className="p-3 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
@@ -310,7 +312,7 @@ export const ProfilesTab: React.FC<ProfilesTabProps> = ({
                     {/* Raw summary */}
                     {data.raw_summary && (
                       <details>
-                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">Full Summary</summary>
+                        <summary className="text-[10px] text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-700 dark:text-zinc-300">{t('lyric.fullSummary')}</summary>
                         <div className="mt-2 p-3 rounded-lg bg-black/20 dark:bg-black/40 border border-zinc-200 dark:border-white/5 text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap leading-relaxed max-h-[40vh] overflow-y-auto">
                           {data.raw_summary}
                         </div>

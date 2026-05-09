@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, ListOrdered, Code2, Download, Clock, Shuffle } from 'lucide-react';
 import type { Artist } from '../../services/lireekApi';
 import { TripleProviderSelector, type ModelSelections, loadSelections, saveSelections } from './ProviderSelector';
@@ -34,6 +35,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
   artist, albumCount, onOpenQueue, onOpenPromptEditor,
 }) => {
   const [imageError, setImageError] = useState(false);
+  const { t } = useTranslation();
 
   // ── LLM Models ──
   const [modelSelections, setModelSelections] = useState<ModelSelections>(loadSelections);
@@ -89,12 +91,12 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-pink-600/20 hover:bg-pink-600/30 text-pink-400 text-xs font-semibold transition-colors"
         >
           <ListOrdered className="w-3.5 h-3.5" />
-          Bulk Operations
+          {t('lyric.bulkOperations')}
         </button>
         <button
           onClick={onOpenPromptEditor}
           className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-600 dark:text-zinc-400 hover:text-white text-xs transition-colors"
-          title="Edit System Prompts"
+          title={t('lyric.editSystemPrompts')}
         >
           <Code2 className="w-3.5 h-3.5" />
         </button>
@@ -110,7 +112,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           >
             <span className="flex items-center gap-1.5">
               <Download className="w-3 h-3" />
-              Filename Prepend
+              {t('lyric.filenamePrepend')}
             </span>
           </div>
           <div className="mt-2 px-1">
@@ -134,7 +136,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           >
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
               <Clock className="w-3 h-3" />
-              LLM Duration
+              {t('lyric.llmDuration')}
             </span>
             <input
               type="checkbox"
@@ -158,7 +160,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           >
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
               <Shuffle className="w-3 h-3" />
-              Randomize Timbre
+              {t('lyric.randomizeTimbre')}
             </span>
             <input
               type="checkbox"
@@ -181,7 +183,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
             onClick={() => setLlmExpanded(!llmExpanded)}
             className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-zinc-200 dark:border-white/5 text-[11px] text-zinc-500 uppercase tracking-wider font-semibold transition-colors"
           >
-            <span>LLM Models</span>
+            <span>{t('lyric.llmModels')}</span>
             {llmExpanded
               ? <ChevronDown className="w-3.5 h-3.5" />
               : <ChevronRight className="w-3.5 h-3.5" />

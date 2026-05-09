@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { X, Save, Loader2, ChevronDown, ChevronRight, Zap, Music, FolderSearch } from 'lucide-react';
 import { lireekApi } from '../../services/lireekApi';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
@@ -53,6 +54,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
   isOpen, lyricsSetId, albumName, onClose, showToast,
 }) => {
   const [form, setForm] = useState<PresetForm>(DEFAULT_FORM);
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [groupsExpanded, setGroupsExpanded] = useState(false);
@@ -128,7 +130,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-white/5">
             <div>
-              <h2 className="text-base font-bold text-white">Album Preset</h2>
+              <h2 className="text-base font-bold text-white">{t('lyric.albumPreset')}</h2>
               <p className="text-xs text-zinc-500 mt-0.5">{albumName || 'Top Songs'}</p>
             </div>
             <button onClick={onClose} className="p-2 rounded-lg hover:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors">
@@ -148,7 +150,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
                     <Zap className="w-4 h-4 text-pink-400" />
-                    Adapter (LoRA/LoKR)
+                    {t('lyric.adapter')}
                   </div>
                   <div className="space-y-2">
                     <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Path</label>
@@ -173,7 +175,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                       className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 transition-colors uppercase tracking-wider"
                     >
                       {groupsExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                      Group Scales
+                      {t('lyric.groupScales')}
                     </button>
                     {groupsExpanded && (
                       <div className="space-y-2 pl-3 border-l-2 border-pink-500/20">
@@ -196,7 +198,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
                     <Music className="w-4 h-4 text-amber-400" />
-                    Reference Track
+                    {t('lyric.referenceTrack')}
                   </div>
                   <div className="space-y-2">
                     <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Reference Audio</label>
@@ -234,14 +236,14 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
             <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-200 dark:border-white/5">
               <button onClick={clear} disabled={saving}
                 className="px-4 py-2 rounded-lg text-xs text-zinc-600 dark:text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-              >Clear Preset</button>
+              >{t('lyric.clearPreset')}</button>
               <div className="flex items-center gap-2">
-                <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:bg-white/5 transition-colors">Cancel</button>
+                <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:bg-white/5 transition-colors">{t('common.cancel')}</button>
                 <button onClick={save} disabled={saving}
                   className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white text-sm font-semibold transition-all disabled:opacity-50 shadow-lg shadow-pink-500/10"
                 >
                   {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                  Save
+                  {t('common.save')}
                 </button>
               </div>
             </div>
