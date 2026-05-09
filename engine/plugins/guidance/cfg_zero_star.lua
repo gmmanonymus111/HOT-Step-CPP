@@ -1,24 +1,20 @@
--- cfg_zero_star.lua: CFG-Zero⋆ — Optimized Scale + Zero-Init
+-- cfg_zero_star.lua: CFG-Zero⋆ — Zero-Init Guidance
 -- Paper: "CFG-Zero⋆: Improved Classifier-Free Guidance for Flow Matching Models"
 --        Fan et al., 2025 (arXiv:2503.18886)
 --
--- Two key improvements over vanilla CFG:
---   1. Optimized scale (s⋆): projects conditional velocity onto unconditional,
---      compensating for underfitting in the learned velocity field.
---   2. Zero-init: zeroes out the velocity for the first N steps of the ODE solver,
---      since early-step CFG predictions are often worse than doing nothing.
+-- The paper proposes two improvements: optimised scale (s⋆) and zero-init.
+-- Since our engine uses APG (perpendicular projection + momentum), which
+-- already corrects for the underfitting that s⋆ addresses, only zero-init
+-- is applied here. Combining both would double-correct.
 --
--- Implementation: routes through native APG for stability (momentum, projection,
--- norm thresholding), then applies the s⋆ correction as a delta on top.
---
--- Math:
---   s⋆ = dot(v_cond, v_uncond) / ||v_uncond||²
---   result = APG(cond, uncond, w) + (s⋆ - 1) * (1 - w) * v_uncond
+-- Zero-init: zeroes out velocity for the first N ODE steps, since early-step
+-- CFG predictions in flow matching are often worse than doing nothing.
+-- All subsequent steps use the standard APG pipeline.
 
 guidance = {
     name        = "cfg_zero_star",
     display     = "CFG-Zero⋆",
-    description = "Optimized scale + zero-init (Fan et al. 2025)",
+    description = "Zero-init + APG guidance (Fan et al. 2025)",
     params      = {
         { key = "zero_init_steps", type = "slider", label = "Zero-Init Steps",
           default = 1, min = 0, max = 5, step = 1,
@@ -38,22 +34,6 @@ function guide(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_thres
         return
     end
 
-    -- Base guidance through APG (handles momentum, projection, norm thresholding)
+    -- Standard APG for all other steps
     apg(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_threshold)
-
-    -- Compute optimized scale s⋆ = dot(cond, uncond) / ||uncond||²
-    local dot_product = 0.0
-    local squared_norm = 0.0
-    for i = 0, n - 1 do
-        dot_product   = dot_product   + pred_cond[i] * pred_uncond[i]
-        squared_norm  = squared_norm  + pred_uncond[i] * pred_uncond[i]
-    end
-    local st_star = dot_product / (squared_norm + 1e-8)
-
-    -- Apply s⋆ correction as delta on top of APG result
-    -- Delta = (s⋆ - 1) * (1 - w) * uncond[i]
-    local scale_correction = (st_star - 1.0) * (1.0 - guidance_scale)
-    for i = 0, n - 1 do
-        result[i] = result[i] + scale_correction * pred_uncond[i]
-    end
 end
