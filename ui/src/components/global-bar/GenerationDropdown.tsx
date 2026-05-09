@@ -4,6 +4,7 @@
 // Reads from GlobalParamsContext instead of props.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { RotateCcw, ChevronDown, Music2, Upload, Trash2 } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
@@ -20,6 +21,7 @@ const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 b
 
 export const GenerationDropdown: React.FC = () => {
   const gp = useGlobalParams();
+  const { t } = useTranslation();
   const { registry, findSolver, findGuidance } = usePluginRegistry();
   const [compositeOpen, setCompositeOpen] = usePersistedState('hs-genAccordion-composite', false);
   const [dcwOpen, setDcwOpen] = usePersistedState('hs-genAccordion-dcw', false);
@@ -104,7 +106,7 @@ export const GenerationDropdown: React.FC = () => {
 
       {/* Solver */}
       <div>
-        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Solver</label>
+        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('gen.solver')}</label>
         <select className={selectClasses} value={gp.inferMethod}
           onChange={e => gp.setInferMethod(e.target.value)}>
           {registry.solvers.length > 0 ? (
@@ -151,7 +153,7 @@ export const GenerationDropdown: React.FC = () => {
 
       {/* Scheduler */}
       <div>
-        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Schedule</label>
+        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('gen.schedule')}</label>
         <select className={selectClasses} value={schedulerKey}
           onChange={e => {
             const v = e.target.value;
@@ -287,7 +289,7 @@ export const GenerationDropdown: React.FC = () => {
 
       {/* Guidance Mode */}
       <div>
-        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Guidance</label>
+        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('gen.guidance')}</label>
         <select className={selectClasses} value={gp.guidanceMode}
           onChange={e => gp.setGuidanceMode(e.target.value)}>
           {registry.guidance.length > 0 ? (
@@ -400,7 +402,7 @@ export const GenerationDropdown: React.FC = () => {
                 <button
                   onClick={() => gp.setTimbreAudioPath('')}
                   className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors flex-shrink-0"
-                  title="Clear timbre reference"
+                  title={t('gen.clearTimbreRef')}
                 >
                   <Trash2 size={12} />
                 </button>
@@ -427,7 +429,7 @@ export const GenerationDropdown: React.FC = () => {
                 {timbreUploading ? (
                   <><span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" /> Uploading...</>
                 ) : (
-                  <><Upload size={14} /> Upload Reference</>
+                  <><Upload size={14} /> {t('gen.uploadReference')}</>
                 )}
               </label>
             </div>
