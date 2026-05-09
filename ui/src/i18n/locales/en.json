@@ -245,6 +245,13 @@
     "library.delete": "Delete",
     "library.rename": "Rename",
     "library.noDescription": "No description",
-    "library.justNow": "Just now"
+    "library.justNow": "Just now",
+    "common.cancel": "Cancel",
+    "common.confirm": "Confirm",
+    "common.close": "Close",
+    "common.save": "Save",
+    "common.delete": "Delete",
+    "common.loading": "Loading...",
+    "common.untitled": "Untitled"
   }
 }
