@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { X, Download, FileAudio, Sparkles, Music2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 
 interface DownloadModalProps {
@@ -38,6 +39,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
   artistName = '',
   prepend = '',
 }) => {
+  const { t } = useTranslation();
   const [format, setFormat] = useState<AudioFormat>(defaultFormat);
   const [bitrate, setBitrate] = useState(
     defaultFormat === 'opus' ? defaultOpusBitrate : defaultMp3Bitrate
@@ -123,7 +125,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                 <Download size={18} className="text-emerald-400" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-white">Download</h2>
+                <h2 className="text-base font-bold text-white">{t('download.title')}</h2>
                 <p className="text-xs text-zinc-500 truncate max-w-[240px]">{song.title || 'Untitled'}</p>
               </div>
             </div>
@@ -140,7 +142,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             {/* Format Selection */}
             <div>
               <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
-                Format
+                {t('download.format')}
               </label>
               <div className="grid grid-cols-4 gap-2">
                 {(Object.keys(FORMAT_INFO) as AudioFormat[]).map(f => (
@@ -169,7 +171,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             {isLossy && (
               <div>
                 <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
-                  Bitrate
+                  {t('download.bitrate')}
                 </label>
                 <div className="grid grid-cols-4 gap-2">
                   {BITRATES.map(b => (
@@ -193,13 +195,13 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             {hasMastered && (
               <div>
                 <label className="block text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-2">
-                  Version
+                  {t('download.version')}
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   {([
-                    { key: 'original', label: 'Original', icon: <Music2 size={14} /> },
-                    { key: 'mastered', label: 'Mastered', icon: <Sparkles size={14} /> },
-                    { key: 'both', label: 'Both', icon: <Download size={14} /> },
+                    { key: 'original', label: t('download.original'), icon: <Music2 size={14} /> },
+                    { key: 'mastered', label: t('download.mastered'), icon: <Sparkles size={14} /> },
+                    { key: 'both', label: t('download.both'), icon: <Download size={14} /> },
                   ] as const).map(v => (
                     <button
                       key={v.key}
@@ -230,12 +232,12 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
               {downloading ? (
                 <>
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Converting...
+                  {t('download.converting')}
                 </>
               ) : (
                 <>
                   <Download size={16} />
-                  Download {FORMAT_INFO[format].label}
+                  {t('download.downloadFormat', { format: FORMAT_INFO[format].label })}
                   {isLossy ? ` (${bitrate}k)` : ''}
                   {hasMastered && version === 'both' ? ' × 2' : ''}
                 </>

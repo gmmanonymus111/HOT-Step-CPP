@@ -252,6 +252,27 @@
     "common.save": "Save",
     "common.delete": "Delete",
     "common.loading": "Loading...",
-    "common.untitled": "Untitled"
+    "common.untitled": "Untitled",
+    "download.title": "Download",
+    "download.format": "Format",
+    "download.bitrate": "Bitrate",
+    "download.version": "Version",
+    "download.original": "Original",
+    "download.mastered": "Mastered",
+    "download.both": "Both",
+    "download.converting": "Converting...",
+    "download.downloadFormat": "Download {{format}}",
+    "download.downloadLatent": "Download Latent (HSLAT)",
+    "download.wavDesc": "Lossless, uncompressed",
+    "download.flacDesc": "Lossless, compressed (~50% smaller)",
+    "download.opusDesc": "High quality at low bitrates",
+    "download.mp3Desc": "Universal compatibility",
+    "activity.recentSongs": "Recent Songs",
+    "activity.queue": "Queue",
+    "latent.sourceLatent": "Source Latent",
+    "latent.removeLatent": "Remove latent",
+    "latent.uploading": "Uploading latent…",
+    "latent.importLatent": "Import Latent (.latent)",
+    "latent.uploadFailed": "Upload failed"
   }
 }

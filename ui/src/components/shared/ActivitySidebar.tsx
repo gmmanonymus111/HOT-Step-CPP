@@ -11,6 +11,7 @@ import {
   Clock, ListOrdered,
   ChevronDown, ChevronRight,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { UnifiedRecentSongs } from './UnifiedRecentSongs';
 import { InlineAudioQueue } from '../lyric-studio/InlineAudioQueue';
 import { useAudioGenQueue } from '../../stores/audioGenQueueStore';
@@ -75,6 +76,7 @@ export const ActivitySidebar: React.FC<ActivitySidebarProps> = ({
   compact = false,
   queueCountColor = 'bg-pink-500/20 text-pink-300',
 }) => {
+  const { t } = useTranslation();
   const queue = useAudioGenQueue();
   const queueCount = queue.items.filter(i =>
     i.status === 'pending' || i.status === 'loading-adapter' || i.status === 'generating'
@@ -86,7 +88,7 @@ export const ActivitySidebar: React.FC<ActivitySidebarProps> = ({
   return (
     <div className="h-full flex flex-col">
 
-      <Section title="Recent Songs"
+      <Section title={t('activity.recentSongs')}
         icon={<Clock className="w-3 h-3" />}
         defaultOpen={true}>
         <UnifiedRecentSongs
@@ -97,7 +99,7 @@ export const ActivitySidebar: React.FC<ActivitySidebarProps> = ({
         />
       </Section>
 
-      <Section title="Queue"
+      <Section title={t('activity.queue')}
         icon={<ListOrdered className="w-3 h-3" />}
         count={queueCount}
         countColor={queueCountColor}

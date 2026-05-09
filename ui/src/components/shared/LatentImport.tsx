@@ -5,6 +5,7 @@
 
 import React, { useCallback, useRef, useState } from 'react';
 import { FileAudio, X, Loader2, Layers } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export interface LatentMetadata {
   bpm?: number;
@@ -31,6 +32,7 @@ interface LatentImportProps {
 export const LatentImport: React.FC<LatentImportProps> = ({
   latentUrl, onLatentLoaded, onClear, className = '',
 }) => {
+  const { t } = useTranslation();
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
   const [loadedFilename, setLoadedFilename] = useState('');
@@ -53,7 +55,7 @@ export const LatentImport: React.FC<LatentImportProps> = ({
       setLoadedMeta(data.metadata || null);
       onLatentLoaded(data.latent_url, data.metadata || {});
     } catch (err: any) {
-      setError(err.message || 'Upload failed');
+      setError(err.message || t('latent.uploadFailed'));
     } finally {
       setIsUploading(false);
     }
@@ -73,12 +75,12 @@ export const LatentImport: React.FC<LatentImportProps> = ({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5 min-w-0">
             <Layers className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
-            <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-wider">Source Latent</span>
+            <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-wider">{t('latent.sourceLatent')}</span>
           </div>
           <button
             onClick={handleClear}
             className="p-0.5 rounded text-zinc-500 hover:text-red-400 transition-colors"
-            title="Remove latent"
+            title={t('latent.removeLatent')}
           >
             <X className="w-3 h-3" />
           </button>
@@ -115,12 +117,12 @@ export const LatentImport: React.FC<LatentImportProps> = ({
         {isUploading ? (
           <>
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            Uploading latent…
+            {t('latent.uploading')}
           </>
         ) : (
           <>
             <FileAudio className="w-3.5 h-3.5" />
-            Import Latent (.latent)
+            {t('latent.importLatent')}
           </>
         )}
       </button>
