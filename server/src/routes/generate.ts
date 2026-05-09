@@ -25,6 +25,7 @@ import { translateParams } from '../services/generation/translateParams.js';
 import { computeLmCacheKey, getLmCache, setLmCache, getLmCacheSize, type LmCacheEntry } from '../services/generation/lmCache.js';
 import { loadSourceAudio, loadSourceLatent, applyTempoAndPitch, loadTimbreReference } from '../services/generation/sourceAudio.js';
 import { runPostProcessingChain } from '../services/generation/postProcessing.js';
+import { sourceLatentCacheKey, getSourceLatentCache, setSourceLatentCache, getSourceLatentCacheSize } from '../services/generation/sourceLatentCache.js';
 
 const router = Router();
 
@@ -314,6 +315,24 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       srcAudioBuf = applyTempoAndPitch(srcAudioBuf, job.params.tempoScale, job.params.pitchShift, log);
     }
 
+    // ── Auto source latent cache: reuse cached VAE-encoded source latent ──
+    // Only check cache when no manual latent import and source audio is present.
+    // Key includes tempo/pitch so pre-processed variants get separate entries.
+    let srcLatentCacheKey = '';
+    if (isCoverTask && !srcLatentBuf && job.params.sourceAudioUrl) {
+      srcLatentCacheKey = sourceLatentCacheKey(
+        job.params.sourceAudioUrl,
+        job.params.tempoScale,
+        job.params.pitchShift,
+      );
+      const cached = getSourceLatentCache(srcLatentCacheKey);
+      if (cached) {
+        srcLatentBuf = cached;
+        logGeneration(job.id, 'INFO',
+          `[Latent Cache] HIT — source latent reused (${(cached.length / 1024).toFixed(0)} KB), VAE encode will be skipped`);
+      }
+    }
+
     // ── Timbre reference ──
     let refAudioBuf: Buffer | undefined;
     const masteringRef = job.params.masteringReference;
@@ -480,6 +499,22 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
       // Store latent URL for DB insert
       latentUrls.push(latentUrl);
+
+      // ── Auto-cache source latent after first track ──
+      // Fetch the VAE-encoded source audio latent from the engine and cache it
+      // so subsequent cover runs with the same source skip the VAE encode.
+      if (trackIdx === 0 && isCoverTask && srcLatentCacheKey && !getSourceLatentCache(srcLatentCacheKey)) {
+        try {
+          const srcLat = await aceClient.getJobSourceLatent(synthJobId);
+          if (srcLat && srcLat.length > 0) {
+            setSourceLatentCache(srcLatentCacheKey, srcLat);
+            logGeneration(job.id, 'INFO',
+              `[Latent Cache] MISS → cached source latent (${(srcLat.length / 1024).toFixed(0)} KB, cache size=${getSourceLatentCacheSize()}) for ${srcLatentCacheKey}`);
+          }
+        } catch (srcLatErr: any) {
+          logGeneration(job.id, 'DEBUG', `[Latent Cache] Source latent capture skipped: ${srcLatErr.message}`);
+        }
+      }
     }
 
     // Get metadata from LM results

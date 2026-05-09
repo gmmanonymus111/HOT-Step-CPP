@@ -352,6 +352,23 @@ export const aceClient = {
     }
   },
 
+  /** GET /job?id=N&source_latent=1 — fetch VAE-encoded source audio latent.
+   *  Only available for cover/repaint/lego/extract tasks that performed a
+   *  fresh VAE encode. Returns null if the engine already received pre-encoded
+   *  src_latents (cache hit) or if no source encoding was performed. */
+  async getJobSourceLatent(jobId: string): Promise<Buffer | null> {
+    try {
+      const res = await fetch(`${BASE}/job?id=${jobId}&source_latent=1`, {
+        signal: AbortSignal.timeout(TIMEOUT_RESULT),
+      });
+      if (res.status === 204 || !res.ok) return null;
+      const buf = await res.arrayBuffer();
+      return buf.byteLength > 0 ? Buffer.from(buf) : null;
+    } catch {
+      return null;
+    }
+  },
+
   /** POST /job?id=N&cancel=1 — cancel a running job */
   async cancelJob(jobId: string): Promise<void> {
     await fetch(`${BASE}/job?id=${jobId}&cancel=1`, {

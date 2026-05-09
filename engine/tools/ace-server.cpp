@@ -802,7 +802,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
     const float *                   ref_lat_ptr = ref_latents.empty() ? nullptr : ref_latents.data();
     std::vector<std::vector<float>> captured_latents;
     const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, src_lat_ptr, src_T_latent, ref_interleaved,
-                                   ref_len, ref_lat_ptr, ref_T_latent, audio.data(), &captured_latents,
+                                   ref_len, ref_lat_ptr, ref_T_latent, audio.data(), nullptr, &captured_latents,
+                                   nullptr, nullptr,  // source latent capture (not needed in ace-server)
                                    server_cancel_job, (void *) &job->cancel);
     ace_synth_free(ctx);
     free(src_interleaved);
