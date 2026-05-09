@@ -392,6 +392,18 @@
     "lyric.edit": "Edit",
     "lyric.delete": "Delete",
     "lyric.save": "Save",
-    "lyric.cancel": "Cancel"
+    "lyric.cancel": "Cancel",
+    "stemBuilder.readyForLayering": "Ready for layering",
+    "stemBuilder.clearSource": "Clear source",
+    "stemBuilder.noBaseModels": "No base models found. Stem Builder requires a non-turbo DiT model.",
+    "stemBuilder.model": "Model",
+    "stemBuilder.stylePlaceholder": "e.g. tight house drums, warm vintage tone",
+    "stemBuilder.buildLayerByLayer": "Build Stems Layer by Layer",
+    "stemBuilder.recentBuilds": "Recent Builds",
+    "stemBuilder.queue": "Queue",
+    "stemBuilder.noBuildsYet": "No builds yet",
+    "stemBuilder.generating": "Generating...",
+    "stemBuilder.sourceAudio": "Source Audio",
+    "stemBuilder.preview": "Preview"
   }
 }
