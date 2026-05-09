@@ -24,7 +24,7 @@ guidance = {
     description = "Manifold projection guidance (Su et al. 2025)",
     params      = {
         { key = "iterations", type = "slider", label = "Projection Iterations (K)",
-          default = 2, min = 1, max = 5, step = 1,
+          default = 1, min = 1, max = 5, step = 1,
           hint = "Fixed-point iterations per step. Paper recommends 2." },
     },
 }

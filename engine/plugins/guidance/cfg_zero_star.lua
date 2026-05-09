@@ -8,9 +8,12 @@
 --   2. Zero-init: zeroes out the velocity for the first N steps of the ODE solver,
 --      since early-step CFG predictions are often worse than doing nothing.
 --
--- Formula (for steps > zero_init_steps):
+-- Implementation: routes through native APG for stability (momentum, projection,
+-- norm thresholding), then applies the s⋆ correction as a delta on top.
+--
+-- Math:
 --   s⋆ = dot(v_cond, v_uncond) / ||v_uncond||²
---   v_guided = s⋆·v_uncond + w·(v_cond - s⋆·v_uncond)
+--   result = APG(cond, uncond, w) + (s⋆ - 1) * (1 - w) * v_uncond
 
 guidance = {
     name        = "cfg_zero_star",
@@ -35,6 +38,9 @@ function guide(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_thres
         return
     end
 
+    -- Base guidance through APG (handles momentum, projection, norm thresholding)
+    apg(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_threshold)
+
     -- Compute optimized scale s⋆ = dot(cond, uncond) / ||uncond||²
     local dot_product = 0.0
     local squared_norm = 0.0
@@ -44,9 +50,10 @@ function guide(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_thres
     end
     local st_star = dot_product / (squared_norm + 1e-8)
 
-    -- v_guided = st_star * v_uncond + w * (v_cond - st_star * v_uncond)
+    -- Apply s⋆ correction as delta on top of APG result
+    -- Delta = (s⋆ - 1) * (1 - w) * uncond[i]
+    local scale_correction = (st_star - 1.0) * (1.0 - guidance_scale)
     for i = 0, n - 1 do
-        local scaled_uncond = st_star * pred_uncond[i]
-        result[i] = scaled_uncond + guidance_scale * (pred_cond[i] - scaled_uncond)
+        result[i] = result[i] + scale_correction * pred_uncond[i]
     end
 end

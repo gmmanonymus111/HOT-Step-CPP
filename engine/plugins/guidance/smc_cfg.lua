@@ -3,18 +3,15 @@
 --        Han et al., 2025 (arXiv:2603.03281)
 --
 -- Reinterprets CFG as a feedback control system and applies Sliding Mode
--- Control (SMC) to stabilize guidance, especially at high scales.
+-- Control (SMC) to stabilise guidance, especially at high scales.
 --
 -- Key idea: define a sliding surface s(t) = ė(t) + λ·e(t) over the
 -- semantic error e = v_cond - v_uncond, then apply a switching control
 -- term Δe = -k·sign(s) that enforces convergence to a stable manifold.
 --
--- Formula:
---   e(t) = v_cond - v_uncond
---   ė(t) ≈ (e(t) - e(t-1)) / Δt       (finite difference)
---   s(t) = ė(t) + λ·e(t)               (sliding surface)
---   Δe   = -k · sign(s)                 (switching control)
---   v_guided = v_uncond + w · (e + Δe)
+-- Implementation: routes through native APG for stability (momentum,
+-- projection, norm thresholding), then applies the SMC correction as
+-- a delta on top: result = APG(cond, uncond, w) + w · Δe
 --
 -- Stateful: stores previous error vector across steps.
 
@@ -48,35 +45,34 @@ function guide(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_thres
     local lam = (params and params.lambda) or 0.5
     local k   = (params and params.k) or 0.1
 
+    -- Base guidance through APG (handles momentum, projection, norm thresholding)
+    apg(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_threshold)
+
     -- Compute semantic error e(t) = cond - uncond
     local error_now = {}
     for i = 0, n - 1 do
         error_now[i] = pred_cond[i] - pred_uncond[i]
     end
 
-    -- First step: no previous error available, use standard CFG with APG
+    -- First step or size change: no previous error, just use APG as-is
     if prev_error == nil or prev_n ~= n then
-        -- Fall back to APG for the first step
-        apg(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_threshold)
-        -- Store error for next step
         prev_error = error_now
         prev_n = n
         return
     end
 
-    -- Compute ė ≈ (e_now - e_prev) / dt  (dt is a global from C++)
-    -- Note: dt can be negative for reverse-time flow; use absolute
+    -- Compute ė ≈ (e_now - e_prev) / dt
     local dt_abs = math.abs(dt or 1.0)
     if dt_abs < 1e-8 then dt_abs = 1e-8 end
     local inv_dt = 1.0 / dt_abs
 
-    -- Compute sliding surface and switching control, element-wise
+    -- Apply SMC correction: Δe = -k · sign(ė + λ·e)
+    -- Add w · Δe as delta on top of APG result
     for i = 0, n - 1 do
         local e_dot = (error_now[i] - prev_error[i]) * inv_dt
         local s = e_dot + lam * error_now[i]
         local delta_e = -k * sign(s)
-        -- v_guided = v_uncond + w * (e + Δe)
-        result[i] = pred_uncond[i] + guidance_scale * (error_now[i] + delta_e)
+        result[i] = result[i] + guidance_scale * delta_e
     end
 
     -- Store for next step
