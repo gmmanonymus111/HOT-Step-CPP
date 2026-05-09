@@ -2,6 +2,7 @@
 // Ported to Tailwind styling matching hot-step-9000's grid layout.
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Slider } from '../shared/Slider';
 
 const KEY_SIGNATURES = [
@@ -48,50 +49,51 @@ export const MetadataSection: React.FC<MetadataSectionProps> = ({
   duration, onDurationChange,
   vocalLanguage, onVocalLanguageChange,
 }) => {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3 pt-3 border-t border-zinc-200 dark:border-white/5">
-      <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Music Parameters</h4>
+      <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">{t('metadataSection.musicParameters')}</h4>
 
       <div className="grid grid-cols-2 gap-3">
         {/* BPM */}
         <div>
-          <Slider label="BPM" value={bpm} onChange={onBpmChange}
+          <Slider label={t('metadataSection.bpm')} value={bpm} onChange={onBpmChange}
             min={0} max={240} step={1} showInput suffix="" />
-          {bpm === 0 && <span className="text-[10px] text-zinc-600">Auto</span>}
+          {bpm === 0 && <span className="text-[10px] text-zinc-600">{t('metadataSection.auto')}</span>}
         </div>
 
         {/* Duration */}
         <div>
-          <Slider label="Duration" value={duration} onChange={onDurationChange}
+          <Slider label={t('metadataSection.duration')} value={duration} onChange={onDurationChange}
             min={-1} max={240} step={1} suffix="s" showInput />
-          {duration <= 0 && <span className="text-[10px] text-zinc-600">Auto</span>}
+          {duration <= 0 && <span className="text-[10px] text-zinc-600">{t('metadataSection.auto')}</span>}
         </div>
 
         {/* Key */}
         <div>
-          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Key</label>
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('metadataSection.key')}</label>
           <select className={selectClasses} value={keyScale}
             onChange={e => onKeyScaleChange(e.target.value)}>
             {KEY_SIGNATURES.map(k => (
-              <option key={k} value={k}>{k || 'Auto'}</option>
+              <option key={k} value={k}>{k || t('metadataSection.auto')}</option>
             ))}
           </select>
         </div>
 
         {/* Time Signature */}
         <div>
-          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Time Sig</label>
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('metadataSection.timeSig')}</label>
           <select className={selectClasses} value={timeSignature}
             onChange={e => onTimeSignatureChange(e.target.value)}>
-            {TIME_SIGNATURES.map(t => (
-              <option key={t} value={t}>{t || 'Auto'}</option>
+            {TIME_SIGNATURES.map(tSig => (
+              <option key={tSig} value={tSig}>{tSig || t('metadataSection.auto')}</option>
             ))}
           </select>
         </div>
 
         {/* Language */}
         <div className="col-span-2">
-          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Vocal Language</label>
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('metadataSection.vocalLanguage')}</label>
           <select className={selectClasses} value={vocalLanguage}
             onChange={e => onVocalLanguageChange(e.target.value)}>
             {LANGUAGES.map(l => (

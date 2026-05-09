@@ -7,8 +7,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Zap, Download, Tag, AlertTriangle, Loader2, Settings2,
   ChevronRight, Save, Scissors,
-  Key, Database,
+  Key, Database, Globe
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { getStemStats, deleteAllJobs, formatBytes, type StemStats } from '../../services/stemStudioApi';
 import { useAuth } from '../../context/AuthContext';
 import { songApi, settingsApi } from '../../services/api';
@@ -53,6 +54,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onSettingsChange,
   onNukeComplete,
 }) => {
+  const { t, i18n } = useTranslation();
   const { token } = useAuth();
   const [nukeConfirm, setNukeConfirm] = useState(false);
   const [nukeRunning, setNukeRunning] = useState(false);
@@ -422,6 +424,29 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {/* ═══════════════ GENERAL TAB ═══════════════ */}
       {activeTab === 'general' && (
       <>
+      {/* Language Section */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <Globe size={16} className="settings-section-icon" />
+          <span className="settings-section-title">Language</span>
+        </div>
+
+        <SelectRow
+          id="setting-language"
+          label="Display Language"
+          description="Application interface language."
+          value={i18n.language?.split('-')[0] || 'en'}
+          options={[
+            { value: 'en', label: 'English' },
+            { value: 'zh', label: '中文 (Chinese)' },
+            { value: 'ja', label: '日本語 (Japanese)' },
+            { value: 'ko', label: '한국어 (Korean)' },
+            { value: 'ru', label: 'Русский (Russian)' },
+          ]}
+          onChange={(v) => i18n.changeLanguage(v)}
+        />
+      </div>
+
       {/* Performance Section */}
       <div className="settings-section">
         <div className="settings-section-header">

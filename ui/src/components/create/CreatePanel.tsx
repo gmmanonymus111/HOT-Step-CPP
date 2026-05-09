@@ -6,6 +6,7 @@
 
 import React, { useEffect } from 'react';
 import { Zap, ListPlus } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { ContentSection } from './ContentSection';
@@ -20,6 +21,7 @@ interface CreatePanelProps {
 }
 
 export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobCount, reuseData }) => {
+  const { t } = useTranslation();
   // ── Content (per-song) ──
   const [caption, setCaption] = usePersistedState('hs-caption', '');
   const [lyrics, setLyrics] = usePersistedState('hs-lyrics', '');
@@ -79,7 +81,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
     <div className="h-full flex flex-col bg-zinc-50 dark:bg-suno">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-white/5">
-        <h2 className="text-lg font-bold text-zinc-900 dark:text-white">Create</h2>
+        <h2 className="text-lg font-bold text-zinc-900 dark:text-white">{t('createPanel.title')}</h2>
         <span className="text-xs text-zinc-500 font-medium">text2music</span>
       </div>
 
@@ -126,7 +128,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
           {activeJobCount > 0 ? (
             <>
               <ListPlus size={18} />
-              Queue Generation
+              {t('createPanel.queueGeneration')}
               <span className="ml-1 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-white/20 text-xs font-bold tabular-nums">
                 {activeJobCount}
               </span>
@@ -134,7 +136,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
           ) : (
             <>
               <Zap size={18} />
-              Generate
+              {t('createPanel.generate')}
             </>
           )}
         </button>

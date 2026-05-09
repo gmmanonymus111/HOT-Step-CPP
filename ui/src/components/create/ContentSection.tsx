@@ -3,6 +3,7 @@
 
 import React from 'react';
 import { Music, ChevronDown, ChevronRight } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface ContentSectionProps {
   caption: string;
@@ -25,6 +26,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
   instrumental, onInstrumentalChange,
   title, onTitleChange, artist, onArtistChange, subject, onSubjectChange,
 }) => {
+  const { t } = useTranslation();
   const hasMetadata = !!(title || artist || subject);
   const [showMetadata, setShowMetadata] = React.useState(hasMetadata);
 
@@ -38,7 +40,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
       {/* Style / Caption */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-          Style Description
+          {t('contentSection.styleDescription')}
         </label>
         <textarea
           className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-none transition-colors"
@@ -58,9 +60,9 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
           {showMetadata
             ? <ChevronDown size={12} className="text-zinc-500" />
             : <ChevronRight size={12} className="text-zinc-500" />}
-          Song Info
+          {t('contentSection.songInfo')}
           {hasMetadata && (
-            <span className="text-[9px] text-pink-400/80 font-normal normal-case ml-1">populated</span>
+            <span className="text-[9px] text-pink-400/80 font-normal normal-case ml-1">{t('contentSection.populated')}</span>
           )}
         </button>
 
@@ -68,32 +70,32 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
           <div className="space-y-2 pl-0.5">
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[10px] text-zinc-600 mb-0.5">Artist</label>
+                <label className="block text-[10px] text-zinc-600 mb-0.5">{t('contentSection.artist')}</label>
                 <input
                   type="text"
                   className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
-                  placeholder="Optional"
+                  placeholder={t('contentSection.artistPlaceholder')}
                   value={artist}
                   onChange={e => onArtistChange(e.target.value)}
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-zinc-600 mb-0.5">Title</label>
+                <label className="block text-[10px] text-zinc-600 mb-0.5">{t('contentSection.title')}</label>
                 <input
                   type="text"
                   className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
-                  placeholder="Optional"
+                  placeholder={t('contentSection.titlePlaceholder')}
                   value={title}
                   onChange={e => onTitleChange(e.target.value)}
                 />
               </div>
             </div>
             <div>
-              <label className="block text-[10px] text-zinc-600 mb-0.5">Subject</label>
+              <label className="block text-[10px] text-zinc-600 mb-0.5">{t('contentSection.subject')}</label>
               <input
                 type="text"
                 className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors"
-                placeholder="Optional — what the song is about"
+                placeholder={t('contentSection.subjectPlaceholder')}
                 value={subject}
                 onChange={e => onSubjectChange(e.target.value)}
               />
@@ -117,7 +119,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
         <div className="flex items-center gap-1.5">
           <Music size={14} className="text-zinc-500" />
           <span className="text-sm text-zinc-600 dark:text-zinc-400 group-hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
-            Instrumental (no vocals)
+            {t('contentSection.instrumental')}
           </span>
         </div>
       </label>
@@ -126,7 +128,7 @@ export const ContentSection: React.FC<ContentSectionProps> = ({
       {!instrumental && (
         <div>
           <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-            Lyrics
+            {t('contentSection.lyrics')}
           </label>
           <textarea
             className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-600 dark:text-zinc-400 dark:placeholder:text-zinc-600 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none resize-vertical transition-colors font-mono leading-relaxed"

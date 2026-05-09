@@ -6,6 +6,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Cpu, Plug, Sliders, Brain, AudioWaveform, Upload, Download } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { BarSection, ToggleSwitch } from './BarSection';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { modelApi } from '../../services/api';
@@ -20,6 +21,7 @@ import { VramIndicator } from '../shared/VramIndicator';
 type SectionId = 'models' | 'adapters' | 'generation' | 'lm' | 'postprocessing' | null;
 
 export const GlobalParamBar: React.FC = () => {
+  const { t } = useTranslation();
   const [openSection, setOpenSection] = useState<SectionId>(null);
   const gp = useGlobalParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -224,7 +226,7 @@ export const GlobalParamBar: React.FC = () => {
         <div className="flex-1 flex items-stretch divide-x divide-white/5">
           <BarSection
             id="models"
-            label="Models"
+            label={t('globalBar.models')}
             icon={<Cpu size={14} />}
             badge={<ModelsBadge />}
             accentColor="pink"
@@ -237,7 +239,7 @@ export const GlobalParamBar: React.FC = () => {
 
           <BarSection
             id="adapters"
-            label="Adapters"
+            label={t('globalBar.adapters')}
             icon={<Plug size={14} />}
             badge={<AdaptersBadge />}
             accentColor="emerald"
@@ -250,7 +252,7 @@ export const GlobalParamBar: React.FC = () => {
 
           <BarSection
             id="generation"
-            label="Generation"
+            label={t('globalBar.generation')}
             icon={<Sliders size={14} />}
             badge={<GenerationBadge />}
             accentColor="sky"
@@ -263,7 +265,7 @@ export const GlobalParamBar: React.FC = () => {
 
           <BarSection
             id="lm"
-            label="LM / Thinking"
+            label={t('globalBar.lm')}
             icon={<Brain size={14} />}
             badge={<LmThinkingBadge />}
             accentColor="purple"
@@ -283,7 +285,7 @@ export const GlobalParamBar: React.FC = () => {
 
           <BarSection
             id="postprocessing"
-            label="Post-Processing"
+            label={t('globalBar.postProcessing')}
             icon={<AudioWaveform size={14} />}
             badge={<PostProcessingBadge />}
             accentColor="amber"
@@ -304,11 +306,11 @@ export const GlobalParamBar: React.FC = () => {
 
         {/* Right — Export/Import + VRAM */}
         <div className="flex items-center gap-2 flex-shrink-0 px-3 border-l border-zinc-200 dark:border-white/5" style={{ width: '210px' }}>
-          <button onClick={handleExport} title="Export preset"
+          <button onClick={handleExport} title={t('globalBar.exportPreset')}
             className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-emerald-400 transition-colors">
             <Upload size={13} />
           </button>
-          <button onClick={() => fileInputRef.current?.click()} title="Import preset"
+          <button onClick={() => fileInputRef.current?.click()} title={t('globalBar.importPreset')}
             className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-sky-400 transition-colors">
             <Download size={13} />
           </button>

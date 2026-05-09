@@ -3,6 +3,7 @@
 
 import React from 'react';
 import { Disc, Library, Mic, Guitar, Scissors, Layers, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
 interface SidebarProps {
@@ -30,6 +31,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   showAssistant = false,
   onToggleAssistant,
 }) => {
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = usePersistedState('hs-sidebar-open', true);
 
   return (
@@ -42,7 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <button
           className="w-8 h-8 rounded-lg bg-zinc-200 dark:bg-white/5 hover:bg-zinc-300 dark:hover:bg-white/10 flex items-center justify-center transition-all flex-shrink-0"
           onClick={() => setIsOpen(!isOpen)}
-          title={isOpen ? 'Collapse' : 'Expand'}
+          title={isOpen ? t('sidebar.collapse') : t('sidebar.expand')}
         >
           <svg className={`w-4 h-4 text-zinc-600 dark:text-zinc-400 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -53,21 +55,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <nav className="flex-1 flex flex-col gap-2 w-full px-3">
         <NavItem
           icon={<Disc size={20} />}
-          label="Create"
+          label={t('sidebar.create')}
           active={activeView === 'create'}
           onClick={() => onViewChange('create')}
           isExpanded={isOpen}
         />
         <NavItem
           icon={<Library size={20} />}
-          label="Library"
+          label={t('sidebar.library')}
           active={activeView === 'library'}
           onClick={() => onViewChange('library')}
           isExpanded={isOpen}
         />
         <NavItem
           icon={<Mic size={20} />}
-          label="Lyric Studio"
+          label={t('sidebar.lyricStudio')}
           active={activeView === 'lyric-studio'}
           onClick={() => onViewChange('lyric-studio')}
           isExpanded={isOpen}
@@ -75,7 +77,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <NavItem
           icon={<Guitar size={20} />}
-          label="Cover Studio"
+          label={t('sidebar.coverStudio')}
           active={activeView === 'cover-studio'}
           onClick={() => onViewChange('cover-studio')}
           isExpanded={isOpen}
@@ -83,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <NavItem
           icon={<Scissors size={20} />}
-          label="Stem Studio"
+          label={t('sidebar.stemStudio')}
           active={activeView === 'stem-studio'}
           onClick={() => onViewChange('stem-studio')}
           isExpanded={isOpen}
@@ -91,7 +93,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <NavItem
           icon={<Layers size={20} />}
-          label="Stem Builder"
+          label={t('sidebar.stemBuilder')}
           active={activeView === 'stem-builder'}
           onClick={() => onViewChange('stem-builder')}
           isExpanded={isOpen}
@@ -99,24 +101,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <NavItem
           icon={<Settings size={20} />}
-          label="Settings"
+          label={t('sidebar.settings')}
           active={activeView === 'settings'}
           onClick={() => onViewChange('settings')}
           isExpanded={isOpen}
         />
 
-        {/* Theme toggle */}
         {onToggleTheme && (
           <button onClick={onToggleTheme}
             className={`w-full rounded-xl flex items-center gap-3 transition-all duration-200
               ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
               text-zinc-500 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5`}
-            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+            title={theme === 'dark' ? t('sidebar.theme.switchToLight') : t('sidebar.theme.switchToDark')}>
             <div className="flex-shrink-0">
               {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
             </div>
             {isOpen && <span className="text-sm font-medium whitespace-nowrap">
-              {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+              {theme === 'dark' ? t('sidebar.theme.lightMode') : t('sidebar.theme.darkMode')}
             </span>}
           </button>
         )}
@@ -133,11 +134,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
                   : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-300 hover:bg-white/5'}
               `}
-              title={showTerminal ? 'Hide Terminal' : 'Show Terminal'}
+              title={showTerminal ? t('sidebar.terminal.hide') : t('sidebar.terminal.show')}
             >
               <div className="flex-shrink-0"><Terminal size={20} /></div>
               {isOpen && (
-                <span className="text-sm font-medium whitespace-nowrap">Terminal</span>
+                <span className="text-sm font-medium whitespace-nowrap">{t('sidebar.terminal.label')}</span>
               )}
             </button>
           )}
@@ -153,11 +154,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   ? 'bg-violet-500/10 text-violet-400 hover:bg-violet-500/15'
                   : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5'}
               `}
-              title={showAssistant ? 'Hide Assistant' : 'Show Assistant'}
+              title={showAssistant ? t('sidebar.assistant.hide') : t('sidebar.assistant.show')}
             >
               <div className="flex-shrink-0"><Sparkles size={20} /></div>
               {isOpen && (
-                <span className="text-sm font-medium whitespace-nowrap">Assistant</span>
+                <span className="text-sm font-medium whitespace-nowrap">{t('sidebar.assistant.label')}</span>
               )}
             </button>
           )}
@@ -170,11 +171,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 w-full rounded-xl flex items-center gap-3 transition-all duration-200 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10
                 ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
               `}
-              title="Restart HOT-Step CPP"
+              title={t('sidebar.restartTitle')}
             >
               <div className="flex-shrink-0"><RotateCcw size={20} /></div>
               {isOpen && (
-                <span className="text-sm font-medium whitespace-nowrap">Restart</span>
+                <span className="text-sm font-medium whitespace-nowrap">{t('sidebar.restart')}</span>
               )}
             </button>
           )}
@@ -186,11 +187,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               w-full rounded-xl flex items-center gap-3 transition-all duration-200 text-red-400 hover:text-red-300 hover:bg-red-500/10
               ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
             `}
-            title="Quit HOT-Step CPP"
+            title={t('sidebar.quitTitle')}
           >
             <div className="flex-shrink-0"><Power size={20} /></div>
             {isOpen && (
-              <span className="text-sm font-medium whitespace-nowrap">Quit</span>
+              <span className="text-sm font-medium whitespace-nowrap">{t('sidebar.quit')}</span>
             )}
           </button>
         </div>

@@ -7,6 +7,7 @@
 // DOM hosts and wires their callbacks to the store.
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from './context/AuthContext';
 import { GlobalParamsProvider, useGlobalParams } from './context/GlobalParamsContext';
 import { usePersistedState } from './hooks/usePersistedState';
@@ -93,7 +94,8 @@ function urlForView(view: string): string {
 
 /** Restarting overlay — polls /api/health and reloads when the server is back */
 const RestartingOverlay: React.FC = () => {
-  const [status, setStatus] = useState('Stopping server...');
+  const { t } = useTranslation();
+  const [status, setStatus] = useState(t('app.restarting.stopping'));
   const [dots, setDots] = useState('');
 
   // Animate dots
@@ -111,20 +113,20 @@ const RestartingOverlay: React.FC = () => {
 
     // Wait a moment before polling (give the server time to die)
     const startDelay = setTimeout(() => {
-      setStatus('Waiting for server');
+      setStatus(t('app.restarting.waiting'));
       const poll = setInterval(async () => {
         attempt++;
         try {
           const res = await fetch('/api/health', { signal: AbortSignal.timeout(2000) });
           if (res.ok && !cancelled) {
             clearInterval(poll);
-            setStatus('Reconnected! Reloading');
+            setStatus(t('app.restarting.reconnected'));
             setTimeout(() => window.location.reload(), 500);
           }
         } catch {
           // Still down — keep polling
           if (attempt > 5 && !cancelled) {
-            setStatus('Waiting for server');
+            setStatus(t('app.restarting.waiting'));
           }
         }
       }, 2000);
@@ -143,15 +145,16 @@ const RestartingOverlay: React.FC = () => {
         <div className="w-16 h-16 rounded-full border-4 border-amber-500/20" />
         <div className="absolute inset-0 w-16 h-16 rounded-full border-4 border-transparent border-t-amber-400 animate-spin" />
       </div>
-      <h1 className="text-2xl font-bold mb-2">Restarting HOT-Step CPP</h1>
+      <h1 className="text-2xl font-bold mb-2">{t('app.restarting.title')}</h1>
       <p className="text-zinc-600 dark:text-zinc-400 text-lg">{status}{dots}</p>
-      <p className="text-zinc-600 text-sm mt-4">The page will reload automatically when the server is ready.</p>
+      <p className="text-zinc-600 text-sm mt-4">{t('app.restarting.message')}</p>
     </div>
   );
 };
 
 /** Inner app content — must be rendered inside GlobalParamsProvider */
 const AppContent: React.FC = () => {
+  const { t } = useTranslation();
   const { token, isLoading } = useAuth();
   const [activeView, setActiveView] = useState(() => viewFromUrl());
   const [songs, setSongs] = useState<Song[]>([]);
@@ -371,7 +374,7 @@ const AppContent: React.FC = () => {
       <div className="flex h-screen items-center justify-center bg-white dark:bg-suno text-zinc-600 dark:text-zinc-400">
         <div className="text-center">
           <div className="text-4xl mb-4">⚡</div>
-          <div className="text-lg font-medium">Loading HOT-Step...</div>
+          <div className="text-lg font-medium">{t('app.loading')}</div>
         </div>
       </div>
     );
@@ -381,8 +384,8 @@ const AppContent: React.FC = () => {
     return (
       <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-white dark:bg-black text-zinc-900 dark:text-white">
         <div className="text-6xl mb-6">👋</div>
-        <h1 className="text-2xl font-bold mb-2">HOT-Step CPP has shut down</h1>
-        <p className="text-zinc-600 dark:text-zinc-400">You may now close this browser tab.</p>
+        <h1 className="text-2xl font-bold mb-2">{t('app.shutdown.title')}</h1>
+        <p className="text-zinc-600 dark:text-zinc-400">{t('app.shutdown.message')}</p>
       </div>
     );
   }
@@ -460,7 +463,7 @@ const AppContent: React.FC = () => {
                 duration: typeof song.duration === 'number' ? song.duration : undefined,
                 style: song.style || '',
               });
-              showToast('Added to playlist', 'success');
+              showToast(t('app.addedToPlaylist'), 'success');
             }}
           />
         </div>
@@ -522,7 +525,7 @@ const AppContent: React.FC = () => {
             onRename={handleRename}
             showFilters={false}
             viewMode="grid"
-            title="Generations"
+            title={t('app.generations')}
             onAddToPlaylist={(song) => {
               addToPlaylist({
                 id: song.id,
@@ -534,7 +537,7 @@ const AppContent: React.FC = () => {
                 duration: typeof song.duration === 'number' ? song.duration : undefined,
                 style: song.style || '',
               });
-              showToast('Added to playlist', 'success');
+              showToast(t('app.addedToPlaylist'), 'success');
             }}
           />
         </div>
@@ -633,9 +636,9 @@ const AppContent: React.FC = () => {
           onViewChange={navigateTo}
           onQuit={() => {
             setConfirmDialog({
-              title: 'Quit HOT-Step CPP',
-              message: 'Are you sure you wish to shut down HOT-Step CPP? This will stop the engine and all servers.',
-              confirmLabel: 'Shut Down',
+              title: t('app.quitDialog.title'),
+              message: t('app.quitDialog.message'),
+              confirmLabel: t('app.quitDialog.confirm'),
               danger: true,
               onConfirm: async () => {
                 setConfirmDialog(null);
@@ -646,9 +649,9 @@ const AppContent: React.FC = () => {
           }}
           onRestart={() => {
             setConfirmDialog({
-              title: 'Restart HOT-Step CPP',
-              message: 'This will restart the server and engine. The UI will reconnect automatically once the server is back.',
-              confirmLabel: 'Restart',
+              title: t('app.restartDialog.title'),
+              message: t('app.restartDialog.message'),
+              confirmLabel: t('app.restartDialog.confirm'),
               danger: false,
               onConfirm: async () => {
                 setConfirmDialog(null);
