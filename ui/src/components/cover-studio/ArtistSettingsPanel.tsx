@@ -1,6 +1,7 @@
 // ArtistSettingsPanel.tsx — Right panel: artist selector + cover settings + generate
 import React from 'react';
 import { Guitar, Disc3, Zap, Music, ChevronDown, Loader2, Type } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { EditableSlider } from './EditableSlider';
 import { transposeKey, type AudioAnalysis } from './coverStudioUtils';
 import type { Artist, AlbumPreset } from '../../services/lireekApi';
@@ -47,6 +48,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
     canGenerate, isGenerating, genProgress, genStage, onGenerate, onCancel,
   } = props;
 
+  const { t } = useTranslation();
   const presetsWithAdapters = artistPresets.filter(p => p.preset?.adapter_path);
   const effectiveKey = keyOverride || analysis?.key || null;
 
@@ -56,7 +58,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
           <Guitar className="w-4 h-4 text-cyan-400" />
-          Target Artist
+          {t('cover.targetArtist')}
           <span className="text-[10px] font-normal text-zinc-500">(optional)</span>
         </div>
         {isLoadingArtists ? (
@@ -65,7 +67,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
           </div>
         ) : artists.length === 0 ? (
           <div className="text-center py-4">
-            <p className="text-xs text-zinc-500">No trained artists available.</p>
+            <p className="text-xs text-zinc-500">{t('cover.noArtistsAvailable')}</p>
             <p className="text-[10px] text-zinc-600 dark:text-zinc-400 mt-1">Describe the target style below, or add artists in Lyric Studio for adapter-powered covers.</p>
           </div>
         ) : (
@@ -171,7 +173,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
           <Disc3 className="w-4 h-4 text-teal-400" />
-          Cover Settings
+          {t('cover.coverSettings')}
         </div>
         <EditableSlider label="Structure Fidelity" value={audioCoverStrength} min={0} max={1} step={0.05}
           onChange={onAudioCoverStrength} formatDisplay={v => v.toFixed(2)}
@@ -228,7 +230,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
           </div>
           <button onClick={onCancel}
             className="w-full py-2 rounded-xl text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors">
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       ) : (
@@ -238,7 +240,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
               ? 'bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white shadow-cyan-500/20 hover:shadow-cyan-400/30 hover:scale-[1.02]'
               : 'bg-zinc-200 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 cursor-not-allowed shadow-none'}`}>
           <Disc3 className="w-4 h-4" />
-          Generate Cover
+          {t('cover.generateCover')}
         </button>
       )}
     </div>

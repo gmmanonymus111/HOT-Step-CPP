@@ -2,6 +2,7 @@
 // Composes: SourcePanel, ArtistSettingsPanel, ActivitySidebar
 import React, { useState, useEffect, useCallback } from 'react';
 import { Search, Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { usePersistedState } from '../../hooks/usePersistedState';
@@ -28,6 +29,7 @@ import {
 import type { LatentMetadata } from '../shared/LatentImport';
 
 export const CoverStudio: React.FC = () => {
+  const { t } = useTranslation();
   const { token } = useAuth();
   const gp = useGlobalParams();
   const [settings] = usePersistedState<AppSettings>('ace-settings', DEFAULT_SETTINGS);
@@ -146,13 +148,13 @@ export const CoverStudio: React.FC = () => {
           if (a) loadArtistPresets(a);
         }
       })
-      .catch(() => showToast('Failed to load artists'))
+      .catch(() => showToast(t('cover.failedToLoadArtists')))
       .finally(() => setIsLoadingArtists(false));
   }, []);
 
   // ── File upload + analysis pipeline ──
   const handleFileSelected = async (file: File) => {
-    if (!token) { showToast('Please sign in first'); return; }
+    if (!token) { showToast(t('cover.signInFirst')); return; }
     setSourceFileName(file.name);
     setBpmCorrection(1);
     setKeyOverride(null);
@@ -160,7 +162,7 @@ export const CoverStudio: React.FC = () => {
     // Check track cache
     const cached = getTrackCache()[file.name];
     if (cached) {
-      showToast('Loaded from cache!');
+      showToast(t('cover.loadedFromCache'));
       if (cached.artist) setSongArtist(cached.artist);
       if (cached.title) setSongTitle(cached.title);
       if (cached.lyrics) setLyrics(cached.lyrics);
@@ -223,15 +225,15 @@ export const CoverStudio: React.FC = () => {
 
   // ── Lyrics search ──
   const handleSearchLyrics = async () => {
-    if (!songArtist.trim() || !songTitle.trim()) { showToast('Enter artist and title first'); return; }
+    if (!songArtist.trim() || !songTitle.trim()) { showToast(t('cover.enterArtistTitle')); return; }
     setIsSearchingLyrics(true);
     try {
       const result = await lireekApi.searchSongLyrics(songArtist.trim(), songTitle.trim());
       setLyrics(result.lyrics);
       if (result.title) setSongTitle(result.title);
-      showToast('Lyrics found!');
+      showToast(t('cover.lyricsFound'));
       if (sourceFileName) saveTrackCacheEntry(sourceFileName, { lyrics: result.lyrics, artist: songArtist.trim(), title: result.title || songTitle.trim() });
-    } catch (err: any) { showToast(err.message || 'No lyrics found'); }
+    } catch (err: any) { showToast(err.message || t('cover.noLyricsFound')); }
     finally { setIsSearchingLyrics(false); }
   };
 
@@ -284,13 +286,13 @@ export const CoverStudio: React.FC = () => {
 
   // ── Generation ──
   const handleGenerate = async () => {
-    if (!token || !sourceAudioUrl || !lyrics.trim()) { showToast('Missing source audio or lyrics'); return; }
+    if (!token || !sourceAudioUrl || !lyrics.trim()) { showToast(t('cover.missingSrcOrLyrics')); return; }
     setIsGenerating(true);
     try {
       // Step 0: If advanced mode with stems, auto-recombine before generation
       let effectiveSourceUrl = sourceAudioUrl;
       if (advancedMode && sepStems && sepStems.length > 0 && sepJobId) {
-        setGenStage('Recombining stems...');
+        setGenStage(t('cover.recombiningStems'));
         setGenProgress(2);
         try {
           // Build effective controls — log them for diagnostics
@@ -384,7 +386,7 @@ export const CoverStudio: React.FC = () => {
 
       const res = await generateApi.submit(params as any, token);
       const jobId = res.jobId;
-      showToast(`Cover generation started!`);
+      showToast(t('cover.genStarted'));
       setActiveJobId(jobId);
 
       // Add to shared queue store so the sidebar Queue panel shows progress
@@ -427,7 +429,7 @@ export const CoverStudio: React.FC = () => {
         if (s.status === 'succeeded') {
           clearInterval(iv); setGenProgress(100); setGenStage('Complete!');
           setIsGenerating(false); setActiveJobId(null); setQueueItemId(null);
-          setRefreshTrigger(p => p + 1); showToast('Cover generated!');
+          setRefreshTrigger(p => p + 1); showToast(t('cover.coverGenerated'));
           setTimeout(() => { setGenProgress(0); setGenStage(''); }, 3000);
 
           // Complete queue item with audio data
@@ -470,10 +472,10 @@ export const CoverStudio: React.FC = () => {
 
   // ── SuperSep handlers ──
   const handleSeparate = useCallback(async () => {
-    if (!sourceAudioUrl) { showToast('Upload source audio first'); return; }
+    if (!sourceAudioUrl) { showToast(t('cover.uploadAudioFirst')); return; }
     setIsSeparating(true);
     setSepProgress(0);
-    setSepMessage('Starting separation...');
+    setSepMessage(t('cover.startingSeparation'));
     setSepStems(null);
 
 
@@ -500,7 +502,7 @@ export const CoverStudio: React.FC = () => {
       // Initialize stem controls (all at 100%, unmuted)
       setStemControls(mixerStems.map(s => ({ index: s.index, volume: 1.0, muted: false })));
       setShowMixer(true);
-      showToast(`Separated into ${result.stems.length} stems!`);
+      showToast(t('cover.separatedIntoStems', { count: result.stems.length }));
     } catch (err: any) {
       showToast(`Separation failed: ${err.message}`);
     } finally {
@@ -560,9 +562,9 @@ export const CoverStudio: React.FC = () => {
               {/* Artist + Title inputs */}
               <div className="flex-1 flex gap-2">
                 <input value={songArtist} onChange={e => setSongArtist(e.target.value)}
-                  placeholder="Artist" className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 focus:outline-none focus:border-cyan-500" />
+                  placeholder={t('cover.artistPlaceholder')} className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 focus:outline-none focus:border-cyan-500" />
                 <input value={songTitle} onChange={e => setSongTitle(e.target.value)}
-                  placeholder="Song title" className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 focus:outline-none focus:border-cyan-500" />
+                  placeholder={t('cover.songTitlePlaceholder')} className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 focus:outline-none focus:border-cyan-500" />
               </div>
               <button onClick={handleSearchLyrics} disabled={isSearchingLyrics || !songArtist.trim() || !songTitle.trim()}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-xs font-medium transition-colors disabled:opacity-50">
@@ -573,7 +575,7 @@ export const CoverStudio: React.FC = () => {
           </div>
           <div className="flex-1 p-4">
             <textarea value={lyrics} onChange={e => setLyrics(e.target.value)}
-              placeholder="Lyrics will appear here after searching Genius, or paste them manually..."
+              placeholder={t('cover.lyricsPlaceholder')}
               className="w-full h-full resize-none bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors font-mono leading-relaxed" />
           </div>
           
