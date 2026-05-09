@@ -220,18 +220,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [activeTab, setActiveTab] = useState<TabId>('general');
 
   const tabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
-    { id: 'general',     label: 'General',        icon: <Zap size={15} className="settings-tab-icon" /> },
-    { id: 'environment', label: 'Environment',     icon: <Settings2 size={15} className="settings-tab-icon" /> },
-    { id: 'ai',          label: 'AI Services',     icon: <Key size={15} className="settings-tab-icon" /> },
-    { id: 'storage',     label: 'Storage & Data',  icon: <Database size={15} className="settings-tab-icon" /> },
+    { id: 'general',     label: t('settings.tabs.general'),        icon: <Zap size={15} className="settings-tab-icon" /> },
+    { id: 'environment', label: t('settings.tabs.environment'),     icon: <Settings2 size={15} className="settings-tab-icon" /> },
+    { id: 'ai',          label: t('settings.tabs.ai'),     icon: <Key size={15} className="settings-tab-icon" /> },
+    { id: 'storage',     label: t('settings.tabs.storage'),  icon: <Database size={15} className="settings-tab-icon" /> },
   ];
 
   return (
     <div className="settings-panel">
       <div className="settings-header">
-        <h1 className="settings-title">Settings</h1>
+        <h1 className="settings-title">{t('settings.title')}</h1>
         <p className="settings-subtitle">
-          Configure performance and behavior options
+          {t('settings.subtitle')}
         </p>
       </div>
 
@@ -254,39 +254,39 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Settings2 size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Environment</span>
+          <span className="settings-section-title">{t('settings.tabs.environment')}</span>
         </div>
 
         {envLoading ? (
           <div className="setting-row" style={{ justifyContent: 'center' }}>
             <Loader2 size={16} className="animate-spin" style={{ color: 'rgba(255,255,255,0.4)' }} />
-            <span style={{ marginLeft: '8px', color: 'rgba(255,255,255,0.4)', fontSize: '0.8125rem' }}>Loading .env…</span>
+            <span style={{ marginLeft: '8px', color: 'rgba(255,255,255,0.4)', fontSize: '0.8125rem' }}>{t('settings.env.loading')}</span>
           </div>
         ) : (
           <>
             {/* Engine */}
-            <EnvSubsection title="Engine" isOpen={openSections.engine} onToggle={() => toggleSection('engine')}>
-              <EnvPathRow envKey="ACESTEPCPP_MODELS" label="Models directory" description="Path to GGUF model files for the synthesis engine."
+            <EnvSubsection title={t('settings.env.engine')} isOpen={openSections.engine} onToggle={() => toggleSection('engine')}>
+              <EnvPathRow envKey="ACESTEPCPP_MODELS" label={t('settings.env.modelsDir')} description={t('settings.env.modelsDesc')}
                 value={envValues.ACESTEPCPP_MODELS || ''} onChange={handleEnvChange} onBrowse={handleBrowse} />
-              <EnvPathRow envKey="ACESTEPCPP_ADAPTERS" label="Adapters directory" description="Path to LoRA/LoKR adapter files (.safetensors)."
+              <EnvPathRow envKey="ACESTEPCPP_ADAPTERS" label={t('settings.env.adaptersDir')} description={t('settings.env.adaptersDesc')}
                 value={envValues.ACESTEPCPP_ADAPTERS || ''} onChange={handleEnvChange} onBrowse={handleBrowse} />
-              <EnvTextRow envKey="ACESTEPCPP_PORT" label="Engine port" description="HTTP port for the ace-server C++ engine."
+              <EnvTextRow envKey="ACESTEPCPP_PORT" label={t('settings.env.enginePort')} description={t('settings.env.enginePortDesc')}
                 value={envValues.ACESTEPCPP_PORT || ''} onChange={handleEnvChange} type="number" placeholder="8085" />
-              <EnvTextRow envKey="ACESTEPCPP_HOST" label="Engine host" description="Bind address for the engine server."
+              <EnvTextRow envKey="ACESTEPCPP_HOST" label={t('settings.env.engineHost')} description={t('settings.env.engineHostDesc')}
                 value={envValues.ACESTEPCPP_HOST || ''} onChange={handleEnvChange} placeholder="127.0.0.1" />
             </EnvSubsection>
 
             {/* Server */}
-            <EnvSubsection title="Server" isOpen={openSections.server} onToggle={() => toggleSection('server')}>
-              <EnvTextRow envKey="SERVER_PORT" label="Server port" description="HTTP port for the Node.js server."
+            <EnvSubsection title={t('settings.env.server')} isOpen={openSections.server} onToggle={() => toggleSection('server')}>
+              <EnvTextRow envKey="SERVER_PORT" label={t('settings.env.serverPort')} description={t('settings.env.serverPortDesc')}
                 value={envValues.SERVER_PORT || ''} onChange={handleEnvChange} type="number" placeholder="3001" />
-              <EnvPathRow envKey="DATA_DIR" label="Data directory" description="Root directory for databases, audio files, and app data."
+              <EnvPathRow envKey="DATA_DIR" label={t('settings.env.dataDir')} description={t('settings.env.dataDirDesc')}
                 value={envValues.DATA_DIR || ''} onChange={handleEnvChange} onBrowse={handleBrowse} placeholder="./data" />
             </EnvSubsection>
 
             {/* Paths */}
-            <EnvSubsection title="Paths" isOpen={openSections.paths} onToggle={() => toggleSection('paths')}>
-              <EnvPathRow envKey="LYRICS_EXPORT_DIR" label="Lyrics export directory" description="Where exported lyrics files are saved."
+            <EnvSubsection title={t('settings.env.paths')} isOpen={openSections.paths} onToggle={() => toggleSection('paths')}>
+              <EnvPathRow envKey="LYRICS_EXPORT_DIR" label={t('settings.env.lyricsExportDir')} description={t('settings.env.lyricsExportDirDesc')}
                 value={envValues.LYRICS_EXPORT_DIR || ''} onChange={handleEnvChange} onBrowse={handleBrowse} />
             </EnvSubsection>
 
@@ -304,11 +304,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               >
                 {envSaving ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Loader2 size={14} className="animate-spin" /> Saving…
+                    <Loader2 size={14} className="animate-spin" /> {t('settings.env.saving')}
                   </span>
                 ) : (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Save size={14} /> Save Environment
+                    <Save size={14} /> {t('settings.env.saveEnvironment')}
                   </span>
                 )}
               </button>
@@ -325,7 +325,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         onSelect={handleBrowseSelect}
         mode="folder"
         startPath={browseKey ? envValues[browseKey] || '' : ''}
-        title={browseKey ? `Select folder for ${browseKey}` : 'Select Folder'}
+        title={browseKey ? t('settings.env.selectFolderFor', { key: browseKey }) : t('settings.env.selectFolder')}
       />
 
       {/* ═══════════════ AI SERVICES TAB ═══════════════ */}
@@ -335,15 +335,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Key size={16} className="settings-section-icon" />
-          <span className="settings-section-title">API Keys</span>
+          <span className="settings-section-title">{t('settings.ai.apiKeys')}</span>
         </div>
-        <EnvPasswordRow envKey="GENIUS_ACCESS_TOKEN" label="Genius API token" description="For fetching reference lyrics from Genius."
+        <EnvPasswordRow envKey="GENIUS_ACCESS_TOKEN" label={t('settings.ai.geniusToken')} description={t('settings.ai.geniusDesc')}
           value={envValues.GENIUS_ACCESS_TOKEN || ''} onChange={handleEnvChange} />
-        <EnvPasswordRow envKey="GEMINI_API_KEY" label="Google Gemini key" description="For Gemini-powered lyric generation."
+        <EnvPasswordRow envKey="GEMINI_API_KEY" label={t('settings.ai.geminiKey')} description={t('settings.ai.geminiDesc')}
           value={envValues.GEMINI_API_KEY || ''} onChange={handleEnvChange} />
-        <EnvPasswordRow envKey="OPENAI_API_KEY" label="OpenAI key" description="For GPT-powered lyric generation."
+        <EnvPasswordRow envKey="OPENAI_API_KEY" label={t('settings.ai.openaiKey')} description={t('settings.ai.openaiDesc')}
           value={envValues.OPENAI_API_KEY || ''} onChange={handleEnvChange} />
-        <EnvPasswordRow envKey="ANTHROPIC_API_KEY" label="Anthropic key" description="For Claude-powered lyric generation."
+        <EnvPasswordRow envKey="ANTHROPIC_API_KEY" label={t('settings.ai.anthropicKey')} description={t('settings.ai.anthropicDesc')}
           value={envValues.ANTHROPIC_API_KEY || ''} onChange={handleEnvChange} />
       </div>
 
@@ -351,12 +351,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Settings2 size={16} className="settings-section-icon" />
-          <span className="settings-section-title">LLM Configuration</span>
+          <span className="settings-section-title">{t('settings.ai.llmConfig')}</span>
         </div>
         <div className="setting-row">
           <div className="setting-info">
-            <div className="setting-label">Default LLM provider</div>
-            <div className="setting-description">Which provider to use by default for lyric generation.</div>
+            <div className="setting-label">{t('settings.ai.defaultProvider')}</div>
+            <div className="setting-description">{t('settings.ai.defaultProviderDesc')}</div>
           </div>
           <select id="env-DEFAULT_LLM_PROVIDER" className="env-select"
             value={envValues.DEFAULT_LLM_PROVIDER || 'gemini'}
@@ -369,17 +369,17 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <option value="unsloth">Unsloth</option>
           </select>
         </div>
-        <EnvTextRow envKey="GEMINI_MODEL" label="Gemini model" description="Model name for Gemini API."
+        <EnvTextRow envKey="GEMINI_MODEL" label={t('settings.ai.geminiModel')} description={t('settings.ai.geminiModelDesc')}
           value={envValues.GEMINI_MODEL || ''} onChange={handleEnvChange} placeholder="gemini-2.5-flash" />
-        <EnvTextRow envKey="OPENAI_MODEL" label="OpenAI model" description="Model name for OpenAI API."
+        <EnvTextRow envKey="OPENAI_MODEL" label={t('settings.ai.openaiModel')} description={t('settings.ai.openaiModelDesc')}
           value={envValues.OPENAI_MODEL || ''} onChange={handleEnvChange} placeholder="gpt-4o-mini" />
-        <EnvTextRow envKey="ANTHROPIC_MODEL" label="Anthropic model" description="Model name for Anthropic API."
+        <EnvTextRow envKey="ANTHROPIC_MODEL" label={t('settings.ai.anthropicModel')} description={t('settings.ai.anthropicModelDesc')}
           value={envValues.ANTHROPIC_MODEL || ''} onChange={handleEnvChange} placeholder="claude-3-5-haiku-20241022" />
-        <EnvTextRow envKey="OLLAMA_MODEL" label="Ollama model" description="Model name for local Ollama instance."
+        <EnvTextRow envKey="OLLAMA_MODEL" label={t('settings.ai.ollamaModel')} description={t('settings.ai.ollamaModelDesc')}
           value={envValues.OLLAMA_MODEL || ''} onChange={handleEnvChange} placeholder="llama3" />
-        <EnvTextRow envKey="LMSTUDIO_MODEL" label="LM Studio model" description="Model name for LM Studio."
+        <EnvTextRow envKey="LMSTUDIO_MODEL" label={t('settings.ai.lmstudioModel')} description={t('settings.ai.lmstudioModelDesc')}
           value={envValues.LMSTUDIO_MODEL || ''} onChange={handleEnvChange} />
-        <EnvTextRow envKey="UNSLOTH_MODEL" label="Unsloth model" description="Model name for Unsloth."
+        <EnvTextRow envKey="UNSLOTH_MODEL" label={t('settings.ai.unslothModel')} description={t('settings.ai.unslothModelDesc')}
           value={envValues.UNSLOTH_MODEL || ''} onChange={handleEnvChange} />
       </div>
 
@@ -387,17 +387,17 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <ChevronRight size={16} className="settings-section-icon" />
-          <span className="settings-section-title">LLM Endpoints</span>
+          <span className="settings-section-title">{t('settings.ai.llmEndpoints')}</span>
         </div>
-        <EnvTextRow envKey="OLLAMA_BASE_URL" label="Ollama URL" description="Base URL for the Ollama API."
+        <EnvTextRow envKey="OLLAMA_BASE_URL" label={t('settings.ai.ollamaUrl')} description={t('settings.ai.ollamaUrlDesc')}
           value={envValues.OLLAMA_BASE_URL || ''} onChange={handleEnvChange} placeholder="http://localhost:11434" />
-        <EnvTextRow envKey="LMSTUDIO_BASE_URL" label="LM Studio URL" description="Base URL for the LM Studio API."
+        <EnvTextRow envKey="LMSTUDIO_BASE_URL" label={t('settings.ai.lmstudioUrl')} description={t('settings.ai.lmstudioUrlDesc')}
           value={envValues.LMSTUDIO_BASE_URL || ''} onChange={handleEnvChange} placeholder="http://localhost:1234/v1" />
-        <EnvTextRow envKey="UNSLOTH_BASE_URL" label="Unsloth URL" description="Base URL for the Unsloth API."
+        <EnvTextRow envKey="UNSLOTH_BASE_URL" label={t('settings.ai.unslothUrl')} description={t('settings.ai.unslothUrlDesc')}
           value={envValues.UNSLOTH_BASE_URL || ''} onChange={handleEnvChange} placeholder="http://127.0.0.1:8888" />
-        <EnvTextRow envKey="UNSLOTH_USERNAME" label="Unsloth username" description="Username for Unsloth authentication."
+        <EnvTextRow envKey="UNSLOTH_USERNAME" label={t('settings.ai.unslothUsername')} description={t('settings.ai.unslothUsernameDesc')}
           value={envValues.UNSLOTH_USERNAME || ''} onChange={handleEnvChange} />
-        <EnvPasswordRow envKey="UNSLOTH_PASSWORD" label="Unsloth password" description="Password for Unsloth authentication."
+        <EnvPasswordRow envKey="UNSLOTH_PASSWORD" label={t('settings.ai.unslothPassword')} description={t('settings.ai.unslothPasswordDesc')}
           value={envValues.UNSLOTH_PASSWORD || ''} onChange={handleEnvChange} />
       </div>
 
@@ -409,11 +409,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <button className="env-save-btn" onClick={handleEnvSave} disabled={!envDirty || envSaving}>
           {envSaving ? (
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Loader2 size={14} className="animate-spin" /> Saving…
+              <Loader2 size={14} className="animate-spin" /> {t('settings.env.saving')}
             </span>
           ) : (
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Save size={14} /> Save Changes
+              <Save size={14} /> {t('settings.env.saveChanges')}
             </span>
           )}
         </button>
@@ -428,13 +428,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Globe size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Language</span>
+          <span className="settings-section-title">{t('settings.general.language')}</span>
         </div>
 
         <SelectRow
           id="setting-language"
-          label="Display Language"
-          description="Application interface language."
+          label={t('settings.general.displayLanguage')}
+          description={t('settings.general.displayLanguageDesc')}
           value={i18n.language?.split('-')[0] || 'en'}
           options={[
             { value: 'en', label: 'English' },
@@ -451,13 +451,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Zap size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Performance</span>
+          <span className="settings-section-title">{t('settings.general.performance')}</span>
         </div>
 
         <SettingRow
           id="setting-co-resident"
-          label="Keep DiT & VAE loaded"
-          description="Keep both the DiT diffusion model and VAE decoder in VRAM simultaneously instead of swapping them. Eliminates ~13s of model load/unload per generation. Uses more VRAM (~8.2GB for XL)."
+          label={t('settings.general.coResident')}
+          description={t('settings.general.coResidentDesc')}
           checked={settings.coResident}
           onChange={(v) => update('coResident', v)}
           badges={[
@@ -468,8 +468,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         <SettingRow
           id="setting-cache-lm"
-          label="Cache LM audio codes"
-          description="When generating with the same seed and parameters, reuse previously computed audio codes instead of re-running the LM. Saves ~12s on repeat generations."
+          label={t('settings.general.cacheLm')}
+          description={t('settings.general.cacheLmDesc')}
           checked={settings.cacheLmCodes}
           onChange={(v) => update('cacheLmCodes', v)}
           badges={[
@@ -482,13 +482,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Download size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Downloads</span>
+          <span className="settings-section-title">{t('settings.general.downloads')}</span>
         </div>
 
         <SelectRow
           id="setting-dl-format"
-          label="Default format"
-          description="Preferred audio format when downloading tracks."
+          label={t('settings.general.defaultFormat')}
+          description={t('settings.general.defaultFormatDesc')}
           value={settings.downloadFormat}
           options={[
             { value: 'wav', label: 'WAV (lossless)' },
@@ -501,8 +501,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         <SelectRow
           id="setting-dl-mp3-bitrate"
-          label="MP3 bitrate"
-          description="Default bitrate for MP3 downloads."
+          label={t('settings.general.mp3Bitrate')}
+          description={t('settings.general.mp3BitrateDesc')}
           value={settings.downloadMp3Bitrate}
           options={[
             { value: 128, label: '128 kbps' },
@@ -515,8 +515,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         <SelectRow
           id="setting-dl-opus-bitrate"
-          label="Opus bitrate"
-          description="Default bitrate for Opus downloads."
+          label={t('settings.general.opusBitrate')}
+          description={t('settings.general.opusBitrateDesc')}
           value={settings.downloadOpusBitrate}
           options={[
             { value: 96, label: '96 kbps' },
@@ -532,13 +532,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Tag size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Adapters</span>
+          <span className="settings-section-title">{t('settings.general.adapters')}</span>
         </div>
 
         <SettingRow
           id="setting-trigger-filename"
-          label="Use filename as trigger word"
-          description="Auto-inject the adapter filename into the style description at generation time. The trigger word is derived from the adapter filename (without .safetensors extension)."
+          label={t('settings.general.triggerFilename')}
+          description={t('settings.general.triggerFilenameDesc')}
           checked={settings.triggerUseFilename}
           onChange={(v) => update('triggerUseFilename', v)}
         />
@@ -546,11 +546,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         {settings.triggerUseFilename && (
           <div className="setting-row">
             <div className="setting-info">
-              <div className="setting-label">Trigger word placement</div>
+              <div className="setting-label">{t('settings.general.triggerPlacement')}</div>
               <div className="setting-description">
-                {settings.triggerPlacement === 'prepend' && 'Trigger word is added before your style description.'}
-                {settings.triggerPlacement === 'append' && 'Trigger word is added after your style description.'}
-                {settings.triggerPlacement === 'replace' && 'Trigger word replaces your entire style description.'}
+                {settings.triggerPlacement === 'prepend' && t('settings.general.triggerPrepend')}
+                {settings.triggerPlacement === 'append' && t('settings.general.triggerAppend')}
+                {settings.triggerPlacement === 'replace' && t('settings.general.triggerReplace')}
               </div>
             </div>
             <div className="placement-button-group">
@@ -577,19 +577,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section">
         <div className="settings-section-header">
           <Scissors size={16} className="settings-section-icon" />
-          <span className="settings-section-title">Stem Storage</span>
+          <span className="settings-section-title">{t('settings.storage.stemStorage')}</span>
         </div>
 
         <div className="setting-row">
           <div className="setting-info">
-            <div className="setting-label">Extracted Stems</div>
+            <div className="setting-label">{t('settings.storage.extractedStems')}</div>
             <div className="setting-description">
               {stemStats ? (
                 <>
                   {stemStats.jobCount} extraction{stemStats.jobCount !== 1 ? 's' : ''} · {stemStats.stemCount} stem{stemStats.stemCount !== 1 ? 's' : ''} · {formatBytes(stemStats.totalBytes)}
                 </>
               ) : (
-                'Loading...'
+                t('settings.storage.loading')
               )}
             </div>
           </div>
@@ -608,11 +608,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   opacity: (!stemStats || stemStats.jobCount === 0) ? 0.5 : 1,
                 }}
               >
-                🗑️ Clear All Stems
+                🗑️ {t('settings.storage.clearAllStems')}
               </button>
             ) : (
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>Delete all stems?</span>
+                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>{t('settings.storage.deleteAllStems')}</span>
                 <button
                   id="clear-stems-confirm-btn"
                   onClick={handleClearStems}
@@ -628,10 +628,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 >
                   {stemClearing ? (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Loader2 size={14} className="animate-spin" /> Clearing...
+                      <Loader2 size={14} className="animate-spin" /> {t('settings.storage.clearing')}
                     </span>
                   ) : (
-                    '🗑️ Confirm'
+                    '🗑️ ' + t('settings.storage.confirm')
                   )}
                 </button>
                 <button
@@ -640,7 +640,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   className="px-3 py-2 rounded-lg text-sm text-zinc-600 dark:text-zinc-400 hover:text-white transition-colors"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}
                 >
-                  Cancel
+                  {t('settings.storage.cancel')}
                 </button>
               </div>
             )}
@@ -652,12 +652,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="settings-section" style={{ borderColor: 'rgba(239, 68, 68, 0.2)' }}>
         <div className="settings-section-header">
           <AlertTriangle size={16} style={{ color: '#ef4444' }} />
-          <span className="settings-section-title" style={{ color: '#ef4444' }}>Danger Zone</span>
+          <span className="settings-section-title" style={{ color: '#ef4444' }}>{t('settings.storage.dangerZone')}</span>
         </div>
 
         <div className="setting-row">
           <div className="setting-info">
-            <div className="setting-label" style={{ color: '#fca5a5' }}>Nuke Generations</div>
+            <div className="setting-label" style={{ color: '#fca5a5' }}>{t('settings.storage.nukeGenerations')}</div>
             <div className="setting-description">
               Permanently delete <strong>all</strong> generated audio — songs from the library, audio files from disk,
               and all Lyric Studio audio generation entries. Lyrics, profiles, and artist data are preserved.
@@ -679,11 +679,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.5)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.3)'; }}
               >
-                ☢️ Nuke Generations
+                ☢️ {t('settings.storage.nukeGenerations')}
               </button>
             ) : (
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>Are you sure?</span>
+                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>{t('settings.storage.areYouSure')}</span>
                 <button
                   id="nuke-confirm-btn"
                   onClick={handleNuke}
@@ -699,10 +699,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 >
                   {nukeRunning ? (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Loader2 size={14} className="animate-spin" /> Nuking...
+                      <Loader2 size={14} className="animate-spin" /> {t('settings.storage.nuking')}
                     </span>
                   ) : (
-                    '☢️ Confirm Nuke'
+                    t('settings.storage.confirmNuke')
                   )}
                 </button>
                 <button
@@ -721,7 +721,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         {/* Nuke Lyrics */}
         <div className="setting-row">
           <div className="setting-info">
-            <div className="setting-label" style={{ color: '#fca5a5' }}>Nuke Written Lyrics</div>
+            <div className="setting-label" style={{ color: '#fca5a5' }}>{t('settings.storage.nukeLyrics')}</div>
             <div className="setting-description">
               Permanently delete <strong>all</strong> generated/written song lyrics across all artists.
               Profiles and source lyrics are preserved.
@@ -743,11 +743,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.5)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.3)'; }}
               >
-                🗑️ Nuke Lyrics
+                🗑️ {t('settings.storage.nukeLyrics')}
               </button>
             ) : (
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>Are you sure?</span>
+                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>{t('settings.storage.areYouSure')}</span>
                 <button
                   id="nuke-lyrics-confirm-btn"
                   onClick={handleNukeLyrics}
@@ -763,10 +763,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 >
                   {nukeLyricsRunning ? (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Loader2 size={14} className="animate-spin" /> Nuking...
+                      <Loader2 size={14} className="animate-spin" /> {t('settings.storage.nuking')}
                     </span>
                   ) : (
-                    '🗑️ Confirm Nuke'
+                    t('settings.storage.confirmNukeLyrics')
                   )}
                 </button>
                 <button
@@ -785,7 +785,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         {/* Nuke Profiles */}
         <div className="setting-row">
           <div className="setting-info">
-            <div className="setting-label" style={{ color: '#fca5a5' }}>Nuke Profiles</div>
+            <div className="setting-label" style={{ color: '#fca5a5' }}>{t('settings.storage.nukeProfiles')}</div>
             <div className="setting-description">
               Permanently delete <strong>all</strong> artist profiles and their dependent written lyrics.
               Source lyrics and artist data are preserved.
@@ -807,11 +807,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.5)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)'; e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.3)'; }}
               >
-                🧬 Nuke Profiles
+                🧬 {t('settings.storage.nukeProfiles')}
               </button>
             ) : (
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>Lyrics will also be deleted!</span>
+                <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>{t('settings.storage.lyricsAlsoDeleted')}</span>
                 <button
                   id="nuke-profiles-confirm-btn"
                   onClick={handleNukeProfiles}
@@ -827,10 +827,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 >
                   {nukeProfilesRunning ? (
                     <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Loader2 size={14} className="animate-spin" /> Nuking...
+                      <Loader2 size={14} className="animate-spin" /> {t('settings.storage.nuking')}
                     </span>
                   ) : (
-                    '🧬 Confirm Nuke'
+                    t('settings.storage.confirmNukeProfiles')
                   )}
                 </button>
                 <button
