@@ -9,6 +9,7 @@ import {
   RotateCcw, Trash2, Download,
   Music, Sparkles, Activity, ListMusic, Scissors,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 
 interface PlayerProps {
@@ -80,12 +81,13 @@ export const Player: React.FC<PlayerProps> = ({
   trimMode,
   onToggleTrimMode,
 }) => {
+  const { t } = useTranslation();
 
 
   if (!currentSong) {
     return (
       <div className="h-14 flex-shrink-0 bg-white dark:bg-zinc-950 flex items-center justify-center">
-        <span className="text-sm text-zinc-600">Select a song to play</span>
+        <span className="text-sm text-zinc-600">{t('player.selectSong')}</span>
       </div>
     );
   }
@@ -115,7 +117,7 @@ export const Player: React.FC<PlayerProps> = ({
         <button
           onClick={onToggleShuffle}
           className={`p-1.5 rounded-lg transition-colors ${isShuffle ? 'text-pink-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
-          title="Shuffle"
+          title={t('player.shuffle')}
         >
           <Shuffle size={16} />
         </button>
@@ -137,14 +139,14 @@ export const Player: React.FC<PlayerProps> = ({
         <button
           onClick={onToggleRepeat}
           className={`p-1.5 rounded-lg transition-colors ${repeatMode !== 'none' ? 'text-pink-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
-          title={repeatMode === 'one' ? 'Repeat One' : repeatMode === 'all' ? 'Repeat All' : 'Repeat Off'}
+          title={repeatMode === 'one' ? t('player.repeatOne') : repeatMode === 'all' ? t('player.repeatAll') : t('player.repeatOff')}
         >
           {repeatMode === 'one' ? <Repeat1 size={16} /> : <Repeat size={16} />}
         </button>
         <button
           onClick={onToggleSpectrum}
           className={`p-1.5 rounded-lg transition-colors ${spectrumEnabled ? 'text-purple-400' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}
-          title={spectrumEnabled ? 'Spectrum Analyzer On' : 'Spectrum Analyzer Off'}
+          title={spectrumEnabled ? t('player.spectrumOn') : t('player.spectrumOff')}
         >
           <Activity size={16} />
         </button>
@@ -161,7 +163,7 @@ export const Player: React.FC<PlayerProps> = ({
             onPlaybackRateChange(rates[(idx + 1) % rates.length]);
           }}
           className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-white px-1.5 py-0.5 rounded font-mono transition-colors"
-          title="Playback Speed"
+          title={t('player.playbackSpeed')}
         >
           {playbackRate}x
         </button>
@@ -175,7 +177,7 @@ export const Player: React.FC<PlayerProps> = ({
                 ? 'text-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(245,158,11,0.15)]'
                 : 'text-zinc-500 hover:text-amber-400 hover:bg-amber-500/5'
             }`}
-            title={playMastered ? 'Playing mastered • Click for original' : 'Playing original • Click for mastered'}
+            title={playMastered ? t('player.playingMastered') : t('player.playingOriginal')}
           >
             <Sparkles size={15} />
           </button>
@@ -189,7 +191,7 @@ export const Player: React.FC<PlayerProps> = ({
               ? 'text-cyan-400 bg-cyan-500/10 shadow-[0_0_8px_rgba(6,182,212,0.15)]'
               : 'text-zinc-500 hover:text-cyan-400 hover:bg-cyan-500/5'
           }`}
-          title={trimMode ? 'Exit Trim Mode' : 'Trim / Crop Audio'}
+          title={trimMode ? t('player.exitTrimMode') : t('player.trimCrop')}
         >
           <Scissors size={15} />
         </button>
@@ -202,7 +204,7 @@ export const Player: React.FC<PlayerProps> = ({
               ? 'text-pink-400 bg-pink-500/10'
               : 'text-zinc-500 hover:text-pink-400 hover:bg-pink-500/5'
           }`}
-          title={showPlaylist ? 'Hide Playlist' : 'Show Playlist'}
+          title={showPlaylist ? t('player.hidePlaylist') : t('player.showPlaylist')}
         >
           <ListMusic size={15} />
           {playlistCount > 0 && (
@@ -236,7 +238,7 @@ export const Player: React.FC<PlayerProps> = ({
           <button
             onClick={onReusePrompt}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
-            title="Reuse Prompt"
+            title={t('player.reusePrompt')}
           >
             <RotateCcw size={14} />
           </button>
@@ -245,7 +247,7 @@ export const Player: React.FC<PlayerProps> = ({
           <button
             onClick={onDownload}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-            title="Download"
+            title={t('player.download')}
           >
             <Download size={14} />
           </button>
@@ -254,7 +256,7 @@ export const Player: React.FC<PlayerProps> = ({
           <button
             onClick={onDelete}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Delete"
+            title={t('player.delete')}
           >
             <Trash2 size={14} />
           </button>

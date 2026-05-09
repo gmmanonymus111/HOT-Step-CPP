@@ -6,6 +6,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { Scissors, X, RotateCcw, Check, AlertTriangle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { WaveformPlayerHandle } from './WaveformPlayer';
 import { songApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -43,6 +44,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
   onReload,
   onCancel,
 }) => {
+  const { t } = useTranslation();
   const { token } = useAuth();
   const [isCropping, setIsCropping] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -80,7 +82,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
         onReload(result.newDuration);
       }
     } catch (err: any) {
-      setError(err.message || 'Crop failed');
+      setError(err.message || t('trim.cropFailed'));
       setIsCropping(false);
     }
   };
@@ -88,11 +90,11 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
   // Instruction text based on state
   let instruction = '';
   if (trimClickCount === 0) {
-    instruction = 'Click on the waveform to set the IN point';
+    instruction = t('trim.clickInPoint');
   } else if (trimClickCount === 1) {
-    instruction = 'Click on the waveform to set the OUT point';
+    instruction = t('trim.clickOutPoint');
   } else {
-    instruction = 'Click to adjust markers, or crop the selection';
+    instruction = t('trim.adjustOrCrop');
   }
 
   const trimDuration = (trimInPoint !== null && trimOutPoint !== null)
@@ -115,7 +117,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
         {/* Instruction / status */}
         <span className="text-[11px] text-zinc-600 dark:text-zinc-400 flex-shrink-0">
           {isCropping ? (
-            <span className="text-amber-400 animate-pulse">Cropping...</span>
+            <span className="text-amber-400 animate-pulse">{t('trim.cropping')}</span>
           ) : (
             instruction
           )}
@@ -160,7 +162,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
                 // Re-enter trim mode (cancel + re-enable handled by parent)
               }}
               className="p-1 rounded text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
-              title="Reset markers"
+              title={t('trim.resetMarkers')}
               disabled={isCropping}
             >
               <RotateCcw size={13} />
@@ -175,7 +177,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
               disabled={isCropping}
             >
               <Scissors size={11} />
-              Crop
+              {t('trim.crop')}
             </button>
           )}
 
@@ -183,14 +185,14 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
           {showConfirm && (
             <div className="flex items-center gap-1.5 animate-in fade-in">
               <AlertTriangle size={12} className="text-amber-400" />
-              <span className="text-[10px] text-amber-400">Can't undo!</span>
+              <span className="text-[10px] text-amber-400">{t('trim.cantUndo')}</span>
               <button
                 onClick={() => { setShowConfirm(false); handleCrop(); }}
                 className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-green-500/15 text-green-400 hover:bg-green-500/25 transition-colors"
                 disabled={isCropping}
               >
                 <Check size={11} />
-                Confirm
+                {t('trim.confirm')}
               </button>
               <button
                 onClick={() => setShowConfirm(false)}
@@ -205,7 +207,7 @@ export const TrimControls: React.FC<TrimControlsProps> = ({
           <button
             onClick={onCancel}
             className="p-1 rounded text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors"
-            title="Exit trim mode"
+            title={t('trim.exitTrimMode')}
             disabled={isCropping}
           >
             <X size={14} />
