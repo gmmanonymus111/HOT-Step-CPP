@@ -12,11 +12,12 @@ import { togglePlay, usePlayback } from '../../stores/playbackStore';
 
 // ── Source filter definitions ────────────────────────────────────────────────
 
-type SourceFilter = 'all' | 'create' | 'lyric-studio' | 'cover-studio';
+type SourceFilter = 'all' | 'create' | 'insta-gen' | 'lyric-studio' | 'cover-studio';
 
 const SOURCE_FILTERS: { id: SourceFilter; label: string; color: string }[] = [
   { id: 'all',           label: 'All',           color: 'text-zinc-700 dark:text-zinc-300 bg-white/10 border-zinc-300 dark:border-white/10' },
   { id: 'create',        label: 'Create',        color: 'text-violet-300 bg-violet-500/15 border-violet-500/25' },
+  { id: 'insta-gen',     label: 'Insta-Gen',     color: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/25' },
   { id: 'lyric-studio',  label: 'Lyric Studio',  color: 'text-pink-300 bg-pink-500/15 border-pink-500/25' },
   { id: 'cover-studio',  label: 'Cover Studio',  color: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
 ];
@@ -64,7 +65,7 @@ export const SongList: React.FC<SongListProps> = ({
 
   // Count songs per source for filter badges
   const sourceCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: songs.length, create: 0, 'lyric-studio': 0, 'cover-studio': 0 };
+    const counts: Record<string, number> = { all: songs.length, create: 0, 'insta-gen': 0, 'lyric-studio': 0, 'cover-studio': 0 };
     for (const s of songs) {
       const src = getSongSource(s);
       if (src in counts) counts[src]++;
