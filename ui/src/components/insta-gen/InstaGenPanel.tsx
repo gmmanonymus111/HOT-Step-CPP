@@ -127,7 +127,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
       setError(err.message || 'Inspire failed');
       setPhase('input');
     }
-  }, [canSubmit, computedCaption, vocalLanguage, token]);
+  }, [canSubmit, computedCaption, subject, vocalLanguage, globalParams, token]);
 
   // ── Generate from preview ──
   const handleGenerateFromPreview = useCallback(() => {
