@@ -356,6 +356,23 @@ const AppContent: React.FC = () => {
     if (selectedSong?.id === updatedSong.id) setSelectedSong(updatedSong);
   }, [selectedSong]);
 
+  // Listen for cover art completion events (fired by SongList context menu)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { songId, coverUrl } = (e as CustomEvent).detail;
+      if (!songId || !coverUrl) return;
+      setSongs(prev => prev.map(s =>
+        s.id === songId ? { ...s, coverUrl, cover_url: coverUrl } : s
+      ));
+      // Also update selected song if it's the one that got cover art
+      setSelectedSong(prev =>
+        prev?.id === songId ? { ...prev, coverUrl, cover_url: coverUrl } : prev
+      );
+    };
+    window.addEventListener('cover-art-updated', handler);
+    return () => window.removeEventListener('cover-art-updated', handler);
+  }, []);
+
   // Rename handler — PATCH title to server + update local state
   const handleRename = useCallback(async (song: Song, newTitle: string) => {
     try {

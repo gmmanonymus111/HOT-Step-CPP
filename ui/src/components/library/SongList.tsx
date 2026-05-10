@@ -26,6 +26,56 @@ function getSongSource(song: Song): string {
   return (song.generationParams as any)?.source || (song.generation_params as any)?.source || 'create';
 }
 
+/**
+ * Trigger cover art generation for a song, poll until complete,
+ * then dispatch a CustomEvent so App.tsx can update the song list.
+ */
+function triggerCoverArtGeneration(song: Song): void {
+  const params = song.generationParams || song.generation_params as any;
+  fetch('/api/cover-art/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      songId: song.id,
+      title: song.title || '',
+      style: song.style || params?.style || '',
+      lyrics: song.lyrics || params?.lyrics || '',
+      subject: params?.subject || '',
+    }),
+  }).then(async r => {
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      console.error('[CoverArt] Generate failed:', d);
+      return;
+    }
+    const { jobId } = await r.json();
+    console.log('[CoverArt] Generation started for', song.title || song.id);
+
+    // Poll job status until succeeded/failed
+    const poll = setInterval(async () => {
+      try {
+        const jr = await fetch(`/api/cover-art/generate/${jobId}`);
+        if (!jr.ok) return;
+        const job = await jr.json();
+        if (job.status === 'succeeded') {
+          clearInterval(poll);
+          console.log('[CoverArt] Cover ready:', job.result?.coverUrl);
+          // Notify App.tsx to update the song in state
+          window.dispatchEvent(new CustomEvent('cover-art-updated', {
+            detail: { songId: song.id, coverUrl: job.result?.coverUrl },
+          }));
+        } else if (job.status === 'failed') {
+          clearInterval(poll);
+          console.error('[CoverArt] Generation failed:', job.error);
+        }
+      } catch { /* network error — keep polling */ }
+    }, 2000);
+
+    // Safety: stop polling after 5 minutes
+    setTimeout(() => clearInterval(poll), 300_000);
+  }).catch(err => console.error('[CoverArt]', err));
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 interface SongListProps {
@@ -503,22 +553,7 @@ const SongItem: React.FC<SongItemProps> = ({
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowMenu(false);
-                    // Fire-and-forget cover art generation
-                    const params = song.generationParams || song.generation_params as any;
-                    fetch('/api/cover-art/generate', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        songId: song.id,
-                        title: song.title || '',
-                        style: song.style || params?.style || '',
-                        lyrics: song.lyrics || params?.lyrics || '',
-                        subject: params?.subject || '',
-                      }),
-                    }).then(r => {
-                      if (!r.ok) r.json().then(d => console.error('[CoverArt] Generate failed:', d)).catch(() => {});
-                      else console.log('[CoverArt] Generation started for', song.title || song.id);
-                    }).catch(err => console.error('[CoverArt]', err));
+                    triggerCoverArtGeneration(song);
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-violet-400 hover:bg-violet-500/10 transition-colors"
                 >
@@ -685,21 +720,7 @@ const SongCard: React.FC<SongCardProps> = ({
                   <button onClick={(e) => {
                     e.stopPropagation();
                     setShowMenu(false);
-                    const params = song.generationParams || song.generation_params as any;
-                    fetch('/api/cover-art/generate', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        songId: song.id,
-                        title: song.title || '',
-                        style: song.style || params?.style || '',
-                        lyrics: song.lyrics || params?.lyrics || '',
-                        subject: params?.subject || '',
-                      }),
-                    }).then(r => {
-                      if (!r.ok) r.json().then(d => console.error('[CoverArt] Generate failed:', d)).catch(() => {});
-                      else console.log('[CoverArt] Generation started for', song.title || song.id);
-                    }).catch(err => console.error('[CoverArt]', err));
+                    triggerCoverArtGeneration(song);
                   }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-violet-400 hover:bg-violet-500/10 transition-colors">
                     <Image size={12} /> {song.coverUrl || song.cover_url ? 'Regenerate Cover' : 'Generate Cover'}
