@@ -71,6 +71,7 @@ function viewFromUrl(path = window.location.pathname): string {
   if (path.startsWith('/insta-gen')) return 'insta-gen';
   if (path.startsWith('/lyric-studio')) return 'lyric-studio';
   if (path.startsWith('/cover-studio')) return 'cover-studio';
+  if (path.startsWith('/stem-studio')) return 'stem-studio';
   if (path.startsWith('/stem-builder')) return 'stem-builder';
   if (path.startsWith('/library')) return 'library';
   if (path.startsWith('/settings')) return 'settings';
@@ -89,6 +90,7 @@ function urlForView(view: string): string {
     return '/lyric-studio';
   }
   if (view === 'cover-studio') return '/cover-studio';
+  if (view === 'stem-studio') return '/stem-studio';
   if (view === 'stem-builder') return '/stem-builder';
   if (view === 'library') return '/library';
   if (view === 'settings') return '/settings';
