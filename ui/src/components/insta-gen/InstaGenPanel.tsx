@@ -8,7 +8,7 @@
 // State machine: Input → (optional) Preview → Generate
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Wand2, Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot } from 'lucide-react';
+import { Wand2, Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -67,6 +67,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const [subject, setSubject] = usePersistedState('hs-instagen-subject', '');
   const [selectedProvider, setSelectedProvider] = usePersistedState('hs-instagen-llm-provider', '');
   const [selectedModel, setSelectedModel] = usePersistedState('hs-instagen-llm-model', '');
+  const [thinking, setThinking] = usePersistedState('hs-instagen-thinking', true);
 
   // ── Ephemeral state ──
   const [additionalCaption, setAdditionalCaption] = useState('');
@@ -131,8 +132,9 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
     instrumental: lyricMode === 'instrumental',
     vocalLanguage: lyricMode === 'instrumental' ? undefined : vocalLanguage,
     source: 'insta-gen',
-    useCotCaption: true,
-  }), [computedCaption, lyricMode, vocalLanguage]);
+    useCotCaption: thinking,
+    skipLm: false, // InstaGen always needs the LM for audio codes (lyrics/metadata come from inspire)
+  }), [computedCaption, lyricMode, vocalLanguage, thinking]);
 
   // ── Inspire flow (preview ON) ──
   const handleInspire = useCallback(async () => {
@@ -162,7 +164,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
             caption: llmResult.caption || computedCaption,
             lyrics: llmResult.lyrics,
             vocalLanguage,
-            useCotCaption: true,
+            useCotCaption: thinking,
             lmModel: globalParams.lmModel || undefined,
             lmTemperature: globalParams.lmTemperature,
             lmCfgScale: globalParams.lmCfgScale,
@@ -194,7 +196,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           {
             caption: computedCaption,
             vocalLanguage,
-            useCotCaption: true,
+            useCotCaption: thinking,
             lmModel: globalParams.lmModel || undefined,
             lmTemperature: globalParams.lmTemperature,
             lmCfgScale: globalParams.lmCfgScale,
@@ -269,7 +271,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
       const inspireParams: any = {
         caption: resolvedCaption,
         vocalLanguage,
-        useCotCaption: true,
+        useCotCaption: thinking,
         lmModel: globalParams.lmModel || undefined,
         lmTemperature: globalParams.lmTemperature,
         lmCfgScale: globalParams.lmCfgScale,
@@ -482,6 +484,27 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
             </div>
           </div>
         )}
+
+        {/* Thinking toggle */}
+        <div className="flex items-center justify-between py-2">
+          <div className="flex items-center gap-2">
+            <Brain size={14} className={thinking ? 'text-amber-400' : 'text-zinc-400'} />
+            <span className="text-sm text-zinc-700 dark:text-zinc-300">Thinking</span>
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">(CoT)</span>
+          </div>
+          <button
+            onClick={() => setThinking(!thinking)}
+            className={`
+              relative w-10 h-5 rounded-full transition-colors duration-200
+              ${thinking ? 'bg-amber-500' : 'bg-zinc-300 dark:bg-zinc-600'}
+            `}
+          >
+            <div className={`
+              absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200
+              ${thinking ? 'translate-x-5' : 'translate-x-0.5'}
+            `} />
+          </button>
+        </div>
 
         {/* Preview toggle (hidden for instrumental) */}
         {lyricMode !== 'instrumental' && (
