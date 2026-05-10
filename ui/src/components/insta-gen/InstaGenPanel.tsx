@@ -56,7 +56,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const [vocalLanguage, setVocalLanguage] = usePersistedState('hs-instagen-language', 'en');
 
   // ── Ephemeral state ──
-  const [subject, setSubject] = useState('');
+  const [subject, setSubject] = usePersistedState('hs-instagen-subject', '');
   const [additionalCaption, setAdditionalCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('input');
   const [inspireResult, setInspireResult] = useState<InspireResult | null>(null);
