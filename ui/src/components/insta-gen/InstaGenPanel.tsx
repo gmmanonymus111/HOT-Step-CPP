@@ -101,8 +101,13 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
     setInspireProgress('Starting...');
 
     try {
+      // Build caption with structured subject directive.
+      // The engine's inspire prompt sends this as the user_msg to the LM.
+      // Using newline-separated fields mirrors the engine's own structured
+      // format (cf. "instrumental: true") so the LM treats genre and topic
+      // as separate concerns rather than one blended musical description.
       const inspireCaption = subject.trim()
-        ? `${computedCaption}. Song about: ${subject.trim()}`
+        ? `${computedCaption}\n\ntopic: ${subject.trim()}`
         : computedCaption;
       console.log('[InstaGen] Inspire request:', { inspireCaption, subject, computedCaption, vocalLanguage, lmModel: globalParams.lmModel });
       const result = await runInspireAndWait(
