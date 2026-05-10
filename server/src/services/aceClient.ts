@@ -237,6 +237,7 @@ export const aceClient = {
     srcAudio?: Buffer,
     refAudio?: Buffer,
     srcLatents?: Buffer,
+    refLatents?: Buffer,
     format: string = 'wav16',
     keepLoaded = false,
   ): Promise<string> {
@@ -276,6 +277,11 @@ export const aceClient = {
     // Source latents part (raw float32 — replaces VAE encode of source audio)
     if (srcLatents) {
       addPart('src_latents', srcLatents, 'application/octet-stream', 'source.latent');
+    }
+
+    // Reference latents part (raw float32 — replaces VAE encode of timbre ref)
+    if (refLatents) {
+      addPart('ref_latents', refLatents, 'application/octet-stream', 'reference.latent');
     }
 
     parts.push(Buffer.from(`--${boundary}--\r\n`));
@@ -426,6 +432,46 @@ export const aceClient = {
       throw new Error(`ace-server POST /pp-vae-reencode failed (${res.status}): ${errBody}`);
     }
     const arrayBuf = await res.arrayBuffer();
+    return Buffer.from(arrayBuf);
+  },
+
+  /** POST /vae with multipart — VAE encode: sends audio, returns raw f32 latent bytes.
+   *  Polls until the engine job completes, then fetches the result.
+   *  Returns raw f32 [T*64] latent buffer. */
+  async vaeEncode(audioBuffer: Buffer): Promise<Buffer> {
+    const boundary = '----HotStepBoundary' + Date.now();
+    const header = `--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="input.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
+    const footer = `\r\n--${boundary}--\r\n`;
+    const body = Buffer.concat([Buffer.from(header), audioBuffer, Buffer.from(footer)]);
+
+    const res = await fetch(`${BASE}/vae`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body,
+      signal: AbortSignal.timeout(TIMEOUT_RESULT),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => 'Unknown error');
+      throw new Error(`ace-server POST /vae failed (${res.status}): ${errBody}`);
+    }
+    const data = await res.json() as { id: string };
+    const jobId = data.id;
+
+    // Poll until done
+    for (;;) {
+      const status = await this.pollJob(jobId);
+      if (status.status === 'done') break;
+      if (status.status === 'failed') throw new Error('VAE encode failed');
+      if (status.status === 'cancelled') throw new Error('VAE encode cancelled');
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Fetch raw latent result
+    const resultRes = await this.getJobResult(jobId);
+    if (!resultRes.ok) throw new Error(`VAE encode result fetch failed (${resultRes.status})`);
+    const arrayBuf = await resultRes.arrayBuffer();
     return Buffer.from(arrayBuf);
   },
 };

@@ -25,6 +25,7 @@ import { translateParams } from '../services/generation/translateParams.js';
 import { computeLmCacheKey, getLmCache, setLmCache, getLmCacheSize, type LmCacheEntry } from '../services/generation/lmCache.js';
 import { loadSourceAudio, loadSourceLatent, applyTempoAndPitch, loadTimbreReference } from '../services/generation/sourceAudio.js';
 import { runPostProcessingChain } from '../services/generation/postProcessing.js';
+import { getCachedLatent, saveCachedLatent } from '../services/generation/sourceLatentCache.js';
 
 const router = Router();
 
@@ -299,8 +300,16 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     // ── Source audio (for cover/repaint/lego/extract tasks) ──
     const log = (level: 'INFO' | 'DEBUG' | 'WARNING' | 'ERROR', msg: string) => logGeneration(job.id, level, msg);
     let srcAudioBuf: Buffer | undefined;
+    let srcAudioPath: string | undefined;  // filesystem path for cache key
     if (isCoverTask && job.params.sourceAudioUrl) {
       srcAudioBuf = loadSourceAudio(job.params.sourceAudioUrl, job.id, log);
+      // Resolve URL to filesystem path (mirrors loadSourceAudio resolution)
+      const u = job.params.sourceAudioUrl;
+      srcAudioPath = u.startsWith('/references/')
+        ? path.join(config.data.dir, 'references', u.replace('/references/', ''))
+        : u.startsWith('/audio/')
+          ? path.join(config.data.audioDir, u.replace('/audio/', ''))
+          : path.isAbsolute(u) ? u : path.join(config.data.dir, u);
     }
 
     // ── Source latent (alternative to source audio — skips VAE encode) ──
@@ -314,10 +323,65 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       srcAudioBuf = applyTempoAndPitch(srcAudioBuf, job.params.tempoScale, job.params.pitchShift, log);
     }
 
+    // ── Auto-cache source latent (VAE encode via /vae endpoint) ──
+    if (srcAudioBuf && !srcLatentBuf && srcAudioPath) {
+      const tempo = job.params.tempoScale as number | undefined;
+      const pitch = job.params.pitchShift as number | undefined;
+      srcLatentBuf = getCachedLatent(srcAudioPath, tempo, pitch);
+      if (!srcLatentBuf) {
+        try {
+          job.stage = 'Encoding source audio (VAE)...';
+          logGeneration(job.id, 'INFO', '[Latent Cache] Source cache MISS — VAE-encoding source audio...');
+          srcLatentBuf = await aceClient.vaeEncode(srcAudioBuf);
+          saveCachedLatent(srcAudioPath, srcLatentBuf, tempo, pitch);
+        } catch (err) {
+          logGeneration(job.id, 'WARNING', `[Latent Cache] VAE encode failed, proceeding with raw audio: ${err}`);
+          srcLatentBuf = undefined;
+        }
+      } else {
+        logGeneration(job.id, 'INFO', '[Latent Cache] Source cache HIT — VAE encode will be skipped');
+      }
+    }
+
     // ── Timbre reference ──
     let refAudioBuf: Buffer | undefined;
+    let refLatentBuf: Buffer | undefined;
     const masteringRef = job.params.masteringReference;
     refAudioBuf = await loadTimbreReference(job.params, masteringRef, aceReq.seed, job.id, log);
+
+    // ── Auto-cache timbre latent (VAE encode via /vae endpoint) ──
+    if (refAudioBuf) {
+      // Resolve timbre ref path for cache key
+      const rawTimbre = job.params.timbreReference;
+      const timbreRef = (rawTimbre === true && typeof masteringRef === 'string')
+        ? masteringRef
+        : (typeof rawTimbre === 'string' ? rawTimbre : undefined);
+      let refPath: string | undefined;
+      if (timbreRef) {
+        refPath = timbreRef.startsWith('/references/')
+          ? path.join(config.data.dir, 'references', timbreRef.replace('/references/', ''))
+          : path.isAbsolute(timbreRef)
+            ? timbreRef
+            : path.join(config.data.dir, 'references', timbreRef);
+      }
+
+      if (refPath) {
+        refLatentBuf = getCachedLatent(refPath);
+        if (!refLatentBuf) {
+          try {
+            job.stage = 'Encoding timbre reference (VAE)...';
+            logGeneration(job.id, 'INFO', '[Latent Cache] Timbre cache MISS — VAE-encoding timbre reference...');
+            refLatentBuf = await aceClient.vaeEncode(refAudioBuf);
+            saveCachedLatent(refPath, refLatentBuf);
+          } catch (err) {
+            logGeneration(job.id, 'WARNING', `[Latent Cache] Timbre VAE encode failed, proceeding with raw audio: ${err}`);
+            refLatentBuf = undefined;
+          }
+        } else {
+          logGeneration(job.id, 'INFO', '[Latent Cache] Timbre cache HIT — VAE encode will be skipped');
+        }
+      }
+    }
 
     // When mastering is enabled, request wav32 (float) from the engine.
     const synthFormat = (job.params.masteringEnabled && job.params.masteringReference) ? 'wav32' : 'wav16';
@@ -403,10 +467,15 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
       // Submit single request to /synth
       let synthJobId: string;
-      if (srcAudioBuf || refAudioBuf || srcLatentBuf) {
-        const parts = [srcAudioBuf ? 'src_audio' : '', refAudioBuf ? 'timbre_ref' : '', srcLatentBuf ? 'src_latents' : ''].filter(Boolean).join('+');
+      if (srcAudioBuf || refAudioBuf || srcLatentBuf || refLatentBuf) {
+        const parts = [
+          srcAudioBuf ? 'src_audio' : '',
+          refAudioBuf ? 'timbre_ref' : '',
+          srcLatentBuf ? 'src_latents' : '',
+          refLatentBuf ? 'ref_latents' : '',
+        ].filter(Boolean).join('+');
         logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: MULTIPART submission (${parts})`);
-        synthJobId = await aceClient.submitSynthMultipart(synthReq, srcAudioBuf, refAudioBuf, srcLatentBuf, synthFormat, coResident);
+        synthJobId = await aceClient.submitSynthMultipart(synthReq, srcAudioBuf, refAudioBuf, srcLatentBuf, refLatentBuf, synthFormat, coResident);
       } else {
         logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: plain JSON submission`);
         synthJobId = await aceClient.submitSynth(synthReq, synthFormat, coResident);
