@@ -2003,13 +2003,29 @@ int main(int argc, char ** argv) {
     g_store = store_create(g_keep_loaded ? EVICT_NEVER : EVICT_STRICT);
 
     // Initialize Lua plugin system.
-    // engine_dir: derive from executable path (ace-server lives in engine/build/)
-    // project_dir: the top-level project directory (parent of engine/)
+    // engine_dir: derive from executable path.
+    // Binary location varies by build system:
+    //   - Visual Studio (multi-config): engine/build/Release/ace-server.exe  (3 levels up)
+    //   - Ninja / Makefiles / macOS:    engine/build/ace-server              (2 levels up)
+    //   - Portable release:             engine/ace-server                    (1 level up)
     // Scans both engine/plugins/ (native) and <project-root>/plugins/ (community)
     {
         std::filesystem::path exe_path = std::filesystem::canonical(argv[0]);
-        // ace-server is in engine/build/ — engine/ is one level up
-        std::filesystem::path engine_dir = exe_path.parent_path().parent_path();
+        std::filesystem::path exe_dir = exe_path.parent_path();
+        std::string dir_name = exe_dir.filename().string();
+
+        std::filesystem::path engine_dir;
+        if (dir_name == "Release" || dir_name == "Debug" ||
+            dir_name == "RelWithDebInfo" || dir_name == "MinSizeRel") {
+            // Multi-config generator: engine/build/Release/ → engine/ is 3 levels
+            engine_dir = exe_dir.parent_path().parent_path();
+        } else if (dir_name == "build") {
+            // Single-config generator: engine/build/ → engine/ is 1 level
+            engine_dir = exe_dir.parent_path();
+        } else {
+            // Portable release: engine/ → engine/ is 0 levels (already there)
+            engine_dir = exe_dir;
+        }
         // Project root is one more level up from engine/
         std::filesystem::path project_dir = engine_dir.parent_path();
         PluginRegistry::instance().init(engine_dir.string(), project_dir.string());

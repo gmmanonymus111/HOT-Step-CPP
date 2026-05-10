@@ -5,7 +5,9 @@
 // Platform-aware: uses taskkill on Windows, targeted SIGTERM on macOS/Linux.
 //
 // SAFETY: We only kill processes we own (our PID and our child ace-server).
-// We NEVER kill by port or process group — that can destroy unrelated services.
+// We NEVER kill by port on macOS — that can destroy unrelated services.
+// On Windows, port-based kill is used for ace-server because we don't
+// have the child PID available in this module.
 
 import { Router } from 'express';
 import { execSync, spawn } from 'child_process';
@@ -15,8 +17,7 @@ import { PROJECT_ROOT } from '../config.js';
 
 const router = Router();
 
-/** Kill the ace-server child process safely.
- *  We track it by PID from the spawn in index.ts, not by port scanning. */
+/** Kill the ace-server child process safely (cross-platform). */
 function killAceServer(): void {
   try {
     if (process.platform === 'win32') {
@@ -67,6 +68,68 @@ function killAceServer(): void {
   }
 }
 
+/** Kill the Vite dev server by port (Windows only, used during full shutdown). */
+function killVite(): void {
+  if (process.platform !== 'win32') return; // macOS: Vite isn't our child in production
+  try {
+    const output = execSync(
+      `netstat -ano | findstr ":3000" | findstr "LISTENING"`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+    );
+    const pids = new Set<string>();
+    for (const line of output.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && /^\d+$/.test(pid) && pid !== '0') {
+        pids.add(pid);
+      }
+    }
+    for (const pid of pids) {
+      try {
+        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+        console.log(`[Shutdown] Killed Vite PID ${pid} (port 3000)`);
+      } catch {
+        // Process may already be dead
+      }
+    }
+  } catch {
+    // No process found on port 3000 — that's fine
+  }
+}
+
+/** Kill our own process tree from outside (Windows).
+ *  Chain: cmd.exe → npx → tsx watch → node (us)
+ *  Killing the parent tsx/npx with /T kills everything, and
+ *  cmd.exe /c exits because its command finished.
+ *  On macOS/Linux, process.exit() is sufficient because launch.sh
+ *  uses exec (replaces shell with node, no orphan parents). */
+function killSelf(): void {
+  if (process.platform !== 'win32') return; // macOS doesn't need this
+  try {
+    const output = execSync(
+      `wmic process where processid=${process.pid} get parentprocessid /value`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    const match = output.match(/ParentProcessId=(\d+)/i);
+    if (match) {
+      const parentPid = match[1];
+      console.log(`[Shutdown] Killing parent PID ${parentPid} (our process tree)`);
+
+      // Spawn detached killer to kill parent after we start exiting
+      const killer = spawn('cmd.exe', [
+        '/c', `ping -n 2 127.0.0.1 > nul & taskkill /PID ${parentPid} /T /F`
+      ], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      killer.unref();
+    }
+  } catch {
+    // Fallback: just exit
+  }
+}
+
 // POST /api/shutdown — terminate everything gracefully
 router.post('/', (_req, res) => {
   console.log('[Server] Shutdown requested via API');
@@ -75,8 +138,13 @@ router.post('/', (_req, res) => {
   setTimeout(() => {
     console.log('[Server] Shutting down...');
     killAceServer();
+    killVite();
 
-    // Give ace-server a moment to die, then exit ourselves
+    // On Windows: kill our process tree from outside (needed for dev-rebuild workflow)
+    // On macOS: process.exit() is sufficient
+    killSelf();
+
+    // Fallback exit
     setTimeout(() => {
       console.log('[Server] Exiting.');
       process.exit(0);
@@ -104,7 +172,12 @@ router.post('/restart', (_req, res) => {
     console.log('[Server] Restarting — stopping ace-server and self...');
     killAceServer();
 
-    // Exit cleanly — the launch wrapper script will restart us
+    // Do NOT kill Vite (port 3000) — leave it running for dev mode
+
+    // On Windows: kill our process tree (needed for restart-loop wrapper)
+    killSelf();
+
+    // Fallback exit — the launch wrapper script will restart us
     setTimeout(() => {
       console.log('[Server] Exiting for restart.');
       process.exit(0);
