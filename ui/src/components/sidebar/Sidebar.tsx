@@ -54,7 +54,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       <nav className="flex-1 flex flex-col gap-2 w-full px-3">
         {/* ── Create section — framed by purple bars ── */}
-        {isOpen && <div className="h-px bg-purple-500/40 mx-1 mt-1" />}
+        {isOpen && <div className="h-[3px] bg-purple-500/40 mx-1 mt-1" />}
         {isOpen && (
           <div className="text-center py-1">
             <span className="text-xs font-bold text-purple-400 tracking-wide">{t('sidebar.createSection')}</span>
@@ -74,7 +74,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onClick={() => onViewChange('create')}
           isExpanded={isOpen}
         />
-        {isOpen && <div className="h-px bg-purple-500/40 mx-1" />}
+        {isOpen && <div className="h-[3px] bg-purple-500/40 mx-1" />}
         {!isOpen && <div className="h-px bg-white/5 mx-2" />}
         <div className={isOpen ? 'mb-1' : 'mb-0'} />
         <NavItem
