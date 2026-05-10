@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HOT_STEP_SUPERSEP
@@ -956,10 +957,23 @@ SuperSep * supersep_init(const char * model_dir, int device_id) {
     ctx->session_opts.SetIntraOpNumThreads(4);
     ctx->session_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    // Enable CUDA EP if requested. The ORT GPU SDK bundles its own CUDA EP
-    // (onnxruntime_providers_cuda.dll) so this doesn't depend on the system
-    // CUDA Toolkit that CMake's CUDAToolkit_FOUND checks for.
+    // Enable GPU acceleration if requested.
     if (device_id >= 0) {
+#ifdef __APPLE__
+        // macOS: CoreML EP (uses Apple Neural Engine + GPU via Metal).
+        // CoreML works with standard ONNX models — no re-export needed.
+        try {
+            std::unordered_map<std::string, std::string> provider_options;
+            provider_options["ModelFormat"] = "MLProgram";
+            ctx->session_opts.AppendExecutionProvider("CoreML", provider_options);
+            fprintf(stderr, "[SuperSep] CoreML EP enabled\n");
+        } catch (const std::exception &e) {
+            fprintf(stderr, "[SuperSep] CoreML EP failed: %s — falling back to CPU\n", e.what());
+        }
+#elif defined(GGML_USE_CUDA)
+        // Windows/Linux: CUDA EP. The ORT GPU SDK bundles its own CUDA EP
+        // (onnxruntime_providers_cuda.dll) so this doesn't depend on the system
+        // CUDA Toolkit that CMake's CUDAToolkit_FOUND checks for.
         try {
             OrtCUDAProviderOptions cuda_opts;
             memset(&cuda_opts, 0, sizeof(cuda_opts));
@@ -973,6 +987,9 @@ SuperSep * supersep_init(const char * model_dir, int device_id) {
         } catch (const std::exception &e) {
             fprintf(stderr, "[SuperSep] CUDA EP failed: %s — falling back to CPU\n", e.what());
         }
+#else
+        fprintf(stderr, "[SuperSep] No GPU EP available — using CPU (device_id=%d ignored)\n", device_id);
+#endif
     } else {
         fprintf(stderr, "[SuperSep] CPU mode (device_id=%d)\n", device_id);
     }

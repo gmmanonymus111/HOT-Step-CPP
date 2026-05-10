@@ -39,11 +39,15 @@ dotenvConfig({ path: ENV_PATH });
 // We check all and use whichever exists.
 const ENGINE_DIR = path.join(PROJECT_ROOT, 'engine');
 const BUILD_DIR = path.join(ENGINE_DIR, 'build');
+
+/** Platform-aware binary extension: .exe on Windows, empty on macOS/Linux */
+const BIN_EXT = process.platform === 'win32' ? '.exe' : '';
+
 const EXE_CANDIDATES = [
-  path.join(ENGINE_DIR, 'ace-server.exe'),             // Portable release (flat)
-  path.join(BUILD_DIR, 'Release', 'ace-server.exe'),   // Visual Studio
-  path.join(BUILD_DIR, 'ace-server.exe'),               // Ninja / Makefiles
-  path.join(BUILD_DIR, 'Debug', 'ace-server.exe'),      // VS Debug build
+  path.join(ENGINE_DIR, `ace-server${BIN_EXT}`),             // Portable release (flat)
+  path.join(BUILD_DIR, 'Release', `ace-server${BIN_EXT}`),   // Visual Studio
+  path.join(BUILD_DIR, `ace-server${BIN_EXT}`),               // Ninja / Makefiles
+  path.join(BUILD_DIR, 'Debug', `ace-server${BIN_EXT}`),      // VS Debug build
 ];
 const DEFAULT_EXE = EXE_CANDIDATES.find(p => fs.existsSync(p)) || EXE_CANDIDATES[0];
 const DEFAULT_MODELS = path.join(PROJECT_ROOT, 'models');
@@ -63,8 +67,8 @@ let _ffmpegPath: string | null | undefined; // undefined = not yet resolved
 export function getFFmpegPath(): string | null {
   if (_ffmpegPath !== undefined) return _ffmpegPath;
 
-  // 1. Portable: server/ffmpeg.exe next to the bundled server
-  const portablePath = path.join(PROJECT_ROOT, 'server', 'ffmpeg.exe');
+  // 1. Portable: ffmpeg binary next to the bundled server
+  const portablePath = path.join(PROJECT_ROOT, 'server', `ffmpeg${BIN_EXT}`);
   if (fs.existsSync(portablePath)) {
     _ffmpegPath = portablePath;
     return _ffmpegPath;
@@ -112,7 +116,7 @@ export const config = {
 
   // Essentia audio analysis
   essentia: {
-    bin: process.env.ESSENTIA_BIN || path.join(PROJECT_ROOT, 'Essentia', 'essentia_streaming_extractor_music.exe'),
+    bin: process.env.ESSENTIA_BIN || path.join(PROJECT_ROOT, 'Essentia', `essentia_streaming_extractor_music${BIN_EXT}`),
   },
 
   // Node.js server
@@ -164,8 +168,8 @@ export const config = {
     get exe() {
       const aceExe = config.aceServer.exe;
       return aceExe
-        ? path.join(path.dirname(aceExe), 'vst-host.exe')
-        : path.join(BUILD_DIR, 'Release', 'vst-host.exe');
+        ? path.join(path.dirname(aceExe), `vst-host${BIN_EXT}`)
+        : path.join(BUILD_DIR, 'Release', `vst-host${BIN_EXT}`);
     },
     /** Directory for .vststate binary blobs */
     get statesDir() {

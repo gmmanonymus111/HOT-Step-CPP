@@ -2,7 +2,7 @@
 //
 // POST /api/shutdown — kills ALL processes on our ports (Node, Vite, ace-server)
 // POST /api/restart  — kills Node + ace-server, writes marker file for loop restart
-// Uses port-based taskkill on Windows, like HOT-Step 9000.
+// Platform-aware: uses taskkill on Windows, lsof+kill on macOS/Linux.
 
 import { Router } from 'express';
 import { execSync, spawn } from 'child_process';
@@ -12,29 +12,42 @@ import { PROJECT_ROOT } from '../config.js';
 
 const router = Router();
 
-/** Kill all processes listening on a given port (Windows) */
+/** Kill all processes listening on a given port (cross-platform) */
 function killPort(port: number): void {
   try {
-    const output = execSync(
-      `netstat -ano | findstr ":${port}" | findstr "LISTENING"`,
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-    );
+    if (process.platform === 'win32') {
+      // Windows: netstat + findstr + taskkill
+      const output = execSync(
+        `netstat -ano | findstr ":${port}" | findstr "LISTENING"`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
 
-    const pids = new Set<string>();
-    for (const line of output.split('\n')) {
-      const parts = line.trim().split(/\s+/);
-      const pid = parts[parts.length - 1];
-      if (pid && /^\d+$/.test(pid) && pid !== '0') {
-        pids.add(pid);
+      const pids = new Set<string>();
+      for (const line of output.split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && /^\d+$/.test(pid) && pid !== '0') {
+          pids.add(pid);
+        }
       }
-    }
 
-    for (const pid of pids) {
+      for (const pid of pids) {
+        try {
+          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+          console.log(`[Shutdown] Killed PID ${pid} (port ${port})`);
+        } catch {
+          // Process may already be dead
+        }
+      }
+    } else {
+      // macOS/Linux: lsof + kill
       try {
-        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
-        console.log(`[Shutdown] Killed PID ${pid} (port ${port})`);
+        execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, {
+          encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
+        });
+        console.log(`[Shutdown] Killed processes on port ${port}`);
       } catch {
-        // Process may already be dead
+        // No process found on this port — that's fine
       }
     }
   } catch {
@@ -42,29 +55,42 @@ function killPort(port: number): void {
   }
 }
 
-/** Walk up the process tree from our PID and kill the top-level parent.
- *  Chain: cmd.exe → npx → tsx watch → node (us)
- *  Killing the parent tsx/npx with /T kills everything, and
- *  cmd.exe /c exits because its command finished. */
+/** Walk up the process tree and kill the top-level parent (cross-platform).
+ *  Windows chain: cmd.exe → npx → tsx watch → node (us)
+ *  macOS chain:   sh → npx → tsx watch → node (us)
+ *  Killing the parent with tree/group kill stops everything. */
 function killSelf(): void {
   try {
-    // Find our parent PID (tsx watch or npx)
-    const output = execSync(
-      `wmic process where processid=${process.pid} get parentprocessid /value`,
-      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-    ).trim();
-    const match = output.match(/ParentProcessId=(\d+)/i);
-    if (match) {
-      const parentPid = match[1];
-      console.log(`[Shutdown] Killing parent PID ${parentPid} (our process tree)`);
+    if (process.platform === 'win32') {
+      // Windows: wmic + cmd.exe
+      const output = execSync(
+        `wmic process where processid=${process.pid} get parentprocessid /value`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      ).trim();
+      const match = output.match(/ParentProcessId=(\d+)/i);
+      if (match) {
+        const parentPid = match[1];
+        console.log(`[Shutdown] Killing parent PID ${parentPid} (our process tree)`);
 
-      // Spawn detached killer to kill parent after we start exiting
-      const killer = spawn('cmd.exe', [
-        '/c', `ping -n 2 127.0.0.1 > nul & taskkill /PID ${parentPid} /T /F`
+        // Spawn detached killer to kill parent after we start exiting
+        const killer = spawn('cmd.exe', [
+          '/c', `ping -n 2 127.0.0.1 > nul & taskkill /PID ${parentPid} /T /F`
+        ], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        killer.unref();
+      }
+    } else {
+      // macOS/Linux: kill parent process (group kill if possible)
+      const ppid = process.ppid;
+      console.log(`[Shutdown] Killing parent PID ${ppid} (our process tree)`);
+      const killer = spawn('sh', [
+        '-c', `sleep 1 && kill -9 -${ppid} 2>/dev/null || kill -9 ${ppid} 2>/dev/null || true`
       ], {
         detached: true,
         stdio: 'ignore',
-        windowsHide: true,
       });
       killer.unref();
     }
@@ -82,14 +108,12 @@ router.post('/', (_req, res) => {
   setTimeout(() => {
     console.log('[Server] Killing all processes...');
 
-    if (process.platform === 'win32') {
-      // Kill ace-server and Vite by port
-      killPort(8085);
-      killPort(3000);
+    // Kill ace-server and Vite by port
+    killPort(8085);
+    killPort(3000);
 
-      // Kill our own process tree from outside
-      killSelf();
-    }
+    // Kill our own process tree from outside
+    killSelf();
 
     // Fallback in case killSelf doesn't work
     setTimeout(() => process.exit(0), 3000);
@@ -100,7 +124,7 @@ router.post('/', (_req, res) => {
 router.post('/restart', (_req, res) => {
   console.log('[Server] Restart requested via API');
 
-  // Write marker file so the loop wrapper (launch.bat / restart-loop.cmd)
+  // Write marker file so the loop wrapper (launch.bat / launch.sh)
   // knows to re-launch instead of exiting
   const markerPath = path.join(PROJECT_ROOT, '.restart-requested');
   try {
@@ -116,15 +140,13 @@ router.post('/restart', (_req, res) => {
   setTimeout(() => {
     console.log('[Server] Restarting — killing ace-server and self...');
 
-    if (process.platform === 'win32') {
-      // Kill ace-server by port — it will be re-spawned on restart
-      killPort(8085);
+    // Kill ace-server by port — it will be re-spawned on restart
+    killPort(8085);
 
-      // Do NOT kill Vite (port 3000) — leave it running for dev mode
+    // Do NOT kill Vite (port 3000) — leave it running for dev mode
 
-      // Kill our own process tree from outside
-      killSelf();
-    }
+    // Kill our own process tree from outside
+    killSelf();
 
     // Fallback in case killSelf doesn't work
     setTimeout(() => process.exit(0), 3000);
@@ -132,4 +154,3 @@ router.post('/restart', (_req, res) => {
 });
 
 export default router;
-

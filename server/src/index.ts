@@ -145,7 +145,7 @@ import { setEngineReady } from './engineState.js';
 function startAceServer(): ChildProcess | null {
   const exe = config.aceServer.exe;
   if (!exe || !fs.existsSync(exe)) {
-    console.log(`[Server] ace-server.exe not found at: ${exe}`);
+    console.log(`[Server] ace-server not found at: ${exe}`);
     console.log('[Server] Start ace-server manually, or set ACESTEPCPP_EXE in .env');
     return null;
   }
@@ -286,7 +286,8 @@ async function ensureRequiredRuntime(): Promise<void> {
 // In dev/build-from-source mode, CUDA DLLs are in the system PATH via the
 // toolkit install — no need to download them into the engine directory.
 (async () => {
-  if (PORTABLE_MODE) {
+  if (PORTABLE_MODE && process.platform === 'win32') {
+    // CUDA runtime DLLs are only needed on Windows (macOS uses Metal via GGML)
     try {
       setEngineReady(false, 'Downloading CUDA runtime...');
       await ensureRequiredRuntime();

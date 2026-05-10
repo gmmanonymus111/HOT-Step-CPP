@@ -180,6 +180,11 @@ if(CUDAToolkit_FOUND)
     target_compile_definitions(supersep PRIVATE GGML_USE_CUDA)
 endif()
 
+# macOS: CoreML EP requires Apple frameworks
+if(APPLE AND SUPERSEP_ENABLED)
+    target_link_libraries(supersep PUBLIC "-framework CoreML" "-framework Foundation")
+endif()
+
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
     src/request.cpp
@@ -229,7 +234,7 @@ if(CUDAToolkit_FOUND)
     target_link_libraries(ace-server PRIVATE CUDA::cudart)
 endif()
 
-# Copy ONNX Runtime DLLs next to ace-server.exe at build time
+# Copy ONNX Runtime DLLs next to ace-server at build time
 if(SUPERSEP_ENABLED AND WIN32)
     set(_ORT_DLL_DIR "${ORT_ROOT}/lib")
     foreach(_dll onnxruntime.dll onnxruntime_providers_shared.dll onnxruntime_providers_cuda.dll)
@@ -241,6 +246,19 @@ if(SUPERSEP_ENABLED AND WIN32)
                 COMMENT "Copying ${_dll}"
             )
         endif()
+    endforeach()
+endif()
+
+# Copy ONNX Runtime dylibs next to ace-server at build time (macOS)
+if(SUPERSEP_ENABLED AND APPLE)
+    set(_ORT_LIB_DIR "${ORT_ROOT}/lib")
+    file(GLOB _ORT_DYLIBS "${_ORT_LIB_DIR}/libonnxruntime*.dylib")
+    foreach(_dylib ${_ORT_DYLIBS})
+        add_custom_command(TARGET ace-server POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_dylib}" "$<TARGET_FILE_DIR:ace-server>"
+            COMMENT "Copying ${_dylib}"
+        )
     endforeach()
 endif()
 
@@ -304,6 +322,33 @@ target_link_libraries(mastering PRIVATE Threads::Threads)
 set(VST3SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vendor/vst3sdk")
 
 # Static library: vst3-hosting
+# Platform-specific hosting sources:
+#   Windows: module_win32.cpp + threadchecker_win32.cpp
+#   macOS:   module_mac.mm (ARC) + threadchecker_mac.mm
+#   Linux:   module_linux.cpp + threadchecker_linux.cpp
+if(APPLE)
+    set(VST3_PLATFORM_SOURCES
+        ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
+        ${VST3SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
+    )
+    # module_mac.mm requires Objective-C ARC
+    set_source_files_properties(
+        ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
+        ${VST3SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+elseif(WIN32)
+    set(VST3_PLATFORM_SOURCES
+        ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp
+        ${VST3SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp
+    )
+else()
+    set(VST3_PLATFORM_SOURCES
+        ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp
+        ${VST3SDK_ROOT}/public.sdk/source/common/threadchecker_linux.cpp
+    )
+endif()
+
 add_library(vst3-hosting STATIC
     # Base library
     ${VST3SDK_ROOT}/base/source/baseiids.cpp
@@ -321,9 +366,9 @@ add_library(vst3-hosting STATIC
     ${VST3SDK_ROOT}/pluginterfaces/base/coreiids.cpp
     ${VST3SDK_ROOT}/pluginterfaces/base/conststringtable.cpp
 
-    # Public SDK hosting
+    # Public SDK hosting (cross-platform + platform-specific)
     ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp
-    ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp
+    ${VST3_PLATFORM_SOURCES}
     ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
     ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
     ${VST3SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp
@@ -336,7 +381,6 @@ add_library(vst3-hosting STATIC
     ${VST3SDK_ROOT}/public.sdk/source/common/memorystream.cpp
     ${VST3SDK_ROOT}/public.sdk/source/common/commoniids.cpp
     ${VST3SDK_ROOT}/public.sdk/source/common/pluginview.cpp
-    ${VST3SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp
     ${VST3SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp
 
     # VST interface ID definitions (all DEF_CLASS_IID symbols)
@@ -365,6 +409,16 @@ else()
     target_compile_options(vst3-hosting PRIVATE -w)
 endif()
 
+# macOS: VST3 hosting needs Cocoa + CoreFoundation frameworks
+if(APPLE)
+    find_library(COCOA_FRAMEWORK Cocoa)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+    target_link_libraries(vst3-hosting PRIVATE
+        ${COCOA_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
+    )
+endif()
+
 # vst-host: standalone VST3 host tool (GUI + offline processing + chain)
 add_executable(vst-host tools/vst-host.cpp)
 target_include_directories(vst-host PRIVATE
@@ -382,3 +436,8 @@ else()
                           -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
 endif()
 add_dependencies(vst-host version)
+
+# macOS: vst-host also needs Apple frameworks
+if(APPLE)
+    target_link_libraries(vst-host PRIVATE ${COCOA_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+endif()
