@@ -11,6 +11,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { Wand2, Sparkles, Music, Eye, EyeOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
+import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { GenreSelector } from './GenreSelector';
 import { InspirePreview } from './InspirePreview';
@@ -49,6 +50,7 @@ interface InstaGenPanelProps {
 export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, activeJobCount }) => {
   const { t } = useTranslation();
   const { token } = useAuth();
+  const globalParams = useGlobalParams();
 
   // ── Persisted state ──
   const [previewEnabled, setPreviewEnabled] = usePersistedState('hs-instagen-preview', true);
@@ -107,6 +109,11 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           subject: subject.trim() || undefined,
           vocalLanguage,
           useCotCaption: true,
+          // Global LM params — ensures the correct model + sampling settings
+          lmModel: globalParams.lmModel || undefined,
+          lmTemperature: globalParams.lmTemperature,
+          lmCfgScale: globalParams.lmCfgScale,
+          lmTopP: globalParams.lmTopP,
         },
         token || undefined,
         (stage, _progress) => setInspireProgress(stage),

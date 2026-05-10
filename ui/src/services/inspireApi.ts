@@ -17,6 +17,7 @@ export interface InspireParams {
   lmModel?: string;
   lmTemperature?: number;
   lmCfgScale?: number;
+  lmTopP?: number;
   useCotCaption?: boolean;
 }
 
