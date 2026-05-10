@@ -4,7 +4,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
-  Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus,
+  Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
@@ -496,6 +496,31 @@ const SongItem: React.FC<SongItemProps> = ({
                 >
                   <Trash2 size={14} /> {t('library.delete')}
                 </button>
+
+                {/* Cover Art Generation */}
+                <div className="border-t border-zinc-200 dark:border-white/5 my-1" />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowMenu(false);
+                    // Fire-and-forget cover art generation
+                    const params = song.generationParams || song.generation_params as any;
+                    fetch('/api/cover-art/generate', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        songId: song.id,
+                        title: song.title || '',
+                        style: song.style || params?.style || '',
+                        lyrics: song.lyrics || params?.lyrics || '',
+                        subject: params?.subject || '',
+                      }),
+                    }).catch(err => console.error('[CoverArt]', err));
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-violet-400 hover:bg-violet-500/10 transition-colors"
+                >
+                  <Image size={14} /> {song.coverUrl ? 'Regenerate Cover Art' : 'Generate Cover Art'}
+                </button>
               </div>
             </>
           )}
@@ -650,6 +675,28 @@ const SongCard: React.FC<SongCardProps> = ({
                   <button onClick={(e) => { e.stopPropagation(); onDelete(); setShowMenu(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors">
                     <Trash2 size={12} /> {t('library.delete')}
+                  </button>
+
+                  {/* Cover Art Generation */}
+                  <div className="border-t border-zinc-200 dark:border-white/5 my-1" />
+                  <button onClick={(e) => {
+                    e.stopPropagation();
+                    setShowMenu(false);
+                    const params = song.generationParams || song.generation_params as any;
+                    fetch('/api/cover-art/generate', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        songId: song.id,
+                        title: song.title || '',
+                        style: song.style || params?.style || '',
+                        lyrics: song.lyrics || params?.lyrics || '',
+                        subject: params?.subject || '',
+                      }),
+                    }).catch(err => console.error('[CoverArt]', err));
+                  }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-violet-400 hover:bg-violet-500/10 transition-colors">
+                    <Image size={12} /> {song.coverUrl || song.cover_url ? 'Regenerate Cover' : 'Generate Cover'}
                   </button>
                 </div>
               </>

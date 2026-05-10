@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Sparkles, AudioWaveform, Zap,
+  Sparkles, AudioWaveform, Zap, Image,
   Upload, Trash2, Music2,
   ChevronDown, RotateCcw,
 } from 'lucide-react';
@@ -21,6 +21,7 @@ import { useVstChainStore } from '../../stores/vstChainStore';
 import { ToggleSwitch } from './BarSection';
 import { formatReferenceName } from './modelLabels';
 import { VstChainDropdown } from './VstChainDropdown';
+import { CoverArtContent, CoverArtBadge } from './CoverArtDropdown';
 import { EditableSlider } from '../shared/EditableSlider';
 
 // ── Accordion Section ───────────────────────────────────────────
@@ -409,6 +410,20 @@ export const PostProcessingDropdown: React.FC = () => {
       >
         <MasteringContent />
       </Accordion>
+
+      {/* 4. Cover Art */}
+      <Accordion
+        icon={<Image size={14} />}
+        label="Cover Art"
+        accentColor="violet"
+        persistKey="hs-ppAccordion-coverart"
+        toggle={{ checked: gp.coverArtEnabled, onChange: gp.setCoverArtEnabled }}
+        badge={gp.coverArtEnabled ? (
+          <CoverArtBadge />
+        ) : undefined}
+      >
+        <CoverArtContent />
+      </Accordion>
     </div>
   );
 };
@@ -416,7 +431,7 @@ export const PostProcessingDropdown: React.FC = () => {
 // ── Badge ───────────────────────────────────────────────────────
 
 export const PostProcessingBadge: React.FC = () => {
-  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode } = useGlobalParams();
+  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled } = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
 
@@ -425,6 +440,7 @@ export const PostProcessingBadge: React.FC = () => {
   if (spectralLifterEnabled) parts.push('SL');
   if (vstEnabled > 0) parts.push(`${vstEnabled} VST${vstEnabled !== 1 ? 's' : ''}`);
   if (masteringEnabled && masteringReference) parts.push('Master');
+  if (coverArtEnabled) parts.push('Cover');
 
   if (parts.length === 0) return null;
 
