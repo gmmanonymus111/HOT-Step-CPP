@@ -38,6 +38,7 @@ import modelManagerRoutes from './routes/modelManager.js';
 import stemStudioRoutes from './routes/stemStudio.js';
 import assistantRoutes from './routes/assistant.js';
 import pluginRoutes from './routes/plugins.js';
+import inspireRoutes from './routes/inspire.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +86,7 @@ app.use('/api/model-manager', modelManagerRoutes);
 app.use('/api/stem-studio', stemStudioRoutes);
 app.use('/api/assistant', assistantRoutes);
 app.use('/api/plugins', pluginRoutes);
+app.use('/api/inspire', inspireRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {

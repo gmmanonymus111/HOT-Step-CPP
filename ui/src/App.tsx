@@ -36,6 +36,7 @@ import { CoverStudio } from './components/cover-studio/CoverStudio';
 import { StemStudio } from './components/stem-studio/StemStudio';
 import { StemBuilder } from './components/stem-builder/StemBuilder';
 import { GlobalParamBar } from './components/global-bar/GlobalParamBar';
+import { InstaGenPanel } from './components/insta-gen/InstaGenPanel';
 import { PlaylistSidebar } from './components/playlist/PlaylistSidebar';
 import {
   usePlayback,
@@ -67,6 +68,7 @@ import { usePlaylist, addToPlaylist } from './components/lyric-studio/playlistSt
 
 /** Derive top-level view from the browser URL */
 function viewFromUrl(path = window.location.pathname): string {
+  if (path.startsWith('/insta-gen')) return 'insta-gen';
   if (path.startsWith('/lyric-studio')) return 'lyric-studio';
   if (path.startsWith('/cover-studio')) return 'cover-studio';
   if (path.startsWith('/stem-builder')) return 'stem-builder';
@@ -77,6 +79,7 @@ function viewFromUrl(path = window.location.pathname): string {
 
 /** Map view names to URL paths */
 function urlForView(view: string): string {
+  if (view === 'insta-gen') return '/insta-gen';
   if (view === 'lyric-studio') {
     // Restore the last deep URL (artist/album/tab) if we have one
     try {
@@ -435,6 +438,59 @@ const AppContent: React.FC = () => {
       return (
         <div className="flex-1 overflow-hidden">
           <StemBuilder />
+        </div>
+      );
+    }
+
+    if (activeView === 'insta-gen') {
+      return (
+        <div className="flex flex-1 overflow-hidden">
+          {/* Insta-Gen Panel — resizable */}
+          <div
+            className="flex-shrink-0 h-full border-r border-zinc-200 dark:border-white/5"
+            style={{ width: createPanelWidth }}
+          >
+            <InstaGenPanel
+              onGenerate={handleGenerate}
+              activeJobCount={activeJobCount}
+            />
+          </div>
+
+          {/* Left resize handle */}
+          <div
+            className="flex-shrink-0 w-1.5 h-full cursor-col-resize group z-20 flex items-center hover:bg-pink-500/20 active:bg-pink-500/30 transition-colors"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startW = createPanelWidth;
+              const onMove = (ev: MouseEvent) => {
+                const newW = Math.min(700, Math.max(360, startW + (ev.clientX - startX)));
+                setCreatePanelWidth(newW);
+              };
+              const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+              };
+              document.body.style.cursor = 'col-resize';
+              document.body.style.userSelect = 'none';
+              document.addEventListener('mousemove', onMove);
+              document.addEventListener('mouseup', onUp);
+            }}
+          >
+            <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
+          </div>
+
+          {/* Activity Sidebar */}
+          <div className="flex-1 min-w-0 overflow-hidden">
+            <ActivitySidebar
+              source="insta-gen"
+              showToast={showToast}
+              refreshKey={songCreatedCount}
+              compact={false}
+            />
+          </div>
         </div>
       );
     }
