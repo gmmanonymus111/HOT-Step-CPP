@@ -116,6 +116,7 @@ const ChainRow: React.FC<{
   total: number;
 }> = ({ entry, index, total }) => {
   const { toggleEnabled, removeFromChain, reorderChain, openGui } = useVstChainStore();
+  const { t } = useTranslation();
 
   return (
     <div
