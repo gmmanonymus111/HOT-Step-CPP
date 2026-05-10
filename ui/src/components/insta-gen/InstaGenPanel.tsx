@@ -8,7 +8,7 @@
 // State machine: Input → (optional) Preview → Generate
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Wand2, Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain } from 'lucide-react';
+import { Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -516,25 +516,9 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
 
   return (
     <div className="h-full flex flex-col bg-white dark:bg-suno overflow-y-auto">
-      {/* Header */}
-      <div className="px-4 pt-4 pb-2 flex-shrink-0">
-        <div className="flex items-center gap-2.5 mb-1">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-pink-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/20">
-            <Wand2 size={16} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-zinc-900 dark:text-white leading-tight">
-              {t('instaGen.title')}
-            </h1>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              {t('instaGen.subtitle')}
-            </p>
-          </div>
-        </div>
-      </div>
 
       {/* Content */}
-      <div className="flex-1 px-4 space-y-4 pb-4">
+      <div className="flex-1 px-4 pt-4 space-y-4 pb-4">
         {/* Genre Selector */}
         <GenreSelector selected={selectedGenres} onChange={setSelectedGenres} />
 

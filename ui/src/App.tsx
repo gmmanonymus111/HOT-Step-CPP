@@ -485,15 +485,116 @@ const AppContent: React.FC = () => {
             <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
           </div>
 
-          {/* Activity Sidebar */}
-          <div className="flex-1 min-w-0 overflow-hidden">
+          {/* Song List — "Generations" */}
+          <div className="flex-1 min-w-0 overflow-y-auto">
+            <SongList
+              songs={songs}
+              currentSongId={currentSong?.id}
+              onPlay={playSong}
+              onDelete={handleDelete}
+              onBulkDelete={handleBulkDelete}
+              onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
+              onReuse={handleReuse}
+              onDownload={setDownloadSong}
+              onRename={handleRename}
+              showFilters={false}
+              viewMode="grid"
+              title={t('app.generations')}
+              onAddToPlaylist={(song) => {
+                addToPlaylist({
+                  id: song.id,
+                  title: song.title || 'Untitled',
+                  audioUrl: song.audioUrl || song.audio_url || '',
+                  masteredAudioUrl: song.masteredAudioUrl || song.mastered_audio_url || '',
+                  artistName: song.artistName || '',
+                  coverUrl: song.coverUrl || song.cover_url || '',
+                  duration: typeof song.duration === 'number' ? song.duration : undefined,
+                  style: song.style || '',
+                });
+                showToast(t('app.addedToPlaylist'), 'success');
+              }}
+            />
+          </div>
+
+          {/* Resize handle — Activity Sidebar */}
+          <div
+            className="flex-shrink-0 w-1.5 h-full cursor-col-resize group z-20 flex items-center hover:bg-pink-500/20 active:bg-pink-500/30 transition-colors"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startW = activitySidebarWidth;
+              const onMove = (ev: MouseEvent) => {
+                const newW = Math.min(700, Math.max(240, startW + startX - ev.clientX));
+                setActivitySidebarWidth(newW);
+              };
+              const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+              };
+              document.body.style.cursor = 'col-resize';
+              document.body.style.userSelect = 'none';
+              document.addEventListener('mousemove', onMove);
+              document.addEventListener('mouseup', onUp);
+            }}
+          >
+            <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
+          </div>
+          {/* Activity Sidebar — Recent Songs + Queue */}
+          <div className="h-full flex-shrink-0 border-l border-zinc-200 dark:border-white/5 overflow-hidden" style={{ width: activitySidebarWidth }}>
             <ActivitySidebar
               source="insta-gen"
               showToast={showToast}
               refreshKey={songCreatedCount}
-              compact={false}
+              compact={activitySidebarWidth < 380}
             />
           </div>
+
+          {/* Right Sidebar — Song detail (same as Create) */}
+          {showRightSidebar && selectedSong && (
+            <>
+              {/* Right resize handle */}
+              <div
+                className="flex-shrink-0 w-1.5 h-full cursor-col-resize group z-20 flex items-center hover:bg-pink-500/20 active:bg-pink-500/30 transition-colors"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const startX = e.clientX;
+                  const startW = rightSidebarWidth;
+                  const onMove = (ev: MouseEvent) => {
+                    const newW = Math.min(600, Math.max(280, startW + startX - ev.clientX));
+                    setRightSidebarWidth(newW);
+                  };
+                  const onUp = () => {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                  };
+                  document.body.style.cursor = 'col-resize';
+                  document.body.style.userSelect = 'none';
+                  document.addEventListener('mousemove', onMove);
+                  document.addEventListener('mouseup', onUp);
+                }}
+              >
+                <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
+              </div>
+              <div
+                className="flex-shrink-0 h-full bg-zinc-50 dark:bg-suno z-10 border-l border-zinc-200 dark:border-white/5"
+                style={{ width: rightSidebarWidth }}
+              >
+                <RightSidebar
+                  song={selectedSong}
+                  onClose={() => setShowRightSidebar(false)}
+                  onReuse={handleReuse}
+                  onDelete={handleDelete}
+                  onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
+                  isPlaying={pb.isPlaying && pb.currentTrack?.id === selectedSong?.id}
+                  onDownload={setDownloadSong}
+                />
+              </div>
+            </>
+          )}
         </div>
       );
     }
