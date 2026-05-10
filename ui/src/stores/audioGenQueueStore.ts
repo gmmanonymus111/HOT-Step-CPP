@@ -204,6 +204,7 @@ export function addManualQueueItem(opts: {
 
 /** Update progress/stage of a manually-added queue item. */
 export function updateManualQueueItem(id: string, update: {
+  title?: string;
   jobId?: string;
   progress?: number;
   stage?: string;
@@ -212,6 +213,7 @@ export function updateManualQueueItem(id: string, update: {
 }): void {
   const item = _state.items.find(i => i.id === id);
   if (!item) return;
+  if (update.title !== undefined) item.title = update.title;
   if (update.jobId !== undefined) item.jobId = update.jobId;
   if (update.progress !== undefined) item.progress = update.progress;
   if (update.stage !== undefined) item.stage = update.stage;

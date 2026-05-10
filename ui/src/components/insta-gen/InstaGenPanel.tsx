@@ -392,8 +392,10 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
         if (inspireResult.timeSignature) params.timeSignature = inspireResult.timeSignature;
 
         // Update queue item title now we have lyrics
-        const title = params.title || resolvedCaption;
-        updateManualQueueItem(queueId, { stage: 'Submitting to engine…' });
+        updateManualQueueItem(queueId, {
+          title: params.title || resolvedCaption,
+          stage: 'Submitting to engine…',
+        });
 
         // Step 4: Merge with global engine params and submit
         const engineParams = globalParams.getGlobalParams();
