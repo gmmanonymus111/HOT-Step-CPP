@@ -95,8 +95,8 @@ export function buildCoverArtPrompt(opts: CoverArtPromptOpts): string {
     }
   }
 
-  // Art direction suffix (always)
-  parts.push('digital art, cinematic, professional album artwork');
+  // Art direction suffix (always — "no text" reinforces the negative prompt)
+  parts.push('digital art, cinematic, professional album artwork, no text, no lettering, no words');
 
   return parts.join(', ');
 }

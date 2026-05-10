@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomInt } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { config } from '../../config.js';
 import { getDb } from '../../db/database.js';
@@ -120,12 +121,17 @@ export async function generateCoverArt(opts: GenerateCoverArtOpts): Promise<Cove
   const outputFilename = `cover_${uuidv4()}.png`;
   const outputPath = path.join(config.data.audioDir, outputFilename);
 
+  // Random seed — each cover should be unique
+  const seed = randomInt(0, 2 ** 32);
+
   // Build sd-cli command
   const args = [
     '--diffusion-model', diffusionModel,
     '--vae', vae,
     '--llm', llm,
     '-p', prompt,
+    '-n', 'text, lettering, words, typography, watermark, signature, logo, title, font, writing, caption, label, stamp, banner',
+    '--seed', String(seed),
     '--cfg-scale', String(GEN_CFG_SCALE),
     '--steps', String(GEN_STEPS),
     '--width', String(GEN_WIDTH),
@@ -135,7 +141,7 @@ export async function generateCoverArt(opts: GenerateCoverArtOpts): Promise<Cove
     '-o', outputPath,
   ];
 
-  console.log(`[CoverArt] Running: ${path.basename(sdCli)} (${GEN_WIDTH}×${GEN_HEIGHT}, ${GEN_STEPS} steps)`);
+  console.log(`[CoverArt] Running: ${path.basename(sdCli)} (${GEN_WIDTH}×${GEN_HEIGHT}, ${GEN_STEPS} steps, seed=${seed})`);
 
   try {
     const { stdout, stderr } = await execFileAsync(sdCli, args, {
