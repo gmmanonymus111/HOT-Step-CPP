@@ -284,11 +284,24 @@ router.post('/llm', async (req, res) => {
     raw = raw.replace(/\s*\((?:Hook|You|Repeat|x\d|Refrain|Spoken|Whispered|Ad[- ]?lib|Echo)\)\s*/gi, '');
     raw = raw.replace(/ +$/gm, '');
 
-    // Strip any title line the LLM might have added despite instructions
+    // Extract title from the end of the response (Title: <song title>)
+    let extractedTitle = '';
+    const titleEndMatch = raw.match(/\n\s*Title:\s*(.+?)\s*$/im);
+    if (titleEndMatch) {
+      extractedTitle = titleEndMatch[1]
+        .replace(/^["']+|["']+$/g, '')  // strip quotes
+        .replace(/[.!?,;:]+$/, '')       // strip trailing punctuation
+        .trim();
+      // Remove the title line from lyrics
+      raw = raw.replace(/\n\s*Title:\s*.+?\s*$/im, '').trimEnd();
+    }
+
+    // Strip any title line the LLM might have added at the start despite instructions
     const rawLines = raw.trim().split('\n');
     for (let i = 0; i < rawLines.length; i++) {
       const match = rawLines[i].match(/^(?:Title:\s*|#\s*)(.*)/i);
       if (match) {
+        if (!extractedTitle) extractedTitle = match[1].replace(/^["']+|["']+$/g, '').trim();
         const rest = rawLines.slice(i + 1);
         while (rest.length && !rest[0].trim()) rest.shift();
         raw = rest.join('\n');
@@ -302,11 +315,12 @@ router.post('/llm', async (req, res) => {
     raw = fixAPrefix(raw);
     raw = enforceLineCounts(raw);
 
-    console.log(`[Inspire/LLM] Generated ${raw.split('\n').length} lines of lyrics`);
+    console.log(`[Inspire/LLM] Generated ${raw.split('\n').length} lines of lyrics${extractedTitle ? `, title: "${extractedTitle}"` : ''}`);
 
     res.json({
       lyrics: raw,
       caption: genreStr,  // Caption is just the genres — built-in LM will expand it later
+      title: extractedTitle || undefined,
       provider: providerName,
       model: effectiveModel,
     });

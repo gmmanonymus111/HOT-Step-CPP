@@ -251,6 +251,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
         const result: InspireResult = {
           caption: llmResult.caption || computedCaption,
           lyrics: llmResult.lyrics,  // Keep LLM lyrics, not inspire's
+          title: llmResult.title,
           bpm: metaResult.bpm,
           duration: metaResult.duration,
           keyScale: metaResult.keyScale,
@@ -295,8 +296,8 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
   const handleGenerateFromPreview = useCallback(() => {
     if (!inspireResult) return;
     const params = buildParams(editedLyrics, editedCaption);
-    // Derive title from lyrics
-    params.title = deriveTitleFromLyrics(editedLyrics) || computedCaption;
+    // Prefer LLM-generated title, then derive from lyrics, then caption
+    params.title = inspireResult.title || deriveTitleFromLyrics(editedLyrics) || computedCaption;
     // Include metadata from inspire result
     if (inspireResult.bpm) params.bpm = inspireResult.bpm;
     if (inspireResult.duration) params.duration = inspireResult.duration;
@@ -341,6 +342,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
         // Step 1: Resolve lyrics
         let resolvedLyrics = '';
         let resolvedCaption = capturedCaption;
+        let llmTitle = '';
 
         if (capturedLyricMode === 'instrumental') {
           resolvedLyrics = '[Instrumental]';
@@ -358,6 +360,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
           );
           resolvedLyrics = llmResult.lyrics;
           resolvedCaption = llmResult.caption || capturedCaption;
+          llmTitle = llmResult.title || '';
         }
 
         // Step 2: Run inspire for metadata (+ lyrics if not resolved)
@@ -385,7 +388,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSong
         // Step 3: Build generation params
         const finalLyrics = resolvedLyrics || inspireResult.lyrics;
         const params = buildParams(finalLyrics, resolvedCaption);
-        params.title = deriveTitleFromLyrics(finalLyrics) || resolvedCaption;
+        params.title = llmTitle || deriveTitleFromLyrics(finalLyrics) || resolvedCaption;
         if (inspireResult.bpm) params.bpm = inspireResult.bpm;
         if (inspireResult.duration) params.duration = inspireResult.duration;
         if (inspireResult.keyScale) params.keyScale = inspireResult.keyScale;

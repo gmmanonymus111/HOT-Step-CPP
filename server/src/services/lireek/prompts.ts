@@ -415,6 +415,11 @@ HOOK RULES:
   - "Hook, Hook, develop, resolve"
 - For energetic genres (punk, rock, pop), add vocal exclamations where appropriate ("Oh!", "Whoa-oh!", etc.)
 
-Output ONLY the lyrics. No title, no commentary.
+TITLE RULE:
+- After all the lyrics, on its own line, write: Title: <song title>
+- The title should be short (1-6 words), catchy, and relevant to the lyrics you wrote.
+- Derive it from the hook or central theme — do not just restate the subject.
+
+Output the lyrics first, then the title line. No other commentary.
 `;
 

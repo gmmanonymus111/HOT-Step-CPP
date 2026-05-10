@@ -24,6 +24,7 @@ export interface InspireParams {
 export interface InspireResult {
   caption: string;
   lyrics: string;
+  title?: string;
   bpm: number;
   duration: number;
   keyScale: string;
@@ -129,6 +130,7 @@ export interface LlmInspireParams {
 export interface LlmInspireResult {
   lyrics: string;
   caption: string;
+  title?: string;
   provider: string;
   model: string;
 }
