@@ -120,6 +120,39 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 
 ## UI / UX
 
+### Create Modes
+
+Two creation modes for different workflows, both sharing the same engine pipeline:
+
+#### Auto-Gen
+
+AI-driven song creation — minimal input, maximum automation:
+
+| Feature | Description |
+|---------|-------------|
+| **Genre-First Workflow** | Select from a curated, searchable genre taxonomy to define the song's style. Random genre selection available. |
+| **Three Lyric Modes** | Instrumental, AI-generated lyrics (with optional subject), or fully automated with random subject selection. |
+| **LLM Lyric Generation** | External LLM writes lyrics, style caption, and title — supports Gemini, LM Studio, OpenAI-compatible providers. |
+| **Preview Mode** | Toggle to review and edit AI-generated lyrics before committing to audio generation. |
+| **Random Subject** | Let the LLM pick the topic — generates a subject, then lyrics for that subject, then a matching title. |
+| **Random Genre** | One-click random genre selection from the full taxonomy. |
+| **Serial Queue** | Jobs run one at a time through an internal queue — queue multiple while one generates. |
+| **Live Progress** | Real-time stage updates (generating lyrics → resolving metadata → submitting → generating audio) with elapsed time. |
+
+#### Custom-Gen
+
+Full manual control for power users:
+
+| Feature | Description |
+|---------|-------------|
+| **Complete Parameter Control** | Set style caption, lyrics, title, artist, BPM, duration, key signature, and time signature. |
+| **Instrumental Toggle** | Switch between vocal and instrumental modes. |
+| **Queue-Based Generation** | Queue multiple generations with configurable parallel job limits. |
+| **Direct Engine Access** | All global engine settings (solvers, schedulers, guidance, adapters) apply directly. |
+| **Artist-Title Metadata** | Fields for artist name, subject description, and key signature — embedded in generation metadata. |
+
+### General UI
+
 | Feature | Description |
 |---------|-------------|
 | **Full React + Tailwind UI** | Purpose-built dark-themed interface, ported and extended from the Python-based HOT-Step 9000. |
@@ -137,7 +170,6 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 | **Toggle Switches** | All boolean controls use styled toggle switches instead of plain checkboxes. |
 | **Persistent UI State** | Accordion states, sidebar collapse, scroll positions, and panel sizes all persist across navigation. |
 | **Per-Track Download Buttons** | Download individual tracks directly from the playlist sidebar. |
-| **Artist-Title Metadata** | Create page fields for artist name, subject description, and key signature — embedded in generation metadata. |
 
 ---
 
@@ -152,9 +184,9 @@ A complete AI-powered lyrics and music generation workspace, powered by the Lire
 | **Artist Profiles** | Per-artist configuration with adapter presets, reference tracks, style summaries, and computed generation statistics. |
 | **Lyric Profiler** | Statistical analysis engine — contraction rates, rhyme schemes, meter patterns, perspective tracking — computed locally without LLM calls. |
 | **Streaming Generation** | Real-time SSE streaming of lyrics with live UI updates as the LLM writes. |
-| **Audio Generation Queue** | Integrated music generation from lyrics with full parameter parity to the Create page. |
+| **Audio Generation Queue** | Integrated music generation from lyrics with full parameter parity to Custom-Gen. |
 | **Bulk Operations** | "Fill to N" mode — auto-calculates how many generations each profile needs to reach a target count, with progress badges. |
-| **Send to Create** | Transfers artist context, adapter path, reference track, key signature, and all metadata to the Create page in one click. |
+| **Send to Custom-Gen** | Transfers artist context, adapter path, reference track, key signature, and all metadata to Custom-Gen in one click. |
 | **Artist Sidebar** | Persistent sidebar with artist list, scroll position memory, and per-artist song counts. |
 | **Album Pages** | Browse by album with header bars, generated songs tab, and inline audio playback. |
 | **Database Migration** | Import tool for migrating from HOT-Step 9000’s `hotstep_lyrics.db` — artists, profiles, and generations. |
@@ -236,7 +268,7 @@ In-app LLM-powered assistant with full context awareness:
 |---------|-------------|
 | **Streaming Chat Sidebar** | Toggleable chat panel with SSE-streamed responses, markdown rendering, and thinking/response separation. |
 | **Full Settings Awareness** | Every message includes a JSON snapshot of all engine parameters, content fields (lyrics, caption, BPM, duration, key, time signature, language), and active mode. |
-| **Mode-Aware Guidance** | Automatically detects which studio the user is in (Create, Lyric Studio, Cover Studio, Stem Studio, Stem Builder) and tailors advice to that workflow. |
+| **Mode-Aware Guidance** | Automatically detects which studio the user is in (Auto-Gen, Custom-Gen, Lyric Studio, Cover Studio, Stem Studio, Stem Builder) and tailors advice to that workflow. |
 | **Actionable Suggestions** | LLM responses can include structured action blocks that the user can preview as diffs and apply individually or in bulk — settings update reactively. |
 | **Content Editing** | Can write, rewrite, or update lyrics, style descriptions, and other content fields directly via action blocks with one-click apply. |
 | **Per-Action Apply** | Each suggested change has its own Apply button — cherry-pick individual settings without accepting the full batch. Applied items show a checkmark and dim out. |

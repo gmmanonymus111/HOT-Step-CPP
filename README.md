@@ -40,6 +40,10 @@ HOT-Step CPP extends the base acestep.cpp engine with 80+ features across infere
 
 🎚️ **Matchering Mastering Engine** — Loudness, EQ, and dynamics matching to a reference track with instant mastered/unmastered A/B toggle. Operates at native 48kHz — no resample round-trip.
 
+🤖 **Auto-Gen** — AI-driven song creation. Pick genres, optionally set a subject and language, and the LM handles everything — lyrics, style caption, metadata, and title. Three lyric modes: fully AI-generated, AI-written from your subject, or instrumental. Preview mode lets you review and edit AI-generated lyrics before committing to generation. Serial queue ensures one job at a time with live progress tracking.
+
+🎹 **Custom-Gen** — Full manual control over every generation parameter. Write your own lyrics (or go instrumental), set a style caption, title, artist, BPM, duration, key signature, and time signature. Direct access to all engine settings with queue-based generation. The power-user mode for when you know exactly what you want.
+
 🔌 **VST3 Host** — Scan, load, and run your existing VST3 plugins directly in the generation pipeline. Offline processing and real-time WASAPI monitor mode with transport controls.
 
 ✍️ **Lyric Studio** — A complete AI-powered lyrics and music workspace. 6 LLM providers (Gemini, LM Studio, OpenAI-compatible), artist profiles with adapter presets, statistical lyric analysis, bulk generation with "Fill to N" mode, and full parameter parity with the Create page.
