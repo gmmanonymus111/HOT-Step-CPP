@@ -101,7 +101,10 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
     try {
       const result = await runInspireAndWait(
         {
-          caption: computedCaption,
+          caption: subject.trim()
+            ? `${computedCaption}. Song about: ${subject.trim()}`
+            : computedCaption,
+          subject: subject.trim() || undefined,
           vocalLanguage,
           useCotCaption: true,
         },
@@ -224,7 +227,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           <select
             value={vocalLanguage}
             onChange={(e) => setVocalLanguage(e.target.value)}
-            className="w-full rounded-xl border border-zinc-300 dark:border-white/10 bg-zinc-50 dark:bg-white/5 px-3 py-2.5 text-sm text-zinc-900 dark:text-white outline-none focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 transition-all appearance-none cursor-pointer"
+            className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
           >
             {LANGUAGES.map(lang => (
               <option key={lang.value} value={lang.value}>{lang.label}</option>

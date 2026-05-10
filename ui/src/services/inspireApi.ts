@@ -6,6 +6,7 @@ const BASE = '/api/inspire';
 
 export interface InspireParams {
   caption: string;
+  subject?: string;
   lyrics?: string;
   bpm?: number;
   duration?: number;
