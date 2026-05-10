@@ -252,6 +252,13 @@ Adapters fine-tune the DiT for specific styles, artists, or genres.
 - `durationBuffer` (seconds): Extra duration added before trimming
 - `autoTrimFadeMs` (ms): Fade-out length
 
+### AI Cover Art
+- `coverArtEnabled` (bool): Auto-generate 1024×1024 album cover art after each song is created
+- Uses FLUX.2-klein-4B via stable-diffusion.cpp — downloads on first use (~5.2 GB)
+- Prompts built from the song's `subject` field (if available) or extracted keywords from lyrics
+- Cover art can also be generated on-demand from the song context menu in the library
+- Non-fatal: if cover art fails, the song is still saved successfully
+
 ---
 
 ## DCW (Differential Correction in Wavelet domain)

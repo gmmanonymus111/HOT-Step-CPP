@@ -115,6 +115,7 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 | **48kHz Native Processing** | Mastering pipeline operates at the native 48kHz sample rate — no lossy resample round-trip. |
 | **PP-VAE Neural Audio Polish** | Post-processing VAE that runs generated audio through an encode→decode round-trip to smooth spectral artifacts and improve tonal coherence. Optional wet/dry blend slider. F32 recommended for best quality. |
 | **ScragVAE Decoder** | Fine-tuned VAE decoder with +38% high-frequency energy and +29dB dynamic range improvement. Drop-in replacement for the standard decoder — selectable at runtime from the Models dropdown. |
+| **AI Cover Art** | Automatic 1024×1024 album cover art generation using FLUX.2-klein-4B via stable-diffusion.cpp. Downloads model + sd-cli binary on first use (~5.2 GB). Toggleable auto-generation after audio creation, plus on-demand "Generate Cover Art" from the song context menu. Prompts built from song subject or lyrics keywords. |
 
 ---
 
