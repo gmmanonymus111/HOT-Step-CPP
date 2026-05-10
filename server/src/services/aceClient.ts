@@ -206,10 +206,11 @@ export const aceClient = {
     return res.json();
   },
 
-  /** POST /lm — submit LM generation job, returns job ID */
+  /** POST /lm — submit LM generation job, returns job ID.
+   *  mode: 'inspire' (Phase 1 only, no codes) | 'format' (reformat, no codes) */
   async submitLm(request: AceRequest, mode?: 'inspire' | 'format'): Promise<string> {
-    const path = mode ? `/lm?mode=${mode}` : '/lm';
-    const res = await acePost(path, request);
+    const body = mode ? { ...request, lm_mode: mode } : request;
+    const res = await acePost('/lm', body);
     const data = await res.json() as { id: string };
     return data.id;
   },
