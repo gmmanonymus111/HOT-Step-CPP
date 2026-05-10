@@ -58,7 +58,6 @@ type LyricMode = 'instrumental' | 'lyrics' | 'lyrics-ai';
 type Phase = 'input' | 'inspiring' | 'preview' | 'generating';
 
 interface InstaGenPanelProps {
-  onGenerate: (params: Partial<GenerationParams>) => void;
   onSongCreated?: (song: any) => void;
   activeJobCount: number;
 }
@@ -129,7 +128,7 @@ async function _drainInstaQueue() {
   _instaRunning = false;
 }
 
-export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, onSongCreated, activeJobCount }) => {
+export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, activeJobCount }) => {
   const { t } = useTranslation();
   const { token } = useAuth();
   const globalParams = useGlobalParams();

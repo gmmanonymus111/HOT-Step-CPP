@@ -27,7 +27,7 @@ interface UnifiedRecentSongsProps {
 // ── Module-level cache (keyed by source) ─────────────────────────────────────
 
 const _cache = new Map<string, { songs: UnifiedRecentSong[]; key: number }>();
-let _fetchInFlight = false;
+const _fetchInFlight = new Set<string>();  // per-source to avoid cross-blocking
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -57,18 +57,18 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
     // Check cache inline (not via closure) to avoid stale dep issues
     const entry = _cache.get(cacheKey);
     if (entry && entry.key === refreshKey) return;
-    if (_fetchInFlight) return;
+    if (_fetchInFlight.has(cacheKey)) return;
     // Only show spinner if we have no cached data at all
     if (!entry) setLoading(true);
 
-    _fetchInFlight = true;
+    _fetchInFlight.add(cacheKey);
     songApi.getRecentSongs(token, source, 50).then(res => {
       const resolved = (res.songs || []).filter(s => !!s.audio_url);
       _cache.set(cacheKey, { songs: resolved, key: refreshKey });
-      _fetchInFlight = false;
+      _fetchInFlight.delete(cacheKey);
       if (mountedRef.current) { setSongs(resolved); setLoading(false); }
     }).catch(() => {
-      _fetchInFlight = false;
+      _fetchInFlight.delete(cacheKey);
       if (mountedRef.current) setLoading(false);
     });
   }, [refreshKey, token, source, cacheKey]);

@@ -453,7 +453,6 @@ const AppContent: React.FC = () => {
             style={{ width: createPanelWidth }}
           >
             <InstaGenPanel
-              onGenerate={handleGenerate}
               onSongCreated={handleSongCreated}
               activeJobCount={activeJobCount}
             />
