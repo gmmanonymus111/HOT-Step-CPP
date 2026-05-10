@@ -14,9 +14,12 @@
   },
   "dependencies": {
     "audiomotion-analyzer": "^4.5.4",
+    "i18next": "^26.0.10",
+    "i18next-browser-languagedetector": "^8.2.1",
     "lucide-react": "^1.8.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-i18next": "^17.0.7",
     "wavesurfer.js": "^7.12.6",
     "zustand": "^5.0.12"
   },

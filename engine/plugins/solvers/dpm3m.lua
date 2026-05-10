@@ -16,6 +16,7 @@ local prev_vt = nil
 local prev_prev_vt = nil
 
 function step(xt, vt, t_curr, t_prev, n)
+    if (step_index or 0) == 0 then prev_vt = nil; prev_prev_vt = nil end
     local dt = t_curr - t_prev
 
     if prev_vt and prev_prev_vt then

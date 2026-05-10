@@ -83,6 +83,15 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
 // reproduces the track's output audio. *T_out is set to T_latent.
 const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, int * T_out);
 
+// Access the VAE-encoded source audio latent (cover_latents) from the job.
+// Shared across all tracks (same source audio). Layout is flat [T_cover * 64]
+// f32, same format as src_latents input. Feeding this back as src_latents on
+// a subsequent cover run skips the VAE encode (~45s saving on mid-range GPUs).
+// Returns NULL when no source encoding was performed (text2music tasks, or
+// when the caller already provided pre-encoded src_latents).
+// *T_out receives the number of time frames (T_cover). Valid until job_free.
+const float * ace_synth_job_get_source_latent(const AceSynthJob * job, int * T_out);
+
 // Phase 2: latent splice (for repaint/lego) + VAE decode. Acquires the VAE
 // decoder from the store; in STRICT this evicts the DiT from phase 1
 // transparently. The splice happens in latent space using s.cover_latents

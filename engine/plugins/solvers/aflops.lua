@@ -22,6 +22,7 @@ local function clamp_alpha(t)
 end
 
 function step(xt, vt, t_curr, t_prev, n)
+    if (step_index or 0) == 0 then prev_w = nil; prev_t = 0; prev_t_dst = 0 end
     local alpha_curr = clamp_alpha(t_curr)
     local alpha_prev = clamp_alpha(t_prev)
     local alpha_ratio = alpha_prev / alpha_curr

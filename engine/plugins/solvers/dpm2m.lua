@@ -17,6 +17,7 @@ solver = {
 local prev_vt = nil
 
 function step(xt, vt, t_curr, t_prev, n)
+    if (step_index or 0) == 0 then prev_vt = nil end
     local dt = t_curr - t_prev
 
     if prev_vt then

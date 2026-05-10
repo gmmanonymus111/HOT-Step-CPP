@@ -37,6 +37,9 @@ local function solve(K, R, b)
 end
 
 function step(xt, vt, t_curr, t_prev, n)
+    -- Reset state on first step of a new generation
+    if (step_index or 0) == 0 then history = {} end
+
     local D_n = {}
     for i = 0, n-1 do D_n[i] = xt[i] - t_curr * vt[i] end
 

@@ -716,6 +716,19 @@ const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, i
     return s.output.data() + (size_t) track_idx * s.T * s.Oc;
 }
 
+// VAE-encoded source audio latent (cover_latents), shared across all tracks.
+// Non-empty only when ops_encode_src performed a VAE encode (not when the
+// caller already provided pre-encoded src_latents).
+const float * ace_synth_job_get_source_latent(const AceSynthJob * job, int * T_out) {
+    const SynthState & s = job->state;
+    if (s.cover_latents.empty()) {
+        *T_out = 0;
+        return nullptr;
+    }
+    *T_out = s.T_cover;
+    return s.cover_latents.data();
+}
+
 // Phase 2: latent splice (for repaint/lego) + VAE decode for every batch item.
 int ace_synth_job_run_vae(AceSynth *    ctx,
                           AceSynthJob * job,

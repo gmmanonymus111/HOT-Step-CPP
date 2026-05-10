@@ -89,8 +89,12 @@ benchmark-results/
 docs/plans/
 scratch/
 
-# Release build artifacts (scripts committed, outputs not)
-release/staging/
-release/out/
-release/.node-cache/
-release/node_modules/
+# Release build artifacts
+release/
+
+# Windows NUL device phantom
+nul
+
+# i18n dev-only utility scripts
+ui/add_strings.mjs
+ui/temp_strings.json

@@ -63,6 +63,7 @@ local function apply_temporal_smoothing(data, offset, T, Oc, strength)
 end
 
 function step(xt, vt, t_curr, t_prev, n)
+    if (step_index or 0) == 0 then prev_delta = nil end
     local dt = t_curr - t_prev
 
     -- Read params (injected by C++ before each call)
