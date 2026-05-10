@@ -45,6 +45,43 @@ export function extractThemeKeywords(lyrics: string, maxKeywords = 5): string[] 
     .map(([word]) => word);
 }
 
+/**
+ * Map music genre keywords to visual moods/palettes for image generation.
+ * Avoids any text-triggering words like "album", "cover", "title", etc.
+ */
+const GENRE_VISUALS: Record<string, string> = {
+  rock: 'dramatic lighting, electric atmosphere, high contrast',
+  metal: 'dark dramatic scene, intense fire and shadows, heavy atmosphere',
+  punk: 'gritty urban scene, raw energy, bold colors, rebellion',
+  pop: 'vibrant colors, clean aesthetic, bright lighting, contemporary',
+  electronic: 'neon lights, futuristic environment, glowing particles, cyberpunk',
+  jazz: 'warm golden tones, smoky atmosphere, elegant mood, sophisticated',
+  blues: 'moody blue tones, deep shadows, soulful atmosphere',
+  folk: 'natural landscapes, warm earth tones, rustic beauty, pastoral',
+  classical: 'elegant composition, renaissance lighting, grand architecture',
+  hip: 'urban cityscape, bold colors, street culture, dynamic perspective',
+  rap: 'urban environment, dramatic angles, street aesthetic',
+  country: 'wide open landscapes, golden hour, rural beauty, americana',
+  indie: 'dreamy atmosphere, soft pastel colors, artistic composition',
+  r: 'warm intimate lighting, smooth gradients, elegant silhouettes',
+  ambient: 'ethereal landscapes, soft focus, atmospheric mist, dreamlike',
+  bossa: 'tropical sunset, warm golden light, coastal paradise',
+  reggae: 'tropical colors, island vibes, sunset hues, laid-back mood',
+  soul: 'warm rich tones, intimate atmosphere, emotional depth',
+  funk: 'bold psychedelic colors, retro vibes, dynamic energy',
+  alternative: 'moody atmosphere, artistic composition, unconventional beauty',
+};
+
+/** Get visual mood keywords based on genre/style string */
+function getGenreVisuals(style: string): string {
+  if (!style) return '';
+  const lower = style.toLowerCase();
+  for (const [genre, visuals] of Object.entries(GENRE_VISUALS)) {
+    if (lower.includes(genre)) return visuals;
+  }
+  return '';
+}
+
 export interface CoverArtPromptOpts {
   title?: string;
   style?: string;
@@ -55,48 +92,45 @@ export interface CoverArtPromptOpts {
 /**
  * Build a text-to-image prompt from song metadata.
  *
- * Keeps total prompt under ~60 words for CLIP's 77-token limit.
+ * IMPORTANT: Avoids ALL text-triggering language. FLUX models at cfg_scale=1
+ * ignore negative prompts, so the only way to prevent text in the output is
+ * to never mention text-related concepts (album, cover, title, etc.) in the
+ * positive prompt. We describe only visual scenes and moods.
  */
 export function buildCoverArtPrompt(opts: CoverArtPromptOpts): string {
   const parts: string[] = [];
 
   if (opts.subject?.trim()) {
-    // Rich subject path: use the curated description directly
+    // Rich subject path: use the curated description as a visual scene
     parts.push(opts.subject.trim());
-
-    // Add a couple of genre words for visual tone
-    if (opts.style) {
-      const styleWords = opts.style.split(',').map(w => w.trim()).filter(Boolean);
-      const shortStyle = styleWords.slice(0, 2).join(', ');
-      if (shortStyle) parts.push(shortStyle);
-    }
   } else {
-    // Fallback: keyword extraction
-    parts.push('Album cover art');
-
-    if (opts.style) {
-      const styleWords = opts.style.split(',').map(w => w.trim()).filter(Boolean);
-      const shortStyle = styleWords.slice(0, 3).join(', ');
-      if (shortStyle) parts.push(`for a ${shortStyle} song`);
-    }
-
-    if (opts.title) {
-      let cleanTitle = opts.title.trim();
-      // Strip "Artist - " prefix if present
-      if (cleanTitle.includes(' - ')) {
-        cleanTitle = cleanTitle.split(' - ').pop()?.trim() || cleanTitle;
-      }
-      parts.push(`called "${cleanTitle}"`);
-    }
-
-    const keywords = extractThemeKeywords(opts.lyrics || '', 4);
+    // Fallback: extract visual themes from lyrics
+    const keywords = extractThemeKeywords(opts.lyrics || '', 5);
     if (keywords.length > 0) {
-      parts.push(`themes of ${keywords.join(', ')}`);
+      parts.push(`a scene evoking ${keywords.join(', ')}`);
+    } else {
+      // Absolute fallback — generic but text-free
+      parts.push('a striking visual composition with dramatic lighting');
     }
   }
 
-  // Art direction suffix (always — "no text" reinforces the negative prompt)
-  parts.push('digital art, cinematic, professional album artwork, no text, no lettering, no words');
+  // Genre-aware visual mood
+  const genreVisuals = getGenreVisuals(opts.style || '');
+  if (genreVisuals) {
+    parts.push(genreVisuals);
+  } else if (opts.style) {
+    // Use raw style words as mood descriptors (but skip any that look like names)
+    const styleWords = opts.style.split(',')
+      .map(w => w.trim().toLowerCase())
+      .filter(w => w.length > 2 && !w.includes('_'))
+      .slice(0, 2);
+    if (styleWords.length > 0) {
+      parts.push(`${styleWords.join(' ')} aesthetic`);
+    }
+  }
+
+  // Art direction — purely visual, zero text-triggering words
+  parts.push('digital painting, cinematic composition, highly detailed, beautiful lighting, 8k');
 
   return parts.join(', ');
 }
