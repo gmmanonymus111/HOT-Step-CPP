@@ -117,6 +117,7 @@ end
 function step(xt, vt, t_curr, t_prev, n)
     local dt = t_curr - t_prev
     if step_index == 0 then
+        velocity_history = {}
         for i = 0, n-1 do xt[i] = xt[i] - vt[i] * dt end
         update_history(vt, n, dt)
         return

@@ -45,6 +45,9 @@ function guide(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_thres
     local lam = (params and params.lambda) or 0.5
     local k   = (params and params.k) or 0.1
 
+    -- Reset state on first step of a new generation
+    if (step_idx or 0) == 0 then prev_error = nil; prev_n = 0 end
+
     -- Base guidance through APG (handles momentum, projection, norm thresholding)
     apg(pred_cond, pred_uncond, guidance_scale, result, Oc, T, norm_threshold)
 

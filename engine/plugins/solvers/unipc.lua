@@ -151,5 +151,8 @@ local function bh1_update(xt, vt, t_curr, t_next, n, model_fn, vt_buf, use_corre
 end
 
 function step(xt, vt, t_curr, t_prev, n, model_fn, vt_buf)
+    -- Reset state on first step of a new generation
+    if (step_index or 0) == 0 then history = {} end
+
     bh1_update(xt, vt, t_curr, t_prev, n, model_fn, vt_buf, true)
 end
