@@ -115,3 +115,57 @@ export async function runInspireAndWait(
 
   throw new Error('Inspire timed out');
 }
+
+// ── External LLM lyric generation ──────────────────────────────────
+
+export interface LlmInspireParams {
+  provider: string;
+  model?: string;
+  genres: string[];
+  subject: string;
+  language?: string;
+}
+
+export interface LlmInspireResult {
+  lyrics: string;
+  caption: string;
+  provider: string;
+  model: string;
+}
+
+export interface InspireProvider {
+  id: string;
+  name: string;
+  available: boolean;
+  models: string[];
+  default_model: string;
+}
+
+/** Generate lyrics via an external LLM provider (synchronous call) */
+export async function runLlmInspire(
+  params: LlmInspireParams,
+  token?: string,
+): Promise<LlmInspireResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE}/llm`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `LLM inspire failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/** Fetch available LLM providers for the Insta-Gen provider dropdown */
+export async function fetchInspireProviders(): Promise<InspireProvider[]> {
+  const res = await fetch(`${BASE}/llm/providers`);
+  if (!res.ok) throw new Error(`Failed to fetch providers: ${res.statusText}`);
+  return res.json();
+}

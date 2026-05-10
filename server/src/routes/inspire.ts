@@ -1,9 +1,8 @@
 // inspire.ts — Inspire API endpoint
 //
-// Wraps the engine's LM inspire mode (POST /lm?mode=inspire) to generate
-// lyrics + metadata without audio codes.  Used by Insta-Gen's "Preview
-// Lyrics" flow so the user can review/edit before committing to full
-// generation.
+// Two inspire paths:
+//   1. POST /api/inspire      — engine's built-in LM (inspire mode)
+//   2. POST /api/inspire/llm   — external LLM lyric generation
 //
 // Async job pattern mirrors generate.ts: submit → poll → result.
 
@@ -14,6 +13,9 @@ import { getUserId } from './auth.js';
 import { engineReady, engineBootStatus } from '../engineState.js';
 import { subscribeLines } from './logs.js';
 import { translateParams } from '../services/generation/translateParams.js';
+import { getProvider, listProviders } from '../services/lireek/llm/registry.js';
+import { stripThinkingBlocks, postprocessLyrics, fixSectionLabels, enforceLineCounts, fixAPrefix } from '../services/lireek/llm/postprocess.js';
+import { INSTAGEN_LYRIC_SYSTEM_PROMPT } from '../services/lireek/prompts.js';
 
 const router = Router();
 
@@ -84,22 +86,8 @@ async function runInspire(job: InspireJob, params: any): Promise<void> {
     job.stage = 'Generating lyrics & metadata...';
     job.progress = 10;
 
-    // Diagnostic logging — trace exactly what reaches the engine
-    console.log(`[Inspire] Job ${job.id} — input params:`, JSON.stringify({
-      caption: params.caption,
-      subject: params.subject,
-      vocalLanguage: params.vocalLanguage,
-      useCotCaption: params.useCotCaption,
-    }));
-    console.log(`[Inspire] Job ${job.id} — aceReq:`, JSON.stringify({
-      caption: aceReq.caption,
-      vocal_language: aceReq.vocal_language,
-      use_cot_caption: aceReq.use_cot_caption,
-      lyrics: aceReq.lyrics || '(empty)',
-      lm_temperature: aceReq.lm_temperature,
-      lm_cfg_scale: aceReq.lm_cfg_scale,
-      lm_top_p: aceReq.lm_top_p,
-    }));
+    // Log what reaches the engine
+    console.log(`[Inspire] Job ${job.id} — caption: ${(params.caption || '').substring(0, 80)}, lang: ${params.vocalLanguage}`);
 
     // Subscribe to engine logs for LM Phase 1 progress
     const unsub = subscribeLines((line) => {
@@ -229,6 +217,113 @@ router.post('/cancel/:id', (req, res) => {
   }
 
   res.json({ success: true, jobId: job.id });
+});
+
+// ── External LLM lyric generation ──────────────────────────────────
+// POST /api/inspire/llm — generate lyrics via an external LLM provider.
+// This is synchronous (not a job queue) since external LLMs respond
+// in seconds. Returns { lyrics, caption } directly.
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+  es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
+  pt: 'Portuguese', ru: 'Russian', ar: 'Arabic', hi: 'Hindi',
+  tr: 'Turkish', vi: 'Vietnamese', th: 'Thai', sv: 'Swedish',
+  pl: 'Polish', nl: 'Dutch',
+};
+
+router.post('/llm', async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const { provider: providerName, model, genres, subject, language } = req.body as {
+    provider: string;
+    model?: string;
+    genres: string[];     // e.g. ["Pop Punk", "Punk Rock"]
+    subject: string;      // e.g. "a man tired from working 9 to 5"
+    language?: string;    // e.g. "en"
+  };
+
+  if (!providerName) {
+    res.status(400).json({ error: 'Missing provider' });
+    return;
+  }
+  if (!subject?.trim()) {
+    res.status(400).json({ error: 'Missing subject — external LLM mode requires a song subject' });
+    return;
+  }
+  if (!genres?.length) {
+    res.status(400).json({ error: 'Missing genres — select at least one genre' });
+    return;
+  }
+
+  try {
+    const provider = getProvider(providerName);
+    const effectiveModel = model || provider.defaultModel;
+    const langName = LANGUAGE_NAMES[language || 'en'] || language || 'English';
+    const genreStr = genres.join(', ');
+
+    // Build user prompt
+    const userPrompt = [
+      `Genre/Style: ${genreStr}`,
+      `Subject: ${subject.trim()}`,
+      `Language: ${langName}`,
+      '',
+      'Write the lyrics now:',
+    ].join('\n');
+
+    console.log(`[Inspire/LLM] Generating lyrics via ${providerName}/${effectiveModel}`);
+    console.log(`[Inspire/LLM] Genre: ${genreStr}, Subject: ${subject}, Language: ${langName}`);
+
+    let raw = await provider.call(INSTAGEN_LYRIC_SYSTEM_PROMPT, userPrompt, effectiveModel);
+
+    // Post-process: strip thinking, clean structure, enforce line counts
+    raw = stripThinkingBlocks(raw);
+    raw = raw.replace(/<\|[a-z_]+\|>/g, '');
+    raw = raw.replace(/\[?(System|User|Assistant)\]?:.*/gi, '');
+    raw = raw.replace(/\s*\((?:Hook|You|Repeat|x\d|Refrain|Spoken|Whispered|Ad[- ]?lib|Echo)\)\s*/gi, '');
+    raw = raw.replace(/ +$/gm, '');
+
+    // Strip any title line the LLM might have added despite instructions
+    const rawLines = raw.trim().split('\n');
+    for (let i = 0; i < rawLines.length; i++) {
+      const match = rawLines[i].match(/^(?:Title:\s*|#\s*)(.*)/i);
+      if (match) {
+        const rest = rawLines.slice(i + 1);
+        while (rest.length && !rest[0].trim()) rest.shift();
+        raw = rest.join('\n');
+        break;
+      }
+      if (rawLines[i].trim().startsWith('[') || (rawLines[i].trim() && i > 2)) break;
+    }
+
+    raw = postprocessLyrics(raw);
+    raw = fixSectionLabels(raw);
+    raw = fixAPrefix(raw);
+    raw = enforceLineCounts(raw);
+
+    console.log(`[Inspire/LLM] Generated ${raw.split('\n').length} lines of lyrics`);
+
+    res.json({
+      lyrics: raw,
+      caption: genreStr,  // Caption is just the genres — built-in LM will expand it later
+      provider: providerName,
+      model: effectiveModel,
+    });
+  } catch (err: any) {
+    console.error(`[Inspire/LLM] Failed:`, err.message);
+    res.status(500).json({ error: err.message || 'LLM lyric generation failed' });
+  }
+});
+
+// GET /api/inspire/llm/providers — list available LLM providers
+router.get('/llm/providers', async (_req, res) => {
+  try {
+    const providers = await listProviders();
+    res.json(providers);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;

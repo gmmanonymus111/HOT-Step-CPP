@@ -1,21 +1,27 @@
 // InstaGenPanel.tsx — Main Insta-Gen studio container
 //
-// Genre-first music generation with optional lyrics preview.
-// State machine: Input → (optional) Preview → Generate
+// Genre-first music generation with three lyric modes:
+//   Instrumental:  no lyrics at all
+//   Lyrics:        built-in ACE-Step LM generates lyrics (random topic)
+//   Lyrics + AI:   external LLM generates subject-aware lyrics
 //
-// "Preview Lyrics" toggle controls the flow:
-//   ON:  genres → subject → Inspire → preview/edit → Generate
-//   OFF: genres → subject → Generate (engine does everything)
+// State machine: Input → (optional) Preview → Generate
 
-import React, { useState, useMemo, useCallback } from 'react';
-import { Wand2, Sparkles, Music, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Wand2, Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { GenreSelector } from './GenreSelector';
 import { InspirePreview } from './InspirePreview';
-import { runInspireAndWait, type InspireResult } from '../../services/inspireApi';
+import {
+  runInspireAndWait,
+  runLlmInspire,
+  fetchInspireProviders,
+  type InspireResult,
+  type InspireProvider,
+} from '../../services/inspireApi';
 import type { GenerationParams } from '../../types';
 
 // Vocal language options (subset matching the engine's VALID_LANGUAGES)
@@ -40,6 +46,7 @@ const LANGUAGES = [
   { value: 'nl', label: 'Nederlands' },
 ];
 
+type LyricMode = 'instrumental' | 'lyrics' | 'lyrics-ai';
 type Phase = 'input' | 'inspiring' | 'preview' | 'generating';
 
 interface InstaGenPanelProps {
@@ -56,9 +63,12 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const [previewEnabled, setPreviewEnabled] = usePersistedState('hs-instagen-preview', true);
   const [selectedGenres, setSelectedGenres] = usePersistedState<string[]>('hs-instagen-genres', []);
   const [vocalLanguage, setVocalLanguage] = usePersistedState('hs-instagen-language', 'en');
+  const [lyricMode, setLyricMode] = usePersistedState<LyricMode>('hs-instagen-lyricmode', 'lyrics');
+  const [subject, setSubject] = usePersistedState('hs-instagen-subject', '');
+  const [selectedProvider, setSelectedProvider] = usePersistedState('hs-instagen-llm-provider', '');
+  const [selectedModel, setSelectedModel] = usePersistedState('hs-instagen-llm-model', '');
 
   // ── Ephemeral state ──
-  const [subject, setSubject] = usePersistedState('hs-instagen-subject', '');
   const [additionalCaption, setAdditionalCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('input');
   const [inspireResult, setInspireResult] = useState<InspireResult | null>(null);
@@ -66,6 +76,33 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const [editedCaption, setEditedCaption] = useState('');
   const [inspireProgress, setInspireProgress] = useState('');
   const [error, setError] = useState('');
+  const [providers, setProviders] = useState<InspireProvider[]>([]);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
+
+  // ── Load LLM providers on mount ──
+  useEffect(() => {
+    if (providersLoaded) return;
+    fetchInspireProviders()
+      .then((list) => {
+        setProviders(list.filter(p => p.available));
+        setProvidersLoaded(true);
+        // Auto-select first available provider if none persisted
+        if (!selectedProvider && list.length > 0) {
+          const first = list.find(p => p.available);
+          if (first) {
+            setSelectedProvider(first.id);
+            setSelectedModel(first.default_model);
+          }
+        }
+      })
+      .catch(() => setProvidersLoaded(true));
+  }, [providersLoaded, selectedProvider, setSelectedProvider, setSelectedModel]);
+
+  // ── Current provider info ──
+  const currentProvider = useMemo(
+    () => providers.find(p => p.id === selectedProvider),
+    [providers, selectedProvider]
+  );
 
   // ── Computed caption ──
   const computedCaption = useMemo(() => {
@@ -80,71 +117,97 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   }, [selectedGenres, additionalCaption]);
 
   // ── Validation ──
-  const canSubmit = selectedGenres.length > 0 || additionalCaption.trim().length > 0;
+  const canSubmit = useMemo(() => {
+    if (selectedGenres.length === 0 && !additionalCaption.trim()) return false;
+    if (lyricMode === 'lyrics-ai' && !subject.trim()) return false;
+    if (lyricMode === 'lyrics-ai' && !selectedProvider) return false;
+    return true;
+  }, [selectedGenres, additionalCaption, lyricMode, subject, selectedProvider]);
 
   // ── Build generation params ──
   const buildParams = useCallback((lyrics: string, caption: string): Partial<GenerationParams> => ({
     caption: caption || computedCaption,
     lyrics,
-    instrumental: false,
-    subject: subject.trim() || undefined,
-    vocalLanguage,
+    instrumental: lyricMode === 'instrumental',
+    vocalLanguage: lyricMode === 'instrumental' ? undefined : vocalLanguage,
     source: 'insta-gen',
     useCotCaption: true,
-  }), [computedCaption, subject, vocalLanguage]);
+  }), [computedCaption, lyricMode, vocalLanguage]);
 
   // ── Inspire flow (preview ON) ──
   const handleInspire = useCallback(async () => {
     if (!canSubmit) return;
     setError('');
     setPhase('inspiring');
-    setInspireProgress('Starting...');
 
     try {
-      // Build caption: subject-first, genres-as-style.
-      // The LM instruction is "Expand the user's input into a detailed
-      // musical description". If the primary input IS the story/subject,
-      // the LM centres its expansion (and lyrics) on that narrative.
-      // Genres are appended as style context, not the main content.
-      const inspireCaption = subject.trim()
-        ? `${subject.trim()}. Style: ${computedCaption}`
-        : computedCaption;
-      console.log('[InstaGen] Inspire request:', { inspireCaption, subject, computedCaption, vocalLanguage, lmModel: globalParams.lmModel });
-      const result = await runInspireAndWait(
-        {
-          caption: inspireCaption,
-          subject: subject.trim() || undefined,
-          vocalLanguage,
-          useCotCaption: true,
-          // Global LM params — ensures the correct model + sampling settings
-          lmModel: globalParams.lmModel || undefined,
-          lmTemperature: globalParams.lmTemperature,
-          lmCfgScale: globalParams.lmCfgScale,
-          lmTopP: globalParams.lmTopP,
-        },
-        token || undefined,
-        (stage, _progress) => setInspireProgress(stage),
-      );
+      if (lyricMode === 'lyrics-ai') {
+        // ── External LLM path ──
+        setInspireProgress('Generating lyrics via AI...');
+        const llmResult = await runLlmInspire(
+          {
+            provider: selectedProvider,
+            model: selectedModel || undefined,
+            genres: selectedGenres,
+            subject: subject.trim(),
+            language: vocalLanguage,
+          },
+          token || undefined,
+        );
 
-      setInspireResult(result);
-      setEditedLyrics(result.lyrics);
-      setEditedCaption(result.caption);
-      setPhase('preview');
+        // Wrap into InspireResult shape (no metadata — engine generates that later)
+        const result: InspireResult = {
+          caption: llmResult.caption || computedCaption,
+          lyrics: llmResult.lyrics,
+          bpm: 0,
+          duration: 0,
+          keyScale: '',
+          timeSignature: '',
+          vocalLanguage,
+        };
+
+        setInspireResult(result);
+        setEditedLyrics(result.lyrics);
+        setEditedCaption(result.caption);
+        setPhase('preview');
+
+      } else {
+        // ── Built-in LM path ──
+        setInspireProgress('Starting...');
+        const result = await runInspireAndWait(
+          {
+            caption: computedCaption,
+            vocalLanguage,
+            useCotCaption: true,
+            lmModel: globalParams.lmModel || undefined,
+            lmTemperature: globalParams.lmTemperature,
+            lmCfgScale: globalParams.lmCfgScale,
+            lmTopP: globalParams.lmTopP,
+          },
+          token || undefined,
+          (stage, _progress) => setInspireProgress(stage),
+        );
+
+        setInspireResult(result);
+        setEditedLyrics(result.lyrics);
+        setEditedCaption(result.caption);
+        setPhase('preview');
+      }
     } catch (err: any) {
       setError(err.message || 'Inspire failed');
       setPhase('input');
     }
-  }, [canSubmit, computedCaption, subject, vocalLanguage, globalParams, token]);
+  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, globalParams, token]);
 
   // ── Generate from preview ──
   const handleGenerateFromPreview = useCallback(() => {
     if (!inspireResult) return;
     const params = buildParams(editedLyrics, editedCaption);
-    // Include metadata from inspire result
-    params.bpm = inspireResult.bpm;
-    params.duration = inspireResult.duration;
-    params.keyScale = inspireResult.keyScale;
-    params.timeSignature = inspireResult.timeSignature;
+    // Include metadata from inspire result (may be 0 if from LLM path — engine fills in)
+    if (inspireResult.bpm) params.bpm = inspireResult.bpm;
+    if (inspireResult.duration) params.duration = inspireResult.duration;
+    if (inspireResult.keyScale) params.keyScale = inspireResult.keyScale;
+    if (inspireResult.timeSignature) params.timeSignature = inspireResult.timeSignature;
     onGenerate(params);
     // Return to input after queuing
     setPhase('input');
@@ -152,11 +215,42 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   }, [inspireResult, editedLyrics, editedCaption, buildParams, onGenerate]);
 
   // ── Direct generate (preview OFF) ──
-  const handleDirectGenerate = useCallback(() => {
+  const handleDirectGenerate = useCallback(async () => {
     if (!canSubmit) return;
-    const params = buildParams('', computedCaption);
-    onGenerate(params);
-  }, [canSubmit, computedCaption, buildParams, onGenerate]);
+
+    if (lyricMode === 'lyrics-ai') {
+      // Even with preview OFF, we still need to call the LLM for lyrics
+      setError('');
+      setPhase('inspiring');
+      setInspireProgress('Generating lyrics via AI...');
+
+      try {
+        const llmResult = await runLlmInspire(
+          {
+            provider: selectedProvider,
+            model: selectedModel || undefined,
+            genres: selectedGenres,
+            subject: subject.trim(),
+            language: vocalLanguage,
+          },
+          token || undefined,
+        );
+
+        // Skip preview, go straight to generate
+        const params = buildParams(llmResult.lyrics, llmResult.caption || computedCaption);
+        onGenerate(params);
+        setPhase('input');
+      } catch (err: any) {
+        setError(err.message || 'LLM lyric generation failed');
+        setPhase('input');
+      }
+    } else {
+      // Instrumental or built-in lyrics: standard direct generate
+      const lyrics = lyricMode === 'instrumental' ? '[Instrumental]' : '';
+      const params = buildParams(lyrics, computedCaption);
+      onGenerate(params);
+    }
+  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, buildParams, onGenerate, token]);
 
   // ── Back to input from preview ──
   const handleBack = useCallback(() => {
@@ -205,19 +299,91 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
         {/* Genre Selector */}
         <GenreSelector selected={selectedGenres} onChange={setSelectedGenres} />
 
-        {/* Subject */}
+        {/* ── Lyric Mode Selector (3-way segmented control) ── */}
         <div>
           <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-            {t('instaGen.subjectLabel')}
+            Vocal Mode
           </label>
-          <input
-            type="text"
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-            placeholder={t('instaGen.subjectPlaceholder')}
-            className="w-full rounded-xl border border-zinc-300 dark:border-white/10 bg-zinc-50 dark:bg-white/5 px-3 py-2.5 text-sm text-zinc-900 dark:text-white placeholder:text-zinc-400 dark:placeholder:text-zinc-500 outline-none focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 transition-all"
-          />
+          <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
+            {([
+              { value: 'instrumental' as LyricMode, label: 'Instrumental', icon: MicOff },
+              { value: 'lyrics' as LyricMode, label: 'Lyrics', icon: Mic },
+              { value: 'lyrics-ai' as LyricMode, label: 'Lyrics + AI', icon: Bot },
+            ]).map(({ value, label, icon: Icon }) => (
+              <button
+                key={value}
+                onClick={() => setLyricMode(value)}
+                className={`
+                  flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-all duration-200
+                  ${lyricMode === value
+                    ? 'bg-gradient-to-r from-violet-600 to-pink-600 text-white shadow-inner'
+                    : 'bg-zinc-50 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/10'
+                  }
+                `}
+              >
+                <Icon size={13} />
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* ── Subject (only for Lyrics + AI) ── */}
+        {lyricMode === 'lyrics-ai' && (
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+              Song Subject <span className="text-pink-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="e.g. a man tired from a life of working 9 to 5"
+              className="w-full rounded-xl border border-zinc-300 dark:border-white/10 bg-zinc-50 dark:bg-white/5 px-3 py-2.5 text-sm text-zinc-900 dark:text-white placeholder:text-zinc-400 dark:placeholder:text-zinc-500 outline-none focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 transition-all"
+            />
+          </div>
+        )}
+
+        {/* ── LLM Provider & Model (only for Lyrics + AI) ── */}
+        {lyricMode === 'lyrics-ai' && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+                LLM Provider
+              </label>
+              <select
+                value={selectedProvider}
+                onChange={(e) => {
+                  setSelectedProvider(e.target.value);
+                  const prov = providers.find(p => p.id === e.target.value);
+                  if (prov) setSelectedModel(prov.default_model);
+                }}
+                className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
+              >
+                {providers.length === 0 && (
+                  <option value="">No providers available</option>
+                )}
+                {providers.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+                Model
+              </label>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
+              >
+                {(currentProvider?.models || []).map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
         {/* Additional caption */}
         <div>
@@ -233,21 +399,23 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           />
         </div>
 
-        {/* Language selector */}
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-            {t('instaGen.languageLabel')}
-          </label>
-          <select
-            value={vocalLanguage}
-            onChange={(e) => setVocalLanguage(e.target.value)}
-            className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
-          >
-            {LANGUAGES.map(lang => (
-              <option key={lang.value} value={lang.value}>{lang.label}</option>
-            ))}
-          </select>
-        </div>
+        {/* Language selector (hidden for instrumental) */}
+        {lyricMode !== 'instrumental' && (
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+              {t('instaGen.languageLabel')}
+            </label>
+            <select
+              value={vocalLanguage}
+              onChange={(e) => setVocalLanguage(e.target.value)}
+              className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
+            >
+              {LANGUAGES.map(lang => (
+                <option key={lang.value} value={lang.value}>{lang.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Caption preview */}
         {computedCaption && (
@@ -261,31 +429,35 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           </div>
         )}
 
-        {/* Preview toggle */}
-        <div className="flex items-center justify-between py-2">
-          <div className="flex items-center gap-2">
-            {previewEnabled ? <Eye size={14} className="text-violet-400" /> : <EyeOff size={14} className="text-zinc-400" />}
-            <span className="text-sm text-zinc-700 dark:text-zinc-300">
-              {t('instaGen.previewToggle')}
-            </span>
-          </div>
-          <button
-            onClick={() => setPreviewEnabled(!previewEnabled)}
-            className={`
-              relative w-10 h-5 rounded-full transition-colors duration-200
-              ${previewEnabled ? 'bg-violet-500' : 'bg-zinc-300 dark:bg-zinc-600'}
-            `}
-          >
-            <div className={`
-              absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200
-              ${previewEnabled ? 'translate-x-5' : 'translate-x-0.5'}
-            `} />
-          </button>
-        </div>
-        {previewEnabled && (
-          <p className="text-xs text-zinc-400 dark:text-zinc-500 -mt-2">
-            {t('instaGen.previewToggleHint')}
-          </p>
+        {/* Preview toggle (hidden for instrumental) */}
+        {lyricMode !== 'instrumental' && (
+          <>
+            <div className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2">
+                {previewEnabled ? <Eye size={14} className="text-violet-400" /> : <EyeOff size={14} className="text-zinc-400" />}
+                <span className="text-sm text-zinc-700 dark:text-zinc-300">
+                  {t('instaGen.previewToggle')}
+                </span>
+              </div>
+              <button
+                onClick={() => setPreviewEnabled(!previewEnabled)}
+                className={`
+                  relative w-10 h-5 rounded-full transition-colors duration-200
+                  ${previewEnabled ? 'bg-violet-500' : 'bg-zinc-300 dark:bg-zinc-600'}
+                `}
+              >
+                <div className={`
+                  absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200
+                  ${previewEnabled ? 'translate-x-5' : 'translate-x-0.5'}
+                `} />
+              </button>
+            </div>
+            {previewEnabled && (
+              <p className="text-xs text-zinc-400 dark:text-zinc-500 -mt-2">
+                {t('instaGen.previewToggleHint')}
+              </p>
+            )}
+          </>
         )}
 
         {/* Error display */}
@@ -306,14 +478,14 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
               {inspireProgress || t('instaGen.inspireLoading')}
             </button>
           </div>
-        ) : previewEnabled ? (
+        ) : lyricMode !== 'instrumental' && previewEnabled ? (
           <button
             onClick={handleInspire}
             disabled={!canSubmit || activeJobCount > 0}
             className="w-full py-3 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-violet-600 to-pink-600 hover:from-violet-500 hover:to-pink-500 shadow-lg shadow-violet-500/20 hover:shadow-violet-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            <Sparkles size={16} />
-            {t('instaGen.inspire')}
+            {lyricMode === 'lyrics-ai' ? <Bot size={16} /> : <Sparkles size={16} />}
+            {lyricMode === 'lyrics-ai' ? 'Generate Lyrics' : t('instaGen.inspire')}
           </button>
         ) : (
           <button
