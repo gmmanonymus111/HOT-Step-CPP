@@ -31,11 +31,6 @@
 // latents_out: optional capture of one post-DiT latent per generated track,
 //   indexed identically to audio_out. Each entry is [T_track * 64] f32 time-major,
 //   T_track = entry.size() / 64. Pass NULL to skip the capture.
-// source_latents_out: optional capture of the VAE-encoded source audio latent
-//   (cover_latents from ops_encode_src). Shared across all tracks — only
-//   populated for cover/repaint/lego/extract tasks that performed a fresh VAE
-//   encode (not when src_latents were already provided). Pass NULL to skip.
-// source_T_latent_out: receives T_cover (number of 25Hz frames) when captured.
 // Returns 0 on success, -1 on any error or cancellation.
 static int synth_batch_run(AceSynth *                             ctx,
                            std::vector<std::vector<AceRequest>> & groups,
@@ -50,8 +45,6 @@ static int synth_batch_run(AceSynth *                             ctx,
                            AceAudio *                             audio_out,
                            std::string *                          lrc_out = nullptr,
                            std::vector<std::vector<float>> *      latents_out = nullptr,
-                           std::vector<float> *                   source_latents_out = nullptr,
-                           int *                                  source_T_latent_out = nullptr,
                            bool (*cancel)(void *)                             = nullptr,
                            void * cancel_data                                 = nullptr) {
     const int                  n_groups = (int) groups.size();
@@ -96,21 +89,6 @@ static int synth_batch_run(AceSynth *                             ctx,
                 const float * src = ace_synth_job_get_latent(jobs[g], i, &T);
                 (*latents_out)[audio_off[g] + i].assign(src, src + (size_t) T * 64);
             }
-        }
-    }
-
-    // Capture VAE-encoded source latent from first group (shared across all
-    // tracks). Only non-empty when ops_encode_src actually ran the VAE
-    // encoder (not when the caller provided pre-encoded src_latents).
-    if (source_latents_out && source_T_latent_out) {
-        int           T_src   = 0;
-        const float * src_lat = ace_synth_job_get_source_latent(jobs[0], &T_src);
-        if (src_lat && T_src > 0) {
-            source_latents_out->assign(src_lat, src_lat + (size_t) T_src * 64);
-            *source_T_latent_out = T_src;
-        } else {
-            source_latents_out->clear();
-            *source_T_latent_out = 0;
         }
     }
 

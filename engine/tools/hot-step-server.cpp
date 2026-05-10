@@ -240,7 +240,6 @@ struct Job {
     std::string       result_mime;
     std::string       result_lrc;   // LRC timestamp text (base64), empty if not generated
     std::vector<float> result_latent; // post-DiT latent [T*64] float32, empty if not captured
-    std::vector<float> result_source_latent; // VAE-encoded source latent [T_cover*64] f32 (cover tasks only)
     std::atomic<bool> cancel{ false };
 
     // memory ordering contract: result_body and result_mime are written
@@ -1010,8 +1009,6 @@ static void synth_worker(std::shared_ptr<Job>    job,
     // Two-phase run (+ optional Phase 3 LRC).
     std::vector<std::string> lrc_results(total_alloc);
     std::vector<std::vector<float>> captured_latents;
-    std::vector<float> captured_source_latent;
-    int captured_source_T = 0;
     const int rc = synth_batch_run(ctx, groups,
                                    src_interleaved, src_len,
                                    src_latents, src_T_latent,
@@ -1020,8 +1017,6 @@ static void synth_worker(std::shared_ptr<Job>    job,
                                    audio.data(),
                                    lrc_results.data(),
                                    &captured_latents,
-                                   &captured_source_latent,
-                                   &captured_source_T,
                                    server_cancel_job, (void *) &job->cancel);
     ace_synth_free(ctx);
     free(src_interleaved);
@@ -1033,13 +1028,6 @@ static void synth_worker(std::shared_ptr<Job>    job,
         job->result_latent = std::move(captured_latents[0]);
         fprintf(stderr, "[Server] Latent captured: T=%zu (%.1fs @ 25Hz)\n",
                 job->result_latent.size() / 64, (float)(job->result_latent.size() / 64) / 25.0f);
-    }
-
-    // Store source latent (VAE-encoded source audio) for /job?source_latent=1
-    if (!captured_source_latent.empty()) {
-        job->result_source_latent = std::move(captured_source_latent);
-        fprintf(stderr, "[Server] Source latent captured: T=%d (%.1fs @ 25Hz)\n",
-                captured_source_T, (float)captured_source_T / 25.0f);
     }
 
     // Store LRC for the first track (used by the Node server)
@@ -1804,18 +1792,6 @@ int main(int argc, char ** argv) {
         auto job = job_find(req.get_param_value("id"));
         if (!job) {
             json_error(res, 404, "Job not found");
-            return;
-        }
-        // ?source_latent=1: return raw VAE-encoded source latent (cover tasks)
-        if (req.has_param("source_latent") && req.get_param_value("source_latent") == "1") {
-            if (job->status.load() != 1 || job->result_source_latent.empty()) {
-                res.status = 204;  // No Content — no source latent captured
-                return;
-            }
-            res.set_content(
-                reinterpret_cast<const char *>(job->result_source_latent.data()),
-                job->result_source_latent.size() * sizeof(float),
-                "application/octet-stream");
             return;
         }
         // ?latent=1: return raw post-DiT latent bytes (float32, [T*64])
