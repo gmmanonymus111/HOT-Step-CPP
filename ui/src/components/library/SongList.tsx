@@ -16,8 +16,8 @@ type SourceFilter = 'all' | 'create' | 'insta-gen' | 'lyric-studio' | 'cover-stu
 
 const SOURCE_FILTERS: { id: SourceFilter; label: string; color: string }[] = [
   { id: 'all',           label: 'All',           color: 'text-zinc-700 dark:text-zinc-300 bg-white/10 border-zinc-300 dark:border-white/10' },
-  { id: 'create',        label: 'Create',        color: 'text-violet-300 bg-violet-500/15 border-violet-500/25' },
-  { id: 'insta-gen',     label: 'Insta-Gen',     color: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/25' },
+  { id: 'create',        label: 'Custom-Gen',   color: 'text-violet-300 bg-violet-500/15 border-violet-500/25' },
+  { id: 'insta-gen',     label: 'Auto-Gen',      color: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/25' },
   { id: 'lyric-studio',  label: 'Lyric Studio',  color: 'text-pink-300 bg-pink-500/15 border-pink-500/25' },
   { id: 'cover-studio',  label: 'Cover Studio',  color: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
 ];

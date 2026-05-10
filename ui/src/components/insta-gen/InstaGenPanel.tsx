@@ -324,7 +324,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
 
     // Create queue item immediately
     const queueId = addManualQueueItem({
-      title: params.title || computedCaption || 'Insta-Gen',
+      title: params.title || computedCaption || 'Auto-Gen',
       caption: editedCaption,
     });
 
@@ -399,7 +399,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
 
     // Create queue item immediately — user sees it right away
     const queueId = addManualQueueItem({
-      title: capturedCaption || 'Insta-Gen',
+      title: capturedCaption || 'Auto-Gen',
       caption: capturedCaption,
     });
     updateManualQueueItem(queueId, {
