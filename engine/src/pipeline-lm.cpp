@@ -696,6 +696,8 @@ int ace_lm_generate(AceLm *            ctx,
             std::string user_msg = ace.caption;
             if (ace.lyrics == "[Instrumental]") {
                 user_msg += "\n\ninstrumental: true";
+            } else {
+                user_msg += "\n\ninstrumental: false";
             }
             prompt = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
         } else if (mode == LM_MODE_FORMAT) {
