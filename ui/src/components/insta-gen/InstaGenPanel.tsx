@@ -310,7 +310,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
 
   // ── Generate from preview ──
   const handleGenerateFromPreview = useCallback(() => {
-    if (!inspireResult) return;
+    if (!inspireResult || !token) return;
     const params = buildParams(editedLyrics, editedCaption);
     // Prefer LLM-generated title, then derive from lyrics, then caption
     params.title = inspireResult.title || deriveTitleFromLyrics(editedLyrics) || computedCaption;
@@ -319,11 +319,64 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
     if (inspireResult.duration) params.duration = inspireResult.duration;
     if (inspireResult.keyScale) params.keyScale = inspireResult.keyScale;
     if (inspireResult.timeSignature) params.timeSignature = inspireResult.timeSignature;
-    onGenerate(params);
+
+    const capturedToken = token;
+
+    // Create queue item immediately
+    const queueId = addManualQueueItem({
+      title: params.title || computedCaption || 'Insta-Gen',
+      caption: editedCaption,
+    });
+
+    // Submit via serial queue
+    enqueueInstaJob(async () => {
+      try {
+        updateManualQueueItem(queueId, { stage: 'Submitting to engine…' });
+        const engineParams = globalParams.getGlobalParams();
+        const enrichedParams = {
+          ...engineParams,
+          ...params,
+          source: 'insta-gen',
+          coResident: (() => { try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').coResident; } catch { return false; } })(),
+          cacheLmCodes: (() => { try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').cacheLmCodes; } catch { return true; } })(),
+        };
+
+        const res = await generateApi.submit(enrichedParams as any, capturedToken);
+        updateManualQueueItem(queueId, { jobId: res.jobId, stage: 'Generating audio…' });
+
+        // Poll until done
+        const startTime = Date.now();
+        while (true) {
+          await new Promise(r => setTimeout(r, 1500));
+          const status = await generateApi.status(res.jobId);
+          const progress = status.progress !== undefined
+            ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
+            : undefined;
+          updateManualQueueItem(queueId, {
+            progress,
+            stage: status.stage || 'Generating…',
+            elapsed: Math.round((Date.now() - startTime) / 1000),
+          });
+
+          if (status.status === 'completed' && status.song) {
+            completeManualQueueItem(queueId, status.song);
+            onSongCreated?.(status.song);
+            break;
+          }
+          if (status.status === 'failed' || status.status === 'cancelled') {
+            failManualQueueItem(queueId, status.error || 'Generation failed');
+            break;
+          }
+        }
+      } catch (err: any) {
+        failManualQueueItem(queueId, err.message || 'Generation failed');
+      }
+    });
+
     // Return to input after queuing
     setPhase('input');
     setInspireResult(null);
-  }, [inspireResult, editedLyrics, editedCaption, computedCaption, buildParams, onGenerate]);
+  }, [inspireResult, editedLyrics, editedCaption, computedCaption, buildParams, token, globalParams, onSongCreated]);
 
   // ── Direct generate (preview OFF) ──
   // Non-blocking: creates a queue item immediately, runs inspire + generate
