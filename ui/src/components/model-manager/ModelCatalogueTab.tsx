@@ -89,6 +89,7 @@ const CollapsibleGroup: React.FC<{
   onDelete: (filename: string) => void;
   defaultOpen?: boolean;
 }> = ({ group, downloadJobs, onDownload, onCancel, onResume, onDelete, defaultOpen = false }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   const [showInfo, setShowInfo] = useState(false);
   const installed = group.files.filter(f => f.installed).length;
@@ -146,7 +147,6 @@ const CollapsibleGroup: React.FC<{
 // ── Main component ──────────────────────────────────────────
 
 export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDownload, onCancel, onResume, onDelete }) => {
-  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<RoleTab>('dit');
 
   const ditGroups = useMemo(() => groupDitFiles(files), [files]);

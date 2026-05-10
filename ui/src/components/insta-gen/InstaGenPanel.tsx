@@ -128,7 +128,7 @@ async function _drainInstaQueue() {
   _instaRunning = false;
 }
 
-export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, activeJobCount }) => {
+export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, activeJobCount: _activeJobCount }) => {
   const { t } = useTranslation();
   const { token } = useAuth();
   const globalParams = useGlobalParams();
@@ -358,9 +358,22 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
             elapsed: Math.round((Date.now() - startTime) / 1000),
           });
 
-          if (status.status === 'completed' && status.song) {
-            completeManualQueueItem(queueId, status.song);
-            onSongCreated?.(status.song);
+          if (status.status === 'succeeded') {
+            const audioUrl = status.result?.audioUrls?.[0] || '';
+            const songId = status.result?.songIds?.[0];
+            completeManualQueueItem(queueId, {
+              audioUrl,
+              songId,
+              masteredAudioUrl: status.result?.masteredAudioUrl,
+              audioDuration: status.result?.duration,
+            });
+            // Notify App to refresh library
+            if (songId) {
+              try {
+                const { song } = await songApi.get(songId);
+                onSongCreated?.(song);
+              } catch { /* non-fatal */ }
+            }
             break;
           }
           if (status.status === 'failed' || status.status === 'cancelled') {
