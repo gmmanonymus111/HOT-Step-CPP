@@ -218,13 +218,22 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const handleDirectGenerate = useCallback(async () => {
     if (!canSubmit) return;
 
-    if (lyricMode === 'lyrics-ai') {
-      // Even with preview OFF, we still need to call the LLM for lyrics
-      setError('');
-      setPhase('inspiring');
-      setInspireProgress('Generating lyrics via AI...');
+    if (lyricMode === 'instrumental') {
+      // Instrumental: no lyrics needed, go straight to generate
+      const params = buildParams('[Instrumental]', computedCaption);
+      onGenerate(params);
+      return;
+    }
 
-      try {
+    // For both 'lyrics' and 'lyrics-ai': generate lyrics first, then generate audio.
+    // This mirrors the preview ON flow but skips the user review step.
+    setError('');
+    setPhase('inspiring');
+
+    try {
+      if (lyricMode === 'lyrics-ai') {
+        // External LLM path
+        setInspireProgress('Generating lyrics via AI...');
         const llmResult = await runLlmInspire(
           {
             provider: selectedProvider,
@@ -235,22 +244,41 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
           },
           token || undefined,
         );
-
-        // Skip preview, go straight to generate
         const params = buildParams(llmResult.lyrics, llmResult.caption || computedCaption);
         onGenerate(params);
-        setPhase('input');
-      } catch (err: any) {
-        setError(err.message || 'LLM lyric generation failed');
-        setPhase('input');
+
+      } else {
+        // Built-in LM path: run inspire to generate lyrics, then feed to generate
+        setInspireProgress('Generating lyrics...');
+        const result = await runInspireAndWait(
+          {
+            caption: computedCaption,
+            vocalLanguage,
+            useCotCaption: true,
+            lmModel: globalParams.lmModel || undefined,
+            lmTemperature: globalParams.lmTemperature,
+            lmCfgScale: globalParams.lmCfgScale,
+            lmTopP: globalParams.lmTopP,
+          },
+          token || undefined,
+          (stage, _progress) => setInspireProgress(stage),
+        );
+
+        // Feed inspire result straight to generate (no preview)
+        const params = buildParams(result.lyrics, result.caption);
+        if (result.bpm) params.bpm = result.bpm;
+        if (result.duration) params.duration = result.duration;
+        if (result.keyScale) params.keyScale = result.keyScale;
+        if (result.timeSignature) params.timeSignature = result.timeSignature;
+        onGenerate(params);
       }
-    } else {
-      // Instrumental or built-in lyrics: standard direct generate
-      const lyrics = lyricMode === 'instrumental' ? '[Instrumental]' : '';
-      const params = buildParams(lyrics, computedCaption);
-      onGenerate(params);
+
+      setPhase('input');
+    } catch (err: any) {
+      setError(err.message || 'Lyric generation failed');
+      setPhase('input');
     }
-  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, buildParams, onGenerate, token]);
+  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, buildParams, onGenerate, token, globalParams]);
 
   // ── Back to input from preview ──
   const handleBack = useCallback(() => {
