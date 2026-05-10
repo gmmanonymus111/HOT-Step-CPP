@@ -54,6 +54,54 @@ interface InstaGenPanelProps {
   activeJobCount: number;
 }
 
+/** Derive a song title from lyrics. Prefers [Chorus] first line, then [Verse 1], then first lyric line. */
+function deriveTitleFromLyrics(lyrics: string): string {
+  if (!lyrics || lyrics === '[Instrumental]') return '';
+
+  const lines = lyrics.split(/\r?\n/);
+  const sectionRe = /^\s*\[(.+?)\]\s*$/;
+
+  // Build a map of section → first meaningful lyric line
+  const sections: Record<string, string> = {};
+  let currentSection = '';
+  for (const line of lines) {
+    const m = line.match(sectionRe);
+    if (m) {
+      currentSection = m[1].trim().toLowerCase();
+      continue;
+    }
+    const trimmed = line.trim();
+    // Skip empty lines, parenthetical backing vocals, and "[Instrumental]" markers
+    if (!trimmed || trimmed.startsWith('(') || trimmed.toLowerCase() === '[instrumental]') continue;
+    if (currentSection && !sections[currentSection]) {
+      sections[currentSection] = trimmed;
+    }
+  }
+
+  // Priority: chorus → verse 1 → verse → first any section
+  const chorusKey = Object.keys(sections).find(k => k.startsWith('chorus'));
+  if (chorusKey) return cleanTitle(sections[chorusKey]);
+
+  const verse1Key = Object.keys(sections).find(k => k === 'verse 1');
+  if (verse1Key) return cleanTitle(sections[verse1Key]);
+
+  const verseKey = Object.keys(sections).find(k => k.startsWith('verse'));
+  if (verseKey) return cleanTitle(sections[verseKey]);
+
+  // Fallback: first value in any section
+  const firstVal = Object.values(sections)[0];
+  return firstVal ? cleanTitle(firstVal) : '';
+}
+
+/** Clean up a lyric line for use as a title */
+function cleanTitle(line: string): string {
+  // Remove trailing punctuation, parenthetical asides, and limit length
+  let t = line.replace(/\s*\(.*?\)\s*/g, '').trim();
+  t = t.replace(/[,.!?;:]+$/, '').trim();
+  if (t.length > 60) t = t.substring(0, 57) + '...';
+  return t;
+}
+
 export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, activeJobCount }) => {
   const { t } = useTranslation();
   const { token } = useAuth();
@@ -221,7 +269,9 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
   const handleGenerateFromPreview = useCallback(() => {
     if (!inspireResult) return;
     const params = buildParams(editedLyrics, editedCaption);
-    // Include metadata from inspire result (may be 0 if from LLM path — engine fills in)
+    // Derive title from lyrics
+    params.title = deriveTitleFromLyrics(editedLyrics) || computedCaption;
+    // Include metadata from inspire result
     if (inspireResult.bpm) params.bpm = inspireResult.bpm;
     if (inspireResult.duration) params.duration = inspireResult.duration;
     if (inspireResult.keyScale) params.keyScale = inspireResult.keyScale;
@@ -230,7 +280,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
     // Return to input after queuing
     setPhase('input');
     setInspireResult(null);
-  }, [inspireResult, editedLyrics, editedCaption, buildParams, onGenerate]);
+  }, [inspireResult, editedLyrics, editedCaption, computedCaption, buildParams, onGenerate]);
 
   // ── Direct generate (preview OFF) ──
   const handleDirectGenerate = useCallback(async () => {
@@ -297,6 +347,8 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
       // for metadata (bpm, duration, key, timesig) and lyrics.
       const finalLyrics = resolvedLyrics || inspireResult.lyrics;
       const params = buildParams(finalLyrics, resolvedCaption);
+      // Derive title from lyrics (or use caption as fallback)
+      params.title = deriveTitleFromLyrics(finalLyrics) || resolvedCaption;
       if (inspireResult.bpm) params.bpm = inspireResult.bpm;
       if (inspireResult.duration) params.duration = inspireResult.duration;
       if (inspireResult.keyScale) params.keyScale = inspireResult.keyScale;
@@ -560,7 +612,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
         ) : lyricMode !== 'instrumental' && previewEnabled ? (
           <button
             onClick={handleInspire}
-            disabled={!canSubmit || activeJobCount > 0}
+            disabled={!canSubmit}
             className="w-full py-3 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-violet-600 to-pink-600 hover:from-violet-500 hover:to-pink-500 shadow-lg shadow-violet-500/20 hover:shadow-violet-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {lyricMode === 'lyrics-ai' ? <Bot size={16} /> : <Sparkles size={16} />}
@@ -569,7 +621,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onGenerate, active
         ) : (
           <button
             onClick={handleDirectGenerate}
-            disabled={!canSubmit || activeJobCount > 0}
+            disabled={!canSubmit}
             className="w-full py-3 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-pink-600 to-violet-600 hover:from-pink-500 hover:to-violet-500 shadow-lg shadow-pink-500/20 hover:shadow-pink-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             <Music size={16} />
