@@ -13,17 +13,35 @@ import https from 'https';
 import http from 'http';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
-import { config } from '../config.js';
+import { config, PORTABLE_MODE, PROJECT_ROOT } from '../config.js';
 
 // Load registry - resolve path based on mode:
 // - Dev mode: relative to source file (../data/model-registry.json from services/)
 // - Portable mode: PROJECT_ROOT/server/data/model-registry.json
-import { config as appConfig, PORTABLE_MODE, PROJECT_ROOT } from '../config.js';
 
 const registryPath = PORTABLE_MODE
   ? path.join(PROJECT_ROOT, 'server', 'data', 'model-registry.json')
   : path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'model-registry.json');
 const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+
+// Engine variant detection — controls which registry items are visible.
+// 'cuda' (default for legacy/pre-v1.1 builds) shows everything;
+// 'vulkan' or 'cpu' hides CUDA-specific files, packs, and runtime.
+function detectEngineVariant(): string {
+  try {
+    const variantFile = path.join(path.dirname(config.aceServer.exe), '.variant');
+    if (fs.existsSync(variantFile)) {
+      return fs.readFileSync(variantFile, 'utf-8').trim();
+    }
+  } catch {}
+  return 'cuda'; // Assume CUDA if no marker
+}
+const ENGINE_VARIANT = detectEngineVariant();
+
+// IDs of CUDA-only file entries
+const CUDA_ONLY_FILE_PREFIXES = ['cuda-rt-', 'supersep-rt-'];
+// IDs of CUDA-only packs (hidden entirely for non-CUDA)
+const CUDA_ONLY_PACKS = ['cuda-runtime', 'supersep-runtime', 'blackwell'];
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -87,16 +105,33 @@ class ModelDownloadService extends EventEmitter {
       : this.modelsDir;
   }
 
-  /** Get all files in the registry, enriched with installed status */
-  getRegistry(): { packs: typeof registry.packs; files: (RegistryFile & { installed: boolean })[]; modelsDir: string } {
+  /** Get all files in the registry, enriched with installed status.
+   *  Filters out CUDA-specific entries for non-CUDA engine variants. */
+  getRegistry(): { packs: any[]; files: (RegistryFile & { installed: boolean })[]; modelsDir: string; variant: string } {
     const installed = this.getInstalledFiles();
-    return {
-      packs: registry.packs,
-      files: registry.files.map((f: RegistryFile) => ({
+    const isCuda = ENGINE_VARIANT === 'cuda';
+
+    // Filter files: hide CUDA-only entries for non-CUDA builds
+    const filteredFiles = registry.files
+      .filter((f: RegistryFile) => isCuda || !CUDA_ONLY_FILE_PREFIXES.some(p => f.id.startsWith(p)))
+      .map((f: RegistryFile) => ({
         ...f,
         installed: installed.has(f.filename),
-      })),
+      }));
+
+    // Filter packs: hide CUDA-only packs, strip CUDA file IDs from remaining
+    const filteredPacks = registry.packs
+      .filter((p: any) => isCuda || !CUDA_ONLY_PACKS.includes(p.id))
+      .map((p: any) => isCuda ? p : {
+        ...p,
+        fileIds: p.fileIds.filter((id: string) => !CUDA_ONLY_FILE_PREFIXES.some(pfx => id.startsWith(pfx))),
+      });
+
+    return {
+      packs: filteredPacks,
+      files: filteredFiles,
       modelsDir: this.modelsDir,
+      variant: ENGINE_VARIANT,
     };
   }
 
