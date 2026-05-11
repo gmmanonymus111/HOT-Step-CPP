@@ -165,6 +165,12 @@ jobs:
           Expand-Archive -Path $nodeZip -DestinationPath release/.node-cache -Force
 
       # ── Build Engine ───────────────────────────────────────────
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
       - name: Setup sccache (compiler cache)
         uses: mozilla-actions/sccache-action@v0.0.7
 
@@ -181,15 +187,22 @@ jobs:
             if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force; Write-Host "Cleared CMake cache (Vulkan)" }
           }
           Push-Location $buildDir
-          cmake .. ${{ matrix.cmake_flags }} `
+          # Use Ninja generator — Visual Studio generator ignores COMPILER_LAUNCHER
+          cmake .. -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            ${{ matrix.cmake_flags }} `
             -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CUDA_COMPILER_LAUNCHER=sccache
-          cmake --build . --config Release -j $env:NUMBER_OF_PROCESSORS
+          cmake --build . -j $env:NUMBER_OF_PROCESSORS
           Pop-Location
 
-          # Verify output
-          $aceServer = "engine/build/Release/ace-server.exe"
+          # Verify output (Ninja puts binaries in build/ directly, not build/Release/)
+          $aceServer = "engine/build/bin/ace-server.exe"
+          if (-not (Test-Path $aceServer)) {
+            # Fallback: check directly in build/
+            $aceServer = "engine/build/ace-server.exe"
+          }
           if (-not (Test-Path $aceServer)) {
             throw "Build failed: ace-server.exe not found"
           }
@@ -257,7 +270,15 @@ jobs:
           # Engine: binaries + DLLs
           $engineOut = "$dist/engine"
           New-Item -ItemType Directory -Force $engineOut | Out-Null
-          $buildRelease = "engine/build/Release"
+          # Ninja outputs to build/ directly; VS generator outputs to build/Release/
+          $buildRelease = if (Test-Path "engine/build/Release/ace-server.exe") {
+            "engine/build/Release"
+          } elseif (Test-Path "engine/build/bin/ace-server.exe") {
+            "engine/build/bin"
+          } else {
+            "engine/build"
+          }
+          Write-Host "Engine output directory: $buildRelease"
 
           $engineFiles = @(
             "ace-server.exe", "mastering.exe", "mp3-codec.exe",
