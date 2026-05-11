@@ -564,6 +564,9 @@ export const CoverStudio: React.FC = () => {
             }
           }}
           onLatentClear={() => setSourceLatentUrl('')}
+          timbreOverridePath={timbreOverridePath}
+          onTimbreOverridePathChange={setTimbreOverridePath}
+          token={token}
         />
 
         {/* Center: Lyrics */}
@@ -614,7 +617,6 @@ export const CoverStudio: React.FC = () => {
           bpmCorrection={bpmCorrection}
           keyOverride={keyOverride}
           artistCaption={artistCaption} onArtistCaptionChange={setArtistCaption}
-          timbreOverridePath={timbreOverridePath} onTimbreOverridePathChange={setTimbreOverridePath}
           canGenerate={canGenerate}
           isGenerating={isGenerating} genProgress={genProgress} genStage={genStage}
           onGenerate={handleGenerate} onCancel={handleCancel}

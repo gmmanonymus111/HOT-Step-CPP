@@ -1,6 +1,6 @@
 // ArtistSettingsPanel.tsx — Right panel: artist selector + cover settings + generate
 import React from 'react';
-import { Guitar, Disc3, Zap, Music, ChevronDown, Loader2, Type, X, Mic, Volume2 } from 'lucide-react';
+import { Guitar, Disc3, Zap, Music, ChevronDown, Loader2, Type, X, Mic } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { EditableSlider } from './EditableSlider';
 import { transposeKey, type AudioAnalysis } from './coverStudioUtils';
@@ -32,8 +32,6 @@ interface ArtistSettingsPanelProps {
   keyOverride: string | null;
   artistCaption: string;
   onArtistCaptionChange: (v: string) => void;
-  timbreOverridePath: string;
-  onTimbreOverridePathChange: (v: string) => void;
   canGenerate: boolean;
   isGenerating: boolean;
   genProgress: number;
@@ -50,7 +48,6 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
     noFsq, onNoFsqChange, instrumental, onInstrumentalChange,
     tempoScale, onTempoScale, pitchShift, onPitchShift, analysis, bpmCorrection, keyOverride,
     artistCaption, onArtistCaptionChange,
-    timbreOverridePath, onTimbreOverridePathChange,
     canGenerate, isGenerating, genProgress, genStage, onGenerate, onCancel,
   } = props;
 
@@ -251,45 +248,6 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
             return shifted && v !== 0 ? `${sign}${v} st → ${shifted}` : `${sign}${v} st`;
           }}
           helpText={`Semitones (-12 to +12)${effectiveKey ? `. Source: ${effectiveKey}` : ''}`} />
-      </div>
-
-      <div className="border-t border-zinc-200 dark:border-white/5" />
-
-      {/* Timbre Reference Override */}
-      <div className="space-y-2">
-        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-          <Volume2 className="w-4 h-4 text-teal-400" />
-          {t('cover.timbreRef')}
-          <span className="text-[10px] font-normal text-zinc-500">(optional)</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            value={timbreOverridePath}
-            onChange={e => onTimbreOverridePathChange(e.target.value)}
-            placeholder={t('cover.timbreRefPlaceholder')}
-            className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 focus:outline-none focus:border-teal-500 transition-colors"
-          />
-          {timbreOverridePath && (
-            <button
-              onClick={() => onTimbreOverridePathChange('')}
-              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[10px] font-medium text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            >
-              <X className="w-3 h-3" />
-              {t('cover.clearTimbreRef')}
-            </button>
-          )}
-        </div>
-        {timbreOverridePath ? (
-          <div className="rounded-lg bg-teal-500/5 border border-teal-500/20 px-3 py-1.5 flex items-center gap-2">
-            <Volume2 className="w-3 h-3 text-teal-400 flex-shrink-0" />
-            <span className="text-[10px] text-zinc-500 truncate flex-1">{timbreOverridePath.split(/[\\/]/).pop()}</span>
-            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-900/30 text-teal-400">TIMBRE</span>
-          </div>
-        ) : (
-          <p className="text-[10px] text-zinc-500 leading-tight">
-            {t('cover.timbreRefHelp')}
-          </p>
-        )}
       </div>
 
       <div className="border-t border-zinc-200 dark:border-white/5" />

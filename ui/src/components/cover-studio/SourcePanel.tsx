@@ -1,11 +1,12 @@
 // SourcePanel.tsx — Left panel: source audio upload + metadata + analysis
-import React, { useCallback, useState } from 'react';
-import { Upload, Music, Loader2, X, Layers } from 'lucide-react';
+import React, { useCallback, useState, useEffect } from 'react';
+import { Upload, Music, Loader2, X, Layers, Volume2, FolderOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AudioMetadata, AudioAnalysis } from './coverStudioUtils';
 import { ALL_KEYS } from './coverStudioUtils';
 import { SEPARATION_LEVELS } from '../../services/supersepApi';
 import { LatentImport, type LatentMetadata } from '../shared/LatentImport';
+import { masteringApi } from '../../services/api';
 
 const LANGUAGES = [
   { value: 'en', label: 'English' },
@@ -51,6 +52,10 @@ interface SourcePanelProps {
   sourceLatentUrl: string;
   onLatentLoaded: (url: string, meta: LatentMetadata) => void;
   onLatentClear: () => void;
+  // Timbre reference override
+  timbreOverridePath: string;
+  onTimbreOverridePathChange: (v: string) => void;
+  token: string | null;
 }
 
 export const SourcePanel: React.FC<SourcePanelProps> = ({
@@ -66,10 +71,53 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
   sourceAudioUrl, onSeparate,
   hasStems, onConfigureStems,
   sourceLatentUrl, onLatentLoaded, onLatentClear,
+  timbreOverridePath, onTimbreOverridePathChange, token,
 }) => {
   const { t } = useTranslation();
   const [isDragging, setIsDragging] = useState(false);
+  const [isTimbreDragging, setIsTimbreDragging] = useState(false);
+  const [isTimbreUploading, setIsTimbreUploading] = useState(false);
+  const [showTimbreBrowser, setShowTimbreBrowser] = useState(false);
+  interface ReferenceTrack { name: string; size: number; url: string; }
+  const [timbreRefs, setTimbreRefs] = useState<ReferenceTrack[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const timbreFileRef = React.useRef<HTMLInputElement>(null);
+
+  // Load references when browser opens
+  useEffect(() => {
+    if (showTimbreBrowser) {
+      masteringApi.listReferences()
+        .then(data => setTimbreRefs(data.references))
+        .catch(() => {});
+    }
+  }, [showTimbreBrowser]);
+
+  const handleTimbreUpload = useCallback(async (file: File) => {
+    if (!token) return;
+    try {
+      setIsTimbreUploading(true);
+      const result = await masteringApi.uploadReference(file, token);
+      onTimbreOverridePathChange(result.name);
+      // Refresh list if browser is open
+      if (showTimbreBrowser) {
+        const data = await masteringApi.listReferences();
+        setTimbreRefs(data.references);
+      }
+    } catch (err) {
+      console.error('[Timbre] Upload failed:', err);
+    } finally {
+      setIsTimbreUploading(false);
+    }
+  }, [token, onTimbreOverridePathChange, showTimbreBrowser]);
+
+  const handleTimbreDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsTimbreDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && /\.(mp3|wav|flac|ogg|m4a|opus|aac)$/i.test(file.name)) {
+      handleTimbreUpload(file);
+    }
+  }, [handleTimbreUpload]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -144,6 +192,130 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
           onLatentLoaded={onLatentLoaded}
           onClear={onLatentClear}
         />
+      </div>
+
+      {/* Timbre Reference Override */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+          <Volume2 className="w-4 h-4 text-teal-400" />
+          {t('cover.timbreRef')}
+          <span className="text-[10px] font-normal text-zinc-500">(optional)</span>
+        </div>
+
+        {/* Drag-and-drop / click zone */}
+        <div
+          onDrop={handleTimbreDrop}
+          onDragOver={e => { e.preventDefault(); setIsTimbreDragging(true); }}
+          onDragLeave={() => setIsTimbreDragging(false)}
+          onClick={() => timbreFileRef.current?.click()}
+          className={`
+            relative border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all duration-300
+            ${isTimbreDragging
+              ? 'border-teal-400 bg-teal-500/10 scale-[1.02]'
+              : timbreOverridePath
+                ? 'border-teal-500/30 bg-teal-500/5'
+                : 'border-zinc-300 dark:border-zinc-700 hover:border-teal-400/50 hover:bg-teal-500/5'}
+          `}
+        >
+          <input
+            ref={timbreFileRef}
+            type="file"
+            accept=".mp3,.wav,.flac,.ogg,.m4a,.opus,.aac"
+            className="hidden"
+            onChange={e => {
+              if (e.target.files?.[0]) handleTimbreUpload(e.target.files[0]);
+              e.target.value = '';
+            }}
+          />
+          {isTimbreUploading ? (
+            <div className="flex flex-col items-center gap-1">
+              <Loader2 className="w-6 h-6 text-teal-400 animate-spin" />
+              <span className="text-[10px] text-teal-400">Uploading...</span>
+            </div>
+          ) : timbreOverridePath ? (
+            <div className="flex flex-col items-center gap-1">
+              <Volume2 className="w-6 h-6 text-teal-400" />
+              <span className="text-[10px] text-zinc-600 dark:text-zinc-400 truncate max-w-full">{timbreOverridePath}</span>
+              <span className="text-[9px] text-zinc-500">{t('cover.clickOrDropReplace')}</span>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-1">
+              <Upload className="w-6 h-6 text-zinc-600 dark:text-zinc-400" />
+              <span className="text-[10px] text-zinc-500">Drop timbre reference or click to upload</span>
+              <span className="text-[9px] text-zinc-600">MP3, WAV, FLAC, OGG</span>
+            </div>
+          )}
+        </div>
+
+        {/* Action row: Browse + Clear */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowTimbreBrowser(!showTimbreBrowser); }}
+            className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-teal-400 text-[10px] font-medium transition-colors border border-teal-500/20"
+          >
+            <FolderOpen className="w-3 h-3" />
+            Browse References
+          </button>
+          {timbreOverridePath && (
+            <button
+              onClick={() => onTimbreOverridePathChange('')}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[10px] font-medium text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+            >
+              <X className="w-3 h-3" />
+              {t('cover.clearTimbreRef')}
+            </button>
+          )}
+        </div>
+
+        {/* Reference browser modal */}
+        {showTimbreBrowser && (
+          <div className="rounded-xl bg-black/5 dark:bg-white/5 border border-zinc-200 dark:border-white/10 overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200 dark:border-white/5">
+              <span className="text-[10px] font-semibold text-zinc-500 uppercase">Reference Tracks</span>
+              <button onClick={() => setShowTimbreBrowser(false)} className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+            <div className="max-h-[160px] overflow-y-auto scrollbar-hide">
+              {timbreRefs.length === 0 ? (
+                <div className="px-3 py-4 text-center text-[10px] text-zinc-500">
+                  No references uploaded yet. Drop an audio file above to add one.
+                </div>
+              ) : (
+                timbreRefs.map(ref => (
+                  <button
+                    key={ref.name}
+                    onClick={() => { onTimbreOverridePathChange(ref.name); setShowTimbreBrowser(false); }}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-teal-500/10 transition-colors ${
+                      timbreOverridePath === ref.name ? 'bg-teal-500/15 border-l-2 border-teal-400' : ''
+                    }`}
+                  >
+                    <Volume2 className="w-3 h-3 text-teal-400 flex-shrink-0" />
+                    <span className="text-xs text-zinc-700 dark:text-zinc-300 truncate flex-1">{ref.name}</span>
+                    <span className="text-[9px] text-zinc-500 flex-shrink-0">
+                      {ref.size < 1024 * 1024 ? `${(ref.size / 1024).toFixed(0)} KB` : `${(ref.size / (1024 * 1024)).toFixed(1)} MB`}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Selected timbre info badge */}
+        {timbreOverridePath && (
+          <div className="rounded-lg bg-teal-500/5 border border-teal-500/20 px-3 py-1.5 flex items-center gap-2">
+            <Volume2 className="w-3 h-3 text-teal-400 flex-shrink-0" />
+            <span className="text-[10px] text-zinc-500 truncate flex-1">{timbreOverridePath}</span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-900/30 text-teal-400">TIMBRE</span>
+          </div>
+        )}
+
+        {!timbreOverridePath && (
+          <p className="text-[10px] text-zinc-500 leading-tight">
+            {t('cover.timbreRefHelp')}
+          </p>
+        )}
       </div>
 
       {/* Metadata display */}
