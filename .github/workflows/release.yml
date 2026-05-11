@@ -169,9 +169,12 @@ jobs:
         run: |
           $buildDir = "engine/build"
           New-Item -ItemType Directory -Force $buildDir | Out-Null
-          # Delete stale CMakeCache to force fresh configure (avoids stale SDK paths)
-          $cacheFile = Join-Path $buildDir "CMakeCache.txt"
-          if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force }
+          # Vulkan SDK paths may change between runs — force fresh configure
+          # (CUDA builds benefit hugely from cache, so only nuke for Vulkan)
+          if ("${{ matrix.variant }}" -eq "vulkan") {
+            $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+            if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force; Write-Host "Cleared CMake cache (Vulkan)" }
+          }
           Push-Location $buildDir
           cmake .. ${{ matrix.cmake_flags }}
           cmake --build . --config Release -j $env:NUMBER_OF_PROCESSORS
