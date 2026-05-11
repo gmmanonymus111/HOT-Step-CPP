@@ -70,11 +70,10 @@ jobs:
 
       - name: Install Vulkan SDK
         if: matrix.variant == 'vulkan'
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        uses: humbletim/install-vulkan-sdk@v1.2.1
         with:
-          vulkan-query-version: latest
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
-          vulkan-use-cache: true
+          version: latest
+          cache: true
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -405,6 +404,8 @@ jobs:
       - name: Install server dependencies
         run: |
           cd server && npm install --ignore-scripts
+          cd node_modules/better-sqlite3 && npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch arm64 --platform darwin || npm run build-release
+          cd ../../..
 
       - name: Bundle server with esbuild
         run: |
