@@ -52,6 +52,13 @@ if(APPLE)
     set(CMAKE_MACOSX_RPATH TRUE)
 endif()
 
+# Linux rpath: make binaries relocatable (portable release support).
+# $ORIGIN tells the dynamic linker to search for .so files next to the binary.
+if(UNIX AND NOT APPLE)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+endif()
+
 # DiT tensor names can exceed default GGML_MAX_NAME of 64
 add_compile_definitions(GGML_MAX_NAME=128)
 
@@ -275,6 +282,19 @@ if(SUPERSEP_ENABLED AND APPLE)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${_dylib}" "$<TARGET_FILE_DIR:ace-server>"
             COMMENT "Copying ${_dylib}"
+        )
+    endforeach()
+endif()
+
+# Copy ONNX Runtime shared libs next to ace-server at build time (Linux)
+if(SUPERSEP_ENABLED AND UNIX AND NOT APPLE)
+    set(_ORT_LIB_DIR "${ORT_ROOT}/lib")
+    file(GLOB _ORT_SOLIBS "${_ORT_LIB_DIR}/libonnxruntime*.so*")
+    foreach(_solib ${_ORT_SOLIBS})
+        add_custom_command(TARGET ace-server POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_solib}" "$<TARGET_FILE_DIR:ace-server>"
+            COMMENT "Copying ${_solib}"
         )
     endforeach()
 endif()

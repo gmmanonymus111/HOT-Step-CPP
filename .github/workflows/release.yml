@@ -678,10 +678,293 @@ jobs:
             release/out/*.sha256
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Linux builds (CUDA / Vulkan / CPU) — run in parallel via matrix strategy
+  # ─────────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04   # 22.04 for wider glibc compatibility across distros
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cuda, vulkan, cpu]
+        include:
+          - variant: cuda
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+          - variant: vulkan
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+          - variant: cpu
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=OFF
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # Manual init below (vstgui4 is fragile + unneeded)
+          fetch-depth: 0      # Full history for release notes
+
+      - name: Init required submodules
+        run: |
+          # Init top-level submodule (vst3sdk)
+          git submodule update --init engine/vendor/vst3sdk
+          # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      # ── SDK Setup ──────────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install CUDA Toolkit 12.8
+        if: matrix.variant == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: '12.8.0'
+          method: 'network'
+
+      - name: Install Vulkan SDK (headers + loader)
+        if: matrix.variant == 'vulkan'
+        run: sudo apt-get install -y libvulkan-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ── ONNX Runtime (SuperSep) ────────────────────────────────
+      - name: Cache ONNX Runtime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: engine/deps/onnxruntime
+          key: ort-linux-x64-gpu-${{ env.ORT_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}.tgz"
+          echo "Downloading ORT from $ORT_URL"
+          mkdir -p engine/deps
+          curl -sL "$ORT_URL" | tar -xz -C engine/deps
+          mv "engine/deps/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}" engine/deps/onnxruntime
+
+      # ── Portable Node.js ───────────────────────────────────────
+      - name: Cache portable Node.js
+        id: cache-node
+        uses: actions/cache@v4
+        with:
+          path: release/.node-cache
+          key: node-linux-x64-${{ env.NODE_VERSION }}
+
+      - name: Download portable Node.js
+        if: steps.cache-node.outputs.cache-hit != 'true'
+        run: |
+          NODE_URL="https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-linux-x64.tar.gz"
+          mkdir -p release/.node-cache
+          curl -sL "$NODE_URL" | tar -xz -C release/.node-cache --strip-components=0
+
+      # ── Build Engine ───────────────────────────────────────────
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
+      - name: Setup sccache (compiler cache)
+        uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Build C++ engine
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+        run: |
+          mkdir -p engine/build && cd engine/build
+
+          # Test if sccache works end-to-end
+          USE_SCCACHE=false
+          if echo 'int main(){return 0;}' > /tmp/test_sccache.c && \
+             sccache gcc -c -o /tmp/test_sccache.o /tmp/test_sccache.c 2>&1; then
+            USE_SCCACHE=true
+            echo "sccache: test compile succeeded — caching enabled"
+          else
+            echo "WARNING: sccache test failed — building without cache"
+          fi
+          rm -f /tmp/test_sccache.c /tmp/test_sccache.o
+
+          LAUNCHER_ARGS=""
+          if [ "$USE_SCCACHE" = true ]; then
+            LAUNCHER_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_CUDA_COMPILER_LAUNCHER=sccache"
+          fi
+
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${{ matrix.cmake_flags }} \
+            $LAUNCHER_ARGS
+          cmake --build . -j $(nproc)
+
+          # Verify output
+          if [ ! -f ace-server ]; then
+            echo "Build failed: ace-server not found"
+            exit 1
+          fi
+          echo "Engine build complete: $(du -h ace-server | awk '{print $1}')"
+
+      # ── Bundle Server ──────────────────────────────────────────
+      - name: Install server dependencies
+        run: |
+          cd server && npm install --ignore-scripts
+          cd node_modules/better-sqlite3 && npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch x64 --platform linux || npm run build-release
+          cd ../..
+          # ffmpeg-static's install script downloads the actual binary
+          cd node_modules/ffmpeg-static && node install.js && cd ../..
+          if [ -f "node_modules/ffmpeg-static/ffmpeg" ]; then
+            echo "ffmpeg downloaded ($(du -h node_modules/ffmpeg-static/ffmpeg | cut -f1))"
+          else
+            echo "WARNING: ffmpeg not found after install script"
+          fi
+          cd ..
+
+      - name: Bundle server with esbuild
+        run: |
+          cd release && npm install esbuild --save-dev
+
+      # ── Build UI ───────────────────────────────────────────────
+      - name: Build UI
+        run: |
+          cd ui && npm install && npm run build
+
+      # ── Assemble Release Package ───────────────────────────────
+      - name: Assemble release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VARIANT="${{ matrix.variant }}"
+          DIST="release/staging"
+          rm -rf "$DIST" && mkdir -p "$DIST"
+
+          # Runtime: portable Node.js
+          mkdir -p "$DIST/runtime/bin" "$DIST/runtime/lib"
+          cp "release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/bin/node" "$DIST/runtime/bin/node"
+          # Copy ICU data if present (required for intl support)
+          if ls release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/lib/*.dat 2>/dev/null; then
+            cp release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/lib/*.dat "$DIST/runtime/lib/"
+          fi
+
+          # Engine binaries
+          mkdir -p "$DIST/engine"
+          BUILD_DIR="engine/build"
+          for bin in ace-server mastering mp3-codec neural-codec vst-host quantize; do
+            if [ -f "$BUILD_DIR/$bin" ]; then
+              cp "$BUILD_DIR/$bin" "$DIST/engine/$bin"
+            fi
+          done
+
+          # Copy shared libraries (.so files — ggml backends, ORT)
+          find "$BUILD_DIR" -maxdepth 1 -name "*.so" -exec cp {} "$DIST/engine/" \;
+          find "$BUILD_DIR" -maxdepth 1 -name "*.so.*" -exec cp {} "$DIST/engine/" \;
+
+          # CPU variant .so files (ggml-cpu-*.so from GGML_CPU_ALL_VARIANTS)
+          find "$BUILD_DIR" -maxdepth 1 -name "ggml-cpu-*.so" -exec cp {} "$DIST/engine/" \;
+
+          # ORT .so files (for SuperSep — all variants need libonnxruntime.so for CPU inference)
+          ORT_LIB="engine/deps/onnxruntime/lib"
+          if [ -d "$ORT_LIB" ]; then
+            # Core runtime — needed by all variants
+            find "$ORT_LIB" -name "libonnxruntime.so*" -exec cp {} "$DIST/engine/" \;
+            # CUDA providers — only needed for CUDA variant
+            if [ "$VARIANT" = "cuda" ]; then
+              find "$ORT_LIB" -name "libonnxruntime_providers_shared.so" -exec cp {} "$DIST/engine/" \;
+              find "$ORT_LIB" -name "libonnxruntime_providers_cuda.so" -exec cp {} "$DIST/engine/" \;
+            fi
+          fi
+
+          # Lua plugins
+          [ -d "engine/plugins" ] && cp -r engine/plugins "$DIST/engine/plugins"
+          [ -d "plugins" ] && cp -r plugins "$DIST/plugins"
+
+          # Server
+          SRVOUT="$DIST/server"
+          mkdir -p "$SRVOUT"
+          # Re-run esbuild into clean staging (staging was wiped above)
+          node release/esbuild.config.mjs
+          [ -f "$SRVOUT/server.mjs" ] || { echo "ERROR: server.mjs missing after esbuild"; exit 1; }
+          # Copy better-sqlite3
+          BSQL_SRC="server/node_modules/better-sqlite3"
+          BSQL_DST="$SRVOUT/node_modules/better-sqlite3"
+          mkdir -p "$BSQL_DST/lib" "$BSQL_DST/build/Release"
+          cp "$BSQL_SRC/package.json" "$BSQL_DST/"
+          cp -r "$BSQL_SRC/lib/"* "$BSQL_DST/lib/"
+          cp "$BSQL_SRC/build/Release/better_sqlite3.node" "$BSQL_DST/build/Release/"
+          # Runtime deps
+          for dep in bindings file-uri-to-path; do
+            [ -d "server/node_modules/$dep" ] && cp -r "server/node_modules/$dep" "$SRVOUT/node_modules/$dep"
+          done
+
+          # Data files
+          mkdir -p "$SRVOUT/data"
+          cp server/src/data/model-registry.json "$SRVOUT/data/"
+          [ -f server/src/data/assistant-knowledge.md ] && cp server/src/data/assistant-knowledge.md "$SRVOUT/data/"
+
+          # UI
+          [ -d "ui/dist" ] && mkdir -p "$DIST/ui" && cp -r ui/dist "$DIST/ui/dist"
+
+          # ffmpeg
+          FFMPEG_SRC="server/node_modules/ffmpeg-static/ffmpeg"
+          if [ -f "$FFMPEG_SRC" ]; then
+            cp "$FFMPEG_SRC" "$SRVOUT/ffmpeg"
+          fi
+
+          # Essentia (if Linux-compatible binaries exist)
+          [ -d "Essentia" ] && cp -r Essentia "$DIST/Essentia"
+
+          # Noise samples
+          [ -d "noise_samples" ] && cp -r noise_samples "$DIST/noise_samples"
+
+          # Empty user directories
+          mkdir -p "$DIST/models" "$DIST/adapters"
+
+          # Build variant marker (so server knows whether CUDA runtime is needed)
+          echo -n "$VARIANT" > "$DIST/engine/.variant"
+
+          # Config and docs
+          cp .env.example "$DIST/.env.example"
+          cp release/HOT-Step.sh "$DIST/HOT-Step.sh"
+          chmod +x "$DIST/HOT-Step.sh"
+          cp release/README.txt "$DIST/README.txt"
+
+      - name: Package and checksum
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VARIANT="${{ matrix.variant }}"
+          TARNAME="HOT-Step-CPP-v${VERSION}-linux-x64-${VARIANT}.tar.gz"
+          mkdir -p release/out
+          tar -czf "release/out/$TARNAME" -C release/staging .
+          HASH=$(sha256sum "release/out/$TARNAME" | awk '{print $1}')
+          echo "$HASH  $TARNAME" > "release/out/${TARNAME}.sha256"
+          echo "$TARNAME ($(du -h "release/out/$TARNAME" | awk '{print $1}'))"
+          echo "SHA256: $HASH"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.variant }}
+          path: |
+            release/out/*.tar.gz
+            release/out/*.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Release — collect all artifacts, generate notes, create draft release
   # ─────────────────────────────────────────────────────────────────────────
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -757,12 +1040,18 @@ jobs:
             [ -f "$f" ] || continue
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | awk '{print $1}')
-            if echo "$NAME" | grep -q "cuda"; then
+            if echo "$NAME" | grep -q "win.*cuda"; then
               echo "| Windows | CUDA (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
-            elif echo "$NAME" | grep -q "vulkan"; then
+            elif echo "$NAME" | grep -q "win.*vulkan"; then
               echo "| Windows | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
-            elif echo "$NAME" | grep -q "cpu"; then
+            elif echo "$NAME" | grep -q "win.*cpu"; then
               echo "| Windows | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda"; then
+              echo "| Linux | CUDA (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*vulkan"; then
+              echo "| Linux | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cpu"; then
+              echo "| Linux | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "macOS"; then
               echo "| macOS | Metal (Apple Silicon) | \`$NAME\` | $SIZE |" >> release-notes.md
             fi
