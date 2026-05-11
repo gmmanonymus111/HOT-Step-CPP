@@ -157,6 +157,11 @@ const RestartingOverlay: React.FC = () => {
   );
 };
 
+/** Extract the source tag from a song's generation params */
+function getSongSource(song: Song): string {
+  return (song.generationParams as any)?.source || (song.generation_params as any)?.source || 'create';
+}
+
 /** Inner app content — must be rendered inside GlobalParamsProvider */
 const AppContent: React.FC = () => {
   const { t } = useTranslation();
@@ -501,10 +506,10 @@ const AppContent: React.FC = () => {
             <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
           </div>
 
-          {/* Song List — "Generations" */}
+          {/* Song List — "Generations" (filtered to insta-gen only) */}
           <div className="flex-1 min-w-0 overflow-y-auto">
             <SongList
-              songs={songs}
+              songs={songs.filter(s => getSongSource(s) === 'insta-gen')}
               currentSongId={currentSong?.id}
               onPlay={playSong}
               onDelete={handleDelete}
@@ -687,10 +692,10 @@ const AppContent: React.FC = () => {
           <div className="w-0.5 h-8 rounded-full bg-zinc-600 group-hover:bg-pink-400 transition-colors" />
         </div>
 
-        {/* Song List + Queue */}
+        {/* Song List + Queue (filtered to create/custom-gen only) */}
         <div className="flex-1 min-w-0 overflow-y-auto">
           <SongList
-            songs={songs}
+            songs={songs.filter(s => getSongSource(s) === 'create')}
             currentSongId={currentSong?.id}
             onPlay={playSong}
             onDelete={handleDelete}
