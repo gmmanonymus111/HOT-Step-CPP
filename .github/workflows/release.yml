@@ -70,7 +70,7 @@ jobs:
 
       - name: Install Vulkan SDK
         if: matrix.variant == 'vulkan'
-        uses: humbletim/install-vulkan-sdk@v1.2.1
+        uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: latest
           cache: true
