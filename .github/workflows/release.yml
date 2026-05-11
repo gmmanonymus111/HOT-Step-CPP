@@ -70,24 +70,23 @@ jobs:
 
       - name: Install Vulkan SDK
         if: matrix.variant == 'vulkan'
-        uses: humbletim/install-vulkan-sdk@v1.2
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
         with:
-          version: latest
-          cache: true
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools, Glslang, shaderc
+          vulkan-use-cache: true
 
       - name: Verify Vulkan SDK layout
         if: matrix.variant == 'vulkan'
         shell: bash
         run: |
           echo "VULKAN_SDK=$VULKAN_SDK"
-          echo "--- Top-level dirs ---"
-          ls -la "$VULKAN_SDK/" | head -20
-          echo "--- Looking for vulkan headers ---"
-          find "$VULKAN_SDK" -name "vulkan.h" -type f 2>/dev/null | head -5
-          echo "--- Looking for vulkan libs ---"
-          find "$VULKAN_SDK" -name "vulkan-1*" -type f 2>/dev/null | head -5
-          echo "--- Looking for glslc ---"
-          find "$VULKAN_SDK" -name "glslc*" -type f 2>/dev/null | head -5
+          echo "--- Headers ---"
+          find "$VULKAN_SDK" -name "vulkan.h" -type f 2>/dev/null | head -3
+          echo "--- Libs ---"
+          find "$VULKAN_SDK" -name "vulkan-1*" -type f 2>/dev/null | head -3
+          echo "--- glslc ---"
+          which glslc || find "$VULKAN_SDK" -name "glslc*" -type f 2>/dev/null | head -3
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
