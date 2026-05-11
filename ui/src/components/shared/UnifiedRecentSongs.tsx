@@ -56,7 +56,13 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
     if (!token) { setLoading(false); return; }
     // Check cache inline (not via closure) to avoid stale dep issues
     const entry = _cache.get(cacheKey);
-    if (entry && entry.key === refreshKey) return;
+    if (entry && entry.key === refreshKey) {
+      // Cache hit — still sync state so component reflects the correct source
+      // (React may reuse this instance across view changes, keeping stale useState)
+      setSongs(entry.songs);
+      setLoading(false);
+      return;
+    }
     if (_fetchInFlight.has(cacheKey)) return;
     // Only show spinner if we have no cached data at all
     if (!entry) setLoading(true);
