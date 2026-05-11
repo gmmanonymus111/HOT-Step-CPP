@@ -84,11 +84,36 @@ if (-not $SkipEngine) {
     # We modify the cmake flags by setting them before calling the script.
     Write-Host "  Running buildall.cmd with static runtime..."
 
-    # Clean the build to ensure /MT is applied everywhere
+    # Smart CMake cache handling: only clear if build flags have changed.
+    # Deleting CMakeCache.txt forces a full reconfigure → full rebuild of ALL
+    # targets including ~100+ CUDA vendor kernels (~1 hour). If the cache already
+    # has the correct release flags, we skip deletion for a fast incremental build.
     $buildDir = Join-Path $engineDir "build"
-    if (Test-Path (Join-Path $buildDir "CMakeCache.txt")) {
-        Write-Host "  Clearing CMake cache for clean release build..."
-        Remove-Item (Join-Path $buildDir "CMakeCache.txt") -Force
+    $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+    $needsCacheClear = $false
+
+    if (Test-Path $cacheFile) {
+        $cacheContent = Get-Content $cacheFile -Raw
+        $requiredFlags = @{
+            "HOT_STEP_STATIC_RUNTIME:BOOL=ON" = "Static runtime (/MT)"
+            "GGML_CUDA:BOOL=ON"               = "CUDA backend"
+            "GGML_VULKAN:BOOL=ON"             = "Vulkan backend"
+            "GGML_CPU_ALL_VARIANTS:BOOL=ON"   = "CPU all variants"
+        }
+        foreach ($flag in $requiredFlags.Keys) {
+            if ($cacheContent -notmatch [regex]::Escape($flag)) {
+                Write-Host "  Cache mismatch: $($requiredFlags[$flag]) ($flag)" -ForegroundColor Yellow
+                $needsCacheClear = $true
+            }
+        }
+        if ($needsCacheClear) {
+            Write-Host "  Clearing CMake cache (flags changed since last build)..." -ForegroundColor Yellow
+            Remove-Item $cacheFile -Force
+        } else {
+            Write-Host "  CMake cache valid — incremental build (CUDA vendor files will NOT rebuild)" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  No CMake cache — full build required" -ForegroundColor Yellow
     }
 
     # Set cmake flags for the build
