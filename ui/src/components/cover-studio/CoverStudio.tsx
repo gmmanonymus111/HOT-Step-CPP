@@ -65,8 +65,10 @@ export const CoverStudio: React.FC = () => {
   const [bpmOverride, setBpmOverride] = useState<number | null>(() => restore<number | null>('bpmOverride', null));
   const [keyOverride, setKeyOverride] = useState<string | null>(() => restore<string | null>('keyOverride', null));
   const [noFsq, setNoFsq] = useState(() => restore<boolean>('noFsq', false));
+  const [instrumental, setInstrumental] = useState(() => restore<boolean>('coverInstrumental', false));
   const [sourceLatentUrl, setSourceLatentUrl] = useState(() => restore<string>('sourceLatentUrl', ''));
   const [vocalLanguage, setVocalLanguage] = useState(() => restore<string>('coverVocalLanguage', 'en'));
+  const [timbreOverridePath, setTimbreOverridePath] = useState(() => restore<string>('coverTimbreOverride', ''));
 
   // ── Generation ──
   const [isGenerating, setIsGenerating] = useState(false);
@@ -131,8 +133,10 @@ export const CoverStudio: React.FC = () => {
   useEffect(() => { persist('bpmOverride', bpmOverride); }, [bpmOverride]);
   useEffect(() => { persist('keyOverride', keyOverride); }, [keyOverride]);
   useEffect(() => { persist('noFsq', noFsq); }, [noFsq]);
+  useEffect(() => { persist('coverInstrumental', instrumental); }, [instrumental]);
   useEffect(() => { persist('sourceLatentUrl', sourceLatentUrl); }, [sourceLatentUrl]);
   useEffect(() => { persist('coverVocalLanguage', vocalLanguage); }, [vocalLanguage]);
+  useEffect(() => { persist('coverTimbreOverride', timbreOverridePath); }, [timbreOverridePath]);
   useEffect(() => { persist('sepLevel', sepLevel); }, [sepLevel]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
@@ -286,7 +290,8 @@ export const CoverStudio: React.FC = () => {
 
   // ── Generation ──
   const handleGenerate = async () => {
-    if (!token || !sourceAudioUrl || !lyrics.trim()) { showToast(t('cover.missingSrcOrLyrics')); return; }
+    if (!token || !sourceAudioUrl) { showToast(t('cover.missingSrcOrLyrics')); return; }
+    if (!instrumental && !lyrics.trim()) { showToast('Enter lyrics or enable Instrumental mode'); return; }
     setIsGenerating(true);
     try {
       // Step 0: If advanced mode with stems, auto-recombine before generation
@@ -331,7 +336,7 @@ export const CoverStudio: React.FC = () => {
       const params: Record<string, any> = {
         ...engineParams,
         customMode: true,
-        lyrics,
+        lyrics: instrumental ? '[Instrumental]' : lyrics,
         style: artistCaption || engineParams.style || '',
         title: songArtist
           ? `${songTitle || 'Cover'} (${songArtist} Cover)`
@@ -343,7 +348,7 @@ export const CoverStudio: React.FC = () => {
         bpm: targetBpm,
         keyScale: targetKey,
         duration: 0,
-        instrumental: false,
+        instrumental: instrumental,
         vocalLanguage,
         source: 'cover-studio',
         artistName: selectedArtist?.name || songArtist || '',
@@ -375,8 +380,7 @@ export const CoverStudio: React.FC = () => {
         params.referenceAudioUrl = selectedPreset.reference_track_path;
         params.masteringEnabled = true;
         params.masteringReference = selectedPreset.reference_track_path;
-        // Timbre: use dedicated timbre path if set, otherwise default to preset reference
-        const timbreOverride = engineParams.timbreReference;
+        const timbreOverride = timbreOverridePath || engineParams.timbreReference;
         if (typeof timbreOverride === 'string' && timbreOverride) {
           params.timbreReference = timbreOverride;  // dedicated timbre audio path
         } else {
@@ -468,7 +472,14 @@ export const CoverStudio: React.FC = () => {
     setSepStems(null); setStemControls([]); setSepJobId(null); setShowMixer(false);
   };
 
-  const canGenerate = !!sourceAudioUrl && !!lyrics.trim() && !isGenerating;
+  const handleClearArtist = () => {
+    setSelectedArtistId(null);
+    setSelectedPreset(null);
+    setArtistPresets([]);
+    setArtistCaption('');
+  };
+
+  const canGenerate = !!sourceAudioUrl && (!!lyrics.trim() || instrumental) && !isGenerating;
 
   // ── SuperSep handlers ──
   const handleSeparate = useCallback(async () => {
@@ -590,17 +601,20 @@ export const CoverStudio: React.FC = () => {
         <ArtistSettingsPanel
           artists={artists} isLoadingArtists={isLoadingArtists}
           selectedArtistId={selectedArtistId} onSelectArtist={handleSelectArtist}
+          onClearArtist={handleClearArtist}
           artistPresets={artistPresets} selectedPreset={selectedPreset}
           onSelectPreset={(p) => { setSelectedPreset(p); applyPresetToGlobal(p); }}
           audioCoverStrength={audioCoverStrength} onAudioCoverStrength={setAudioCoverStrength}
           coverNoiseStrength={coverNoiseStrength} onCoverNoiseStrength={setCoverNoiseStrength}
           noFsq={noFsq} onNoFsqChange={setNoFsq}
+          instrumental={instrumental} onInstrumentalChange={setInstrumental}
           tempoScale={tempoScale} onTempoScale={setTempoScale}
           pitchShift={pitchShift} onPitchShift={setPitchShift}
           analysis={analysis}
           bpmCorrection={bpmCorrection}
           keyOverride={keyOverride}
           artistCaption={artistCaption} onArtistCaptionChange={setArtistCaption}
+          timbreOverridePath={timbreOverridePath} onTimbreOverridePathChange={setTimbreOverridePath}
           canGenerate={canGenerate}
           isGenerating={isGenerating} genProgress={genProgress} genStage={genStage}
           onGenerate={handleGenerate} onCancel={handleCancel}

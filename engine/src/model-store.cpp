@@ -20,6 +20,8 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
 
@@ -366,8 +368,24 @@ DiTGGML * store_require_dit(ModelStore * s, const ModelKey & k) {
     DiTGGML *    m       = new DiTGGML();
     const char * adapter = k.adapter_path.empty() ? nullptr : k.adapter_path.c_str();
     if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale)) {
+        // Retry once after a brief delay — CUDA context may need time to release
+        // resources after a model eviction (common during XL↔base swaps).
+        fprintf(stderr, "[Store] DiT load failed, retrying in 500ms (possible CUDA context issue)...\n");
         delete m;
-        return nullptr;
+        {
+            // Temporarily unlock to allow other threads to proceed during sleep.
+            // Note: lock_guard does not support unlock, so we use a scoped sleep
+            // while still holding the lock. This is acceptable since the store
+            // mutex is process-wide and the 500ms delay only matters here.
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        m = new DiTGGML();
+        if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale)) {
+            fprintf(stderr, "[Store] DiT load FAILED on retry. GPU context may be corrupted.\n");
+            delete m;
+            return nullptr;
+        }
+        fprintf(stderr, "[Store] DiT load succeeded on retry.\n");
     }
     install_entry(s, k, m, bytes_of_dit(m), "DiT", del_dit);
     fprintf(stderr, "[Store] Load DiT: %.0f ms\n", t.ms());
@@ -400,7 +418,24 @@ VAEGGML * store_require_vae_dec(ModelStore * s, const ModelKey & k) {
     }
     Timer     t;
     VAEGGML * m = new VAEGGML();
-    vae_ggml_load(m, k.path.c_str());  // exit(1) on failure, returns void
+    // vae_ggml_load calls exit(1) on hard failure, but CUDA context issues
+    // may manifest as a later crash. We wrap in try/catch for safety.
+    try {
+        vae_ggml_load(m, k.path.c_str());
+    } catch (...) {
+        fprintf(stderr, "[Store] VAE-Dec load failed, retrying in 500ms...\n");
+        delete m;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        m = new VAEGGML();
+        try {
+            vae_ggml_load(m, k.path.c_str());
+            fprintf(stderr, "[Store] VAE-Dec load succeeded on retry.\n");
+        } catch (...) {
+            fprintf(stderr, "[Store] VAE-Dec load FAILED on retry.\n");
+            delete m;
+            return nullptr;
+        }
+    }
     install_entry(s, k, m, bytes_of_vae_dec(m), "VAE-Dec", del_vae_dec);
     fprintf(stderr, "[Store] Load VAE-Dec: %.0f ms\n", t.ms());
     return m;

@@ -903,6 +903,31 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
         }
     }
 
+    // ── Latent output RMS guard ─────────────────────────────────────────
+    // Detect latent blowup (common with XL models at high noise + high CFG)
+    // and auto-rescale to prevent pure-noise/static VAE output.
+    {
+        const int  n       = (int) s.output.size();
+        double     sum_sq  = 0.0;
+        for (int i = 0; i < n; i++) {
+            sum_sq += (double) s.output[i] * s.output[i];
+        }
+        float out_rms = (float) sqrt(sum_sq / (double) n);
+        const float RMS_THRESHOLD = 1.0f;
+        const float TARGET_RMS    = 0.3f;
+        if (out_rms > RMS_THRESHOLD) {
+            float gain = TARGET_RMS / out_rms;
+            fprintf(stderr,
+                    "[DiT-Generate] WARNING: output RMS=%.3f exceeds safe range (>%.1f), "
+                    "auto-rescaling by %.4f to target RMS=%.1f. "
+                    "This may indicate XL model divergence at high noise + high CFG.\n",
+                    out_rms, RMS_THRESHOLD, gain, TARGET_RMS);
+            for (int i = 0; i < n; i++) {
+                s.output[i] *= gain;
+            }
+        }
+    }
+
     debug_dump_2d(&s.dbg, "dit_output", s.output.data(), s.T, s.Oc);
 
     // LRC alignment: run while the DiT is still held (dit_guard in scope).
