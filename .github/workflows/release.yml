@@ -137,6 +137,9 @@ jobs:
         run: |
           $buildDir = "engine/build"
           New-Item -ItemType Directory -Force $buildDir | Out-Null
+          # Delete stale CMakeCache to force fresh configure (avoids stale SDK paths)
+          $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+          if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force }
           Push-Location $buildDir
           cmake .. ${{ matrix.cmake_flags }}
           cmake --build . --config Release -j $env:NUMBER_OF_PROCESSORS
@@ -155,6 +158,15 @@ jobs:
         run: |
           Push-Location server
           npm install --ignore-scripts
+          # ffmpeg-static needs its postinstall to download the binary
+          npx --yes ffmpeg-static 2>$null
+          # Verify ffmpeg was downloaded
+          if (Test-Path "node_modules/ffmpeg-static/ffmpeg.exe") {
+            $sz = [math]::Round((Get-Item "node_modules/ffmpeg-static/ffmpeg.exe").Length / 1MB, 1)
+            Write-Host "ffmpeg.exe downloaded ($sz MB)"
+          } else {
+            Write-Warning "ffmpeg.exe not found after postinstall"
+          }
           Pop-Location
 
       - name: Rebuild better-sqlite3 for portable Node
@@ -405,7 +417,15 @@ jobs:
         run: |
           cd server && npm install --ignore-scripts
           cd node_modules/better-sqlite3 && npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch arm64 --platform darwin || npm run build-release
-          cd ../../..
+          cd ../..
+          # ffmpeg-static needs its postinstall to download the binary
+          npx --yes ffmpeg-static 2>/dev/null || true
+          if [ -f "node_modules/ffmpeg-static/ffmpeg" ]; then
+            echo "ffmpeg downloaded ($(du -h node_modules/ffmpeg-static/ffmpeg | cut -f1))"
+          else
+            echo "WARNING: ffmpeg not found after postinstall"
+          fi
+          cd ..
 
       - name: Bundle server with esbuild
         run: |
@@ -484,6 +504,12 @@ jobs:
 
           # UI
           [ -d "ui/dist" ] && mkdir -p "$DIST/ui" && cp -r ui/dist "$DIST/ui/dist"
+
+          # ffmpeg
+          FFMPEG_SRC="server/node_modules/ffmpeg-static/ffmpeg"
+          if [ -f "$FFMPEG_SRC" ]; then
+            cp "$FFMPEG_SRC" "$SRVOUT/ffmpeg"
+          fi
 
           # Noise samples
           [ -d "noise_samples" ] && cp -r noise_samples "$DIST/noise_samples"
