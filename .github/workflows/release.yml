@@ -779,60 +779,21 @@ jobs:
           cmakeVersion: latest
           ninjaVersion: latest
 
-      - name: Setup sccache (compiler cache)
-        uses: mozilla-actions/sccache-action@v0.0.7
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          key: cmake-linux-${{ matrix.variant }}-${{ hashFiles('engine/src/**', 'engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-linux-${{ matrix.variant }}-
 
       - name: Build C++ engine
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
         run: |
           mkdir -p engine/build && cd engine/build
-
-          # Test if sccache works end-to-end.
-          # Stop any existing server first (clean state, matches Windows probe).
-          USE_SCCACHE=false
-          sccache --stop-server 2>/dev/null || true
-          if echo 'int main(){return 0;}' > /tmp/test_sccache.c && \
-             sccache gcc -c -o /tmp/test_sccache.o /tmp/test_sccache.c 2>&1; then
-            USE_SCCACHE=true
-            echo "sccache: test compile succeeded — caching enabled"
-          else
-            echo "WARNING: sccache test failed — building without cache"
-          fi
-          rm -f /tmp/test_sccache.c /tmp/test_sccache.o
-
-          LAUNCHER_ARGS=""
-          if [ "$USE_SCCACHE" = true ]; then
-            LAUNCHER_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_CUDA_COMPILER_LAUNCHER=sccache"
-          fi
-
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            ${{ matrix.cmake_flags }} \
-            $LAUNCHER_ARGS
-
-          # Build — if sccache dies mid-build (GHA cache backend outage),
-          # wipe the build dir and retry without cache.
-          if ! cmake --build . -j $(nproc); then
-            if [ "$USE_SCCACHE" = true ]; then
-              echo ""
-              echo "============================================="
-              echo "  Build failed with sccache — GHA cache may be down."
-              echo "  Retrying without compiler cache..."
-              echo "============================================="
-              echo ""
-              cd ..
-              rm -rf build && mkdir build && cd build
-              cmake .. -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release \
-                ${{ matrix.cmake_flags }}
-              cmake --build . -j $(nproc)
-            else
-              echo "Build failed (no sccache involved)"
-              exit 1
-            fi
-          fi
+            ${{ matrix.cmake_flags }}
+          cmake --build . -j $(nproc)
 
           # Verify output
           if [ ! -f ace-server ]; then
