@@ -29,8 +29,6 @@ ARCH="arm64"
 NODE_VERSION="22.22.2"
 NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-${ARCH}.tar.xz"
 RELEASE_NAME="HOT-Step-CPP-v${VERSION}-macOS-${ARCH}"
-STAGING_DIR="${ROOT_DIR}/release-staging/${RELEASE_NAME}"
-OUTPUT_FILE="${ROOT_DIR}/${RELEASE_NAME}.tar.gz"
 SKIP_BUILD=0
 
 for arg in "$@"; do
@@ -39,6 +37,9 @@ for arg in "$@"; do
         --version=*) VERSION="${arg#*=}"; RELEASE_NAME="HOT-Step-CPP-v${VERSION}-macOS-${ARCH}" ;;
     esac
 done
+
+STAGING_DIR="${ROOT_DIR}/release-staging/${RELEASE_NAME}"
+OUTPUT_FILE="${ROOT_DIR}/${RELEASE_NAME}.tar.gz"
 
 # ── Colors ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -111,6 +112,22 @@ for bin in ace-server mastering mp3-codec vst-host; do
     [ -f "engine/build/${bin}" ] || fail "engine/build/${bin} not found"
 done
 ok "All engine binaries built"
+
+# Fix rpaths: replace any absolute build-dir rpaths with @executable_path
+# so dylibs are found relative to the binary (portable release requirement).
+echo "  Fixing dylib rpaths for portability..."
+for bin in engine/build/ace-server engine/build/ace-lm engine/build/ace-synth \
+           engine/build/ace-understand engine/build/neural-codec engine/build/quantize; do
+    if [ -f "$bin" ]; then
+        # Remove all existing rpaths (may be absolute build paths)
+        for old_rpath in $(otool -l "$bin" 2>/dev/null | grep -A1 LC_RPATH | grep "path " | awk '{print $2}'); do
+            install_name_tool -delete_rpath "$old_rpath" "$bin" 2>/dev/null || true
+        done
+        # Add the portable @executable_path rpath
+        install_name_tool -add_rpath "@executable_path" "$bin" 2>/dev/null || true
+    fi
+done
+ok "Rpaths fixed (@executable_path)"
 
 # ── Step 2: Install server deps (production) ─────────────────────────
 step 2 "Installing server dependencies (production)..."

@@ -42,6 +42,16 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# macOS rpath: make binaries relocatable (portable release support).
+# Without this, CMake bakes the absolute build directory into LC_RPATH,
+# which breaks on any machine other than the one that built it.
+# @executable_path tells dyld to look for dylibs next to the binary.
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@executable_path")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+    set(CMAKE_MACOSX_RPATH TRUE)
+endif()
+
 # DiT tensor names can exceed default GGML_MAX_NAME of 64
 add_compile_definitions(GGML_MAX_NAME=128)
 
