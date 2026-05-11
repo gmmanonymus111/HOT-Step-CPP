@@ -733,7 +733,7 @@ jobs:
 
       - name: Install Vulkan SDK (headers + loader)
         if: matrix.variant == 'vulkan'
-        run: sudo apt-get install -y libvulkan-dev
+        run: sudo apt-get install -y libvulkan-dev glslc
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
