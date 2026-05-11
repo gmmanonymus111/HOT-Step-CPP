@@ -366,7 +366,7 @@ const AppContent: React.FC = () => {
       ));
       // Also update selected song if it's the one that got cover art
       setSelectedSong(prev =>
-        prev?.id === songId ? { ...prev, coverUrl, cover_url: coverUrl } : prev
+        prev?.id === songId ? { ...prev, coverUrl, cover_url: coverUrl } as Song : prev
       );
     };
     window.addEventListener('cover-art-updated', handler);

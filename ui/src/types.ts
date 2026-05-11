@@ -193,6 +193,9 @@ export interface GenerationParams {
 
   // Lua plugin dynamic params
   pluginParams?: Record<string, string>;
+
+  // Cover Art auto-generation
+  coverArtEnabled?: boolean;
 }
 
 /** Generation job status from the server */
