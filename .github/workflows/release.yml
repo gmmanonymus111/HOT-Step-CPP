@@ -789,8 +789,10 @@ jobs:
         run: |
           mkdir -p engine/build && cd engine/build
 
-          # Test if sccache works end-to-end
+          # Test if sccache works end-to-end.
+          # Stop any existing server first (clean state, matches Windows probe).
           USE_SCCACHE=false
+          sccache --stop-server 2>/dev/null || true
           if echo 'int main(){return 0;}' > /tmp/test_sccache.c && \
              sccache gcc -c -o /tmp/test_sccache.o /tmp/test_sccache.c 2>&1; then
             USE_SCCACHE=true
@@ -809,7 +811,28 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             ${{ matrix.cmake_flags }} \
             $LAUNCHER_ARGS
-          cmake --build . -j $(nproc)
+
+          # Build — if sccache dies mid-build (GHA cache backend outage),
+          # wipe the build dir and retry without cache.
+          if ! cmake --build . -j $(nproc); then
+            if [ "$USE_SCCACHE" = true ]; then
+              echo ""
+              echo "============================================="
+              echo "  Build failed with sccache — GHA cache may be down."
+              echo "  Retrying without compiler cache..."
+              echo "============================================="
+              echo ""
+              cd ..
+              rm -rf build && mkdir build && cd build
+              cmake .. -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                ${{ matrix.cmake_flags }}
+              cmake --build . -j $(nproc)
+            else
+              echo "Build failed (no sccache involved)"
+              exit 1
+            fi
+          fi
 
           # Verify output
           if [ ! -f ace-server ]; then
