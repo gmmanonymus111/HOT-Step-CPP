@@ -13,7 +13,7 @@ import { Router } from 'express';
 import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { PROJECT_ROOT } from '../config.js';
+import { PROJECT_ROOT, PORTABLE_MODE } from '../config.js';
 
 const router = Router();
 
@@ -174,10 +174,14 @@ router.post('/restart', (_req, res) => {
 
     // Do NOT kill Vite (port 3000) — leave it running for dev mode
 
-    // On Windows: kill our process tree (needed for restart-loop wrapper)
-    killSelf();
+    // In portable mode, the bat file has a restart loop that checks
+    // .restart-requested after node exits — just exit cleanly.
+    // In dev mode, kill our process tree so tsx watch relaunches us.
+    if (!PORTABLE_MODE) {
+      killSelf();
+    }
 
-    // Fallback exit — the launch wrapper script will restart us
+    // Exit — portable bat loop will relaunch, dev tsx watch will relaunch
     setTimeout(() => {
       console.log('[Server] Exiting for restart.');
       process.exit(0);

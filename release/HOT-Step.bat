@@ -15,10 +15,23 @@ if not exist "%~dp0models" mkdir "%~dp0models"
 REM Open browser after a short delay
 start "" cmd /c "timeout /t 5 /nobreak > nul & start http://localhost:3001/"
 
-REM Run server via portable Node.js
+REM ── Restart loop ──────────────────────────────────────────
+REM The server writes .restart-requested when the user clicks
+REM "Restart" in the UI. After node exits, we check for the
+REM marker — if it exists, we delete it and relaunch.
+:start
 echo Starting server...
 echo.
 "%~dp0runtime\node.exe" "%~dp0server\server.mjs"
+
+REM Check for restart marker
+if exist "%~dp0.restart-requested" (
+    del "%~dp0.restart-requested"
+    echo.
+    echo [HOT-Step] Restarting...
+    echo.
+    goto start
+)
 
 echo.
 echo [HOT-Step] Server stopped. Press any key to exit.
