@@ -105,7 +105,7 @@ jobs:
           Invoke-WebRequest -Uri $ortUrl -OutFile $ortZip -UseBasicParsing
           New-Item -ItemType Directory -Force engine/deps | Out-Null
           Expand-Archive -Path $ortZip -DestinationPath engine/deps -Force
-          Rename-Item "engine/deps/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}" "engine/deps/onnxruntime"
+          Move-Item "engine/deps/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}" "engine/deps/onnxruntime"
 
       # ── Portable Node.js ───────────────────────────────────────
       - name: Cache portable Node.js
@@ -231,12 +231,18 @@ jobs:
             Copy-Item $_.FullName (Join-Path $engineOut $_.Name)
           }
 
-          # ORT DLLs (for SuperSep)
+          # ORT DLLs (for SuperSep — all variants need onnxruntime.dll for CPU inference)
           $ortLib = "engine/deps/onnxruntime/lib"
           if (Test-Path $ortLib) {
-            foreach ($dll in @("onnxruntime.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll")) {
-              $src = Join-Path $ortLib $dll
-              if (Test-Path $src) { Copy-Item $src (Join-Path $engineOut $dll) }
+            # Core runtime — needed by all variants
+            $ortCore = Join-Path $ortLib "onnxruntime.dll"
+            if (Test-Path $ortCore) { Copy-Item $ortCore (Join-Path $engineOut "onnxruntime.dll") }
+            # CUDA providers — only needed for CUDA variant
+            if ($variant -eq "cuda") {
+              foreach ($dll in @("onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll")) {
+                $src = Join-Path $ortLib $dll
+                if (Test-Path $src) { Copy-Item $src (Join-Path $engineOut $dll) }
+              }
             }
           }
 
@@ -359,7 +365,7 @@ jobs:
   # macOS build (Apple Silicon / Metal)
   # ─────────────────────────────────────────────────────────────────────────
   build-macos:
-    runs-on: macos-14  # M1 Apple Silicon
+    runs-on: macos-15  # Apple Silicon — needs Xcode 16+ for std::from_chars<float>
     steps:
       - name: Checkout
         uses: actions/checkout@v4
