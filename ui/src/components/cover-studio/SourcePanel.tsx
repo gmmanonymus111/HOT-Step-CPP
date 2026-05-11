@@ -7,19 +7,7 @@ import { ALL_KEYS } from './coverStudioUtils';
 import { SEPARATION_LEVELS } from '../../services/supersepApi';
 import { LatentImport, type LatentMetadata } from '../shared/LatentImport';
 import { masteringApi } from '../../services/api';
-
-const LANGUAGES = [
-  { value: 'en', label: 'English' },
-  { value: 'zh', label: '中文' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-  { value: 'es', label: 'Español' },
-  { value: 'fr', label: 'Français' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'ru', label: 'Русский' },
-  { value: 'it', label: 'Italiano' },
-  { value: 'pt', label: 'Português' },
-];
+import { VOCAL_LANGUAGES } from '../../constants/languages';
 
 interface SourcePanelProps {
   sourceFileName: string;
@@ -436,7 +424,7 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
               onChange={e => onVocalLanguageChange(e.target.value)}
               className="flex-1 px-2 py-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-xs text-zinc-700 dark:text-zinc-300 outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-colors cursor-pointer"
             >
-              {LANGUAGES.map(l => (
+              {VOCAL_LANGUAGES.map(l => (
                 <option key={l.value} value={l.value}>{l.label}</option>
               ))}
             </select>

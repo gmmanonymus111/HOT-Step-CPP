@@ -4,6 +4,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Slider } from '../shared/Slider';
+import { VOCAL_LANGUAGES } from '../../constants/languages';
 
 const KEY_SIGNATURES = [
   '', 'C major', 'C minor', 'C# major', 'C# minor',
@@ -15,18 +16,6 @@ const KEY_SIGNATURES = [
 ];
 
 const TIME_SIGNATURES = ['', '4/4', '3/4', '6/8', '2/4'];
-const LANGUAGES = [
-  { value: 'en', label: 'English' },
-  { value: 'zh', label: '中文' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-  { value: 'es', label: 'Español' },
-  { value: 'fr', label: 'Français' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'ru', label: 'Русский' },
-  { value: 'it', label: 'Italiano' },
-  { value: 'pt', label: 'Português' },
-];
 
 interface MetadataSectionProps {
   bpm: number;
@@ -96,7 +85,7 @@ export const MetadataSection: React.FC<MetadataSectionProps> = ({
           <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('metadataSection.vocalLanguage')}</label>
           <select className={selectClasses} value={vocalLanguage}
             onChange={e => onVocalLanguageChange(e.target.value)}>
-            {LANGUAGES.map(l => (
+            {VOCAL_LANGUAGES.map(l => (
               <option key={l.value} value={l.value}>{l.label}</option>
             ))}
           </select>

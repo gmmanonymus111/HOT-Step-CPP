@@ -31,28 +31,7 @@ import {
   failManualQueueItem,
 } from '../../stores/audioGenQueueStore';
 import type { GenerationParams } from '../../types';
-
-// Vocal language options (subset matching the engine's VALID_LANGUAGES)
-const LANGUAGES = [
-  { value: 'en', label: 'English' },
-  { value: 'zh', label: '中文 (Chinese)' },
-  { value: 'ja', label: '日本語 (Japanese)' },
-  { value: 'ko', label: '한국어 (Korean)' },
-  { value: 'es', label: 'Español' },
-  { value: 'fr', label: 'Français' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'it', label: 'Italiano' },
-  { value: 'pt', label: 'Português' },
-  { value: 'ru', label: 'Русский' },
-  { value: 'ar', label: 'العربية' },
-  { value: 'hi', label: 'हिन्दी' },
-  { value: 'tr', label: 'Türkçe' },
-  { value: 'vi', label: 'Tiếng Việt' },
-  { value: 'th', label: 'ไทย' },
-  { value: 'sv', label: 'Svenska' },
-  { value: 'pl', label: 'Polski' },
-  { value: 'nl', label: 'Nederlands' },
-];
+import { VOCAL_LANGUAGES } from '../../constants/languages';
 
 type LyricMode = 'instrumental' | 'lyrics' | 'lyrics-ai';
 type Phase = 'input' | 'inspiring' | 'preview' | 'generating';
@@ -721,7 +700,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
               onChange={(e) => setVocalLanguage(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
             >
-              {LANGUAGES.map(lang => (
+              {VOCAL_LANGUAGES.map(lang => (
                 <option key={lang.value} value={lang.value}>{lang.label}</option>
               ))}
             </select>
