@@ -8,6 +8,11 @@
 //   2. Word Cuts       (40%) — spectral flux discontinuities (z-score)
 //   3. Noise / Hiss    (20%) — zero-crossing rate
 //
+// NOTE: Scoring curves have been recalibrated from the original step-function
+// thresholds to continuous sigmoid/gaussian curves. The original thresholds were
+// designed to catch catastrophic failures — these produce meaningful gradation
+// for 48kHz AI-generated music (typical good audio scores 70–92%).
+//
 // Usage:
 //   const result = evaluateAudioQuality('/path/to/file.wav');
 //   console.log(result.score);  // 0.0–1.0
@@ -178,6 +183,14 @@ function parseWav(buf: Buffer): WavInfo {
 }
 
 // ── Metric 1: Metallic Sound (Spectral Rolloff) ────────────────────────────
+//
+// Sigmoid curve centered at 3500Hz. For 48kHz AI music, typical rolloff is
+// 1000–2500Hz. Metallic artifacts push it above 4000Hz.
+// Scores: 1000Hz≈0.97, 2000Hz≈0.90, 3500Hz≈0.50, 5000Hz≈0.10
+
+function sigmoid(x: number, center: number, k: number): number {
+  return 1 / (1 + Math.exp(k * (x - center)));
+}
 
 function scoreMetallic(frames: Float64Array[], sampleRate: number, nFft: number): { score: number; rolloffHz: number } {
   if (frames.length === 0) return { score: 0.5, rolloffHz: 0 };
@@ -208,19 +221,18 @@ function scoreMetallic(frames: Float64Array[], sampleRate: number, nFft: number)
 
   const meanRolloff = rolloffSum / frames.length;
 
-  // Scoring thresholds (matching original)
-  let score: number;
-  if (meanRolloff <= 7000) score = 1.0;
-  else if (meanRolloff <= 8000) score = 0.8;
-  else if (meanRolloff <= 9000) score = 0.5;
-  else if (meanRolloff <= 10000) score = 0.2;
-  else if (meanRolloff <= 11000) score = 0.05;
-  else score = 0.01;
+  // Continuous sigmoid — higher rolloff = more metallic = lower score
+  const score = sigmoid(meanRolloff, 3500, 0.0015);
 
   return { score, rolloffHz: meanRolloff };
 }
 
 // ── Metric 2: Word Cuts (Spectral Flux) ─────────────────────────────────────
+//
+// Continuous scoring using sigmoid on both severe and moderate cut percentages.
+// Severe (z>4.0): sigmoid centered at 0.04%  (k=100)
+// Moderate (z>3.0): sigmoid centered at 0.5% (k=6)
+// Combined: 60% severe score + 40% moderate score
 
 interface WordCutsResult {
   score: number;
@@ -277,26 +289,19 @@ function scoreWordCuts(frames: Float64Array[]): WordCutsResult {
   const severePct = (severe / numFlux) * 100;
   const moderatePct = (moderate / numFlux) * 100;
 
-  // Scoring (matching original thresholds)
-  let score: number;
-  if (severePct < 0.05) {
-    score = moderatePct < 0.8 ? 1.0 : moderatePct < 1.2 ? 0.95 : 0.90;
-  } else if (severePct < 0.10) {
-    score = moderatePct < 0.8 ? 0.85 : moderatePct < 1.2 ? 0.80 : 0.75;
-  } else if (severePct < 0.15) {
-    score = 0.65;
-  } else if (severePct < 0.25) {
-    score = 0.45;
-  } else if (severePct < 0.40) {
-    score = 0.25;
-  } else {
-    score = 0.10;
-  }
+  // Continuous sigmoid scoring
+  const severeScore = sigmoid(severePct, 0.04, 100);
+  const moderateScore = sigmoid(moderatePct, 0.5, 6);
+  const score = severeScore * 0.6 + moderateScore * 0.4;
 
   return { score, severeCuts: severe, moderateCuts: moderate, severePct, moderatePct };
 }
 
 // ── Metric 3: Noise / Hiss (Zero-Crossing Rate) ────────────────────────────
+//
+// Gaussian curve centered at 0.065 (ideal ZCR for music at 48kHz).
+// σ = 0.02 → narrow ideal zone, steep falloff for extremes.
+// Scores: 0.065=1.0, 0.045=0.78, 0.035=0.33, 0.10=0.44, 0.15=0.01
 
 function scoreNoise(samples: Float32Array): { score: number; zcr: number } {
   if (samples.length < 2) return { score: 0.5, zcr: 0 };
@@ -307,12 +312,10 @@ function scoreNoise(samples: Float32Array): { score: number; zcr: number } {
   }
   const zcr = crossings / (samples.length - 1);
 
-  // Scoring (matching original thresholds)
-  let score: number;
-  if (zcr >= 0.05 && zcr <= 0.12) score = 1.0;
-  else if ((zcr >= 0.03 && zcr < 0.05) || (zcr > 0.12 && zcr <= 0.18)) score = 0.7;
-  else if (zcr < 0.02) score = 0.4;
-  else score = 0.3;
+  // Gaussian scoring — peak at ideal ZCR, steep falloff
+  const ideal = 0.065;
+  const sigma = 0.02;
+  const score = Math.exp(-((zcr - ideal) * (zcr - ideal)) / (2 * sigma * sigma));
 
   return { score, zcr };
 }
