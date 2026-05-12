@@ -5,6 +5,7 @@
 // Remembers last-visited directory per filter type in localStorage.
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Folder, FileText, ChevronUp, X, Loader2 } from 'lucide-react';
 import { adapterApi } from '../../services/api';
 import type { BrowseEntry } from '../../types';
@@ -102,7 +103,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
     }
   };
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{ background: 'rgba(0, 0, 0, 0.5)', backdropFilter: 'blur(4px)' }}
@@ -254,6 +255,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
