@@ -71,7 +71,9 @@ HOT-Step CPP extends the base acestep.cpp engine with 80+ features across infere
 
 🧱 **Stem Builder** — Generatively create new instrument stems for source tracks using the DiT engine. Select a source audio file, choose which instrument layers to generate (vocals, drums, bass, guitar, piano), and the engine creates fresh stems that complement the original. Build up arrangements by iteratively adding AI-generated layers.
 
-🔊 **Audio Post-Processing** — Spectral denoiser (Wiener-filter), Spectral Lifter (native C++), PP-VAE neural audio polish, duration buffer with auto-trim for clean endings, and configurable fade-out.
+🔊 **Audio Post-Processing** — Spectral denoiser (Wiener-filter), Spectral Lifter (native C++), PP-VAE neural audio polish, Vocal Naturalizer (5-stage DSP humanization), duration buffer with auto-trim for clean endings, and configurable fade-out.
+
+📊 **Audio Quality Evaluator** — Automatic post-generation quality scoring using spectral analysis. Three weighted metrics — metallic sound detection (spectral rolloff), word cut detection (spectral flux discontinuities), and noise/hiss analysis (zero-crossing rate) — produce a 0–100% score per track. Choose to evaluate unmastered, mastered, or both for direct comparison. Scores display as colour-coded badges in the Library. Ported from [JK-AceStep-Nodes](https://github.com/jeankassio/JK-AceStep-Nodes) (MIT License).
 
 🤖 **AI Assistant** — In-app LLM-powered assistant with full awareness of your current settings, lyrics, mode, and engine state. Ask it to review your configuration, write or rewrite lyrics, suggest optimizations, or directly apply setting changes — all via a streaming chat sidebar. Supports any configured LLM provider (local or cloud) with per-action apply controls and thinking/response separation.
 
