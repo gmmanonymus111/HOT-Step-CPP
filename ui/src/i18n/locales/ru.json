@@ -659,6 +659,12 @@
     "instaGen.preview.generate": "Создать песню",
     "instaGen.preview.back": "Назад к редактированию",
     "instaGen.preview.editCaption": "Изменить описание",
-    "instaGen.clearAll": "Очистить всё"
+    "instaGen.clearAll": "Очистить всё",
+
+    "coverArt.subjectTitle": "Обложка",
+    "coverArt.subjectLabel": "Тема изображения",
+    "coverArt.subjectPlaceholder": "Авто — генерируется из текста и стиля",
+    "coverArt.subjectHelp": "Переопределите описание визуальной сцены для обложки. Оставьте пустым для автоматической генерации из метаданных песни.",
+    "coverArt.subjectReset": "Сброс"
   }
 }

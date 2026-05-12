@@ -191,6 +191,8 @@ export interface GlobalParams {
   // ── Cover Art ──
   coverArtEnabled: boolean;
   setCoverArtEnabled: (v: boolean) => void;
+  coverArtSubject: string;
+  setCoverArtSubject: (v: string) => void;
 
   // ── Derived ──
   /** Assemble all engine params for a generation request */
@@ -323,6 +325,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   // Cover Art
   const [coverArtEnabled, setCoverArtEnabled] = usePersistedState('hs-coverArtEnabled', false);
+  const [coverArtSubject, setCoverArtSubject] = usePersistedState('hs-coverArtSubject', '');
 
   // Trigger word settings — read from shared settings (same key as App.tsx)
   const [settings] = usePersistedState<AppSettings>('ace-settings', DEFAULT_SETTINGS);
@@ -445,6 +448,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
       // Cover Art
       coverArtEnabled: coverArtEnabled || undefined,
+      coverArtSubject: (coverArtEnabled && coverArtSubject) ? coverArtSubject : undefined,
     };
   }, [
     ditModel, lmModel, vaeModel, embeddingModel,
@@ -465,6 +469,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     natMetallicReduction, natQuantizationMask, natTransitionSmooth,
     ppVaeReencode, ppVaeBlend,
     coverArtEnabled,
+    coverArtSubject,
     postProcessingEnabled,
     pluginParams,
     settings,
@@ -534,6 +539,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     ppVaeBlend, setPpVaeBlend,
     // Cover Art
     coverArtEnabled, setCoverArtEnabled,
+    coverArtSubject, setCoverArtSubject,
     // Derived
     getGlobalParams,
   }), [
@@ -584,6 +590,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     ppVaeReencode, setPpVaeReencode,
     ppVaeBlend, setPpVaeBlend,
     coverArtEnabled, setCoverArtEnabled,
+    coverArtSubject, setCoverArtSubject,
     getGlobalParams,
   ]);
 

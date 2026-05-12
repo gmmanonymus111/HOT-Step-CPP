@@ -659,6 +659,12 @@
     "instaGen.preview.generate": "曲を生成する",
     "instaGen.preview.back": "編集に戻る",
     "instaGen.preview.editCaption": "キャプションを編集",
-    "instaGen.clearAll": "すべてクリア"
+    "instaGen.clearAll": "すべてクリア",
+
+    "coverArt.subjectTitle": "カバーアート",
+    "coverArt.subjectLabel": "画像テーマ",
+    "coverArt.subjectPlaceholder": "自動 — 歌詞とスタイルから生成",
+    "coverArt.subjectHelp": "カバーアートのビジュアルシーンを上書きします。空のままにすると、曲のメタデータから自動生成されます。",
+    "coverArt.subjectReset": "リセット"
   }
 }

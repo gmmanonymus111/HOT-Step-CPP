@@ -678,6 +678,12 @@
     "instaGen.preview.back": "Back to Editing",
     "instaGen.preview.editCaption": "Edit Caption",
     "instaGen.preview.refine": "Refine in Custom-Gen",
-    "instaGen.clearAll": "Clear All"
+    "instaGen.clearAll": "Clear All",
+
+    "coverArt.subjectTitle": "Cover Art",
+    "coverArt.subjectLabel": "Image Subject",
+    "coverArt.subjectPlaceholder": "Auto — generated from song lyrics and style",
+    "coverArt.subjectHelp": "Override the visual scene description for cover art. Leave empty to auto-generate from song metadata.",
+    "coverArt.subjectReset": "Reset"
   }
 }

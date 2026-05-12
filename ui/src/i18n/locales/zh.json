@@ -659,6 +659,12 @@
     "instaGen.preview.generate": "生成歌曲",
     "instaGen.preview.back": "返回编辑",
     "instaGen.preview.editCaption": "编辑描述",
-    "instaGen.clearAll": "全部清除"
+    "instaGen.clearAll": "全部清除",
+
+    "coverArt.subjectTitle": "封面艺术",
+    "coverArt.subjectLabel": "图像主题",
+    "coverArt.subjectPlaceholder": "自动 — 根据歌词和风格生成",
+    "coverArt.subjectHelp": "覆盖封面艺术的视觉场景描述。留空则从歌曲元数据自动生成。",
+    "coverArt.subjectReset": "重置"
   }
 }

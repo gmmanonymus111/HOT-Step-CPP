@@ -659,6 +659,12 @@
     "instaGen.preview.generate": "노래 생성",
     "instaGen.preview.back": "편집으로 돌아가기",
     "instaGen.preview.editCaption": "캡션 편집",
-    "instaGen.clearAll": "모두 지우기"
+    "instaGen.clearAll": "모두 지우기",
+
+    "coverArt.subjectTitle": "커버 아트",
+    "coverArt.subjectLabel": "이미지 주제",
+    "coverArt.subjectPlaceholder": "자동 — 가사와 스타일에서 생성",
+    "coverArt.subjectHelp": "커버 아트의 시각적 장면 설명을 재정의합니다. 비워두면 곡 메타데이터에서 자동 생성됩니다.",
+    "coverArt.subjectReset": "초기화"
   }
 }

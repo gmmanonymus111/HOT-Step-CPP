@@ -357,6 +357,11 @@ class CoverArtDownloader extends EventEmitter {
         }
       }
 
+      // Sweep ALL subdirectories for stray runtime DLLs that the above
+      // binary-centric move may have missed (different ZIP layouts, nested
+      // folders, etc.)
+      this._sweepRuntimeLibs(dir);
+
       // Step 6: Clean up ZIP
       try { fs.unlinkSync(zipPath); } catch {}
       console.log(`[CoverArt Download] sd.exe ready`);
@@ -447,6 +452,42 @@ class CoverArtDownloader extends EventEmitter {
     try {
       return fs.readdirSync(dir);
     } catch { return []; }
+  }
+
+  /**
+   * Recursively move all .dll/.so/.dylib files from subdirectories to root.
+   * Cleans up empty subdirectories afterwards.
+   */
+  private _sweepRuntimeLibs(rootDir: string): void {
+    const LIB_EXTS = new Set(['.dll', '.so', '.dylib']);
+    let moved = 0;
+    const sweep = (dir: string) => {
+      try {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            sweep(full);
+            // Remove empty subdirectories
+            try {
+              const remaining = fs.readdirSync(full);
+              if (remaining.length === 0) fs.rmdirSync(full);
+            } catch {}
+          } else if (entry.isFile() && LIB_EXTS.has(path.extname(entry.name).toLowerCase())) {
+            if (dir !== rootDir) {
+              const dst = path.join(rootDir, entry.name);
+              if (!fs.existsSync(dst)) {
+                fs.renameSync(full, dst);
+                moved++;
+              }
+            }
+          }
+        }
+      } catch {}
+    };
+    sweep(rootDir);
+    if (moved > 0) {
+      console.log(`[CoverArt Download] Swept ${moved} runtime lib(s) to cover-art root`);
+    }
   }
 
   /** Build the complete list of entries including sd.exe for status display */

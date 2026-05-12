@@ -32,6 +32,7 @@ import {
 } from '../../stores/audioGenQueueStore';
 import type { GenerationParams } from '../../types';
 import { VOCAL_LANGUAGES } from '../../constants/languages';
+import { CoverArtSubjectSection } from '../shared/CoverArtSubjectSection';
 
 type LyricMode = 'instrumental' | 'lyrics' | 'lyrics-ai';
 type Phase = 'input' | 'inspiring' | 'preview' | 'generating';
@@ -743,6 +744,9 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
             </div>
           </div>
         )}
+
+        {/* Cover Art prompt override (only when enabled) */}
+        <CoverArtSubjectSection />
 
         {/* Thinking toggle */}
         <div className="flex items-center justify-between py-2">

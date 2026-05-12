@@ -12,6 +12,7 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { ContentSection } from './ContentSection';
 import { MetadataSection } from './MetadataSection';
 import { LatentImport } from '../shared/LatentImport';
+import { CoverArtSubjectSection } from '../shared/CoverArtSubjectSection';
 import type { GenerationParams, Song } from '../../types';
 
 interface CreatePanelProps {
@@ -116,6 +117,9 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
           }}
           onClear={() => setSourceLatentUrl('')}
         />
+
+        {/* Cover Art prompt override (only when enabled) */}
+        <CoverArtSubjectSection />
       </div>
 
       {/* Generate button */}

@@ -206,6 +206,7 @@ export interface GenerationParams {
 
   // Cover Art auto-generation
   coverArtEnabled?: boolean;
+  coverArtSubject?: string;     // Override the auto-generated image subject
 }
 
 /** Generation job status from the server */
