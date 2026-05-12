@@ -70,34 +70,40 @@ export function gatherSongMetadata(song: any): AudioMetadata {
   meta.title = rawTitle;
 
   // ── Artist ──
+  // For Lyric Studio and Cover Studio, append "(AI-Generated)" to be
+  // transparent that this is AI-generated content in the style of the artist.
   if (source === 'cover-studio') {
-    // Cover Studio: format as "TargetArtist (SourceArtist Cover)"
+    // Cover Studio: format as "TargetArtist (SourceArtist Cover) (AI-Generated)"
     const targetArtist = genParams.artistName || '';
     const sourceArtist = genParams.sourceArtist || '';
     if (targetArtist && sourceArtist) {
-      meta.artist = `${targetArtist} (${sourceArtist} Cover)`;
+      meta.artist = `${targetArtist} (${sourceArtist} Cover) (AI-Generated)`;
       meta.albumArtist = sourceArtist;
     } else if (targetArtist) {
-      meta.artist = targetArtist;
+      meta.artist = `${targetArtist} (AI-Generated)`;
     } else if (sourceArtist) {
-      meta.artist = sourceArtist;
+      meta.artist = `${sourceArtist} (AI-Generated)`;
     }
   } else if (source === 'lyric-studio') {
     // Lyric Studio: enrich from the lireek join chain
     const lireekMeta = enrichFromLireek(song.audio_url);
     if (lireekMeta) {
-      meta.artist = lireekMeta.artistName || artist;
+      const lireekArtist = lireekMeta.artistName || artist;
+      meta.artist = lireekArtist ? `${lireekArtist} (AI-Generated)` : undefined;
       meta.album = lireekMeta.album || undefined;
     } else {
-      meta.artist = artist || undefined;
+      meta.artist = artist ? `${artist} (AI-Generated)` : undefined;
     }
   } else {
     // Auto-Gen / Custom-Gen
     meta.artist = artist || undefined;
   }
 
-  // ── Genre (style/caption) ──
-  meta.genre = song.style || song.caption || genParams.style || undefined;
+  // ── Genre (music style from caption, NOT from subject) ──
+  // song.style stores the subject (what the song is about), NOT the genre.
+  // song.caption stores the LM's music style description (e.g. "metalcore,
+  // aggressive, heavy guitars") which is what genre should be based on.
+  meta.genre = song.caption || genParams.caption || genParams.style || undefined;
 
   // ── Lyrics ──
   if (song.lyrics && song.lyrics !== '[Instrumental]') {
@@ -170,17 +176,36 @@ export function buildMetadataArgs(meta: AudioMetadata, format: string): string[]
     add('genre', meta.genre);
     add('date', meta.date);
 
-    if (meta.bpm) add('BPM', meta.bpm);
-    if (meta.key) add('KEY', meta.key);
+    // BPM and Key — use standardized tag names per format so media players
+    // actually populate their "Beats-per-minute" and "Initial key" fields.
+    // MP3 (ID3v2): TBPM and TKEY are the standard frame names.
+    // FLAC/Opus (Vorbis): BPM is standard, INITIALKEY is more widely
+    // recognized than KEY by media players and DJ software.
+    if (meta.bpm) {
+      if (format === 'mp3') {
+        add('TBPM', meta.bpm);
+      } else {
+        add('BPM', meta.bpm);
+      }
+    }
+    if (meta.key) {
+      if (format === 'mp3') {
+        add('TKEY', meta.key);
+      } else {
+        add('INITIALKEY', meta.key);
+      }
+    }
 
-    // Lyrics — uses LYRICS tag for Vorbis (FLAC/Opus), USLT for ID3 (MP3)
-    // ffmpeg maps 'lyrics' metadata to the appropriate tag per format
+    // Lyrics — use UNSYNCEDLYRICS for better player compatibility.
+    // Most players (foobar2000, MusicBee, VLC, Strawberry) look for this
+    // tag name in Vorbis comments. For MP3, ffmpeg writes it as a custom
+    // text frame (TXXX); full USLT support requires a dedicated ID3 library.
     if (meta.lyrics) {
       // Truncate very long lyrics to avoid bloating (16KB limit is generous)
       const truncated = meta.lyrics.length > 16_000
         ? meta.lyrics.substring(0, 16_000) + '\n[truncated]'
         : meta.lyrics;
-      add('lyrics', truncated);
+      add('UNSYNCEDLYRICS', truncated);
     }
   }
 
