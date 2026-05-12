@@ -147,7 +147,7 @@ export async function runPostProcessingChain(
           vibratoDepth: params.natVibratoDepth ?? 1.0,
           formantStrength: params.natFormantStrength ?? 1.0,
           metallicReduction: params.natMetallicReduction ?? 1.0,
-          quantizationMask: params.natQuantizationMask ?? 1.0,
+          quantizationMask: params.natQuantizationMask ?? 0.0,
           transitionSmooth: params.natTransitionSmooth ?? 1.0,
         };
         const applied = await runVocalNaturalizer(

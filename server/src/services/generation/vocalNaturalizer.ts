@@ -8,13 +8,13 @@
 //
 // All DSP is pure math — no native dependencies. Butterworth IIR filters are
 // computed from coefficient formulas, applied via direct-form II transposed.
+//
+// Architecture note: DSP is applied directly to the full mix. The 5 stages
+// are all frequency-band-targeted and primarily affect vocal content without
+// needing stem separation. This avoids the destructive separate/remix cycle
+// that degrades signal quality and raises the noise floor.
 
 import fs from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { config, getFFmpegPath } from '../../config.js';
-
-const execFileAsync = promisify(execFile);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ export interface NaturalizerParams {
   vibratoDepth: number;     // 0.0–1.0 (relative to master)
   formantStrength: number;  // 0.0–1.0
   metallicReduction: number; // 0.0–1.0
-  quantizationMask: number; // 0.0–1.0
+  quantizationMask: number; // 0.0–1.0 — CAUTION: injects shaped noise, off by default
   transitionSmooth: number; // 0.0–1.0
 }
 
@@ -34,7 +34,7 @@ export const DEFAULT_NATURALIZER: NaturalizerParams = {
   vibratoDepth: 1.0,
   formantStrength: 1.0,
   metallicReduction: 1.0,
-  quantizationMask: 1.0,
+  quantizationMask: 0.0,   // Off by default — injects 1–4kHz noise (audible hiss)
   transitionSmooth: 1.0,
 };
 
@@ -289,6 +289,9 @@ function naturalizeChannel(
   }
 
   // Stage 4: Quantization Masking (shaped noise 1–4 kHz)
+  // WARNING: This stage injects noise. Off by default (quantizationMask = 0).
+  // Only enable if you specifically want dither-like masking of quantization
+  // artifacts and accept the trade-off of a slightly raised noise floor.
   const qMask = params.quantizationMask;
   if (qMask > 0.01) {
     const rawNoise = gaussianNoise(N, seed + 42);
@@ -350,22 +353,15 @@ function naturalizeWav(wav: WavData, params: NaturalizerParams, seed: number): W
   return { ...wav, samples: result, bitsPerSample: 32 };
 }
 
-// ── SuperSep Orchestration ─────────────────────────────────────────────────
-
-interface StemMeta {
-  name: string;
-  category: string;
-  stem_type: string;
-  index: number;
-  stage: number;
-}
+// ── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Run the full vocal naturaliser pipeline:
- * 1. SuperSep level 0 (BS-Roformer) → 6 stems
- * 2. Naturalise the "vocals" stem
- * 3. Remix: naturalised vocals + all other stems
- * 4. Write result to processedPath
+ * Run the vocal naturaliser pipeline directly on the full mix.
+ *
+ * DSP stages are frequency-band-targeted and primarily affect vocal content
+ * without needing stem separation. This preserves signal integrity, avoids
+ * phase smearing, and keeps the full dynamic range intact for downstream
+ * processing (VST chains, mastering).
  */
 export async function runVocalNaturalizer(
   processedPath: string,
@@ -375,180 +371,27 @@ export async function runVocalNaturalizer(
   trackIndex?: number,
   totalTracks?: number,
 ): Promise<boolean> {
-  const ACE_URL = config.aceServer.url;
   const suffix = (totalTracks && totalTracks > 1 && trackIndex !== undefined)
     ? ` (${trackIndex + 1}/${totalTracks})`
     : '';
 
-  // 1. Send audio to SuperSep level 0
-  setStage(`Vocal Naturalizer: separating stems${suffix}...`);
-  const wavBuf = fs.readFileSync(processedPath);
+  setStage(`Vocal Naturalizer: processing${suffix}...`);
 
-  // Capture the original sample rate BEFORE SuperSep resamples to 44.1kHz
-  let originalSampleRate = 48000;
   try {
-    const inputWav = parseWav(wavBuf);
-    originalSampleRate = inputWav.sampleRate;
-  } catch { /* fallback to 48000 */ }
+    // Read the WAV directly — no separation step
+    const wavBuf = fs.readFileSync(processedPath);
+    const wav = parseWav(wavBuf);
 
-  let jobId: string;
-  try {
-    const sepRes = await fetch(`${ACE_URL}/supersep/separate?level=0`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: wavBuf,
-    });
-    if (!sepRes.ok) {
-      const err = await sepRes.text();
-      throw new Error(`SuperSep returned ${sepRes.status}: ${err}`);
-    }
-    const sepData = await sepRes.json() as { id: string };
-    jobId = sepData.id;
-  } catch (err: any) {
-    log('WARNING', `[Vocal Naturalizer] SuperSep separation failed: ${err.message}`);
-    return false;
-  }
+    const seed = Date.now();
+    const processed = naturalizeWav(wav, params, seed);
 
-  // 2. Poll until done
-  setStage(`Vocal Naturalizer: waiting for separation${suffix}...`);
-  let attempts = 0;
-  const maxAttempts = 600; // 5 minutes at 500ms intervals
-  while (attempts < maxAttempts) {
-    await new Promise(r => setTimeout(r, 500));
-    try {
-      const progRes = await fetch(`${ACE_URL}/supersep/progress?id=${jobId}`);
-      const prog = await progRes.json() as { status: string; progress: number; message: string; error?: string };
-      if (prog.status === 'done') break;
-      if (prog.status === 'failed' || prog.status === 'cancelled') {
-        throw new Error(prog.error || `Separation ${prog.status}`);
-      }
-      setStage(`Vocal Naturalizer: separating (${Math.round(prog.progress * 100)}%)${suffix}...`);
-    } catch (err: any) {
-      log('WARNING', `[Vocal Naturalizer] Progress poll failed: ${err.message}`);
-      return false;
-    }
-    attempts++;
-  }
-  if (attempts >= maxAttempts) {
-    log('WARNING', '[Vocal Naturalizer] Separation timed out');
-    return false;
-  }
+    // Write back — same sample rate, same channels, no resampling needed
+    fs.writeFileSync(processedPath, writeWav(processed));
 
-  // 3. Get stem list
-  let stems: StemMeta[];
-  try {
-    const resultRes = await fetch(`${ACE_URL}/supersep/result?id=${jobId}`);
-    if (!resultRes.ok) throw new Error(`Result fetch failed: ${resultRes.status}`);
-    const resultData = await resultRes.json() as { stems: StemMeta[] };
-    stems = resultData.stems;
-  } catch (err: any) {
-    log('WARNING', `[Vocal Naturalizer] Failed to fetch stem list: ${err.message}`);
-    return false;
-  }
-
-  // 4. Download all stems and identify vocals
-  setStage(`Vocal Naturalizer: processing vocals${suffix}...`);
-  const stemBuffers: Map<number, Buffer> = new Map();
-  const vocalIndices: number[] = [];
-
-  for (const stem of stems) {
-    try {
-      const stemRes = await fetch(`${ACE_URL}/supersep/serve?id=${jobId}&stem=${stem.index}`);
-      if (!stemRes.ok) continue;
-      const buf = Buffer.from(await stemRes.arrayBuffer());
-      stemBuffers.set(stem.index, buf);
-      if (stem.category === 'vocals') vocalIndices.push(stem.index);
-    } catch {
-      log('WARNING', `[Vocal Naturalizer] Failed to download stem ${stem.index}`);
-    }
-  }
-
-  if (vocalIndices.length === 0) {
-    log('INFO', '[Vocal Naturalizer] No vocal stems found — skipping');
-    return false;
-  }
-
-  // 5. Naturalise vocal stems
-  const seed = Date.now();
-  for (const idx of vocalIndices) {
-    const buf = stemBuffers.get(idx)!;
-    try {
-      const wav = parseWav(buf);
-      const processed = naturalizeWav(wav, params, seed);
-      stemBuffers.set(idx, writeWav(processed));
-    } catch (err: any) {
-      log('WARNING', `[Vocal Naturalizer] DSP failed on stem ${idx}: ${err.message}`);
-    }
-  }
-
-  // 6. Remix: sum all stems back together
-  setStage(`Vocal Naturalizer: remixing${suffix}...`);
-  try {
-    // Parse all stems to float, find max length
-    const parsedStems: WavData[] = [];
-    let maxLength = 0;
-    let outRate = 44100;
-    let outChannels = 2;
-
-    for (const [, buf] of stemBuffers) {
-      const wav = parseWav(buf);
-      parsedStems.push(wav);
-      if (wav.samples.length > maxLength) maxLength = wav.samples.length;
-      outRate = wav.sampleRate;
-      outChannels = wav.channels;
-    }
-
-    // Sum
-    const mixed = new Float32Array(maxLength);
-    for (const stem of parsedStems) {
-      for (let i = 0; i < stem.samples.length; i++) {
-        mixed[i] += stem.samples[i];
-      }
-    }
-
-    // Soft clip to prevent clipping from summation
-    let peak = 0;
-    for (let i = 0; i < mixed.length; i++) {
-      const a = Math.abs(mixed[i]);
-      if (a > peak) peak = a;
-    }
-    if (peak > 0.95) {
-      const scale = 0.95 / peak;
-      for (let i = 0; i < mixed.length; i++) mixed[i] *= scale;
-    }
-
-    const outWav = writeWav({ sampleRate: outRate, channels: outChannels, bitsPerSample: 32, samples: mixed });
-    fs.writeFileSync(processedPath, outWav);
-
-    // SuperSep operates at 44100 Hz internally, so the remix comes back at
-    // 44.1kHz even though the original was 48kHz. Resample back to the
-    // original rate to avoid contaminating the rest of the pipeline.
-    if (outRate !== originalSampleRate) {
-      const ffmpegPath = getFFmpegPath();
-      if (ffmpegPath) {
-        const tempResampled = processedPath + '.resampled.wav';
-        try {
-          log('INFO', `[Vocal Naturalizer] Resampling ${outRate} → ${originalSampleRate} Hz`);
-          await execFileAsync(ffmpegPath, [
-            '-y', '-i', processedPath,
-            '-ar', String(originalSampleRate),
-            '-c:a', 'pcm_f32le',
-            tempResampled,
-          ], { timeout: 60_000 });
-          fs.renameSync(tempResampled, processedPath);
-        } catch (rsErr: any) {
-          log('WARNING', `[Vocal Naturalizer] Resample failed: ${rsErr.message}`);
-          try { fs.unlinkSync(tempResampled); } catch {}
-        }
-      } else {
-        log('WARNING', `[Vocal Naturalizer] ffmpeg not available — output remains at ${outRate} Hz`);
-      }
-    }
-
-    log('INFO', `[Vocal Naturalizer] Applied to ${vocalIndices.length} vocal stem(s)`);
+    log('INFO', `[Vocal Naturalizer] Applied to full mix (${wav.sampleRate}Hz, ${wav.channels}ch)`);
     return true;
   } catch (err: any) {
-    log('WARNING', `[Vocal Naturalizer] Remix failed: ${err.message}`);
+    log('WARNING', `[Vocal Naturalizer] Failed (non-fatal): ${err.message}`);
     return false;
   }
 }

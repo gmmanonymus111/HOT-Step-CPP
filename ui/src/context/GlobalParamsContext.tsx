@@ -322,7 +322,7 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [natVibratoDepth, setNatVibratoDepth] = usePersistedState('hs-natVibratoDepth', 1.0);
   const [natFormantStrength, setNatFormantStrength] = usePersistedState('hs-natFormantStrength', 1.0);
   const [natMetallicReduction, setNatMetallicReduction] = usePersistedState('hs-natMetallicReduction', 1.0);
-  const [natQuantizationMask, setNatQuantizationMask] = usePersistedState('hs-natQuantizationMask', 1.0);
+  const [natQuantizationMask, setNatQuantizationMask] = usePersistedState('hs-natQuantizationMask', 0.0);
   const [natTransitionSmooth, setNatTransitionSmooth] = usePersistedState('hs-natTransitionSmooth', 1.0);
 
   // PP-VAE re-encode (spectral cleanup via post-processing VAE)
