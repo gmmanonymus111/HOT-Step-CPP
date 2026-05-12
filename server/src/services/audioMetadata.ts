@@ -7,7 +7,7 @@
 // Format support:
 //   FLAC  — Vorbis comments + PICTURE block (full metadata + cover art)
 //   MP3   — ID3v2 tags + APIC frame (full metadata + cover art)
-//   Opus  — Vorbis comments + METADATA_BLOCK_PICTURE (full metadata + cover art)
+//   Opus  — Vorbis comments (full text metadata, no cover art — OGG limitation)
 //   WAV   — INFO chunk only (title, artist, comment — no cover art)
 
 import fs from 'fs';
@@ -191,17 +191,22 @@ export function buildMetadataArgs(meta: AudioMetadata, format: string): string[]
  * Build ffmpeg arguments for embedding cover art.
  *
  * Returns separate input args (to prepend) and output args (to append).
- * WAV format returns empty arrays (no standard cover art support).
  *
- * The cover art is transcoded from PNG to JPEG and downscaled to 600×600
- * on-the-fly, keeping the embedded image ~50-150KB instead of 2-5MB.
+ * Cover art is transcoded from PNG to JPEG and downscaled to 1024×1024
+ * on-the-fly, keeping the embedded image ~150-250KB instead of 2-5MB PNG.
+ *
+ * Supported: FLAC (PICTURE block), MP3 (ID3v2 APIC frame)
+ * NOT supported: Opus (OGG container can't hold video streams — would
+ *   need METADATA_BLOCK_PICTURE in Vorbis comments which requires base64
+ *   encoding), WAV (no standard mechanism)
  */
 export function buildCoverArtArgs(
   coverPath: string,
   format: string,
 ): { inputArgs: string[]; outputArgs: string[] } {
-  // WAV has no standard cover art mechanism
-  if (format === 'wav') {
+  // WAV and Opus: no cover art via the video-stream approach
+  // WAV has no standard, Opus/OGG can't hold video streams
+  if (format === 'wav' || format === 'opus') {
     return { inputArgs: [], outputArgs: [] };
   }
 
@@ -214,11 +219,11 @@ export function buildCoverArtArgs(
   const inputArgs = ['-i', coverPath];
 
   // Output: map audio from input 0, video (cover) from input 1
-  // Transcode to JPEG, downscale to 600×600, quality 5 (~85%)
+  // Transcode to JPEG, scale to 1024×1024, quality 5 (~85%)
   const outputArgs: string[] = [];
 
   if (format === 'mp3') {
-    // MP3/ID3v2: use -map, codec copy approach with JPEG transcode
+    // MP3/ID3v2: APIC frame with JPEG transcode
     outputArgs.push(
       '-map', '0:a',
       '-map', '1:v',
@@ -231,7 +236,7 @@ export function buildCoverArtArgs(
       '-id3v2_version', '3',
     );
   } else {
-    // FLAC and Opus: same approach, slightly different disposition handling
+    // FLAC: PICTURE block with JPEG transcode
     outputArgs.push(
       '-map', '0:a',
       '-map', '1:v',
