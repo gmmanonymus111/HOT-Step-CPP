@@ -504,9 +504,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/build
-          key: cmake-macos-${{ hashFiles('engine/src/**', 'engine/ggml/**', 'engine/CMakeLists.txt') }}
+          key: cmake-macos-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
           restore-keys: |
             cmake-macos-
+
+      - name: Restore source file timestamps
+        run: |
+          # actions/checkout sets all file mtimes to 'now', which makes cached
+          # build objects look stale to Ninja (source newer than object → rebuild).
+          # Restore git commit timestamps so Ninja can correctly skip unchanged files.
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && touch -d "@$ts" "$file" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
 
       - name: Build C++ engine
         run: |
@@ -770,9 +782,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/build
-          key: cmake-linux-${{ matrix.variant }}-${{ hashFiles('engine/src/**', 'engine/ggml/**', 'engine/CMakeLists.txt') }}
+          key: cmake-linux-${{ matrix.variant }}-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
           restore-keys: |
             cmake-linux-${{ matrix.variant }}-
+
+      - name: Restore source file timestamps
+        run: |
+          # actions/checkout sets all file mtimes to 'now', which makes cached
+          # build objects look stale to Ninja (source newer than object → rebuild).
+          # Restore git commit timestamps so Ninja can correctly skip unchanged files.
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && touch -d "@$ts" "$file" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
 
       - name: Build C++ engine
         run: |
