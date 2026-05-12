@@ -390,10 +390,20 @@ export const PostProcessingDropdown: React.FC = () => {
       >
         <div className="space-y-2 mt-2">
           <p className="text-[10px] text-zinc-500 leading-relaxed">
-            Removes robotic/auto-tune artifacts from AI vocals using 5-stage
-            DSP humanisation. Uses SuperSep to isolate vocals before processing.
-            Adds ~30–60s. Skipped on instrumentals.
+            Applies 5-stage DSP humanisation to reduce robotic/auto-tune
+            artifacts. Processes the full mix using frequency-band-targeted
+            filters that primarily affect vocal content.
           </p>
+          {gp.vocalNaturalizerEnabled && (
+            <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
+              <span className="text-amber-400 text-xs mt-px">⚠</span>
+              <p className="text-[10px] text-amber-300/80 leading-relaxed">
+                <strong>Experimental.</strong> This feature may subtly degrade audio quality
+                and interfere with downstream VST/mastering processing. A/B test
+                with it disabled to verify it&apos;s improving your output.
+              </p>
+            </div>
+          )}
           {gp.vocalNaturalizerEnabled && (
             <div className="space-y-2 pt-1">
               <div className="flex justify-end">
@@ -405,7 +415,7 @@ export const PostProcessingDropdown: React.FC = () => {
                     gp.setNatVibratoDepth(1.0);
                     gp.setNatFormantStrength(1.0);
                     gp.setNatMetallicReduction(1.0);
-                    gp.setNatQuantizationMask(1.0);
+                    gp.setNatQuantizationMask(0.0);
                     gp.setNatTransitionSmooth(1.0);
                   }}
                   className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-pink-400 transition-colors"

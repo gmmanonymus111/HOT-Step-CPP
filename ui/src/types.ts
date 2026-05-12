@@ -177,7 +177,7 @@ export interface GenerationParams {
   durationBuffer?: number;      // Extra seconds added to generation duration (default 15)
   autoTrimFadeMs?: number;      // Fade-out length in ms (default 2000 for forced, 500 for gap-detected)
 
-  // Vocal Naturalizer (SuperSep stem isolation + DSP humanisation)
+  // Vocal Naturalizer (5-stage DSP humanisation, applied to full mix)
   vocalNaturalizerEnabled?: boolean;
   naturalizeAmount?: number;        // 0.0–1.0 master intensity
   natVibratoRate?: number;          // 3.0–7.0 Hz
