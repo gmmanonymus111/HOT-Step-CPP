@@ -108,6 +108,7 @@ function normalizeSong(s: any): Song {
     mastered_audio_url: s.mastered_audio_url,
     latentUrl: s.latent_url || s.latentUrl || '',
     latent_url: s.latent_url,
+    quality_scores: s.quality_scores,
   };
 }
 
