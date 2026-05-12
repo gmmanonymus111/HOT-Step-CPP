@@ -1,9 +1,10 @@
-// download.ts — Audio download route with format conversion
+// download.ts — Audio download route with format conversion + metadata embedding
 //
 // GET /api/songs/:id/download?format=wav|flac|opus|mp3&bitrate=192&version=original|mastered
 //
-// Converts the source WAV to the requested format and streams it back
-// with a Content-Disposition header for browser download.
+// Converts the source WAV to the requested format, embeds metadata tags
+// and cover art (when available), and streams it back with a
+// Content-Disposition header for browser download.
 
 import { Router } from 'express';
 import fs from 'fs';
@@ -12,6 +13,10 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { config, getFFmpegPath } from '../config.js';
 import { getDb } from '../db/database.js';
+import {
+  gatherSongMetadata, buildMetadataArgs, buildCoverArtArgs,
+  type AudioMetadata,
+} from '../services/audioMetadata.js';
 
 const execFileAsync = promisify(execFile);
 const router = Router();
@@ -24,21 +29,25 @@ function getMp3CodecPath(): string {
   return path.resolve(process.cwd(), '..', 'engine', 'build', 'Release', `mp3-codec${ext}`);
 }
 
-/** Convert WAV to target format, return temp file path */
+/** Convert WAV to target format with optional metadata embedding */
 async function convertAudio(
   sourcePath: string,
   format: string,
   bitrate: number,
   outputPath: string,
+  metadata?: AudioMetadata,
 ): Promise<void> {
-  if (format === 'wav') {
-    // No conversion needed — copy source
+  const hasMeta = !!metadata;
+
+  // WAV without metadata — fast copy, no conversion
+  if (format === 'wav' && !hasMeta) {
     fs.copyFileSync(sourcePath, outputPath);
     return;
   }
 
-  if (format === 'mp3') {
-    // Use mp3-codec.exe for MP3 (no ffmpeg dependency)
+  // MP3 without metadata — use mp3-codec.exe if available (faster, no ffmpeg dep)
+  // When metadata IS present, we must use ffmpeg so ID3 tags get written.
+  if (format === 'mp3' && !hasMeta) {
     const codec = getMp3CodecPath();
     if (fs.existsSync(codec)) {
       await execFileAsync(codec, [
@@ -49,14 +58,33 @@ async function convertAudio(
     // Fallback to ffmpeg
   }
 
-  // Use ffmpeg for FLAC, Opus, or MP3 fallback
+  // All other cases use ffmpeg (conversion + metadata + cover art)
   const ffmpegPath = getFFmpegPath();
   if (!ffmpegPath) {
+    // No ffmpeg — for WAV, fall back to raw copy (no metadata)
+    if (format === 'wav') {
+      fs.copyFileSync(sourcePath, outputPath);
+      return;
+    }
     throw new Error(`Cannot convert to ${format} — ffmpeg not available`);
   }
+
+  // ── Build ffmpeg command ──
   const args = ['-y', '-i', sourcePath];
 
+  // Cover art: add as second input (PNG → JPEG transcoded on-the-fly)
+  let coverArtArgs: { inputArgs: string[]; outputArgs: string[] } = { inputArgs: [], outputArgs: [] };
+  if (metadata?.coverArtPath) {
+    coverArtArgs = buildCoverArtArgs(metadata.coverArtPath, format);
+    args.push(...coverArtArgs.inputArgs);
+  }
+
+  // Audio codec selection
   switch (format) {
+    case 'wav':
+      // Re-encode through ffmpeg so INFO chunks get written
+      args.push('-c:a', 'pcm_s16le');
+      break;
     case 'flac':
       args.push('-c:a', 'flac', '-sample_fmt', 's32', '-compression_level', '8');
       break;
@@ -68,6 +96,16 @@ async function convertAudio(
       break;
     default:
       throw new Error(`Unsupported format: ${format}`);
+  }
+
+  // Cover art output args (stream mapping, codec, disposition)
+  if (coverArtArgs.outputArgs.length > 0) {
+    args.push(...coverArtArgs.outputArgs);
+  }
+
+  // Metadata tags
+  if (metadata) {
+    args.push(...buildMetadataArgs(metadata, format));
   }
 
   args.push(outputPath);
@@ -195,6 +233,15 @@ router.get('/:id', async (req, res) => {
     return;
   }
 
+  // Gather metadata for embedding into the output file
+  let metadata: AudioMetadata | undefined;
+  try {
+    metadata = gatherSongMetadata(song);
+  } catch (metaErr: any) {
+    // Non-fatal — proceed without metadata if gathering fails
+    console.warn(`[Download] Metadata gathering failed (non-fatal): ${metaErr.message}`);
+  }
+
   // Build download filename: Prepend - Artist - Title_suffix.format
   // Strip leading/trailing underscores and the old backend-injected prefix patterns
   const badPrefixes = /^_?(XL|STD)(\s*\(CPP\))?_?\s*-?\s*/i;
@@ -223,8 +270,8 @@ router.get('/:id', async (req, res) => {
   const downloadFilename = `${parts.join(' - ')}.${format}`;
 
   try {
-    if (format === 'wav' && sourcePath.endsWith('.wav')) {
-      // Source is already WAV — stream directly, no temp file
+    if (format === 'wav' && sourcePath.endsWith('.wav') && !metadata) {
+      // Source is already WAV with no metadata to embed — stream directly
       res.setHeader('Content-Type', mimeTypes.wav);
       res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
       res.setHeader('Content-Length', fs.statSync(sourcePath).size);
@@ -237,7 +284,7 @@ router.get('/:id', async (req, res) => {
     fs.mkdirSync(tempDir, { recursive: true });
     const tempFile = path.join(tempDir, `dl_${Date.now().toString(36)}.${format}`);
 
-    await convertAudio(sourcePath, format, bitrate, tempFile);
+    await convertAudio(sourcePath, format, bitrate, tempFile, metadata);
 
     const stat = fs.statSync(tempFile);
     res.setHeader('Content-Type', mimeTypes[format] || 'application/octet-stream');
