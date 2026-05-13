@@ -8,7 +8,7 @@
 // State machine: Input → (optional) Preview → Generate
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain } from 'lucide-react';
+import { Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain, Code2, Save, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -20,6 +20,9 @@ import {
   runLlmInspire,
   fetchInspireProviders,
   generateRandomSubject,
+  fetchInstagenPrompt,
+  saveInstagenPrompt,
+  resetInstagenPrompt,
   type InspireResult,
   type InspireProvider,
 } from '../../services/inspireApi';
@@ -136,6 +139,15 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [randomSubject, setRandomSubject] = useState(false);
 
+  // ── Prompt editor state ──
+  const [promptEditorOpen, setPromptEditorOpen] = useState(false);
+  const [promptContent, setPromptContent] = useState('');
+  const [promptDefault, setPromptDefault] = useState('');
+  const [promptDirty, setPromptDirty] = useState(false);
+  const [promptIsCustom, setPromptIsCustom] = useState(false);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptLoaded, setPromptLoaded] = useState(false);
+
   // ── Load LLM providers on mount ──
   useEffect(() => {
     if (providersLoaded) return;
@@ -228,33 +240,50 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
           token || undefined,
         );
 
-        // Run inspire with the LLM lyrics to get metadata (bpm, duration, key, timesig)
-        setInspireProgress('Resolving song metadata...');
-        const metaResult = await runInspireAndWait(
-          {
+        let result: InspireResult;
+
+        if (llmResult.structured && llmResult.bpm) {
+          // ── Structured path: LLM returned full metadata, skip inspire ──
+          console.log('[InstaGen] Structured LLM response — skipping inspire step');
+          result = {
             caption: llmResult.caption || computedCaption,
             lyrics: llmResult.lyrics,
+            title: llmResult.title,
+            bpm: llmResult.bpm,
+            duration: llmResult.duration || 200,
+            keyScale: llmResult.key || 'C major',
+            timeSignature: llmResult.timeSignature || '4/4',
             vocalLanguage,
-            useCotCaption: thinking,
-            lmModel: globalParams.lmModel || undefined,
-            lmTemperature: globalParams.lmTemperature,
-            lmCfgScale: globalParams.lmCfgScale,
-            lmTopP: globalParams.lmTopP,
-          },
-          token || undefined,
-          (stage, _progress) => setInspireProgress(stage),
-        );
+          };
+        } else {
+          // ── Legacy path: run inspire for metadata ──
+          setInspireProgress('Resolving song metadata...');
+          const metaResult = await runInspireAndWait(
+            {
+              caption: llmResult.caption || computedCaption,
+              lyrics: llmResult.lyrics,
+              vocalLanguage,
+              useCotCaption: thinking,
+              lmModel: globalParams.lmModel || undefined,
+              lmTemperature: globalParams.lmTemperature,
+              lmCfgScale: globalParams.lmCfgScale,
+              lmTopP: globalParams.lmTopP,
+            },
+            token || undefined,
+            (stage, _progress) => setInspireProgress(stage),
+          );
 
-        const result: InspireResult = {
-          caption: llmResult.caption || computedCaption,
-          lyrics: llmResult.lyrics,  // Keep LLM lyrics, not inspire's
-          title: llmResult.title,
-          bpm: metaResult.bpm,
-          duration: metaResult.duration,
-          keyScale: metaResult.keyScale,
-          timeSignature: metaResult.timeSignature,
-          vocalLanguage,
-        };
+          result = {
+            caption: llmResult.caption || computedCaption,
+            lyrics: llmResult.lyrics,
+            title: llmResult.title,
+            bpm: metaResult.bpm,
+            duration: metaResult.duration,
+            keyScale: metaResult.keyScale,
+            timeSignature: metaResult.timeSignature,
+            vocalLanguage,
+          };
+        }
 
         setInspireResult(result);
         setEditedLyrics(result.lyrics);
@@ -434,6 +463,81 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
           resolvedLyrics = llmResult.lyrics;
           resolvedCaption = llmResult.caption || capturedCaption;
           llmTitle = llmResult.title || '';
+
+          // If structured response, use LLM metadata directly — skip inspire
+          if (llmResult.structured && llmResult.bpm) {
+            console.log('[InstaGen] Structured LLM response — skipping inspire step');
+            const finalLyrics = resolvedLyrics;
+            const params = buildParams(finalLyrics, resolvedCaption);
+            params.title = llmTitle || deriveTitleFromLyrics(finalLyrics) || resolvedCaption;
+            if (llmResult.bpm) params.bpm = llmResult.bpm;
+            if (llmResult.duration) params.duration = llmResult.duration;
+            if (llmResult.key) params.keyScale = llmResult.key;
+            if (llmResult.timeSignature) params.timeSignature = llmResult.timeSignature;
+
+            updateManualQueueItem(queueId, {
+              title: params.title || resolvedCaption,
+              stage: 'Submitting to engine…',
+            });
+
+            // Merge with global engine params and submit
+            const engineParams = globalParams.getGlobalParams();
+            const enrichedParams = {
+              ...engineParams,
+              ...params,
+              source: 'insta-gen',
+              coResident: ((): boolean => {
+                try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').coResident; }
+                catch { return false; }
+              })(),
+              cacheLmCodes: ((): boolean => {
+                try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').cacheLmCodes; }
+                catch { return true; }
+              })(),
+            };
+
+            const res = await generateApi.submit(enrichedParams as any, capturedToken);
+            updateManualQueueItem(queueId, { jobId: res.jobId, stage: 'Generating audio…' });
+
+            // Poll until done
+            const startTime = Date.now();
+            while (true) {
+              await new Promise(r => setTimeout(r, 1500));
+              const status = await generateApi.status(res.jobId);
+              const progress = status.progress !== undefined
+                ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
+                : undefined;
+              updateManualQueueItem(queueId, {
+                progress,
+                stage: status.stage || 'Generating…',
+                elapsed: Math.round((Date.now() - startTime) / 1000),
+              });
+
+              if (status.status === 'succeeded') {
+                const audioUrl = status.result?.audioUrls?.[0] || '';
+                const songId = status.result?.songIds?.[0];
+                completeManualQueueItem(queueId, {
+                  audioUrl,
+                  songId,
+                  masteredAudioUrl: status.result?.masteredAudioUrl,
+                  audioDuration: status.result?.duration,
+                });
+                if (songId) {
+                  try {
+                    const { song } = await songApi.get(songId);
+                    onSongCreated?.(song);
+                  } catch { /* non-fatal */ }
+                }
+                return;
+              }
+              if (status.status === 'failed' || status.status === 'cancelled') {
+                throw new Error(status.error || 'Generation failed');
+              }
+              if (Date.now() - startTime > 30 * 60 * 1000) {
+                throw new Error('Generation timed out');
+              }
+            }
+          }
         }
 
         // Step 2: Run inspire for metadata (+ lyrics if not resolved)
@@ -626,6 +730,86 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
             ))}
           </div>
         </div>
+
+        {/* ── System Prompt Editor (Lyrics + AI only) ── */}
+        {lyricMode === 'lyrics-ai' && (
+          <div className="rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
+            <button
+              onClick={() => {
+                if (!promptEditorOpen && !promptLoaded) {
+                  // Load prompt on first open
+                  fetchInstagenPrompt().then(data => {
+                    setPromptDefault(data.default_content);
+                    setPromptContent(data.custom || data.default_content);
+                    setPromptIsCustom(!!data.custom);
+                    setPromptLoaded(true);
+                  }).catch(() => setPromptLoaded(true));
+                }
+                setPromptEditorOpen(!promptEditorOpen);
+              }}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <Code2 size={12} className="text-cyan-400" />
+                System Prompt
+                {promptIsCustom && (
+                  <span className="text-[9px] text-cyan-400 bg-cyan-400/10 px-1 rounded">custom</span>
+                )}
+                {promptDirty && (
+                  <span className="text-[9px] text-amber-400 bg-amber-400/10 px-1 rounded">unsaved</span>
+                )}
+              </span>
+              {promptEditorOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </button>
+            {promptEditorOpen && (
+              <div className="border-t border-zinc-200 dark:border-white/5">
+                <textarea
+                  value={promptContent}
+                  onChange={(e) => { setPromptContent(e.target.value); setPromptDirty(true); }}
+                  className="w-full h-48 p-3 bg-black/10 dark:bg-black/30 text-xs text-zinc-700 dark:text-zinc-300 font-mono leading-relaxed resize-y focus:outline-none"
+                  spellCheck={false}
+                  placeholder="Loading prompt..."
+                />
+                <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-50 dark:bg-white/[0.02]">
+                  <div className="flex items-center gap-1">
+                    {promptIsCustom && (
+                      <button
+                        onClick={async () => {
+                          if (!confirm('Reset to default prompt? Your customizations will be lost.')) return;
+                          try {
+                            await resetInstagenPrompt();
+                            setPromptContent(promptDefault);
+                            setPromptIsCustom(false);
+                            setPromptDirty(false);
+                          } catch { /* ignore */ }
+                        }}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-white/5 transition-colors"
+                      >
+                        <RotateCcw size={10} /> Reset
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    disabled={!promptDirty || promptSaving}
+                    onClick={async () => {
+                      setPromptSaving(true);
+                      try {
+                        await saveInstagenPrompt(promptContent);
+                        setPromptDirty(false);
+                        setPromptIsCustom(true);
+                      } catch { /* ignore */ }
+                      setPromptSaving(false);
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-medium bg-cyan-500 text-black hover:bg-cyan-400 disabled:opacity-30 transition-all"
+                  >
+                    <Save size={10} />
+                    {promptSaving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── Subject (only for Lyrics + AI) ── */}
         {lyricMode === 'lyrics-ai' && (

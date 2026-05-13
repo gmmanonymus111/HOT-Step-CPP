@@ -15,7 +15,8 @@ import { subscribeLines } from './logs.js';
 import { translateParams } from '../services/generation/translateParams.js';
 import { getProvider, listProviders } from '../services/lireek/llm/registry.js';
 import { stripThinkingBlocks, postprocessLyrics, fixSectionLabels, enforceLineCounts, fixAPrefix } from '../services/lireek/llm/postprocess.js';
-import { INSTAGEN_LYRIC_SYSTEM_PROMPT } from '../services/lireek/prompts.js';
+import { INSTAGEN_LYRIC_SYSTEM_PROMPT, INSTAGEN_FULL_SYSTEM_PROMPT } from '../services/lireek/prompts.js';
+import { getSetting, setSetting } from '../db/lireekDb.js';
 
 const router = Router();
 
@@ -236,12 +237,13 @@ router.post('/llm', async (req, res) => {
   const userId = getUserId(req);
   if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
 
-  const { provider: providerName, model, genres, subject, language } = req.body as {
+  const { provider: providerName, model, genres, subject, language, systemPrompt: clientPrompt } = req.body as {
     provider: string;
     model?: string;
     genres: string[];     // e.g. ["Pop Punk", "Punk Rock"]
     subject: string;      // e.g. "a man tired from working 9 to 5"
     language?: string;    // e.g. "en"
+    systemPrompt?: string; // Optional client-side prompt override (takes priority over DB custom)
   };
 
   if (!providerName) {
@@ -263,67 +265,106 @@ router.post('/llm', async (req, res) => {
     const langName = LANGUAGE_NAMES[language || 'en'] || language || 'English';
     const genreStr = genres.join(', ');
 
+    // Resolve system prompt: client override → DB custom → default
+    const dbCustom = getSetting('instagen_system_prompt');
+    const systemPrompt = clientPrompt?.trim() || dbCustom || INSTAGEN_FULL_SYSTEM_PROMPT;
+
     // Build user prompt
     const userPrompt = [
       `Genre/Style: ${genreStr}`,
       `Subject: ${subject.trim()}`,
       `Language: ${langName}`,
       '',
-      'Write the lyrics now:',
+      'Generate the complete song now:',
     ].join('\n');
 
-    console.log(`[Inspire/LLM] Generating lyrics via ${providerName}/${effectiveModel}`);
+    console.log(`[Inspire/LLM] Generating song via ${providerName}/${effectiveModel}`);
     console.log(`[Inspire/LLM] Genre: ${genreStr}, Subject: ${subject}, Language: ${langName}`);
+    console.log(`[Inspire/LLM] Prompt source: ${clientPrompt ? 'client override' : dbCustom ? 'DB custom' : 'default'}`);
 
-    let raw = await provider.call(INSTAGEN_LYRIC_SYSTEM_PROMPT, userPrompt, effectiveModel);
+    let raw = await provider.call(systemPrompt, userPrompt, effectiveModel);
 
-    // Post-process: strip thinking, clean structure, enforce line counts
+    // Strip thinking blocks first
     raw = stripThinkingBlocks(raw);
     raw = raw.replace(/<\|[a-z_]+\|>/g, '');
-    raw = raw.replace(/\[?(System|User|Assistant)\]?:.*/gi, '');
-    raw = raw.replace(/\s*\((?:Hook|You|Repeat|x\d|Refrain|Spoken|Whispered|Ad[- ]?lib|Echo)\)\s*/gi, '');
-    raw = raw.replace(/ +$/gm, '');
 
-    // Extract title from the end of the response (Title: <song title>)
-    let extractedTitle = '';
-    const titleEndMatch = raw.match(/\n\s*Title:\s*(.+?)\s*$/im);
-    if (titleEndMatch) {
-      extractedTitle = titleEndMatch[1]
-        .replace(/^["']+|["']+$/g, '')  // strip quotes
-        .replace(/[.!?,;:]+$/, '')       // strip trailing punctuation
-        .trim();
-      // Remove the title line from lyrics
-      raw = raw.replace(/\n\s*Title:\s*.+?\s*$/im, '').trimEnd();
-    }
+    // Try to parse as structured JSON response
+    let structuredResult = parseStructuredLlmResponse(raw);
 
-    // Strip any title line the LLM might have added at the start despite instructions
-    const rawLines = raw.trim().split('\n');
-    for (let i = 0; i < rawLines.length; i++) {
-      const match = rawLines[i].match(/^(?:Title:\s*|#\s*)(.*)/i);
-      if (match) {
-        if (!extractedTitle) extractedTitle = match[1].replace(/^["']+|["']+$/g, '').trim();
-        const rest = rawLines.slice(i + 1);
-        while (rest.length && !rest[0].trim()) rest.shift();
-        raw = rest.join('\n');
-        break;
+    if (structuredResult) {
+      // ── Structured JSON path — LLM returned all metadata ──
+      let lyrics = structuredResult.lyrics || '';
+      lyrics = lyrics.replace(/\[?(System|User|Assistant)\]?:.*/gi, '');
+      lyrics = lyrics.replace(/\s*\((?:Hook|You|Repeat|x\d|Refrain|Spoken|Whispered|Ad[- ]?lib|Echo)\)\s*/gi, '');
+      lyrics = lyrics.replace(/ +$/gm, '');
+      lyrics = postprocessLyrics(lyrics);
+      lyrics = fixSectionLabels(lyrics);
+      lyrics = fixAPrefix(lyrics);
+      lyrics = enforceLineCounts(lyrics);
+
+      console.log(`[Inspire/LLM] Structured response: ${lyrics.split('\n').length} lines, BPM=${structuredResult.bpm}, Key=${structuredResult.key}, Title="${structuredResult.title}"`);
+
+      res.json({
+        lyrics,
+        caption: structuredResult.tags || genreStr,
+        title: structuredResult.title || undefined,
+        bpm: structuredResult.bpm || undefined,
+        key: structuredResult.key || undefined,
+        timeSignature: structuredResult.time_signature || undefined,
+        duration: structuredResult.duration || undefined,
+        structured: true,  // Flag so frontend knows to skip inspire
+        provider: providerName,
+        model: effectiveModel,
+      });
+    } else {
+      // ── Fallback: raw text path (legacy prompt or non-JSON response) ──
+      console.log('[Inspire/LLM] Non-JSON response, falling back to lyrics-only parsing');
+
+      raw = raw.replace(/\[?(System|User|Assistant)\]?:.*/gi, '');
+      raw = raw.replace(/\s*\((?:Hook|You|Repeat|x\d|Refrain|Spoken|Whispered|Ad[- ]?lib|Echo)\)\s*/gi, '');
+      raw = raw.replace(/ +$/gm, '');
+
+      // Extract title from the end of the response (Title: <song title>)
+      let extractedTitle = '';
+      const titleEndMatch = raw.match(/\n\s*Title:\s*(.+?)\s*$/im);
+      if (titleEndMatch) {
+        extractedTitle = titleEndMatch[1]
+          .replace(/^["']+|["']+$/g, '')  // strip quotes
+          .replace(/[.!?,;:]+$/, '')       // strip trailing punctuation
+          .trim();
+        raw = raw.replace(/\n\s*Title:\s*.+?\s*$/im, '').trimEnd();
       }
-      if (rawLines[i].trim().startsWith('[') || (rawLines[i].trim() && i > 2)) break;
+
+      // Strip any title line at the start
+      const rawLines = raw.trim().split('\n');
+      for (let i = 0; i < rawLines.length; i++) {
+        const match = rawLines[i].match(/^(?:Title:\s*|#\s*)(.*)/i);
+        if (match) {
+          if (!extractedTitle) extractedTitle = match[1].replace(/^["']+|["']+$/g, '').trim();
+          const rest = rawLines.slice(i + 1);
+          while (rest.length && !rest[0].trim()) rest.shift();
+          raw = rest.join('\n');
+          break;
+        }
+        if (rawLines[i].trim().startsWith('[') || (rawLines[i].trim() && i > 2)) break;
+      }
+
+      raw = postprocessLyrics(raw);
+      raw = fixSectionLabels(raw);
+      raw = fixAPrefix(raw);
+      raw = enforceLineCounts(raw);
+
+      console.log(`[Inspire/LLM] Generated ${raw.split('\n').length} lines of lyrics${extractedTitle ? `, title: "${extractedTitle}"` : ''}`);
+
+      res.json({
+        lyrics: raw,
+        caption: genreStr,
+        title: extractedTitle || undefined,
+        structured: false,
+        provider: providerName,
+        model: effectiveModel,
+      });
     }
-
-    raw = postprocessLyrics(raw);
-    raw = fixSectionLabels(raw);
-    raw = fixAPrefix(raw);
-    raw = enforceLineCounts(raw);
-
-    console.log(`[Inspire/LLM] Generated ${raw.split('\n').length} lines of lyrics${extractedTitle ? `, title: "${extractedTitle}"` : ''}`);
-
-    res.json({
-      lyrics: raw,
-      caption: genreStr,  // Caption is just the genres — built-in LM will expand it later
-      title: extractedTitle || undefined,
-      provider: providerName,
-      model: effectiveModel,
-    });
   } catch (err: any) {
     console.error(`[Inspire/LLM] Failed:`, err.message);
     res.status(500).json({ error: err.message || 'LLM lyric generation failed' });
@@ -386,5 +427,90 @@ router.post('/llm/subject', async (req, res) => {
     res.status(500).json({ error: err.message || 'Subject generation failed' });
   }
 });
+
+// ── InstaGen system prompt CRUD ──────────────────────────────────────
+// Reuses Lireek DB settings table (same as Lyric Studio's prompt editor).
+
+router.get('/llm/prompt', (_req, res) => {
+  try {
+    const custom = getSetting('instagen_system_prompt') || null;
+    res.json({
+      name: 'instagen_system',
+      default_content: INSTAGEN_FULL_SYSTEM_PROMPT,
+      custom,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/llm/prompt', (req, res) => {
+  try {
+    const { value } = req.body;
+    if (!value) { res.status(400).json({ error: 'value required' }); return; }
+    setSetting('instagen_system_prompt', value);
+    console.log('[Inspire/LLM] Custom InstaGen system prompt saved');
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/llm/prompt', (_req, res) => {
+  try {
+    setSetting('instagen_system_prompt', '');
+    console.log('[Inspire/LLM] InstaGen system prompt reset to default');
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Structured JSON response parser ──────────────────────────────────
+// Extracts the JSON object from LLM output, handling code fences, thinking
+// blocks, and other wrapping the LLM might add around the JSON.
+
+interface StructuredLlmResult {
+  tags?: string;
+  lyrics: string;
+  title?: string;
+  bpm?: number;
+  key?: string;
+  time_signature?: string;
+  duration?: number;
+}
+
+function parseStructuredLlmResponse(raw: string): StructuredLlmResult | null {
+  // Strip markdown code fences
+  let cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/gm, '').trim();
+
+  // Try direct parse first
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object' && parsed.lyrics) return parsed;
+  } catch { /* not valid JSON as-is */ }
+
+  // Try to find JSON object in the text
+  const start = cleaned.indexOf('{');
+  if (start === -1) return null;
+
+  // Find the matching closing brace
+  let depth = 0;
+  for (let i = start; i < cleaned.length; i++) {
+    if (cleaned[i] === '{') depth++;
+    else if (cleaned[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          const parsed = JSON.parse(cleaned.slice(start, i + 1));
+          if (parsed && typeof parsed === 'object' && parsed.lyrics) return parsed;
+        } catch { /* not valid JSON */ }
+        break;
+      }
+    }
+  }
+
+  return null;
+}
 
 export default router;
