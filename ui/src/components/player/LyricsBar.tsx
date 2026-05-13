@@ -4,33 +4,12 @@
 
 import React, { useMemo, useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Music } from 'lucide-react';
-
-interface LrcLine {
-    time: number;
-    text: string;
-}
+import { parseLrc, type LrcLine } from '../../utils/lrcUtils';
 
 interface LyricsBarProps {
     audioUrl?: string;
     currentTime: number;
     isPlaying: boolean;
-}
-
-function parseLrc(raw: string): LrcLine[] {
-    const lines: LrcLine[] = [];
-    for (const line of raw.replace(/\r/g, '').split('\n')) {
-        const match = line.match(/^\[(\d+):(\d+)(?:\.(\d+))?\]\s*(.*)$/);
-        if (match) {
-            const mins = parseInt(match[1], 10);
-            const secs = parseInt(match[2], 10);
-            const cs = match[3] ? parseInt(match[3].padEnd(2, '0').slice(0, 2), 10) : 0;
-            const text = match[4].trim();
-            if (text && !/^\[.*\]$/.test(text)) {
-                lines.push({ time: mins * 60 + secs + cs / 100, text });
-            }
-        }
-    }
-    return lines.sort((a, b) => a.time - b.time);
 }
 
 function findCurrentIndex(lines: LrcLine[], time: number): number {

@@ -2,7 +2,7 @@
 // Ported from hot-step-9000, simplified for current cpp feature set.
 
 import React from 'react';
-import { Disc, Library, Mic, Guitar, Scissors, Layers, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles, Wand2 } from 'lucide-react';
+import { Disc, Library, Mic, Guitar, Paintbrush, Scissors, Layers, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles, Wand2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
@@ -97,6 +97,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label={t('sidebar.coverStudio')}
           active={activeView === 'cover-studio'}
           onClick={() => onViewChange('cover-studio')}
+          isExpanded={isOpen}
+        />
+
+        <NavItem
+          icon={<Paintbrush size={20} />}
+          label={t('sidebar.repaint')}
+          active={activeView === 'repaint'}
+          onClick={() => onViewChange('repaint')}
           isExpanded={isOpen}
         />
 

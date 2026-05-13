@@ -35,6 +35,7 @@ import { LyricStudioV2 } from './components/lyric-studio/LyricStudioV2';
 import { CoverStudio } from './components/cover-studio/CoverStudio';
 import { StemStudio } from './components/stem-studio/StemStudio';
 import { StemBuilder } from './components/stem-builder/StemBuilder';
+import { RepaintStudio } from './components/repaint-studio/RepaintStudio';
 import { GlobalParamBar } from './components/global-bar/GlobalParamBar';
 import { InstaGenPanel } from './components/insta-gen/InstaGenPanel';
 import { PlaylistSidebar } from './components/playlist/PlaylistSidebar';
@@ -73,6 +74,7 @@ function viewFromUrl(path = window.location.pathname): string {
   if (path.startsWith('/cover-studio')) return 'cover-studio';
   if (path.startsWith('/stem-studio')) return 'stem-studio';
   if (path.startsWith('/stem-builder')) return 'stem-builder';
+  if (path.startsWith('/repaint')) return 'repaint';
   if (path.startsWith('/library')) return 'library';
   if (path.startsWith('/settings')) return 'settings';
   return 'create';
@@ -92,6 +94,7 @@ function urlForView(view: string): string {
   if (view === 'cover-studio') return '/cover-studio';
   if (view === 'stem-studio') return '/stem-studio';
   if (view === 'stem-builder') return '/stem-builder';
+  if (view === 'repaint') return '/repaint';
   if (view === 'library') return '/library';
   if (view === 'settings') return '/settings';
   return '/';
@@ -462,6 +465,14 @@ const AppContent: React.FC = () => {
       return (
         <div className="flex-1 overflow-hidden">
           <StemBuilder />
+        </div>
+      );
+    }
+
+    if (activeView === 'repaint') {
+      return (
+        <div className="flex-1 overflow-hidden">
+          <RepaintStudio />
         </div>
       );
     }
