@@ -564,7 +564,11 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
 
         // Step 3: Build generation params
         const finalLyrics = resolvedLyrics || inspireResult.lyrics;
-        const params = buildParams(finalLyrics, resolvedCaption);
+        // Caption rewrite ON → use inspire's rich caption; OFF → user's original
+        const finalCaption = capturedThinking
+          ? (inspireResult.caption || resolvedCaption)
+          : resolvedCaption;
+        const params = buildParams(finalLyrics, finalCaption);
         params.title = llmTitle || deriveTitleFromLyrics(finalLyrics) || resolvedCaption;
         if (inspireResult.bpm) params.bpm = inspireResult.bpm;
         if (inspireResult.duration) params.duration = inspireResult.duration;
