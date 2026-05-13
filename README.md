@@ -8,19 +8,13 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 
 Pre-built portable releases — no installation required. Extract, run, done.
 
-#### Windows
+**[📥 Download the latest release →](https://github.com/scragnog/HOT-Step-CPP/releases/latest)**
 
-| Download | GPU | Size |
-|----------|-----|------|
-| [**HOT-Step-CPP — CUDA**](https://github.com/scragnog/HOT-Step-CPP/releases/download/v1.0.0/HOT-Step-CPP-v1.0.0-win-x64-cuda.zip) | NVIDIA (RTX 2000+) | 220 MB |
-| [**HOT-Step-CPP — Vulkan**](https://github.com/scragnog/HOT-Step-CPP/releases/download/v1.0.0/HOT-Step-CPP-v1.0.0-win-x64-vulkan.zip) | AMD / Intel / NVIDIA | 94 MB |
-| [**HOT-Step-CPP — CPU**](https://github.com/scragnog/HOT-Step-CPP/releases/download/v1.0.0/HOT-Step-CPP-v1.0.0-win-x64-cpu.zip) | No GPU required | 78 MB |
-
-#### macOS
-
-| Download | GPU | Size |
-|----------|-----|------|
-| [**HOT-Step-CPP — macOS (Apple Silicon)**](https://github.com/scragnog/HOT-Step-CPP/releases/download/v1.0.0/HOT-Step-CPP-v1.0.0-macOS-arm64.tar.gz) | Metal (M1/M2/M3/M4) | 97 MB |
+| Platform | Variants |
+|----------|----------|
+| **Windows** (x64) | CUDA (NVIDIA), Vulkan (AMD/Intel/NVIDIA), CPU |
+| **Linux** (x64) | CUDA (NVIDIA), Vulkan (AMD/Intel/NVIDIA), CPU |
+| **macOS** (Apple Silicon) | Metal (M1/M2/M3/M4) |
 
 **Which variant?**
 - **CUDA** — Best performance. Use this if you have an NVIDIA GPU (RTX 2060 or newer recommended).
@@ -35,15 +29,23 @@ Pre-built portable releases — no installation required. Extract, run, done.
 3. Your browser opens to `http://localhost:3001`
 4. On first launch, go to **Models → Get More Models** to download the AI models (~7 GB)
 
+**Linux:**
+1. Download and extract the `.tar.gz` for your hardware
+2. Run **`./HOT-Step.sh`**
+3. Open `http://localhost:3001` in your browser
+4. On first launch, go to **Models → Get More Models** to download the AI models (~7 GB)
+
 **macOS:**
 1. Download and extract the `.tar.gz`
-2. Open Terminal in the extracted folder and run **`./launch.sh`**
+2. Open Terminal in the extracted folder and run **`./HOT-Step.sh`**
 3. Your browser opens to `http://localhost:3001`
 4. On first launch, the **Model Manager** opens automatically — download the AI models (~7 GB)
 
 > **Windows requirements:** Windows 10/11 (64-bit), ~10 GB free disk space. CUDA variant needs NVIDIA drivers. Vulkan variant needs Vulkan 1.1+ capable drivers.
 
-> **macOS requirements:** macOS 13+ (Apple Silicon M1/M2/M3/M4), ~10 GB free disk space. No other software needed — Node.js is bundled. If macOS blocks the app (unsigned binary), run: `xattr -cr /path/to/HOT-Step-CPP-v1.0.0-macOS-arm64/`
+> **Linux requirements:** Ubuntu 22.04+ or equivalent (x86_64), ~10 GB free disk space. CUDA variant needs NVIDIA drivers 525+. Vulkan variant needs Vulkan 1.1+ capable drivers and `libvulkan1`.
+
+> **macOS requirements:** macOS 13+ (Apple Silicon M1/M2/M3/M4), ~10 GB free disk space. No other software needed — Node.js is bundled. If macOS blocks the app (unsigned binary), run: `xattr -cr /path/to/HOT-Step-CPP/`
 
 ---
 
@@ -105,7 +107,9 @@ HOT-Step CPP is three components working together:
 | Windows + AMD/Intel (Vulkan) | ✅ Pre-built release available |
 | Windows CPU-only | ✅ Pre-built release available |
 | macOS Apple Silicon (Metal) | ✅ Pre-built release available |
-| Linux | 🔧 Engine supports it, UI/server scripts TBD |
+| Linux + NVIDIA (CUDA) | ✅ Pre-built release available |
+| Linux + AMD/Intel (Vulkan) | ✅ Pre-built release available |
+| Linux CPU-only | ✅ Pre-built release available |
 
 ---
 
@@ -285,6 +289,81 @@ Open `http://localhost:3001` in your browser.
 cd ui && npx vite  # In another terminal
 ```
 Then open `http://localhost:3000`.
+
+---
+
+### Linux (x86_64)
+
+#### Prerequisites
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| GCC / Clang | GCC 11+ | `sudo apt install build-essential` |
+| CMake | 3.14+ | `sudo apt install cmake` |
+| Node.js | 18–22 LTS | **Node 24+ is not supported** |
+| Git | Any | `sudo apt install git` |
+| CUDA Toolkit (optional) | 12.x+ | For NVIDIA GPU acceleration |
+| Vulkan SDK (optional) | Latest | For AMD / Intel GPU acceleration |
+
+#### 1. Clone the repo
+
+```bash
+git clone --recursive https://github.com/scragnog/HOT-Step-CPP.git
+cd HOT-Step-CPP
+```
+
+> **Already cloned without `--recursive`?** Run `git submodule update --init --recursive` to fetch the ggml and vst3sdk submodules.
+
+#### 2. Build the engine
+
+**CUDA (NVIDIA GPU):**
+```bash
+cd engine
+mkdir -p build && cd build
+cmake .. -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j $(nproc)
+cd ../..
+```
+
+**Vulkan (AMD / Intel / NVIDIA):**
+```bash
+# Install Vulkan SDK first: https://vulkan.lunarg.com/sdk/home
+cd engine
+mkdir -p build && cd build
+cmake .. -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j $(nproc)
+cd ../..
+```
+
+**CPU-only:**
+```bash
+cd engine
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j $(nproc)
+cd ../..
+```
+
+#### 3. Download models
+
+Same as Windows — place GGUF files in `models/`. See [model list above](#3-download-models). Or skip this and download from the in-app Model Manager on first launch.
+
+#### 4. Install UI & server dependencies
+
+```bash
+cd server && npm install && cd ..
+cd ui && npm install && cd ..
+```
+
+#### 5. Run
+
+```bash
+./launch.sh
+```
+
+Open `http://localhost:3001` in your browser.
+
+> **No `.env` file needed** for the standard setup. The server automatically finds the engine binary and models. See `.env.example` if you need to override paths.
 
 ---
 
