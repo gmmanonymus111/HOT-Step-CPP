@@ -309,14 +309,14 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
 
         setInspireResult(result);
         setEditedLyrics(result.lyrics);
-        setEditedCaption(result.caption);
+        setEditedCaption(thinking ? result.caption : computedCaption);
         setPhase('preview');
       }
     } catch (err: any) {
       setError(err.message || 'Inspire failed');
       setPhase('input');
     }
-  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, globalParams, token]);
+  }, [canSubmit, lyricMode, selectedProvider, selectedModel, selectedGenres, subject, vocalLanguage, computedCaption, thinking, globalParams, token]);
 
   // ── Generate from preview ──
   const handleGenerateFromPreview = useCallback(() => {
