@@ -885,7 +885,7 @@ const SongCard: React.FC<SongCardProps> = ({
 };
 
 
-// ── SongTable — Table view ───────────────────────────────────────────────────
+// ── SongTable — Table view with resizable columns ────────────────────────────
 
 interface SongTableProps {
   songs: Song[];
@@ -908,11 +908,88 @@ const SOURCE_BADGE_MAP: Record<string, { label: string; cls: string }> = {
   'cover-studio': { label: 'Cover', cls: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
 };
 
+// Column definitions — id, label, default width, min width, alignment
+type ColAlign = 'left' | 'center' | 'right';
+interface ColDef { id: string; label: string; defaultW: number; minW: number; align: ColAlign; resizable: boolean }
+
+const BASE_COLS: ColDef[] = [
+  { id: 'thumb',   label: '',        defaultW: 40,  minW: 32,  align: 'left',   resizable: false },
+  { id: 'title',   label: 'Title',   defaultW: 200, minW: 80,  align: 'left',   resizable: true },
+  { id: 'style',   label: 'Style',   defaultW: 200, minW: 80,  align: 'left',   resizable: true },
+  { id: 'bpm',     label: 'BPM',     defaultW: 60,  minW: 40,  align: 'center', resizable: true },
+  { id: 'key',     label: 'Key',     defaultW: 60,  minW: 40,  align: 'center', resizable: true },
+  { id: 'model',   label: 'Model',   defaultW: 110, minW: 60,  align: 'left',   resizable: true },
+  { id: 'quality', label: 'Quality', defaultW: 70,  minW: 50,  align: 'center', resizable: true },
+  { id: 'time',    label: 'Time',    defaultW: 56,  minW: 44,  align: 'right',  resizable: true },
+  { id: 'date',    label: 'Date',    defaultW: 80,  minW: 50,  align: 'right',  resizable: true },
+  { id: 'actions', label: '',        defaultW: 80,  minW: 60,  align: 'left',   resizable: false },
+];
+
+const SOURCE_COL: ColDef = { id: 'source', label: 'Source', defaultW: 80, minW: 50, align: 'left', resizable: true };
+const SELECT_COL: ColDef = { id: 'select', label: '', defaultW: 32, minW: 32, align: 'left', resizable: false };
+
+const STORAGE_KEY = 'hs-table-colWidths';
+
+function loadColWidths(): Record<string, number> {
+  try { const v = localStorage.getItem(STORAGE_KEY); return v ? JSON.parse(v) : {}; } catch { return {}; }
+}
+
+function saveColWidths(w: Record<string, number>) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(w)); } catch { /* ignore */ }
+}
+
 const SongTable: React.FC<SongTableProps> = ({
   songs, currentSongId, isPlaying, selectionMode, selectedIds, onToggleSelect,
   onPlay, onSelect, onDelete, onReuse, onDownload, showSourceBadge,
 }) => {
   const { t } = useTranslation();
+
+  // Build column list based on current flags
+  const columns = useMemo(() => {
+    const cols: ColDef[] = [];
+    if (selectionMode) cols.push(SELECT_COL);
+    // Insert base cols, injecting source col after style if needed
+    for (const c of BASE_COLS) {
+      cols.push(c);
+      if (c.id === 'style' && showSourceBadge) cols.push(SOURCE_COL);
+    }
+    return cols;
+  }, [selectionMode, showSourceBadge]);
+
+  // Persisted column widths
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    const saved = loadColWidths();
+    const merged: Record<string, number> = {};
+    for (const c of [...BASE_COLS, SOURCE_COL, SELECT_COL]) {
+      merged[c.id] = saved[c.id] ?? c.defaultW;
+    }
+    return merged;
+  });
+
+  const getW = (id: string) => colWidths[id] ?? BASE_COLS.find(c => c.id === id)?.defaultW ?? 80;
+
+  // Drag-resize handler
+  const handleResizeStart = useCallback((colId: string, minW: number, startX: number) => {
+    const startW = getW(colId);
+    const onMove = (e: MouseEvent) => {
+      const newW = Math.max(minW, startW + (e.clientX - startX));
+      setColWidths(prev => {
+        const next = { ...prev, [colId]: newW };
+        saveColWidths(next);
+        return next;
+      });
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [colWidths]);
 
   const formatDuration = (val: string | number | undefined) => {
     if (!val) return '--:--';
@@ -935,23 +1012,37 @@ const SongTable: React.FC<SongTableProps> = ({
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
+  // Total width for the table
+  const totalW = columns.reduce((s, c) => s + getW(c.id), 0);
+
   return (
     <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/5">
-      <table className="w-full text-xs">
+      <table className="text-xs" style={{ tableLayout: 'fixed', width: Math.max(totalW, 600) }}>
+        <colgroup>
+          {columns.map(c => (
+            <col key={c.id} style={{ width: getW(c.id) }} />
+          ))}
+        </colgroup>
         <thead>
           <tr className="bg-zinc-100/80 dark:bg-zinc-800/80 text-zinc-500 text-left">
-            {selectionMode && <th className="px-2 py-2.5 w-8" />}
-            <th className="px-2 py-2.5 w-8" />
-            <th className="px-2 py-2.5 font-semibold">Title</th>
-            <th className="px-2 py-2.5 font-semibold">Style</th>
-            {showSourceBadge && <th className="px-2 py-2.5 font-semibold">Source</th>}
-            <th className="px-2 py-2.5 font-semibold w-16 text-center">BPM</th>
-            <th className="px-2 py-2.5 font-semibold w-16 text-center">Key</th>
-            <th className="px-2 py-2.5 font-semibold w-24">Model</th>
-            <th className="px-2 py-2.5 font-semibold w-16 text-center">Quality</th>
-            <th className="px-2 py-2.5 font-semibold w-14 text-right">Time</th>
-            <th className="px-2 py-2.5 font-semibold w-20 text-right">Date</th>
-            <th className="px-2 py-2.5 w-20" />
+            {columns.map(c => (
+              <th
+                key={c.id}
+                className={`relative px-2 py-2.5 font-semibold select-none ${
+                  c.align === 'center' ? 'text-center' : c.align === 'right' ? 'text-right' : ''
+                }`}
+              >
+                {c.label}
+                {c.resizable && (
+                  <div
+                    className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize z-10 group/resize hover:bg-pink-500/30"
+                    onMouseDown={(e) => { e.preventDefault(); handleResizeStart(c.id, c.minW, e.clientX); }}
+                  >
+                    <div className="w-px h-full mx-auto bg-zinc-300 dark:bg-zinc-600 group-hover/resize:bg-pink-400 transition-colors" />
+                  </div>
+                )}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
@@ -965,6 +1056,66 @@ const SongTable: React.FC<SongTableProps> = ({
             const src = (gp as any)?.source || 'create';
             const badge = SOURCE_BADGE_MAP[src];
 
+            // Build cell map
+            const cells: Record<string, React.ReactNode> = {
+              select: selectionMode ? (
+                selectedIds.has(song.id)
+                  ? <CheckSquare size={15} className="text-pink-400" />
+                  : <Square size={15} className="text-zinc-600" />
+              ) : null,
+
+              thumb: (
+                <div className="relative w-8 h-8 rounded bg-zinc-100 dark:bg-zinc-800 overflow-hidden flex items-center justify-center">
+                  {song.coverUrl || song.cover_url ? (
+                    <img src={song.coverUrl || song.cover_url} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <Music size={12} className="text-zinc-600" />
+                  )}
+                  {!selectionMode && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (isActive) togglePlay(); else onPlay(song); }}
+                      className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      {isActive && isPlaying
+                        ? <Pause size={10} className="text-white" />
+                        : <Play size={10} className="text-white ml-0.5" />
+                      }
+                    </button>
+                  )}
+                </div>
+              ),
+
+              title: <span className={`font-medium truncate block ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>{song.title || 'Untitled'}</span>,
+              style: <span className="text-zinc-500 truncate block">{song.style || song.caption || '—'}</span>,
+              source: badge ? <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>{badge.label}</span> : null,
+              bpm: <span className="text-zinc-500 font-mono">{bpm || '—'}</span>,
+              key: <span className="text-zinc-500">{keyScale || '—'}</span>,
+              model: <span className="text-violet-400/60 truncate block" title={model}>{modelShort || '—'}</span>,
+              quality: <QualityBadge song={song} />,
+              time: <span className="text-zinc-500 font-mono">{formatDuration(song.duration)}</span>,
+              date: <span className="text-zinc-600">{formatDate(song.created_at || song.createdAt)}</span>,
+              actions: (
+                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {onReuse && (
+                    <button onClick={(e) => { e.stopPropagation(); onReuse(song); }}
+                      className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.reusePrompt')}>
+                      <RotateCcw size={12} />
+                    </button>
+                  )}
+                  {onDownload && (
+                    <button onClick={(e) => { e.stopPropagation(); onDownload(song); }}
+                      className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.download')}>
+                      <Download size={12} />
+                    </button>
+                  )}
+                  <button onClick={(e) => { e.stopPropagation(); onDelete(song); }}
+                    className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors" title={t('library.delete')}>
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ),
+            };
+
             return (
               <tr
                 key={song.id}
@@ -977,98 +1128,16 @@ const SongTable: React.FC<SongTableProps> = ({
                 }`}
                 onClick={() => selectionMode ? onToggleSelect(song.id) : onSelect?.(song)}
               >
-                {/* Selection */}
-                {selectionMode && (
-                  <td className="px-2 py-2">
-                    {selectedIds.has(song.id)
-                      ? <CheckSquare size={15} className="text-pink-400" />
-                      : <Square size={15} className="text-zinc-600" />
-                    }
+                {columns.map(c => (
+                  <td
+                    key={c.id}
+                    className={`px-2 py-2 overflow-hidden ${
+                      c.align === 'center' ? 'text-center' : c.align === 'right' ? 'text-right' : ''
+                    }`}
+                  >
+                    {cells[c.id]}
                   </td>
-                )}
-
-                {/* Thumbnail + play */}
-                <td className="px-2 py-1.5">
-                  <div className="relative w-8 h-8 rounded bg-zinc-100 dark:bg-zinc-800 overflow-hidden flex-shrink-0 flex items-center justify-center">
-                    {song.coverUrl || song.cover_url ? (
-                      <img src={song.coverUrl || song.cover_url} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <Music size={12} className="text-zinc-600" />
-                    )}
-                    {!selectionMode && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); if (isActive) togglePlay(); else onPlay(song); }}
-                        className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        {isActive && isPlaying
-                          ? <Pause size={10} className="text-white" />
-                          : <Play size={10} className="text-white ml-0.5" />
-                        }
-                      </button>
-                    )}
-                  </div>
-                </td>
-
-                {/* Title */}
-                <td className={`px-2 py-2 font-medium max-w-[200px] truncate ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>
-                  {song.title || 'Untitled'}
-                </td>
-
-                {/* Style */}
-                <td className="px-2 py-2 text-zinc-500 max-w-[200px] truncate">
-                  {song.style || song.caption || '—'}
-                </td>
-
-                {/* Source badge */}
-                {showSourceBadge && (
-                  <td className="px-2 py-2">
-                    {badge && (
-                      <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>
-                        {badge.label}
-                      </span>
-                    )}
-                  </td>
-                )}
-
-                {/* BPM */}
-                <td className="px-2 py-2 text-zinc-500 text-center font-mono">{bpm || '—'}</td>
-
-                {/* Key */}
-                <td className="px-2 py-2 text-zinc-500 text-center">{keyScale || '—'}</td>
-
-                {/* Model */}
-                <td className="px-2 py-2 text-violet-400/60 truncate max-w-[100px]" title={model}>{modelShort || '—'}</td>
-
-                {/* Quality */}
-                <td className="px-2 py-2 text-center"><QualityBadge song={song} /></td>
-
-                {/* Duration */}
-                <td className="px-2 py-2 text-zinc-500 font-mono text-right">{formatDuration(song.duration)}</td>
-
-                {/* Date */}
-                <td className="px-2 py-2 text-zinc-600 text-right">{formatDate(song.created_at || song.createdAt)}</td>
-
-                {/* Actions */}
-                <td className="px-2 py-2">
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {onReuse && (
-                      <button onClick={(e) => { e.stopPropagation(); onReuse(song); }}
-                        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.reusePrompt')}>
-                        <RotateCcw size={12} />
-                      </button>
-                    )}
-                    {onDownload && (
-                      <button onClick={(e) => { e.stopPropagation(); onDownload(song); }}
-                        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.download')}>
-                        <Download size={12} />
-                      </button>
-                    )}
-                    <button onClick={(e) => { e.stopPropagation(); onDelete(song); }}
-                      className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors" title={t('library.delete')}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                </td>
+                ))}
               </tr>
             );
           })}
@@ -1077,3 +1146,5 @@ const SongTable: React.FC<SongTableProps> = ({
     </div>
   );
 };
+
+
