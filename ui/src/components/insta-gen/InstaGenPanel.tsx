@@ -8,7 +8,7 @@
 // State machine: Input → (optional) Preview → Generate
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, Brain, Code2, Save, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
+import { Sparkles, Music, Eye, EyeOff, Mic, MicOff, Bot, PenLine, Code2, Save, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -201,7 +201,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
     vocalLanguage: lyricMode === 'instrumental' ? undefined : vocalLanguage,
     source: 'insta-gen',
     useCotCaption: thinking,
-    skipLm: !thinking, // Thinking ON = LM runs (audio codes + CoT); OFF = skip LM (faster)
+    skipLm: false, // InstaGen always needs the LM for metadata (BPM/key/timesig)
   }), [computedCaption, lyricMode, vocalLanguage, thinking]);
 
   // ── Random subject toggle ──
@@ -932,11 +932,11 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
         {/* Cover Art prompt override (only when enabled) */}
         <CoverArtSubjectSection />
 
-        {/* Thinking toggle */}
+        {/* Caption Rewrite toggle */}
         <div className="flex items-center justify-between py-2">
           <div className="flex items-center gap-2">
-            <Brain size={14} className={thinking ? 'text-amber-400' : 'text-zinc-400'} />
-            <span className="text-sm text-zinc-700 dark:text-zinc-300">Thinking</span>
+            <PenLine size={14} className={thinking ? 'text-amber-400' : 'text-zinc-400'} />
+            <span className="text-sm text-zinc-700 dark:text-zinc-300">Caption Rewrite</span>
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">(CoT)</span>
           </div>
           <button
