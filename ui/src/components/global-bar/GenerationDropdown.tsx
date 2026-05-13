@@ -121,6 +121,13 @@ export const GenerationDropdown: React.FC = () => {
                   <option key={s.name} value={s.name}>{s.display} ({s.nfe} NFE)</option>
                 ))}
               </optgroup>
+              {registry.solvers.some(s => (s.nfe ?? 1) === 0) && (
+                <optgroup label="── Adaptive (Variable NFE) ──">
+                  {registry.solvers.filter(s => (s.nfe ?? 1) === 0).map(s => (
+                    <option key={s.name} value={s.name}>{s.display}</option>
+                  ))}
+                </optgroup>
+              )}
             </>
           ) : (
             <>
