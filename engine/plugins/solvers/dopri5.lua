@@ -34,9 +34,9 @@ local E = {
 }
 
 -- Generic ERK step: compute all stages, return result in xt_out
-local function erk_step(x, k1, t, h, n_elem, model_fn, vt_buf, num_extra, a_rows, c_vals, b_vals)
+-- xt_fa is a FloatArray used as scratch space for model_fn calls
+local function erk_step(x, k1, t, h, n_elem, model_fn, vt_buf, xt_fa, num_extra, a_rows, c_vals, b_vals)
     local ks = {k1}
-    local x_tmp = {}
     for s = 1, num_extra do
         local a_row = a_rows[s]
         for i = 0, n_elem-1 do
@@ -44,13 +44,10 @@ local function erk_step(x, k1, t, h, n_elem, model_fn, vt_buf, num_extra, a_rows
             for j = 1, #a_row do
                 if a_row[j] ~= 0 then combo = combo + a_row[j] * ks[j][i] end
             end
-            x_tmp[i] = x[i] - h * combo
+            xt_fa[i] = x[i] - h * combo
         end
-        -- Need to write x_tmp into a FloatArray for model_fn...
-        -- Since model_fn expects a FloatArray, we copy into vt_buf as scratch
-        -- Actually model_fn takes the xt array directly
-        -- We'll use a workaround: write into result array temporarily
-        model_fn(x_tmp, t - c_vals[s] * h)
+        -- model_fn expects a FloatArray, writes result into vt_buf
+        model_fn(xt_fa, t - c_vals[s] * h)
         ks[s+1] = {}
         for i = 0, n_elem-1 do ks[s+1][i] = vt_buf[i] end
     end
@@ -76,7 +73,7 @@ function step(xt, vt, t_curr, t_prev, n, model_fn, vt_buf)
     local t_end = t_prev
     local h = t - t_end
 
-    -- Working copy
+    -- Working copy (Lua tables for intermediate math)
     local x_cur = {}
     local v_cur = {}
     for i = 0, n-1 do x_cur[i] = xt[i]; v_cur[i] = vt[i] end
@@ -87,7 +84,8 @@ function step(xt, vt, t_curr, t_prev, n, model_fn, vt_buf)
         local k1 = v_cur
 
         -- Full DOPRI5 step (6 extra stages for 7 total including FSAL)
-        local x_next, ks = erk_step(x_cur, k1, t, h, n, model_fn, vt_buf, 6, A, C, B)
+        -- Pass xt as scratch FloatArray for model_fn calls
+        local x_next, ks = erk_step(x_cur, k1, t, h, n, model_fn, vt_buf, xt, 6, A, C, B)
 
         -- Error estimate
         local err_sq_sum = 0
