@@ -457,12 +457,12 @@ export const GlobalParamsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       ppVaeBlend: (postProcessingEnabled && ppVaeReencode && ppVaeBlend > 0) ? ppVaeBlend : undefined,
 
       // Cover Art
-      coverArtEnabled: coverArtEnabled || undefined,
-      coverArtSubject: (coverArtEnabled && coverArtSubject) ? coverArtSubject : undefined,
+      coverArtEnabled: (postProcessingEnabled && coverArtEnabled) || undefined,
+      coverArtSubject: (postProcessingEnabled && coverArtEnabled && coverArtSubject) ? coverArtSubject : undefined,
 
       // Quality Evaluator
-      qualityEvalEnabled: qualityEvalEnabled || undefined,
-      qualityEvalTarget: qualityEvalEnabled ? qualityEvalTarget as any : undefined,
+      qualityEvalEnabled: (postProcessingEnabled && qualityEvalEnabled) || undefined,
+      qualityEvalTarget: (postProcessingEnabled && qualityEvalEnabled) ? qualityEvalTarget as any : undefined,
     };
   }, [
     ditModel, lmModel, vaeModel, embeddingModel,
