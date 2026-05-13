@@ -699,6 +699,12 @@ int ace_lm_generate(AceLm *            ctx,
             } else {
                 user_msg += "\n\ninstrumental: false";
             }
+            // Include vocal language in the text prompt so the LM has a
+            // direct signal (the FSM also constrains it, but can desync
+            // if the LM generates unexpected fields like "genres:").
+            if (!ace.vocal_language.empty() && ace.vocal_language != "unknown") {
+                user_msg += "\nlanguage: " + ace.vocal_language;
+            }
             prompt = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
         } else if (mode == LM_MODE_FORMAT) {
             std::string sys      = std::string("# Instruction\n") + LM_FORMAT_INSTRUCTION + "\n";
