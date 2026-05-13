@@ -28,7 +28,7 @@ solver = {
           default = 0.15, min = 0.05, max = 0.50, step = 0.01,
           hint = "How aggressively complex passages get extra precision. Lower = more careful on transients and busy sections, higher = faster but looser" },
         { key = "look_back_lambda", type = "slider", label = "Coherence Smoothing",
-          default = 0.35, min = 0, max = 1, step = 0.01,
+          default = 0.15, min = 0, max = 1, step = 0.01,
           hint = "Blends each step with previous ones for smoother output. 0 = off (raw), higher = more coherent but softer detail" },
         { key = "look_back_snr_power", type = "slider", label = "Early-Step Focus",
           default = 1.5, min = 0.5, max = 3, step = 0.1,
