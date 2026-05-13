@@ -188,7 +188,7 @@ jobs:
           git log --pretty=format:%at --name-only -- engine/ | \
             awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
             while IFS=' ' read -r ts file; do
-              [ -f "$file" ] && touch -d "@$ts" "$file" 2>/dev/null
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
             done
           echo "Restored git timestamps for engine/ source files"
 
@@ -516,7 +516,7 @@ jobs:
           git log --pretty=format:%at --name-only -- engine/ | \
             awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
             while IFS=' ' read -r ts file; do
-              [ -f "$file" ] && touch -d "@$ts" "$file" 2>/dev/null
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
             done
           echo "Restored git timestamps for engine/ source files"
 
@@ -794,7 +794,7 @@ jobs:
           git log --pretty=format:%at --name-only -- engine/ | \
             awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
             while IFS=' ' read -r ts file; do
-              [ -f "$file" ] && touch -d "@$ts" "$file" 2>/dev/null
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
             done
           echo "Restored git timestamps for engine/ source files"
 
