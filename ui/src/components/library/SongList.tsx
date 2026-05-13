@@ -914,8 +914,8 @@ interface ColDef { id: string; label: string; defaultW: number; minW: number; al
 
 const BASE_COLS: ColDef[] = [
   { id: 'thumb',   label: '',        defaultW: 40,  minW: 32,  align: 'left', resizable: false },
-  { id: 'title',   label: 'Title',   defaultW: 200, minW: 80,  align: 'left', resizable: true },
-  { id: 'style',   label: 'Style',   defaultW: 200, minW: 80,  align: 'left', resizable: true },
+  { id: 'title',   label: 'Title',   defaultW: 320, minW: 80,  align: 'left', resizable: true },
+  { id: 'style',   label: 'Style',   defaultW: 320, minW: 80,  align: 'left', resizable: true },
   { id: 'bpm',     label: 'BPM',     defaultW: 60,  minW: 40,  align: 'left', resizable: true },
   { id: 'key',     label: 'Key',     defaultW: 60,  minW: 40,  align: 'left', resizable: true },
   { id: 'model',   label: 'Model',   defaultW: 110, minW: 60,  align: 'left', resizable: true },
@@ -1012,10 +1012,12 @@ const SongTable: React.FC<SongTableProps> = ({
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
+  // Sum of all column pixel widths — table uses this as its exact width
+  const totalW = columns.reduce((s, c) => s + getW(c.id), 0);
 
   return (
     <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/5">
-      <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+      <table className="text-xs" style={{ tableLayout: 'fixed', width: totalW }}>
         <colgroup>
           {columns.map(c => (
             <col key={c.id} style={{ width: getW(c.id) }} />
