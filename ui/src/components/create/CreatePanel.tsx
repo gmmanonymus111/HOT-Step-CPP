@@ -4,8 +4,8 @@
 // have been moved to the GlobalParamBar. This panel now only handles
 // per-song content and metadata.
 
-import React, { useEffect } from 'react';
-import { Zap, ListPlus } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Zap, ListPlus, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -13,6 +13,7 @@ import { ContentSection } from './ContentSection';
 import { MetadataSection } from './MetadataSection';
 import { LatentImport } from '../shared/LatentImport';
 import { CoverArtSubjectSection } from '../shared/CoverArtSubjectSection';
+import { AiGenerateModal, type AiGenerateResult } from './AiGenerateModal';
 import type { GenerationParams, Song } from '../../types';
 
 interface CreatePanelProps {
@@ -23,6 +24,10 @@ interface CreatePanelProps {
 
 export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobCount, reuseData }) => {
   const { t } = useTranslation();
+
+  // ── AI Generate modal ──
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+
   // ── Content (per-song) ──
   const [caption, setCaption] = usePersistedState('hs-caption', '');
   const [lyrics, setLyrics] = usePersistedState('hs-lyrics', '');
@@ -62,6 +67,21 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
     if (gpData.seed !== undefined) gp.setSeed(gpData.seed);
   }, [reuseData?.timestamp]);
 
+  // ── AI generation result handler ──
+  const handleAiResult = useCallback((result: AiGenerateResult) => {
+    if (result.caption) setCaption(result.caption);
+    if (result.lyrics) setLyrics(result.lyrics);
+    if (result.title) setTitle(result.title);
+    if (result.subject) setSubject(result.subject);
+    if (result.bpm) setBpm(result.bpm);
+    if (result.keyScale) setKeyScale(result.keyScale);
+    if (result.timeSignature) setTimeSignature(result.timeSignature);
+    if (result.duration) setDuration(result.duration);
+    if (result.vocalLanguage) setVocalLanguage(result.vocalLanguage);
+    // Disable instrumental mode since AI generated lyrics
+    setInstrumental(false);
+  }, [setCaption, setLyrics, setTitle, setSubject, setBpm, setKeyScale, setTimeSignature, setDuration, setVocalLanguage, setInstrumental]);
+
   const handleGenerate = () => {
     const params: Partial<GenerationParams> = {
       caption,
@@ -83,7 +103,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-white/5">
         <h2 className="text-lg font-bold text-zinc-900 dark:text-white">{t('createPanel.title')}</h2>
-        <span className="text-xs text-zinc-500 font-medium">{t('createPanel.subtitle')}</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setAiModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-violet-400 hover:text-violet-300 bg-violet-500/10 hover:bg-violet-500/20 border border-violet-500/20 hover:border-violet-500/30 transition-all duration-200"
+            title="Generate all fields using an external AI model"
+          >
+            <Sparkles size={13} />
+            Generate with AI
+          </button>
+        </div>
       </div>
 
       {/* Scrollable body — now much slimmer */}
@@ -145,6 +174,13 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
           )}
         </button>
       </div>
+
+      {/* AI Generate Modal */}
+      <AiGenerateModal
+        isOpen={aiModalOpen}
+        onClose={() => setAiModalOpen(false)}
+        onResult={handleAiResult}
+      />
     </div>
   );
 };
