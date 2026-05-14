@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { Download } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { modelApi } from '../../services/api';
-import { formatDitModel, formatLmModel, formatVaeModel, formatEmbeddingModel } from './modelLabels';
+import { formatDitModel, formatLmModel, formatVaeModel, formatEmbeddingModel, getDitModelDescription, getLmModelDescription, getVaeModelDescription } from './modelLabels';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import type { AceModels } from '../../types';
 
@@ -64,6 +64,9 @@ export const ModelsDropdown: React.FC = () => {
             <option key={m} value={m}>{formatDitModel(m)}</option>
           ))}
         </select>
+        {getDitModelDescription(gp.ditModel) && (
+          <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getDitModelDescription(gp.ditModel)}</p>
+        )}
       </div>
 
       {/* LM Model */}
@@ -76,6 +79,9 @@ export const ModelsDropdown: React.FC = () => {
             <option key={m} value={m}>{formatLmModel(m)}</option>
           ))}
         </select>
+        {getLmModelDescription(gp.lmModel) && (
+          <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getLmModelDescription(gp.lmModel)}</p>
+        )}
       </div>
 
       {/* VAE Model — only show when multiple VAEs are available */}
@@ -88,6 +94,9 @@ export const ModelsDropdown: React.FC = () => {
               <option key={m} value={m}>{formatVaeModel(m)}</option>
             ))}
           </select>
+          {getVaeModelDescription(gp.vaeModel) && (
+            <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getVaeModelDescription(gp.vaeModel)}</p>
+          )}
         </div>
       )}
 

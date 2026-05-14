@@ -94,3 +94,40 @@ export function formatScheduler(scheduler: string): string {
   };
   return names[scheduler] || scheduler;
 }
+
+/** Get a contextual description for a DiT model based on its filename */
+export function getDitModelDescription(filename: string): string {
+  if (!filename) return '';
+  const name = filename.replace(/\.gguf$/i, '').toLowerCase();
+
+  if (name.includes('turbo') && name.includes('xl')) return 'Extended architecture with turbo training. Fast inference at 8–15 steps with enriched audio quality.';
+  if (name.includes('merge') && name.includes('xl')) return 'Merged XL checkpoint combining base stability with turbo speed. Best of both worlds.';
+  if (name.includes('sftturbo') || (name.includes('sft') && name.includes('turbo'))) return 'Supervised fine-tuned + turbo-distilled. Consistent quality at reduced step counts.';
+  if (name.includes('xl') && name.includes('sft')) return 'Extended architecture, supervised fine-tuned. Maximum consistency for complex prompts.';
+  if (name.includes('xl') && name.includes('base')) return 'Extended architecture baseline. Full quality with 30–50 steps recommended.';
+  if (name.includes('turbo-continuous')) return 'Turbo variant trained for continuous flow. Works well across all step ranges.';
+  if (name.includes('turbo-shift')) return 'Turbo variant with pre-baked shift calibration.';
+  if (name.includes('turbo')) return 'Distilled for fast inference. Best at 8–15 steps. The speed workhorse.';
+  if (name.includes('sft')) return 'Supervised fine-tuned for consistent, prompt-adherent output.';
+  if (name.includes('base')) return 'Full quality baseline model. Best with 30–50 steps.';
+  if (name.includes('merge')) return 'Merged checkpoint blending multiple training paradigms.';
+  return '';
+}
+
+/** Get a contextual description for an LM model based on its filename */
+export function getLmModelDescription(filename: string): string {
+  if (!filename) return '';
+  const name = filename.toLowerCase();
+  if (name.includes('4b')) return 'Large language model (4B params). Richer lyric generation and metadata planning.';
+  if (name.includes('1.5b') || name.includes('1b')) return 'Compact language model. Faster inference, lighter VRAM usage.';
+  return 'Language model for lyric and metadata generation.';
+}
+
+/** Get a contextual description for a VAE model */
+export function getVaeModelDescription(filename: string): string {
+  if (!filename) return '';
+  const name = filename.replace(/\.gguf$/i, '').toLowerCase();
+  if (name === 'vae') return 'Stock ACE-Step VAE. Standard latent-to-audio decoding.';
+  if (name.includes('scragvae') || name.includes('scrag')) return 'ScragVAE — custom-trained for reduced artifacts and improved high-frequency clarity.';
+  return 'Variational autoencoder for latent-to-audio decoding.';
+}
