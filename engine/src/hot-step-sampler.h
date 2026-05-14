@@ -268,6 +268,9 @@ static int dit_ggml_generate(DiTGGML *           model,
     // Prepare host buffers (all N real samples contiguous)
     std::vector<float> xt(noise, noise + n_total);
     std::vector<float> vt(n_total);
+    std::vector<float> vt_pre_solver;  // snapshot of vt before solver step (for DCW)
+                                       // Multi-eval solvers overwrite vt via model_fn,
+                                       // but DCW needs the original velocity.
 
     std::vector<float> vt_cond;
     std::vector<float> vt_uncond;
@@ -604,6 +607,10 @@ static int dit_ggml_generate(DiTGGML *           model,
             g_ctx.step_idx = step_idx + 1;
             g_ctx.t_curr   = t_curr;
             g_ctx.dt       = t_curr - t_next;
+            // Full-loop solvers control their own model_fn calls, so vt may
+            // have been overwritten. For safety, use vt as-is (full-loop
+            // solvers are responsible for their own vt state).
+            // TODO: snapshot vt in loop_on_step if full-loop multi-eval solvers need DCW
             sampler_apply_dcw(xt.data(), vt.data(), N, T, Oc, t_curr, t_next, step_idx);
             if (guidance_plugin->has_post_step && do_cfg && step_idx < num_steps - 1) {
                 PostStepModelFn eval_cond_fn = [&](const float * xt_in, float t_v) {
@@ -740,6 +747,12 @@ static int dit_ggml_generate(DiTGGML *           model,
         } else {
             float t_next = schedule[step + 1];
 
+            // Save original velocity before solver step — multi-eval solvers
+            // (UniPC, Heun, RK4, etc.) overwrite vt via model_fn callbacks.
+            // DCW needs the pre-solver velocity to compute its denoised estimate.
+            if (g_hotstep_params.dcw_enabled && solver_plugin->needs_model) {
+                vt_pre_solver.assign(vt.begin(), vt.end());
+            }
 
             // ── Lua solver dispatch ────────────────────────────────────
             // The solver step function modifies xt[] in-place.
@@ -754,7 +767,11 @@ static int dit_ggml_generate(DiTGGML *           model,
             );
 
             // ── DCW correction ──
-            sampler_apply_dcw(xt.data(), vt.data(), N, T, Oc, t_curr, t_next, step);
+            // Use the pre-solver vt snapshot for multi-eval solvers (vt may
+            // have been clobbered by the corrector/intermediate model_fn call).
+            const float * vt_for_dcw = (solver_plugin->needs_model && !vt_pre_solver.empty())
+                                     ? vt_pre_solver.data() : vt.data();
+            sampler_apply_dcw(xt.data(), vt_for_dcw, N, T, Oc, t_curr, t_next, step);
 
             // ── Post-step guidance hook (CFG-MP manifold projection etc.) ──
             if (guidance_plugin->has_post_step && do_cfg && step < num_steps - 1) {
