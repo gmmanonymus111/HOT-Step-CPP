@@ -747,31 +747,40 @@ static int dit_ggml_generate(DiTGGML *           model,
         } else {
             float t_next = schedule[step + 1];
 
-            // Save original velocity before solver step — multi-eval solvers
-            // (UniPC, Heun, RK4, etc.) overwrite vt via model_fn callbacks.
-            // DCW needs the pre-solver velocity to compute its denoised estimate.
-            if (g_hotstep_params.dcw_enabled && solver_plugin->needs_model) {
+            // ── Buffer separation for multi-eval solvers ──────────────
+            // Multi-eval solvers (Heun, UniPC, RK4, etc.) call model_fn
+            // during their step, which writes new velocity into the vt
+            // buffer. If both the "read-only original velocity" (arg 2)
+            // and the "model_fn output buffer" (arg 7) point to the same
+            // memory, solvers that reference the original velocity after
+            // model_fn get corrupted values (e.g. Heun's correction term
+            // becomes zero, silently degrading it to Euler).
+            //
+            // Fix: snapshot vt into vt_pre_solver and pass it as the
+            // read-only arg 2. The live vt buffer (overwritten by
+            // model_fn) is passed as the mutable arg 7 (vt_buf).
+            const float * vt_readonly = vt.data();
+            if (solver_plugin->needs_model) {
                 vt_pre_solver.assign(vt.begin(), vt.end());
+                vt_readonly = vt_pre_solver.data();
             }
 
             // ── Lua solver dispatch ────────────────────────────────────
             // The solver step function modifies xt[] in-place.
-            // Multi-eval solvers call evaluate_velocity() via the model_fn
-            // callback; single-eval solvers ignore it.
+            // vt_readonly  = original velocity (preserved for read-only access)
+            // vt.data()    = mutable buffer where model_fn writes results
             solver_state.step_index = step;
             lua_call_solver_step(
                 *solver_plugin,
-                xt.data(), vt.data(), t_curr, t_next, n_total,
+                xt.data(), vt_readonly, t_curr, t_next, n_total,
                 solver_state, evaluate_velocity, vt.data(),
                 g_hotstep_params.plugin_params
             );
 
             // ── DCW correction ──
-            // Use the pre-solver vt snapshot for multi-eval solvers (vt may
-            // have been clobbered by the corrector/intermediate model_fn call).
-            const float * vt_for_dcw = (solver_plugin->needs_model && !vt_pre_solver.empty())
-                                     ? vt_pre_solver.data() : vt.data();
-            sampler_apply_dcw(xt.data(), vt_for_dcw, N, T, Oc, t_curr, t_next, step);
+            // Use the pre-solver velocity for multi-eval solvers (vt was
+            // clobbered by intermediate model_fn calls during the step).
+            sampler_apply_dcw(xt.data(), vt_readonly, N, T, Oc, t_curr, t_next, step);
 
             // ── Post-step guidance hook (CFG-MP manifold projection etc.) ──
             if (guidance_plugin->has_post_step && do_cfg && step < num_steps - 1) {
