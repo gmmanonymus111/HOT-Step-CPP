@@ -15,6 +15,7 @@ import { useAuth } from '../../context/AuthContext';
 import { DownloadModal } from './DownloadModal';
 import { usePlaylist } from '../lyric-studio/playlistStore';
 import { playFromList, unifiedRecentSongToTrack } from '../../stores/playbackStore';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface UnifiedRecentSongsProps {
   showToast: (msg: string, type?: 'success' | 'error') => void;
@@ -44,6 +45,7 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
   const mountedRef = useRef(true);
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
   const [downloadArtist, setDownloadArtist] = useState('');
+  const { disguiseArtist } = useDisguiseMode();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -171,7 +173,7 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
                   {rs.title || 'Untitled'}
                 </p>
                 {rs.artist_name && (
-                  <p className="text-[10px] text-zinc-500 truncate leading-snug">{rs.artist_name}</p>
+                  <p className="text-[10px] text-zinc-500 truncate leading-snug">{disguiseArtist(rs.artist_name)}</p>
                 )}
                 {dur > 0 && (
                   <p className="text-[10px] text-zinc-600 font-mono mt-0.5">{mins}:{secs}</p>

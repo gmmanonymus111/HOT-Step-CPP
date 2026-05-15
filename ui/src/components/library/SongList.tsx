@@ -10,6 +10,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 import { togglePlay, usePlayback } from '../../stores/playbackStore';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 // ── Source filter definitions ────────────────────────────────────────────────
 
@@ -484,6 +485,7 @@ const SongItem: React.FC<SongItemProps> = ({
   const [editing, setEditing] = React.useState(false);
   const [editTitle, setEditTitle] = React.useState(song.title || '');
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const { isDisguised } = useDisguiseMode();
 
   React.useEffect(() => {
     if (editing && inputRef.current) {
@@ -599,7 +601,7 @@ const SongItem: React.FC<SongItemProps> = ({
           </div>
         )}
         <div className="text-xs text-zinc-500 truncate mt-0.5">
-          {song.style || song.caption || t('library.noDescription')}
+          {isDisguised ? '' : (song.style || song.caption || t('library.noDescription'))}
         </div>
       </div>
 
@@ -726,6 +728,7 @@ const SongCard: React.FC<SongCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const [showMenu, setShowMenu] = React.useState(false);
+  const { isDisguised } = useDisguiseMode();
 
   const formatDuration = (val: string | number | undefined) => {
     if (!val) return '--:--';
@@ -872,7 +875,7 @@ const SongCard: React.FC<SongCardProps> = ({
 
         {/* Style / Caption — wraps, max 3 lines */}
         <div className="text-[11px] text-white/70 mt-0.5 leading-tight line-clamp-3">
-          {song.style || song.caption || t('library.noDescription')}
+          {isDisguised ? '' : (song.style || song.caption || t('library.noDescription'))}
         </div>
 
         {/* Quality + Date row */}
@@ -946,6 +949,7 @@ const SongTable: React.FC<SongTableProps> = ({
   onPlay, onSelect, onDelete, onReuse, onDownload, showSourceBadge,
 }) => {
   const { t } = useTranslation();
+  const { isDisguised } = useDisguiseMode();
 
   // Build column list based on current flags
   const columns = useMemo(() => {
@@ -1092,7 +1096,7 @@ const SongTable: React.FC<SongTableProps> = ({
               ),
 
               title: <span className={`font-medium truncate block ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>{song.title || 'Untitled'}</span>,
-              style: <span className="text-zinc-500 truncate block">{song.style || song.caption || '—'}</span>,
+              style: <span className="text-zinc-500 truncate block">{isDisguised ? '—' : (song.style || song.caption || '—')}</span>,
               source: badge ? <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>{badge.label}</span> : null,
               bpm: <span className="text-zinc-500 font-mono">{bpm || '—'}</span>,
               key: <span className="text-zinc-500">{keyScale || '—'}</span>,

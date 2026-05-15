@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface PlayerProps {
   currentSong: Song | null;
@@ -82,6 +83,7 @@ export const Player: React.FC<PlayerProps> = ({
   onToggleTrimMode,
 }) => {
   const { t } = useTranslation();
+  const { disguiseArtist, isDisguised } = useDisguiseMode();
 
 
   if (!currentSong) {
@@ -106,7 +108,7 @@ export const Player: React.FC<PlayerProps> = ({
         <div className="min-w-0">
           <div className="text-sm font-medium text-zinc-900 dark:text-white truncate">{currentSong.title || 'Untitled'}</div>
           <div className="text-xs text-zinc-500 truncate">
-            {currentSong.caption || currentSong.style || ''}
+            {isDisguised ? '' : (currentSong.caption || currentSong.style || '')}
           </div>
         </div>
       </div>
