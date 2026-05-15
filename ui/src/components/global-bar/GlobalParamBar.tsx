@@ -213,8 +213,8 @@ export const GlobalParamBar: React.FC = () => {
          style={{ backdropFilter: 'blur(20px)' }}>
       <div className="flex items-stretch">
         {/* Logo */}
-        <div className="flex items-center justify-center flex-shrink-0 border-r border-zinc-200 dark:border-white/5" style={{ width: '210px', backgroundColor: '#000' }}>
-          <img src="/logo.webp" alt="HOT-Step" className="h-full w-auto object-contain" draggable={false} />
+        <div className="flex items-center justify-center flex-shrink-0 border-r border-zinc-200 dark:border-white/5" style={{ width: '199px', backgroundColor: '#000' }}>
+          <img src="/logo.webp" alt="HOT-Step" style={{ width: '140px' }} className="h-auto object-contain" draggable={false} />
         </div>
 
         {/* Sections — separated by dividers */}
