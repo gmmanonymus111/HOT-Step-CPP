@@ -101,7 +101,7 @@ export const BarSection: React.FC<BarSectionProps> = ({
         id={`global-bar-${id}`}
         onClick={handleClick}
         className={`
-          absolute inset-0 w-full px-3 flex items-center gap-2 transition-all duration-150 cursor-pointer
+          absolute inset-0 w-full px-3 pt-1 flex items-center gap-2 transition-all duration-150 cursor-pointer
           border-b-2 ${isOpen ? `${accent.bgHover} ${accent.border}` : `${accent.bg} border-transparent hover:${accent.bgHover}`}
         `}
       >
