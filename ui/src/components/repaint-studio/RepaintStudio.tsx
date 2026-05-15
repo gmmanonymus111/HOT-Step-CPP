@@ -21,6 +21,7 @@ import {
   useAudioGenQueue,
 } from '../../stores/audioGenQueueStore';
 import type { Song } from '../../types';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 // ── Persist helpers (same pattern as CoverStudio) ──
 function persist(key: string, value: unknown) {
@@ -38,6 +39,7 @@ export const RepaintStudio: React.FC = () => {
   const { token } = useAuth();
   const gp = useGlobalParams();
   const queue = useAudioGenQueue();
+  const { disguiseArtist } = useDisguiseMode();
 
   // ── Source song state ──
   const [sourceSong, setSourceSong] = useState<Song | null>(() => restore('sourceSong', null));
@@ -372,7 +374,7 @@ export const RepaintStudio: React.FC = () => {
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-white truncate">{sourceName}</div>
                     {sourceSong?.artistName && (
-                      <div className="text-[10px] text-zinc-500 truncate">{sourceSong.artistName}</div>
+                      <div className="text-[10px] text-zinc-500 truncate">{disguiseArtist(sourceSong.artistName)}</div>
                     )}
                   </div>
                   <button
@@ -462,7 +464,7 @@ export const RepaintStudio: React.FC = () => {
                             <div className="flex-1 min-w-0">
                               <div className="text-xs text-white truncate">{song.title || 'Untitled'}</div>
                               <div className="text-[10px] text-zinc-500 truncate">
-                                {song.artistName || ''} {song.duration ? `· ${typeof song.duration === 'number' ? Math.round(song.duration) + 's' : song.duration}` : ''}
+                                {disguiseArtist(song.artistName || '')} {song.duration ? `· ${typeof song.duration === 'number' ? Math.round(song.duration) + 's' : song.duration}` : ''}
                               </div>
                             </div>
                           </button>

@@ -66,6 +66,7 @@ import {
 } from './stores/playbackStore';
 import type { Song, GenerationParams } from './types';
 import { usePlaylist, addToPlaylist } from './components/lyric-studio/playlistStore';
+import { DisguiseModeProvider } from './hooks/useDisguiseMode';
 
 /** Derive top-level view from the browser URL */
 function viewFromUrl(path = window.location.pathname): string {
@@ -1140,10 +1141,12 @@ const AppContent: React.FC = () => {
   );
 };
 
-/** Root App — wraps content in GlobalParamsProvider */
+/** Root App — wraps content in GlobalParamsProvider + DisguiseModeProvider */
 const App: React.FC = () => (
   <GlobalParamsProvider>
-    <AppContent />
+    <DisguiseModeProvider>
+      <AppContent />
+    </DisguiseModeProvider>
   </GlobalParamsProvider>
 );
 

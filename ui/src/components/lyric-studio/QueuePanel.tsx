@@ -30,6 +30,7 @@ import type { Artist, LyricsSet, Profile, AlbumPreset } from '../../services/lir
 import { useAuth } from '../../context/AuthContext';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
 import { EditableSlider } from '../shared/EditableSlider';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface QueuePanelProps {
   open: boolean;
@@ -78,6 +79,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const stream = useStreamingStore();
   const { t } = useTranslation();
   const { token: _token } = useAuth();
+  const { disguiseArtist, disguiseAlbum } = useDisguiseMode();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<QueueMode>('profile');
   const [genCount, setGenCount] = useState(4);
@@ -489,8 +491,8 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                 <label key={ls.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors ${selected.has(ls.id) ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-white/5 border border-transparent hover:bg-white/10'}`}>
                   <input type="checkbox" checked={selected.has(ls.id)} onChange={() => toggleItem(ls.id)} className="accent-amber-500" />
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm text-white truncate block">{ls.album || 'Unknown Album'}</span>
-                    <span className="text-[10px] text-zinc-500">{ls.artist_name}</span>
+                    <span className="text-sm text-white truncate block">{disguiseAlbum(ls.album || '') || 'Unknown Album'}</span>
+                    <span className="text-[10px] text-zinc-500">{disguiseArtist(ls.artist_name || '')}</span>
                   </div>
                 </label>
               ))}</>);
@@ -516,7 +518,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                       <input type="checkbox" checked={selected.has(profile.id)} onChange={() => toggleItem(profile.id)} className="accent-green-500" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm text-white truncate">{ls?.album || 'Unknown Album'} — {ls?.artist_name || '?'}</span>
+                          <span className="text-sm text-white truncate">{disguiseAlbum(ls?.album || '') || 'Unknown Album'} — {disguiseArtist(ls?.artist_name || '?')}</span>
                           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${genCt === 0 ? 'bg-red-900/30 text-red-400' : genCt < 3 ? 'bg-amber-900/30 text-amber-400' : 'bg-green-900/30 text-green-400'}`}>
                             {genCt} gen{genCt !== 1 ? 's' : ''}
                           </span>
@@ -557,9 +559,9 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                       <input type="checkbox" checked={selected.has(ls.id)} onChange={() => toggleItem(ls.id)} className="accent-pink-500" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm text-white truncate">{ls.artist_name}</span>
+                          <span className="text-sm text-white truncate">{disguiseArtist(ls.artist_name || '')}</span>
                           <span className="text-[10px] text-zinc-600">—</span>
-                          <span className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{ls.album || 'Top Songs'}</span>
+                          <span className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{disguiseAlbum(ls.album || '') || 'Top Songs'}</span>
                           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${badge.color}`}>{badge.icon} {badge.label}</span>
                         </div>
                         <div className="flex items-center gap-2 mt-0.5">

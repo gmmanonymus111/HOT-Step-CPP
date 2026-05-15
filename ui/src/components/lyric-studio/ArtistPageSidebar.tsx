@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, ListOrdered, Code2, Download, Clock, Shuffle
 import type { Artist } from '../../services/lireekApi';
 import { TripleProviderSelector, type ModelSelections, loadSelections, saveSelections } from './ProviderSelector';
 import { LLM_DURATION_KEY } from '../../utils/estimateDuration';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 // ── Persisted state hook ────────────────────────────────────────────────────
 function useLocalPersistedState<T>(key: string, defaultValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
@@ -36,6 +37,7 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
 }) => {
   const [imageError, setImageError] = useState(false);
   const { t } = useTranslation();
+  const { disguiseArtist, disguiseImageUrl } = useDisguiseMode();
 
   // ── LLM Models ──
   const [modelSelections, setModelSelections] = useState<ModelSelections>(loadSelections);
@@ -63,20 +65,23 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
       {artist && (
         <>
           <div className="relative flex-shrink-0">
-            {artist.image_url && !imageError ? (
+            {(() => {
+              const dUrl = disguiseImageUrl(artist.image_url, artist.name);
+              return dUrl && !imageError ? (
               <img
-                src={artist.image_url}
-                alt={artist.name}
+                src={dUrl}
+                alt={disguiseArtist(artist.name)}
                 className="w-full aspect-[16/9] object-cover"
                 onError={() => setImageError(true)}
               />
             ) : (
-              <div className="w-full aspect-[16/9]" style={{ background: gradient(artist.name) }} />
-            )}
+              <div className="w-full aspect-[16/9]" style={{ background: gradient(disguiseArtist(artist.name)) }} />
+            );
+            })()}
             <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent" />
           </div>
           <div className="px-4 py-3 -mt-6 relative z-10 flex-shrink-0">
-            <h2 className="text-base font-bold text-white leading-tight">{artist.name}</h2>
+            <h2 className="text-base font-bold text-white leading-tight">{disguiseArtist(artist.name)}</h2>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
               {(albumCount ?? 0)} album{(albumCount ?? 0) !== 1 ? 's' : ''}
             </p>

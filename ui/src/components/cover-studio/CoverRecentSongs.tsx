@@ -13,6 +13,7 @@ import type { Song } from '../../types';
 import { DownloadModal } from '../shared/DownloadModal';
 import { usePlaylist } from '../lyric-studio/playlistStore';
 import { playFromList, songToTrack, usePlayback } from '../../stores/playbackStore';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface CoverRecentSongsProps {
   showToast: (msg: string, type?: 'success' | 'error') => void;
@@ -35,6 +36,7 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
   const mountedRef = useRef(true);
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
   const [downloadArtist, setDownloadArtist] = useState('');
+  const { disguiseArtist } = useDisguiseMode();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -168,7 +170,7 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
                   {song.title || 'Untitled Cover'}
                 </p>
                 {targetArtist && (
-                  <p className="text-[10px] text-zinc-500 truncate leading-snug">{targetArtist}</p>
+                  <p className="text-[10px] text-zinc-500 truncate leading-snug">{disguiseArtist(targetArtist)}</p>
                 )}
                 {dur > 0 && (
                   <p className="text-[10px] text-zinc-600 font-mono mt-0.5">{mins}:{secs}</p>

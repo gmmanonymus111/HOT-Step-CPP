@@ -20,6 +20,7 @@ import { usePlaylist } from './playlistStore';
 import type { Song } from '../../types';
 import { DownloadModal } from '../shared/DownloadModal';
 import { play as pbPlay, audioQueueItemToTrack, usePlayback } from '../../stores/playbackStore';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 export const InlineAudioQueue: React.FC = () => {
   const { items } = useAudioGenQueue();
@@ -137,6 +138,7 @@ interface QueueItemRowProps {
 }
 
 const QueueItemRow: React.FC<QueueItemRowProps> = ({ item, isPlayingInMain, onPlay, onDownload }) => {
+  const { disguiseArtist } = useDisguiseMode();
   const isRunning = item.status === 'loading-adapter' || item.status === 'generating';
   const isSucceeded = item.status === 'succeeded';
   const isFailed = item.status === 'failed';
@@ -184,7 +186,7 @@ const QueueItemRow: React.FC<QueueItemRowProps> = ({ item, isPlayingInMain, onPl
           <p className={`text-xs font-medium truncate ${isPlayingInMain ? 'text-pink-300' : 'text-zinc-800 dark:text-zinc-200'}`}>
             {item.generation.title || 'Untitled'}
           </p>
-          <p className="text-[10px] text-zinc-500 truncate">{item.artistName}</p>
+          <p className="text-[10px] text-zinc-500 truncate">{disguiseArtist(item.artistName || '')}</p>
         </div>
 
         <div className="flex items-center gap-1 flex-shrink-0">

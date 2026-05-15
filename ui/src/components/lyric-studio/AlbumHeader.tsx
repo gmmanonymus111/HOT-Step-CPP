@@ -2,6 +2,7 @@ import React from 'react';
 import { ChevronLeft, ChevronDown, ChevronRight, Settings2, FileText, Users, Music2, Headphones } from 'lucide-react';
 import type { Artist, LyricsSet, SongLyric } from '../../services/lireekApi';
 import { TripleProviderSelector, type ModelSelections, loadSelections, saveSelections } from './ProviderSelector';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 function parseSongs(songs: SongLyric[] | string): SongLyric[] {
   if (typeof songs === 'string') {
@@ -27,6 +28,7 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
   const [modelSelections, setModelSelections] = React.useState<ModelSelections>(loadSelections);
   const [llmExpanded, setLlmExpanded] = React.useState(false);
   const songs = parseSongs(album.songs);
+  const { disguiseArtist, disguiseAlbum, disguiseImageUrl } = useDisguiseMode();
 
   const gradient = (name: string) => {
     const hash = name.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0);
@@ -46,28 +48,31 @@ export const AlbumHeader: React.FC<AlbumHeaderProps> = ({
         Albums
       </button>
 
-      {/* Artist image / gradient */}
       <div className="relative">
-        {artist.image_url && !imageError ? (
+        {(() => {
+          const dUrl = disguiseImageUrl(artist.image_url, artist.name);
+          const dArtistName = disguiseArtist(artist.name);
+          return dUrl && !imageError ? (
           <img
-            src={artist.image_url}
-            alt={artist.name}
+            src={dUrl}
+            alt={dArtistName}
             className="w-full aspect-video object-cover"
             onError={() => setImageError(true)}
           />
         ) : (
-          <div className="w-full aspect-video" style={{ background: gradient(artist.name) }} />
-        )}
+          <div className="w-full aspect-video" style={{ background: gradient(dArtistName) }} />
+        );
+        })()}
         <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent" />
       </div>
 
       {/* Info */}
       <div className="px-4 py-4 -mt-8 relative z-10">
         <p className="text-xs text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-1 font-semibold">
-          {artist.name}
+          {disguiseArtist(artist.name)}
         </p>
         <h2 className="text-lg font-bold text-white leading-tight mb-3">
-          {album.album || 'Top Songs'}
+          {disguiseAlbum(album.album || '') || 'Top Songs'}
         </h2>
 
         <div className="space-y-2 text-sm">

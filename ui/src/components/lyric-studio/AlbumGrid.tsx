@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Disc3, Plus, FileText, MoreVertical, RefreshCw, Link2, Trash2, Search, PenLine, ChevronDown, Sparkles } from 'lucide-react';
 import type { LyricsSet, SongLyric } from '../../services/lireekApi';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 function parseSongs(songs: SongLyric[] | string): SongLyric[] {
   if (typeof songs === 'string') {
@@ -25,6 +26,7 @@ interface AlbumGridProps {
 export const AlbumGrid: React.FC<AlbumGridProps> = ({
   albums, loading, artistName, onSelectAlbum, onAddAlbum, onAddManual, onDeleteAlbum, onRefreshImage, onSetImage, onCuratedProfile,
 }) => {
+  const { disguiseArtist, disguiseAlbum, disguiseImageUrl } = useDisguiseMode();
   const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -68,7 +70,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-xl font-bold text-white">Albums</h2>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-0.5">{artistName}</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-0.5">{disguiseArtist(artistName)}</p>
         </div>
         <div className="flex items-center gap-3">
           {onCuratedProfile && albums.length >= 2 && (
@@ -147,11 +149,13 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                 className={`group relative aspect-square rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:scale-[1.03] hover:shadow-2xl hover:shadow-indigo-500/10 ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
                 onClick={() => onSelectAlbum(album)}
               >
-                {/* Album cover art or gradient */}
-                {album.image_url && !imageErrors.has(album.id) ? (
+                {(() => {
+                  const dAlbumName = disguiseAlbum(album.album || '');
+                  const dUrl = disguiseImageUrl(album.image_url, album.album || String(album.id));
+                  return dUrl && !imageErrors.has(album.id) ? (
                   <img
-                    src={album.image_url}
-                    alt={album.album || 'Album'}
+                    src={dUrl}
+                    alt={dAlbumName || 'Album'}
                     className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
                     onError={() => setImageErrors(prev => new Set(prev).add(album.id))}
                   />
@@ -159,14 +163,15 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                   <>
                     <div
                       className="absolute inset-0"
-                      style={{ background: gradient(album.album || String(album.id)) }}
+                      style={{ background: gradient(dAlbumName || String(album.id)) }}
                     />
                     {/* Decorative vinyl record */}
                     <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full border border-zinc-200 dark:border-white/5 opacity-20">
                       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[30%] h-[30%] rounded-full border border-zinc-300 dark:border-white/10" />
                     </div>
                   </>
-                )}
+                );
+                })()}
 
                 {/* Overlay */}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
@@ -174,7 +179,7 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
                 {/* Content */}
                 <div className="absolute inset-x-0 bottom-0 p-4">
                   <h3 className="text-sm font-bold text-white truncate mb-2 drop-shadow-lg">
-                    {album.album || 'Top Songs'}
+                    {disguiseAlbum(album.album || '') || 'Top Songs'}
                   </h3>
                   <div className="flex items-center gap-3 text-xs text-zinc-700 dark:text-zinc-300/70">
                     <span className="flex items-center gap-1">

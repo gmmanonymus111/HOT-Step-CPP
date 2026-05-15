@@ -16,6 +16,7 @@ import { usePlaylist, type PlaylistItem } from '../lyric-studio/playlistStore';
 import { playFromList, playlistItemToTrack, usePlayback } from '../../stores/playbackStore';
 import { DownloadModal } from '../shared/DownloadModal';
 import type { Song } from '../../types';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface PlaylistSidebarProps {
   onClose: () => void;
@@ -27,6 +28,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
   const pb = usePlayback();
   const currentSongId = pb.currentTrack?.id ?? null;
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
+  const { disguiseArtist } = useDisguiseMode();
 
   const handlePlay = useCallback((item: PlaylistItem) => {
     const allTracks = playlist.items.map(playlistItemToTrack);
@@ -121,7 +123,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
                       {item.title || 'Untitled'}
                     </p>
                     {item.artistName && (
-                      <p className="text-[9px] text-zinc-500 truncate leading-tight">{item.artistName}</p>
+                      <p className="text-[9px] text-zinc-500 truncate leading-tight">{disguiseArtist(item.artistName)}</p>
                     )}
                   </div>
 

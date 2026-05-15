@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import { ChevronLeft } from 'lucide-react';
 import type { Artist } from '../../services/lireekApi';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface ArtistSidebarProps {
   artists: Artist[];
@@ -16,6 +17,7 @@ export const ArtistSidebar: React.FC<ArtistSidebarProps> = ({
   artists, selectedArtistId, onSelectArtist, onBack,
   artistIdsWithAdapters,
 }) => {
+  const { disguiseArtist, disguiseImageUrl } = useDisguiseMode();
   const [imageErrors, setImageErrors] = React.useState<Set<number>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -76,26 +78,30 @@ export const ArtistSidebar: React.FC<ArtistSidebarProps> = ({
             >
               {/* Mini avatar */}
               <div className="w-8 h-8 flex-shrink-0 rounded-lg overflow-hidden">
-                {artist.image_url && !imageErrors.has(artist.id) ? (
+                {(() => {
+                  const dUrl = disguiseImageUrl(artist.image_url, artist.name);
+                  const dName = disguiseArtist(artist.name);
+                  return dUrl && !imageErrors.has(artist.id) ? (
                   <img
-                    src={artist.image_url}
-                    alt={artist.name}
+                    src={dUrl}
+                    alt={dName}
                     className="w-full h-full object-cover"
                     onError={() => setImageErrors(prev => new Set(prev).add(artist.id))}
                   />
                 ) : (
                   <div
                     className="w-full h-full flex items-center justify-center text-xs font-bold text-white/60"
-                    style={{ backgroundColor: gradient(artist.name) }}
+                    style={{ backgroundColor: gradient(dName) }}
                   >
-                    {artist.name.charAt(0).toUpperCase()}
+                    {dName.charAt(0).toUpperCase()}
                   </div>
-                )}
+                );
+                })()}
               </div>
 
               <div className="min-w-0 flex-1">
                 <p className={`text-sm font-medium truncate ${isSelected ? 'text-pink-400' : 'text-zinc-700 dark:text-zinc-300'}`}>
-                  {artist.name}
+                  {disguiseArtist(artist.name)}
                 </p>
                 <p className="text-[11px] text-zinc-500">
                   {artist.lyrics_set_count ?? 0} album{(artist.lyrics_set_count ?? 0) !== 1 ? 's' : ''}

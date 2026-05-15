@@ -44,6 +44,7 @@ import { QueuePanel } from './QueuePanel';
 import { PromptEditor } from './PromptEditor';
 // streamingStore used via queue panel
 import { loadSelections } from './ProviderSelector';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 
 // ── URL helpers ──────────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ interface NavState {
 export const LyricStudioV2: React.FC = () => {
   const { token } = useAuth();
   const { t } = useTranslation();
+  const { disguiseArtist, disguiseAlbum } = useDisguiseMode();
 
   // ── Navigation ──
   const [nav, setNav] = useState<NavState>({ level: 'artists', selectedArtist: null, selectedAlbum: null });
@@ -656,7 +658,7 @@ export const LyricStudioV2: React.FC = () => {
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Header bar — spans above ArtistPageSidebar + Grid, matches ContentTabs height */}
               <div className="flex-shrink-0 flex items-center px-5 py-3 border-b border-zinc-200 dark:border-white/5 bg-zinc-50/30 dark:bg-zinc-950/30">
-                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">{nav.selectedArtist.name}</span>
+                <span className="text-sm font-medium text-zinc-600 dark:text-zinc-400">{disguiseArtist(nav.selectedArtist.name)}</span>
                 {albums.length > 0 && (
                   <span className="ml-2 min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold flex items-center justify-center bg-white/10 text-zinc-600 dark:text-zinc-400">
                     {albums.length}

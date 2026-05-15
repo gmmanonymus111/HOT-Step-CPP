@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Music, Plus, RefreshCw, Trash2, MoreVertical, Link2, Search, PenLine, ChevronDown } from 'lucide-react';
 import type { Artist } from '../../services/lireekApi';
+import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface ArtistGridProps {
   artists: Artist[];
@@ -16,6 +17,7 @@ interface ArtistGridProps {
 export const ArtistGrid: React.FC<ArtistGridProps> = ({
   artists, loading, onSelectArtist, onAddNew, onAddManual, onDelete, onRefreshImage, onSetImage,
 }) => {
+  const { disguiseArtist, disguiseImageUrl } = useDisguiseMode();
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -126,23 +128,27 @@ export const ArtistGrid: React.FC<ArtistGridProps> = ({
               onClick={() => onSelectArtist(artist)}
             >
               {/* Background image or gradient */}
-              {artist.image_url && !imageErrors.has(artist.id) ? (
+              {(() => {
+                const dUrl = disguiseImageUrl(artist.image_url, artist.name);
+                const dName = disguiseArtist(artist.name);
+                return dUrl && !imageErrors.has(artist.id) ? (
                 <img
-                  src={artist.image_url}
-                  alt={artist.name}
+                  src={dUrl}
+                  alt={dName}
                   className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
                   onError={() => setImageErrors(prev => new Set(prev).add(artist.id))}
                 />
               ) : (
                 <div
                   className="absolute inset-0 flex items-center justify-center"
-                  style={{ background: gradient(artist.name) }}
+                  style={{ background: gradient(dName) }}
                 >
                   <span className="text-5xl font-black text-white/20 select-none">
-                    {artist.name.charAt(0).toUpperCase()}
+                    {dName.charAt(0).toUpperCase()}
                   </span>
                 </div>
-              )}
+              );
+              })()}
 
               {/* Dark overlay gradient */}
               <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
@@ -150,7 +156,7 @@ export const ArtistGrid: React.FC<ArtistGridProps> = ({
               {/* Content */}
               <div className="absolute inset-x-0 bottom-0 p-4">
                 <h3 className="text-base font-bold text-white truncate mb-1 drop-shadow-lg">
-                  {artist.name}
+                  {disguiseArtist(artist.name)}
                 </h3>
                 <p className="text-xs text-zinc-700 dark:text-zinc-300/80">
                   {artist.lyrics_set_count ?? 0} album{(artist.lyrics_set_count ?? 0) !== 1 ? 's' : ''}
