@@ -36,7 +36,7 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
   const mountedRef = useRef(true);
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
   const [downloadArtist, setDownloadArtist] = useState('');
-  const { disguiseArtist } = useDisguiseMode();
+  const { disguiseArtist, disguiseTitle } = useDisguiseMode();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -167,7 +167,7 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate leading-snug">
-                  {song.title || 'Untitled Cover'}
+                  {disguiseTitle(song.title || 'Untitled Cover')}
                 </p>
                 {targetArtist && (
                   <p className="text-[10px] text-zinc-500 truncate leading-snug">{disguiseArtist(targetArtist)}</p>

@@ -65,6 +65,8 @@ interface DisguiseModeContextValue {
   disguiseAlbum: (name: string) => string;
   /** Swap an image URL for a fake band image (passthrough when disguise is off) */
   disguiseImageUrl: (realUrl: string | undefined, name: string) => string | undefined;
+  /** Replace artist portion of "Artist - Title" format strings (passthrough when off) */
+  disguiseTitle: (title: string) => string;
 }
 
 const DisguiseModeContext = createContext<DisguiseModeContextValue>({
@@ -72,6 +74,7 @@ const DisguiseModeContext = createContext<DisguiseModeContextValue>({
   disguiseArtist: (n) => n,
   disguiseAlbum: (n) => n,
   disguiseImageUrl: (u) => u,
+  disguiseTitle: (t) => t,
 });
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -115,12 +118,26 @@ export const DisguiseModeProvider: React.FC<{ children: React.ReactNode }> = ({ 
     return `/disguise/band_${String(idx).padStart(2, '0')}.webp`;
   }, [isDisguised]);
 
+  const disguiseTitle = useCallback((title: string): string => {
+    if (!isDisguised || !title) return title;
+    // Detect "Artist - Song Title" pattern and replace the artist part
+    const sepIdx = title.indexOf(' - ');
+    if (sepIdx > 0) {
+      const artistPart = title.substring(0, sepIdx);
+      const songPart = title.substring(sepIdx + 3);
+      const fakeArtist = FAKE_ARTISTS[stableHash(artistPart) % FAKE_ARTISTS.length];
+      return `${fakeArtist} - ${songPart}`;
+    }
+    return title;
+  }, [isDisguised]);
+
   const value = useMemo(() => ({
     isDisguised,
     disguiseArtist,
     disguiseAlbum,
     disguiseImageUrl,
-  }), [isDisguised, disguiseArtist, disguiseAlbum, disguiseImageUrl]);
+    disguiseTitle,
+  }), [isDisguised, disguiseArtist, disguiseAlbum, disguiseImageUrl, disguiseTitle]);
 
   return (
     <DisguiseModeContext.Provider value={value}>
@@ -133,3 +150,4 @@ export const DisguiseModeProvider: React.FC<{ children: React.ReactNode }> = ({ 
 export function useDisguiseMode(): DisguiseModeContextValue {
   return useContext(DisguiseModeContext);
 }
+

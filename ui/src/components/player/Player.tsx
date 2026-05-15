@@ -83,7 +83,7 @@ export const Player: React.FC<PlayerProps> = ({
   onToggleTrimMode,
 }) => {
   const { t } = useTranslation();
-  const { disguiseArtist, isDisguised } = useDisguiseMode();
+  const { disguiseArtist, isDisguised, disguiseTitle } = useDisguiseMode();
 
 
   if (!currentSong) {
@@ -106,7 +106,7 @@ export const Player: React.FC<PlayerProps> = ({
           )}
         </div>
         <div className="min-w-0">
-          <div className="text-sm font-medium text-zinc-900 dark:text-white truncate">{currentSong.title || 'Untitled'}</div>
+          <div className="text-sm font-medium text-zinc-900 dark:text-white truncate">{disguiseTitle(currentSong.title || 'Untitled')}</div>
           <div className="text-xs text-zinc-500 truncate">
             {isDisguised ? '' : (currentSong.caption || currentSong.style || '')}
           </div>

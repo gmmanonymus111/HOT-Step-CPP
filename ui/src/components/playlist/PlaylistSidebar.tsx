@@ -28,7 +28,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
   const pb = usePlayback();
   const currentSongId = pb.currentTrack?.id ?? null;
   const [downloadSong, setDownloadSong] = useState<Song | null>(null);
-  const { disguiseArtist } = useDisguiseMode();
+  const { disguiseArtist, disguiseTitle } = useDisguiseMode();
 
   const handlePlay = useCallback((item: PlaylistItem) => {
     const allTracks = playlist.items.map(playlistItemToTrack);
@@ -120,7 +120,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
                   {/* Title / Artist */}
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handlePlay(item)}>
                     <p className={`text-[11px] font-medium truncate leading-tight ${isPlaying ? 'text-pink-300' : 'text-zinc-800 dark:text-zinc-200'}`}>
-                      {item.title || 'Untitled'}
+                      {disguiseTitle(item.title || 'Untitled')}
                     </p>
                     {item.artistName && (
                       <p className="text-[9px] text-zinc-500 truncate leading-tight">{disguiseArtist(item.artistName)}</p>
