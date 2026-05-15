@@ -13,7 +13,8 @@
         "scragvae-bf16",
         "pp-vae-f32",
         "cuda-rt-cublas",
-        "cuda-rt-cublaslt"
+        "cuda-rt-cublaslt",
+        "cuda-rt-cudart"
       ]
     },
     {
@@ -28,7 +29,8 @@
         "scragvae-bf16",
         "pp-vae-bf16",
         "cuda-rt-cublas",
-        "cuda-rt-cublaslt"
+        "cuda-rt-cublaslt",
+        "cuda-rt-cudart"
       ]
     },
     {
@@ -43,7 +45,8 @@
         "scragvae-bf16",
         "pp-vae-f32",
         "cuda-rt-cublas",
-        "cuda-rt-cublaslt"
+        "cuda-rt-cublaslt",
+        "cuda-rt-cudart"
       ]
     },
     {
@@ -58,16 +61,18 @@
         "scragvae-bf16",
         "pp-vae-f32",
         "cuda-rt-cublas",
-        "cuda-rt-cublaslt"
+        "cuda-rt-cublaslt",
+        "cuda-rt-cudart"
       ]
     },
     {
       "id": "cuda-runtime",
       "name": "CUDA Runtime",
-      "description": "NVIDIA cuBLAS libraries required for GPU-accelerated generation. ~510 MB download. Required on machines without CUDA Toolkit.",
+      "description": "NVIDIA CUDA runtime libraries required for GPU-accelerated generation. ~510 MB download. Required on machines without CUDA Toolkit.",
       "fileIds": [
         "cuda-rt-cublas",
-        "cuda-rt-cublaslt"
+        "cuda-rt-cublaslt",
+        "cuda-rt-cudart"
       ]
     },
     {
@@ -1785,6 +1790,23 @@
         "required"
       ],
       "repoPath": "runtime/cublasLt64_13.dll"
+    },
+    {
+      "id": "cuda-rt-cudart",
+      "filename": "cudart64_12.dll",
+      "role": "runtime",
+      "displayName": "CUDA Runtime",
+      "scale": null,
+      "variant": null,
+      "quant": null,
+      "sizeBytes": 573952,
+      "repo": "scragnog/HOT-Step-CPP-SuperSep",
+      "description": "NVIDIA CUDA Runtime library — required for GPU initialisation.",
+      "tags": [
+        "runtime",
+        "required"
+      ],
+      "repoPath": "runtime/cudart64_12.dll"
     }
   ]
 }

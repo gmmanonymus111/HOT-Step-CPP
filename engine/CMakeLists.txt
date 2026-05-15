@@ -256,6 +256,19 @@ find_package(CUDAToolkit QUIET)
 if(CUDAToolkit_FOUND)
     target_compile_definitions(ace-server PRIVATE GGML_USE_CUDA)
     target_link_libraries(ace-server PRIVATE CUDA::cudart)
+    # Copy CUDA runtime DLL to build dir (needed for portable release builds —
+    # end users don't have the CUDA Toolkit, so cudart64_*.dll must ship with the binary)
+    if(WIN32)
+        get_target_property(_CUDART_LOC CUDA::cudart IMPORTED_LOCATION)
+        if(_CUDART_LOC)
+            add_custom_command(TARGET ace-server POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_CUDART_LOC}"
+                    "$<TARGET_FILE_DIR:ace-server>"
+                COMMENT "Copying cudart DLL for portable release"
+            )
+        endif()
+    endif()
 endif()
 
 # Copy ONNX Runtime DLLs next to ace-server at build time

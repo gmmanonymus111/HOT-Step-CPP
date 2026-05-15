@@ -144,6 +144,12 @@ let aceProcess: ChildProcess | null = null;
 
 import { setEngineReady } from './engineState.js';
 
+// Crash-count limiter: prevent infinite respawn on fatal errors (missing DLLs, etc.)
+let crashCount = 0;
+let firstCrashTime = 0;
+const MAX_CRASHES = 3;
+const CRASH_WINDOW_MS = 30_000; // 30 seconds
+
 function startAceServer(): ChildProcess | null {
   const exe = config.aceServer.exe;
   if (!exe || !fs.existsSync(exe)) {
@@ -198,7 +204,24 @@ function startAceServer(): ChildProcess | null {
   child.on('exit', (code, signal) => {
     if (signal !== 'SIGTERM' && signal !== 'SIGINT' && code !== 0) {
       console.error(`[ace-server] Process exited with code ${code}, signal ${signal}`);
-      console.log('[ace-server] Restarting in 3 seconds...');
+
+      // Crash-count limiter: reset window if enough time has passed
+      const now = Date.now();
+      if (now - firstCrashTime > CRASH_WINDOW_MS) {
+        crashCount = 0;
+        firstCrashTime = now;
+      }
+      crashCount++;
+
+      if (crashCount >= MAX_CRASHES) {
+        console.error(`[ace-server] Crashed ${MAX_CRASHES} times within ${CRASH_WINDOW_MS / 1000}s — giving up.`);
+        console.error('[ace-server] This usually means a required DLL is missing from the engine/ directory.');
+        console.error('[ace-server] Check the error above, or try re-extracting the release zip.');
+        setEngineReady(false, `Engine crashed ${MAX_CRASHES} times — check logs for missing DLLs`);
+        return;
+      }
+
+      console.log(`[ace-server] Restarting in 3 seconds... (crash ${crashCount}/${MAX_CRASHES})`);
       setTimeout(() => {
         aceProcess = startAceServer();
       }, 3000);
@@ -219,7 +242,7 @@ function startAceServer(): ChildProcess | null {
 import { modelDownloadService } from './services/modelDownloadService.js';
 
 /** IDs of registry files tagged "required" that must exist before engine start */
-const REQUIRED_RUNTIME_IDS = ['cuda-rt-cublas', 'cuda-rt-cublaslt'];
+const REQUIRED_RUNTIME_IDS = ['cuda-rt-cublas', 'cuda-rt-cublaslt', 'cuda-rt-cudart'];
 
 async function ensureRequiredRuntime(): Promise<void> {
   const engineDir = path.dirname(config.aceServer.exe);
