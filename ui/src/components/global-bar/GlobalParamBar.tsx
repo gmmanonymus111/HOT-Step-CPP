@@ -213,13 +213,8 @@ export const GlobalParamBar: React.FC = () => {
          style={{ backdropFilter: 'blur(20px)' }}>
       <div className="flex items-stretch">
         {/* Logo */}
-        <div className="flex items-center gap-2.5 px-5 flex-shrink-0 border-r border-zinc-200 dark:border-white/5" style={{ width: '210px' }}>
-          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center shadow-lg flex-shrink-0">
-            <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </div>
-          <span className="text-base font-bold text-white whitespace-nowrap">HOT-Step CPP</span>
+        <div className="flex items-center justify-center flex-shrink-0 border-r border-zinc-200 dark:border-white/5 px-3" style={{ width: '210px' }}>
+          <img src="/logo.webp" alt="HOT-Step" className="h-8 w-auto object-contain" draggable={false} />
         </div>
 
         {/* Sections — separated by dividers */}
