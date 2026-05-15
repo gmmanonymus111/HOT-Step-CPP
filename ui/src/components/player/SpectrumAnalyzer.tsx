@@ -87,8 +87,8 @@ export const SpectrumAnalyzer: React.FC<SpectrumAnalyzerProps> = ({
     if (!analyzerRef.current) return;
     if (visible && isPlaying) {
       analyzerRef.current.start();
-    } else if (!visible) {
-      // Stop animation loop when hidden for performance
+    } else {
+      // Stop animation loop when hidden OR when visible but paused
       analyzerRef.current.stop();
     }
   }, [visible, isPlaying]);
