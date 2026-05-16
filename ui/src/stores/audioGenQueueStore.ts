@@ -298,23 +298,51 @@ async function _notifySongCreated(songId: string): Promise<void> {
 
 // ── Audio duration probing ───────────────────────────────────────────────────
 
-/** Probe an audio URL with a hidden Audio element to get the real duration. */
-function _probeAudioDuration(itemId: string, url: string): void {
-  const audio = new Audio();
-  audio.preload = 'metadata';
-  audio.onloadedmetadata = () => {
-    const dur = audio.duration;
-    if (dur && isFinite(dur) && dur > 0) {
-      const item = _state.items.find(i => i.id === itemId);
-      if (item) {
-        item.audioDuration = Math.round(dur);
-        _emit(true);
+/** Probe an audio URL with a hidden Audio element to get the real duration.
+ *  Fetches the file as a blob first to avoid race conditions when served
+ *  via tunnels/proxies where the file may not be fully ready yet. */
+async function _probeAudioDuration(itemId: string, url: string): Promise<void> {
+  let blobUrl: string | undefined;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    blobUrl = URL.createObjectURL(blob);
+
+    const audio = new Audio();
+    audio.preload = 'metadata';
+
+    audio.onloadedmetadata = () => {
+      const dur = audio.duration;
+      if (dur && isFinite(dur) && dur > 0) {
+        const item = _state.items.find(i => i.id === itemId);
+        if (item) {
+          item.audioDuration = Math.round(dur);
+          _emit(true);
+        }
+      }
+      cleanup();
+    };
+
+    audio.onerror = () => {
+      cleanup();
+    };
+
+    audio.src = blobUrl;
+
+    function cleanup() {
+      audio.src = '';
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        blobUrl = undefined;
       }
     }
-    audio.src = ''; // release
-  };
-  audio.onerror = () => { audio.src = ''; };
-  audio.src = url;
+  } catch {
+    // Non-fatal — duration simply won't be updated
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+  }
 }
 
 // ── Simple generation API (for Create page) ─────────────────────────────────
