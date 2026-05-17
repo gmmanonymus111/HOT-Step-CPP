@@ -8,6 +8,7 @@ import { AnthropicProvider } from './anthropic.js';
 import { OllamaProvider } from './ollama.js';
 import { LMStudioProvider } from './lmstudio.js';
 import { UnslothProvider } from './unsloth.js';
+import { OpenAICompatProvider } from './openai-compat.js';
 
 const providers: Record<string, LLMProvider> = {
   gemini: new GeminiProvider(),
@@ -16,6 +17,7 @@ const providers: Record<string, LLMProvider> = {
   ollama: new OllamaProvider(),
   lmstudio: new LMStudioProvider(),
   unsloth: new UnslothProvider(),
+  'openai-compat': new OpenAICompatProvider(),
 };
 
 export function getProvider(name: string): LLMProvider {
@@ -27,7 +29,7 @@ export function getProvider(name: string): LLMProvider {
 export async function listProviders(): Promise<ProviderInfo[]> {
   const results = [];
   for (const p of Object.values(providers)) {
-    if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider) {
+    if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider || p instanceof OpenAICompatProvider) {
       results.push(await p.toInfoAsync());
     } else {
       results.push(p.toInfo());

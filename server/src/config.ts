@@ -154,6 +154,10 @@ export const config = {
     ollamaModel: process.env.OLLAMA_MODEL || 'llama3',
     lmstudioModel: process.env.LMSTUDIO_MODEL || '',
     unslothModel: process.env.UNSLOTH_MODEL || '',
+    openaiCompatBaseUrl: process.env.OPENAI_COMPAT_BASE_URL || '',
+    openaiCompatApiKey: process.env.OPENAI_COMPAT_API_KEY || '',
+    openaiCompatModel: process.env.OPENAI_COMPAT_MODEL || '',
+    openaiCompatName: process.env.OPENAI_COMPAT_NAME || 'OpenAI Compatible',
     get dbPath() {
       return path.join(config.data.dir, 'lireek.db');
     },
@@ -202,6 +206,7 @@ export const EXPOSED_ENV_KEYS = [
   // LLM endpoints
   'OLLAMA_BASE_URL', 'LMSTUDIO_BASE_URL',
   'UNSLOTH_BASE_URL', 'UNSLOTH_USERNAME', 'UNSLOTH_PASSWORD',
+  'OPENAI_COMPAT_BASE_URL', 'OPENAI_COMPAT_API_KEY', 'OPENAI_COMPAT_MODEL', 'OPENAI_COMPAT_NAME',
   // Paths
   'LYRICS_EXPORT_DIR',
 ] as const;
@@ -282,6 +287,14 @@ export function reloadEnvConfig(): string[] {
     () => config.lireek.lmstudioModel);
   apply('UNSLOTH_MODEL', v => { config.lireek.unslothModel = v; },
     () => config.lireek.unslothModel);
+  apply('OPENAI_COMPAT_BASE_URL', v => { config.lireek.openaiCompatBaseUrl = v; },
+    () => config.lireek.openaiCompatBaseUrl);
+  apply('OPENAI_COMPAT_API_KEY', v => { config.lireek.openaiCompatApiKey = v; },
+    () => config.lireek.openaiCompatApiKey);
+  apply('OPENAI_COMPAT_MODEL', v => { config.lireek.openaiCompatModel = v; },
+    () => config.lireek.openaiCompatModel);
+  apply('OPENAI_COMPAT_NAME', v => { config.lireek.openaiCompatName = v || 'OpenAI Compatible'; },
+    () => config.lireek.openaiCompatName);
   apply('LYRICS_EXPORT_DIR', v => {
     config.lireek.exportDir = v || path.join(config.data.dir, 'lyrics');
   }, () => config.lireek.exportDir);
