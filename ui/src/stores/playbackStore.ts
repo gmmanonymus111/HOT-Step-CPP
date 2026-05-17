@@ -55,6 +55,11 @@ export interface PlaybackState {
   currentTime: number;
   duration: number;
 
+  // ── Player Bar Visibility ──
+  // True when a track has been loaded for playback. Stays true when paused.
+  // Only set to false by an explicit stop() call, which collapses the player bar.
+  playerActive: boolean;
+
   // ── Mastered/Original Toggle ──
   playMastered: boolean;
   hasMastered: boolean;
@@ -198,6 +203,8 @@ let _state: PlaybackState = {
   loadError: null,
   currentTime: 0,
   duration: 0,
+
+  playerActive: false,
 
   playMastered: false,
   hasMastered: false,
@@ -401,6 +408,7 @@ function loadTrack(track: PlaybackTrack): void {
 
   setState({
     currentTrack: track,
+    playerActive: true,      // Mark player bar as active (stays open on pause)
     isLoading: true,
     isPlaying: wasPlaying,   // keep true during track-to-track switch
     loadError: null,
@@ -451,10 +459,50 @@ export function playFromList(
 /** Toggle play/pause on both WaveSurfer instances */
 export function togglePlay(): void {
   if (!_state.currentTrack) return;
-  // Manual pause clears the suppress guard so the visualiser collapses normally
+  // Pause no longer collapses the player bar — only stop() does that.
+  // Clear suppress guard so isPlaying state updates naturally.
   _suppressPlayFalse = false;
   _wsOriginalRef.current?.playPause();
   if (_state.hasMastered) _wsAltRef.current?.playPause();
+}
+
+/** Stop playback entirely — pauses audio, resets position, and collapses the player bar */
+export function stop(): void {
+  _suppressPlayFalse = false;
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+  _retryCount = 0;
+
+  // Pause both WaveSurfer instances (don't call playPause — we want guaranteed pause)
+  const wsOrig = _wsOriginalRef.current;
+  const wsAlt = _wsAltRef.current;
+  if (wsOrig) {
+    const m = wsOrig.getMediaElement();
+    if (m && !m.paused) wsOrig.playPause();
+  }
+  if (wsAlt) {
+    const m = wsAlt.getMediaElement();
+    if (m && !m.paused) wsAlt.playPause();
+  }
+
+  setState({
+    playerActive: false,
+    isPlaying: false,
+    currentTrack: null,
+    currentTime: 0,
+    duration: 0,
+    isLoading: false,
+    loadError: null,
+    hasMastered: false,
+    playMastered: false,
+    currentAudioUrl: null,
+    trimMode: false,
+    trimInPoint: null,
+    trimOutPoint: null,
+    trimClickCount: 0,
+    abMode: false,
+    abTrackA: null,
+    abTrackB: null,
+  });
 }
 
 /** Seek both WaveSurfer instances to a time in seconds */

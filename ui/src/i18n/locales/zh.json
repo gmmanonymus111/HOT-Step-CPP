@@ -208,6 +208,7 @@
     "player.reusePrompt": "复用提示词",
     "player.download": "下载",
     "player.delete": "删除",
+    "player.stop": "停止",
     "trim.clickInPoint": "点击波形设置起点 (IN)",
     "trim.clickOutPoint": "点击波形设置终点 (OUT)",
     "trim.adjustOrCrop": "拖动以调整标记，或直接裁剪选区",

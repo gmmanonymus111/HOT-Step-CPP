@@ -3,7 +3,7 @@
 
 import React from 'react';
 import {
-  Play, Pause, SkipBack, SkipForward,
+  Play, Pause, SkipBack, SkipForward, Square,
   Shuffle, Repeat, Repeat1,
   Volume2, VolumeX,
   RotateCcw, Trash2, Download,
@@ -17,6 +17,7 @@ interface PlayerProps {
   currentSong: Song | null;
   isPlaying: boolean;
   onTogglePlay: () => void;
+  onStop: () => void;
   currentTime: number;
   duration: number;
   onSeek: (time: number) => void;
@@ -60,6 +61,7 @@ export const Player: React.FC<PlayerProps> = ({
   currentSong,
   isPlaying,
   onTogglePlay,
+  onStop,
   currentTime,
   duration,
   onSeek: _onSeek,
@@ -133,6 +135,13 @@ export const Player: React.FC<PlayerProps> = ({
         </button>
         <button onClick={onPrevious} className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors">
           <SkipBack size={18} />
+        </button>
+        <button
+          onClick={onStop}
+          className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          title={t('player.stop')}
+        >
+          <Square size={14} fill="currentColor" />
         </button>
         <button
           onClick={onTogglePlay}

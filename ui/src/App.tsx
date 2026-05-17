@@ -63,6 +63,7 @@ import {
   reloadCurrentTrack as pbReloadCurrentTrack,
   toggleAB as pbToggleAB,
   exitABMode as pbExitABMode,
+  stop as pbStop,
   songToTrack,
   playFromList,
 } from './stores/playbackStore';
@@ -246,6 +247,7 @@ const AppContent: React.FC = () => {
   const currentTrack = usePlaybackSelector(s => s.currentTrack);
   const currentSong = currentTrack as (Song | null);  // PlaybackTrack is Song-compatible for rendering
   const isPlaying = usePlaybackSelector(s => s.isPlaying);
+  const playerActive = usePlaybackSelector(s => s.playerActive);
   const currentTime = usePlaybackSelector(s => s.currentTime);
   const duration = usePlaybackSelector(s => s.duration);
   const volume = usePlaybackSelector(s => s.volume);
@@ -1053,8 +1055,8 @@ const AppContent: React.FC = () => {
         <div
           style={{
             display: 'grid',
-            gridTemplateRows: (isPlaying || trimMode) ? '1fr' : '0fr',
-            opacity: (isPlaying || trimMode) ? 1 : 0,
+            gridTemplateRows: (playerActive || trimMode) ? '1fr' : '0fr',
+            opacity: (playerActive || trimMode) ? 1 : 0,
             transition: 'grid-template-rows 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease',
           }}
         >
@@ -1062,7 +1064,7 @@ const AppContent: React.FC = () => {
           <SectionMarkers audioUrl={currentTrack?.audioUrl ?? undefined} duration={duration} />
           <SpectrumAnalyzer
             mediaElement={spectrumMediaEl}
-            visible={spectrumEnabled && isPlaying}
+            visible={spectrumEnabled && playerActive}
             isPlaying={isPlaying}
           />
           {trimMode && (
@@ -1142,6 +1144,7 @@ const AppContent: React.FC = () => {
           currentSong={currentSong}
           isPlaying={isPlaying}
           onTogglePlay={pbTogglePlay}
+          onStop={pbStop}
           currentTime={currentTime}
           duration={duration}
           onSeek={pbSeek}

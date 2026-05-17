@@ -209,6 +209,7 @@
     "player.reusePrompt": "Reuse Prompt",
     "player.download": "Download",
     "player.delete": "Delete",
+    "player.stop": "Stop",
     "trim.clickInPoint": "Click on the waveform to set the IN point",
     "trim.clickOutPoint": "Click on the waveform to set the OUT point",
     "trim.adjustOrCrop": "Click to adjust markers, or crop the selection",
