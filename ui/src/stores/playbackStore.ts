@@ -740,7 +740,12 @@ export function handleFinish(): void {
     return;
   }
 
-  if (_state.repeat === 'all' || _state.trackList.length > 1) {
+  // Only auto-advance when playing from a playlist, or when repeat-all is active.
+  // Individual tracks (library, recent, direct, etc.) just stop at the end.
+  const shouldAdvance = _state.repeat === 'all'
+    || (_state.source === 'playlist' && _state.trackList.length > 1);
+
+  if (shouldAdvance) {
     next();
   } else {
     setState({ isPlaying: false });
