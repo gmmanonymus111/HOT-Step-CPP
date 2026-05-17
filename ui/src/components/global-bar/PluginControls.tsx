@@ -3,10 +3,14 @@
 // Takes a plugin's `params` array and renders the appropriate controls
 // (sliders, selects, toggles, text inputs) with a Reset button.
 // Values are stored in a flat { "pluginName:key": value } map.
+//
+// Renders as a collapsible accordion, collapsed by default.
+// Open/closed state is persisted per-plugin via localStorage.
 
 import React from 'react';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, ChevronDown } from 'lucide-react';
 import { Slider } from '../shared/Slider';
+import { usePersistedState } from '../../hooks/usePersistedState';
 import type { PluginParamSchema } from '../../types/pluginTypes';
 
 const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
@@ -49,6 +53,8 @@ export const PluginControls: React.FC<PluginControlsProps> = ({
   onChange,
   onReset,
 }) => {
+  const [isOpen, setIsOpen] = usePersistedState(`hs-pluginAccordion-${pluginName}`, false);
+
   if (!params || params.length === 0) return null;
 
   const a = (accent && accentMap[accent]) || defaultAccent;
@@ -74,89 +80,103 @@ export const PluginControls: React.FC<PluginControlsProps> = ({
   if (visibleParams.length === 0) return null;
 
   return (
-    <div className={`rounded-xl border ${a.border} ${a.bg} p-3 space-y-3 transition-all`}>
-      <div className="flex items-center justify-between">
-        <span className={`text-[10px] font-semibold ${a.text} uppercase tracking-wider`}>
-          {displayName} Controls
-        </span>
-        <button type="button" onClick={onReset}
+    <div className={`rounded-xl border ${a.border} ${a.bg} transition-all overflow-hidden`}>
+      {/* Accordion header */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className={`w-full flex items-center justify-between px-3 py-2 ${a.hover.replace('hover:text-', 'hover:bg-').replace('300', '500/5')} transition-colors`}
+      >
+        <div className="flex items-center gap-2">
+          <ChevronDown size={12} className={`${a.text} transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+          <span className={`text-[10px] font-semibold ${a.text} uppercase tracking-wider`}>
+            {displayName} Controls
+          </span>
+        </div>
+        <button type="button" onClick={(e) => { e.stopPropagation(); onReset(); }}
           className={`flex items-center gap-1 text-[10px] ${a.text} ${a.hover} transition-colors`}>
           <RotateCcw size={10} /> Reset
         </button>
-      </div>
-      {visibleParams.map(p => {
-        const val = getVal(p);
-        const fullKey = `${pluginName}:${p.key}`;
+      </button>
 
-        switch (p.type) {
-          case 'slider':
-            return (
-              <div key={p.key}>
-                <Slider
-                  label={p.label}
-                  value={parseFloat(val) || 0}
-                  onChange={v => onChange(fullKey, String(v))}
-                  min={p.min ?? 0}
-                  max={p.max ?? 1}
-                  step={p.step ?? 0.01}
-                  showInput
-                />
-                {p.hint && <p className="text-[10px] text-zinc-500 mt-0.5">{p.hint}</p>}
-              </div>
-            );
+      {/* Collapsible param content */}
+      {isOpen && (
+        <div className="px-3 pb-3 space-y-3">
+          {visibleParams.map(p => {
+            const val = getVal(p);
+            const fullKey = `${pluginName}:${p.key}`;
 
-          case 'select':
-            return (
-              <div key={p.key}>
-                <label className={`block text-[10px] ${a.text} mb-1`}>{p.label}</label>
-                <select
-                  className={selectClasses}
-                  value={val}
-                  onChange={e => onChange(fullKey, e.target.value)}
-                >
-                  {(p.options || []).map(o => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-                {p.hint && <p className="text-[10px] text-zinc-500 mt-0.5">{p.hint}</p>}
-              </div>
-            );
+            switch (p.type) {
+              case 'slider':
+                return (
+                  <div key={p.key}>
+                    <Slider
+                      label={p.label}
+                      value={parseFloat(val) || 0}
+                      onChange={v => onChange(fullKey, String(v))}
+                      min={p.min ?? 0}
+                      max={p.max ?? 1}
+                      step={p.step ?? 0.01}
+                      showInput
+                    />
+                    {p.hint && <p className="text-[10px] text-zinc-500 mt-0.5">{p.hint}</p>}
+                  </div>
+                );
 
-          case 'toggle':
-            return (
-              <div key={p.key} className="flex items-center justify-between">
-                <span className="text-xs text-zinc-400">{p.label}</span>
-                <button
-                  type="button"
-                  onClick={() => onChange(fullKey, val === 'true' ? 'false' : 'true')}
-                  className={`w-9 h-5 rounded-full transition-colors ${
-                    val === 'true' ? 'bg-pink-500' : 'bg-zinc-600'
-                  } relative`}
-                >
-                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
-                    val === 'true' ? 'left-[18px]' : 'left-0.5'
-                  }`} />
-                </button>
-              </div>
-            );
+              case 'select':
+                return (
+                  <div key={p.key}>
+                    <label className={`block text-[10px] ${a.text} mb-1`}>{p.label}</label>
+                    <select
+                      className={selectClasses}
+                      value={val}
+                      onChange={e => onChange(fullKey, e.target.value)}
+                    >
+                      {(p.options || []).map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                    {p.hint && <p className="text-[10px] text-zinc-500 mt-0.5">{p.hint}</p>}
+                  </div>
+                );
 
-          case 'text':
-            return (
-              <div key={p.key}>
-                <label className={`block text-[10px] ${a.text} mb-1`}>{p.label}</label>
-                <input
-                  className={inputClasses}
-                  value={val}
-                  onChange={e => onChange(fullKey, e.target.value)}
-                  placeholder={p.hint || ''}
-                />
-              </div>
-            );
+              case 'toggle':
+                return (
+                  <div key={p.key} className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-400">{p.label}</span>
+                    <button
+                      type="button"
+                      onClick={() => onChange(fullKey, val === 'true' ? 'false' : 'true')}
+                      className={`w-9 h-5 rounded-full transition-colors ${
+                        val === 'true' ? 'bg-pink-500' : 'bg-zinc-600'
+                      } relative`}
+                    >
+                      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
+                        val === 'true' ? 'left-[18px]' : 'left-0.5'
+                      }`} />
+                    </button>
+                  </div>
+                );
 
-          default:
-            return null;
-        }
-      })}
+              case 'text':
+                return (
+                  <div key={p.key}>
+                    <label className={`block text-[10px] ${a.text} mb-1`}>{p.label}</label>
+                    <input
+                      className={inputClasses}
+                      value={val}
+                      onChange={e => onChange(fullKey, e.target.value)}
+                      placeholder={p.hint || ''}
+                    />
+                  </div>
+                );
+
+              default:
+                return null;
+            }
+          })}
+        </div>
+      )}
     </div>
   );
 };
