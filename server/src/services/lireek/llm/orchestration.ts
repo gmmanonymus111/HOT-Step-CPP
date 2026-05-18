@@ -67,9 +67,7 @@ async function planSongMetadata(
       for (const s of usedSubjects) lines.push(`  ✗ ${s}`);
     }
   }
-  if (usedBpms?.length) lines.push(`\nBPMs ALREADY USED (avoid ±5 of these): ${usedBpms.join(', ')}`);
   if (usedKeys?.length) lines.push(`\nKeys ALREADY USED (try different ones): ${usedKeys.join(', ')}`);
-  if (usedDurations?.length) lines.push(`\nDurations ALREADY USED (avoid ±10 of these): ${usedDurations.join(', ')}`);
   lines.push('\nPlan the metadata for the next song:');
 
   const prompt = lines.join('\n');

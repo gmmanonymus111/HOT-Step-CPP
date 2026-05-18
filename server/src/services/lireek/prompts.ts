@@ -112,8 +112,8 @@ SUBJECT:
 
 BPM:
 - Choose a realistic tempo (30-300) that fits the artist's typical style and genre
-- Vary the BPM across generations — avoid picking BPMs within ±5 of previously used values
-- Consider the genre norms: ballads ~60-80, pop ~100-130, rock ~110-140, punk ~150-180, EDM ~120-150, hip-hop ~80-100, folk ~90-120
+- Just pick a BPM that feels right for the song — don't overthink it or try to avoid previous values
+- Genre norms for reference: ballads ~60-80, pop ~100-130, rock ~110-140, punk ~150-180, EDM ~120-150, hip-hop ~80-100, folk ~90-120
 
 KEY:
 - Pick a musical key that fits the artist and genre (e.g. "C Major", "A Minor", "F# Minor", "Bb Major")
