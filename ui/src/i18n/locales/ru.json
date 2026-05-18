@@ -472,6 +472,8 @@
     "lyric.generating": "Генерация...",
     "lyric.generateLyrics": "Сгенерировать текст",
     "lyric.count": "Количество:",
+    "lyric.subjectPlaceholder": "Необязательно — укажите тему для текста",
+    "lyric.clearSubject": "Очистить тему",
     "lyric.buildProfileFirst": "Сначала создайте профиль",
     "lyric.noGeneratedLyricsYet": "Пока нет сгенерированных текстов",
     "lyric.generateFromProfile": "Сгенерируйте тексты на основе профиля, и они появятся здесь.",

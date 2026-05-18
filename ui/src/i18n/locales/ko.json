@@ -472,6 +472,8 @@
     "lyric.generating": "생성 중...",
     "lyric.generateLyrics": "가사 생성",
     "lyric.count": "횟수:",
+    "lyric.subjectPlaceholder": "선택 사항 — 가사의 주제를 지정하세요",
+    "lyric.clearSubject": "주제 지우기",
     "lyric.buildProfileFirst": "먼저 프로필을 구축하세요",
     "lyric.noGeneratedLyricsYet": "아직 생성된 가사가 없습니다",
     "lyric.generateFromProfile": "프로필에서 가사를 생성하면 여기에 표시됩니다.",

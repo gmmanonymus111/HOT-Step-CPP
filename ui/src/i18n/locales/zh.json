@@ -473,6 +473,8 @@
     "lyric.generating": "生成中...",
     "lyric.generateLyrics": "生成歌词",
     "lyric.count": "数量:",
+    "lyric.subjectPlaceholder": "可选 — 指定歌词的主题",
+    "lyric.clearSubject": "清除主题",
     "lyric.buildProfileFirst": "请先构建一个配置文件",
     "lyric.noGeneratedLyricsYet": "暂未生成任何歌词",
     "lyric.generateFromProfile": "通过配置文件生成歌词后即可在这里查看。",

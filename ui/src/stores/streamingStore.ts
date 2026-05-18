@@ -25,6 +25,7 @@ export interface QueueItem {
   error?: string;
   count?: number;
   countCompleted?: number;
+  userSubject?: string;
 }
 
 export interface StreamingState {
@@ -246,7 +247,7 @@ async function _executeQueueItem(item: QueueItem): Promise<void> {
       case 'generate':
         await consumeSSE(
           `/api/lireek/profiles/${item.targetId}/generate-stream`,
-          { provider_name: item.provider, model: item.model },
+          { provider_name: item.provider, model: item.model, user_subject: item.userSubject },
           makeCallbacks(),
         );
         break;
@@ -288,14 +289,14 @@ export async function startStreamBuildProfile(
 
 export async function startStreamGenerate(
   _profileId: number,
-  req: { profile_id: number; provider: string; model?: string; extra_instructions?: string },
+  req: { profile_id: number; provider: string; model?: string; extra_instructions?: string; user_subject?: string },
   onComplete?: () => void,
 ): Promise<void> {
   resetStream('Generating lyrics…');
   try {
     await consumeSSE(
       `/api/lireek/profiles/${req.profile_id}/generate-stream`,
-      { provider_name: req.provider, model: req.model, extra_instructions: req.extra_instructions },
+      { provider_name: req.provider, model: req.model, extra_instructions: req.extra_instructions, user_subject: req.user_subject },
       makeCallbacks(() => onComplete?.(), (msg) => { _state.text += `\n⚠ Error: ${msg}`; _emit(); }),
     );
   } catch (err) {

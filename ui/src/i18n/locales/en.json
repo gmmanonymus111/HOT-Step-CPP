@@ -483,6 +483,8 @@
     "lyric.generating": "Generating...",
     "lyric.generateLyrics": "Generate Lyrics",
     "lyric.count": "Count:",
+    "lyric.subjectPlaceholder": "Optional — specify a subject for the lyrics",
+    "lyric.clearSubject": "Clear subject",
     "lyric.buildProfileFirst": "Build a profile first",
     "lyric.noGeneratedLyricsYet": "No generated lyrics yet",
     "lyric.generateFromProfile": "Generate lyrics from a profile to see them here.",

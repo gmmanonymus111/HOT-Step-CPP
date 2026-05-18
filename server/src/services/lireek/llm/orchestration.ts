@@ -38,7 +38,8 @@ async function planSongMetadata(
   usedDurations: number[],
   providerName: string,
   modelName: string,
-  onChunk?: ChunkCallback
+  onChunk?: ChunkCallback,
+  userSubject?: string
 ): Promise<any> {
   const provider = getProvider(providerName);
   const lines: string[] = [`Artist: ${profile.artist}`];
@@ -57,9 +58,14 @@ async function planSongMetadata(
   if (profile.subject_categories?.length) {
     lines.push(`\nThematic categories: ${profile.subject_categories.join(', ')}`);
   }
-  if (usedSubjects?.length) {
-    lines.push('\nSubjects ALREADY USED (do NOT repeat these):');
-    for (const s of usedSubjects) lines.push(`  ✗ ${s}`);
+  if (userSubject) {
+    lines.push(`\nThe subject for this song has been chosen by the user: "${userSubject}"`);
+    lines.push('Use this exact subject. Plan the BPM, key, caption, and duration to complement it.');
+  } else {
+    if (usedSubjects?.length) {
+      lines.push('\nSubjects ALREADY USED (do NOT repeat these):');
+      for (const s of usedSubjects) lines.push(`  ✗ ${s}`);
+    }
   }
   if (usedBpms?.length) lines.push(`\nBPMs ALREADY USED (avoid ±5 of these): ${usedBpms.join(', ')}`);
   if (usedKeys?.length) lines.push(`\nKeys ALREADY USED (try different ones): ${usedKeys.join(', ')}`);
@@ -189,19 +195,22 @@ export async function generateLyricsStreaming(
   extraInstructions?: string, usedSubjects: string[] = [],
   usedBpms: number[] = [], usedKeys: string[] = [],
   usedTitles: string[] = [], usedDurations: number[] = [],
-  onChunk?: ChunkCallback, onPhase?: (phase: string) => void
+  onChunk?: ChunkCallback, onPhase?: (phase: string) => void,
+  userSubject?: string
 ): Promise<GenerationResponse> {
   const provider = getProvider(providerName);
   const effectiveModel = model || provider.defaultModel;
 
   if (onPhase) onPhase("Planning song metadata…");
   let metadata = { subject: '', bpm: 0, key: '', caption: '', duration: 0 };
-  if (profile.song_subjects || (profile.themes && profile.themes.length)) {
+  if (profile.song_subjects || (profile.themes && profile.themes.length) || userSubject) {
     try {
-      metadata = await planSongMetadata(profile, usedSubjects, usedBpms, usedKeys, usedDurations, providerName, effectiveModel, onChunk);
+      metadata = await planSongMetadata(profile, usedSubjects, usedBpms, usedKeys, usedDurations, providerName, effectiveModel, onChunk, userSubject);
+      if (userSubject) metadata.subject = userSubject;
       console.log("Planned metadata:", metadata);
     } catch(e) { console.warn("Failed to plan metadata", e); }
   }
+  if (userSubject && !metadata.subject) metadata.subject = userSubject;
 
   if (metadata.subject) extraInstructions = `The song must be about: ${metadata.subject}\n\n${extraInstructions || ''}`;
   if (onPhase) onPhase("Writing lyrics…");

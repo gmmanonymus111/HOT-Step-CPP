@@ -27,6 +27,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
   const [generating, setGenerating] = useState(false);
   const [refiningId, setRefiningId] = useState<number | null>(null);
   const [genCount, setGenCount] = useState(1);
+  const [userSubject, setUserSubject] = useState('');
 
   // Persistent streaming state — survives tab navigation
   const streaming = useStreamingStore();
@@ -53,6 +54,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
             profile_id: profile.id,
             provider: generationModel.provider,
             model: generationModel.model,
+            user_subject: userSubject.trim() || undefined,
           },
           () => onRefresh(),
         );
@@ -63,7 +65,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
     } finally {
       setGenerating(false);
     }
-  }, [profiles, genCount, generationModel, onRefresh, showToast]);
+  }, [profiles, genCount, generationModel, onRefresh, showToast, userSubject]);
 
   const handleRefine = async (gen: Generation) => {
     const { provider, model } = refinementModel;
@@ -157,6 +159,25 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
         </div>
         {profiles.length === 0 && (
           <span className="text-xs text-amber-400/60">{t('lyric.buildProfileFirst')}</span>
+        )}
+      </div>
+      {/* Optional subject input */}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={userSubject}
+          onChange={(e) => setUserSubject(e.target.value)}
+          placeholder={t('lyric.subjectPlaceholder')}
+          className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-amber-500/50 transition-colors"
+        />
+        {userSubject && (
+          <button
+            onClick={() => setUserSubject('')}
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors px-1.5"
+            title={t('lyric.clearSubject')}
+          >
+            ✕
+          </button>
         )}
       </div>
 

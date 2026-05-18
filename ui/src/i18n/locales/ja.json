@@ -472,6 +472,8 @@
     "lyric.generating": "生成中...",
     "lyric.generateLyrics": "歌詞を生成",
     "lyric.count": "回数:",
+    "lyric.subjectPlaceholder": "任意 — 歌詞のテーマを指定",
+    "lyric.clearSubject": "テーマをクリア",
     "lyric.buildProfileFirst": "最初にプロファイルを構築してください",
     "lyric.noGeneratedLyricsYet": "生成された歌詞はまだありません",
     "lyric.generateFromProfile": "プロファイルから歌詞を生成するとここに表示されます。",
