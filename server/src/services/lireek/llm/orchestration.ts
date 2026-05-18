@@ -21,6 +21,15 @@ const BLUEPRINT_LABEL_NAMES: Record<string, string> = {
   POC: 'Post-Chorus', I: 'Intro', O: 'Outro', IL: 'Interlude',
 };
 
+/**
+ * Append a unique nonce to a system prompt to bust oMLX's KV cache.
+ * Without this, oMLX reuses cached prefix states for identical system prompts,
+ * which can cause thinking models to skip reasoning on subsequent calls.
+ */
+function cacheBustPrompt(prompt: string): string {
+  return `${prompt}\n\n(session ${Date.now()}-${Math.random().toString(36).slice(2, 8)})`;
+}
+
 async function planSongMetadata(
   profile: LyricsProfile,
   usedSubjects: string[],
@@ -59,7 +68,7 @@ async function planSongMetadata(
 
   const prompt = lines.join('\n');
   console.log('[LLM] Planning song metadata via', providerName, modelName);
-  const responseJsonStr = await provider.call(SONG_METADATA_SYSTEM_PROMPT, prompt, modelName, onChunk);
+  const responseJsonStr = await provider.call(cacheBustPrompt(SONG_METADATA_SYSTEM_PROMPT), prompt, modelName, onChunk);
   const cleaned = stripThinkingBlocks(responseJsonStr);
   const cleanJson = cleaned.replace(/^```(?:json)?\s*|\s*```$/gm, '').trim();
   try {
@@ -197,7 +206,7 @@ export async function generateLyricsStreaming(
   if (metadata.subject) extraInstructions = `The song must be about: ${metadata.subject}\n\n${extraInstructions || ''}`;
   if (onPhase) onPhase("Writing lyrics…");
   const userPrompt = buildGenerationPrompt(profile, extraInstructions);
-  let raw = await provider.call(GENERATION_SYSTEM_PROMPT, userPrompt, effectiveModel, onChunk);
+  let raw = await provider.call(cacheBustPrompt(GENERATION_SYSTEM_PROMPT), userPrompt, effectiveModel, onChunk);
 
   raw = stripThinkingBlocks(raw);
   raw = raw.replace(/<\|[a-z_]+\|>/g, '');
@@ -241,7 +250,7 @@ export async function generateLyricsStreaming(
     }
     titleLines.push('\n--- LYRICS ---', raw, '--- END LYRICS ---');
     titleLines.push('\nChoose the best title for this song:');
-    let titleRaw = await provider.call(TITLE_DERIVATION_PROMPT, titleLines.join('\n'), effectiveModel, onChunk);
+    let titleRaw = await provider.call(cacheBustPrompt(TITLE_DERIVATION_PROMPT), titleLines.join('\n'), effectiveModel, onChunk);
     titleRaw = stripThinkingBlocks(titleRaw).trim();
     titleRaw = titleRaw.replace(/^(?:Title:\s*|#\s*)/i, '').replace(/^["'`]|["'`]$/g, '').trim();
     title = titleRaw.split('\n')[0].trim();
@@ -320,7 +329,7 @@ export async function refineLyricsStreaming(
   const slopScan = slopDetector.scanForSlop(originalLyrics);
   const foundSlop = [...slopScan.layers.blacklisted_words.found, ...slopScan.layers.blacklisted_phrases.found];
   const userPrompt = buildRefinementPrompt(originalLyrics, artistName, title, profile, foundSlop);
-  let raw = await provider.call(REFINEMENT_SYSTEM_PROMPT, userPrompt, effectiveModel, onChunk);
+  let raw = await provider.call(cacheBustPrompt(REFINEMENT_SYSTEM_PROMPT), userPrompt, effectiveModel, onChunk);
 
   raw = stripThinkingBlocks(raw);
   raw = raw.replace(/<\|[a-z_]+\|>/g, '');
