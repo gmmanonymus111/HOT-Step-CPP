@@ -865,11 +865,33 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             }
         }
         // truncate s.schedule
-        s.schedule.erase(s.schedule.begin(), s.schedule.begin() + start_idx);
-        s.num_steps = (int) s.schedule.size();
-        // recalculate s.cover_steps with remaining steps
-        if (s.cover_steps >= 0) {
-            s.cover_steps = (int) ((float) s.num_steps * s.rr.audio_cover_strength);
+        bool use_rescale = (s.rr.cover_noise_method == "rescale");
+
+        if (use_rescale) {
+            // RESCALE: rebuild schedule with full step count in [start_sigma, 0] range.
+            // Preserves the shift distribution within the reduced range.
+            float start_sigma = nearest_t;
+            float sh = s.shift;
+            for (int i = 0; i < s.num_steps; i++) {
+                float t = 1.0f - (float) i / (float) s.num_steps;
+                float sigma = sh * t / (1.0f + (sh - 1.0f) * t);
+                s.schedule[i] = sigma * start_sigma;
+            }
+            // num_steps unchanged — full step budget
+            if (s.cover_steps >= 0) {
+                s.cover_steps = (int) ((float) s.num_steps * s.rr.audio_cover_strength);
+            }
+            fprintf(stderr, "[Noise] Rescale: %d steps in [%.4f -> 0], shift=%.1f\n",
+                    s.num_steps, start_sigma, sh);
+        } else {
+            // TRUNCATE (original behavior): remove early steps
+            s.schedule.erase(s.schedule.begin(), s.schedule.begin() + start_idx);
+            s.num_steps = (int) s.schedule.size();
+            if (s.cover_steps >= 0) {
+                s.cover_steps = (int) ((float) s.num_steps * s.rr.audio_cover_strength);
+            }
+            fprintf(stderr, "[Noise] Truncate: %d steps remaining (removed %d)\n",
+                    s.num_steps, start_idx);
         }
         fprintf(stderr,
                 "[Init-Noise] cover_noise_strength=%.2f -> noise_level=%.4f, nearest_t=%.4f, remaining_steps=%d\n",

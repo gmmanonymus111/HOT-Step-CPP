@@ -63,6 +63,7 @@ struct AceRequest {
     // cover mode (active when source audio is provided)
     float audio_cover_strength;  // 1.0 (0-1, fraction of DiT steps using source context)
     float cover_noise_strength;  // 0.0 (0-1, how close to source: 0=pure noise, 1=source)
+    std::string cover_noise_method;  // "" = truncate (default), "rescale" = rebuild schedule
 
     // repaint region (requires source audio)
     // start: seconds offset. 0 = source start. Negative = outpaint before source.

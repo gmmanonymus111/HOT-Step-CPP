@@ -43,6 +43,7 @@ void request_init(AceRequest * r) {
     r->dcw_mode             = DCW_MODE_LOW;
     r->audio_cover_strength = 1.0f;
     r->cover_noise_strength = 0.0f;
+    r->cover_noise_method   = "";
     r->repainting_start     = 0.0f;
     r->repainting_end       = -1.0f;
     r->latent_shift         = 0.0f;
@@ -182,6 +183,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "cover_noise_strength")) && yyjson_is_num(v)) {
         r->cover_noise_strength = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "cover_noise_method")) && yyjson_is_str(v)) {
+        r->cover_noise_method = yy_str(v);
     }
     if ((v = yyjson_obj_get(obj, "repainting_start")) && yyjson_is_num(v)) {
         r->repainting_start = (float) yyjson_get_num(v);
@@ -436,6 +440,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->cover_noise_strength != def.cover_noise_strength) {
         yyjson_mut_obj_add_real(doc, root, "cover_noise_strength", r->cover_noise_strength);
+    }
+    if (all || !r->cover_noise_method.empty()) {
+        yyjson_mut_obj_add_strcpy(doc, root, "cover_noise_method", r->cover_noise_method.c_str());
     }
     if (all || r->repainting_start != def.repainting_start) {
         yyjson_mut_obj_add_real(doc, root, "repainting_start", r->repainting_start);
