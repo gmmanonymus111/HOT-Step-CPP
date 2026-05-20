@@ -240,6 +240,30 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
         count++;
     }
 
+    // Scan for safetensors VAE files (classified by filename prefix)
+    for (const auto & fname : files) {
+        if (!str_ends_with(fname, ".safetensors")) {
+            continue;
+        }
+
+        // Classify by lowercase filename prefix
+        std::string lower = fname;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        std::string full = std::string(models_dir) + REGISTRY_SEP + fname;
+        ModelEntry  entry = { fname, full };
+
+        if (lower.find("pp-vae") == 0 || lower.find("pp_vae") == 0) {
+            reg->pp_vae.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> PP-VAE (safetensors)\n", fname.c_str());
+            count++;
+        } else if (lower.find("vae") == 0 || lower.find("scragvae") == 0) {
+            reg->vae.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> VAE (safetensors)\n", fname.c_str());
+            count++;
+        }
+    }
+
     return count > 0;
 }
 
