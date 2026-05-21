@@ -91,7 +91,7 @@ async function planSongMetadata(
   }
 }
 
-function buildGenerationPrompt(profile: LyricsProfile, extraInstructions?: string): string {
+function buildGenerationPrompt(profile: LyricsProfile, extraInstructions?: string, targetDuration?: number, bpm?: number): string {
   const lines: string[] = [`Artist: ${profile.artist}`];
   if (profile.album) lines.push(`Album style: ${profile.album}`);
 
@@ -174,6 +174,39 @@ function buildGenerationPrompt(profile: LyricsProfile, extraInstructions?: strin
     lines.push(...profile.representative_excerpts.slice(0, 10).flatMap(e => [e, '---']));
   }
 
+  if (targetDuration && targetDuration > 0 && bpm && bpm > 0) {
+    const barSeconds = 240.0 / bpm;
+    const totalBars = Math.round(targetDuration / barSeconds);
+    // Reserve bars for instrumental gaps between sections (2-4 bars each)
+    const blueprintParts = profile.structure_blueprints?.length
+      ? selectBestBlueprint(profile.structure_blueprints).split('-')
+      : ['I', 'V', 'C', 'V', 'C', 'B', 'C', 'O'];
+    const sectionCount = blueprintParts.length;
+    const transitionBars = (sectionCount - 1) * 3; // ~3 bars per transition
+    const singableBars = totalBars - transitionBars;
+    // At ~2 bars per lyric line (rough average), calculate max lyric lines
+    const maxLyricLines = Math.max(12, Math.floor(singableBars / 2));
+    const minutes = Math.floor(targetDuration / 60);
+    const seconds = Math.round(targetDuration % 60);
+
+    lines.push('', '=== DURATION BUDGET (CRITICAL — DO NOT EXCEED) ===');
+    lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')})`);
+    lines.push(`BPM: ${bpm} — one bar of 4/4 = ${barSeconds.toFixed(1)} seconds`);
+    lines.push(`Total bars available: ~${totalBars} bars for the entire song`);
+    lines.push(`After accounting for ~${transitionBars} bars of instrumental transitions between ${sectionCount} sections, you have ~${singableBars} singable bars.`);
+    lines.push(`At roughly 2 bars per lyric line, aim for approximately ${maxLyricLines} total lyric lines (across ALL sections).`);
+    lines.push('');
+    lines.push('USE THIS TO DECIDE LINE COUNTS:');
+    if (maxLyricLines <= 20) {
+      lines.push('- This is a SHORT song. Use 4-line verses and 4-line choruses. Keep it tight.');
+    } else if (maxLyricLines <= 32) {
+      lines.push('- This is a STANDARD-length song. Use 4-line verses (or one 8-line verse). Choruses should be 4-6 lines.');
+    } else {
+      lines.push('- This is a LONGER song. You can use 8-line verses and 6-8 line choruses if the blueprint calls for it.');
+    }
+    lines.push(`- Count your total lyric lines before finalising. If you exceed ~${maxLyricLines} lines, the song will run over its target duration.`);
+  }
+
   lines.push(
     '', '=== FINAL REMINDERS ===',
     '1. VERSE LINE COUNT: Exactly 4 or 8 lines per verse.',
@@ -212,7 +245,7 @@ export async function generateLyricsStreaming(
 
   if (metadata.subject) extraInstructions = `The song must be about: ${metadata.subject}\n\n${extraInstructions || ''}`;
   if (onPhase) onPhase("Writing lyrics…");
-  const userPrompt = buildGenerationPrompt(profile, extraInstructions);
+  const userPrompt = buildGenerationPrompt(profile, extraInstructions, metadata.duration, metadata.bpm);
   let raw = await provider.call(cacheBustPrompt(GENERATION_SYSTEM_PROMPT), userPrompt, effectiveModel, onChunk);
 
   raw = stripThinkingBlocks(raw);
