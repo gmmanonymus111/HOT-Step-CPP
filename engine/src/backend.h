@@ -12,6 +12,16 @@
 #include <cstring>
 #include <thread>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 struct BackendPair {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
@@ -107,6 +117,25 @@ static BackendPair backend_init(const char * label) {
         exit(1);
     }
     bp.has_gpu = !best_is_cpu;
+
+#ifdef _WIN32
+    // Warn if we expected a GPU backend but got CPU
+    if (best_is_cpu) {
+        wchar_t exe_path[MAX_PATH];
+        GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+        std::wstring dir(exe_path);
+        auto pos = dir.find_last_of(L'\\');
+        if (pos != std::wstring::npos) dir = dir.substr(0, pos);
+
+        bool cuda_dll = GetFileAttributesW((dir + L"\\ggml-cuda.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (cuda_dll) {
+            fprintf(stderr, "[Load] WARNING: ggml-cuda.dll found but CUDA backend did not load.\n");
+            fprintf(stderr, "[Load]   Likely missing: cublas64_13.dll and/or cublasLt64_13.dll\n");
+            fprintf(stderr, "[Load]   Fix: Settings -> Model Manager -> CUDA Runtime, or re-download the CUDA release.\n");
+        }
+    }
+#endif
+
     fprintf(stderr, "[Load] %s backend: %s (CPU threads: %d)\n", label, ggml_backend_name(bp.backend), n_threads);
 
     g_backend_cache = bp;

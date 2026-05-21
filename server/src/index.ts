@@ -244,15 +244,16 @@ function startAceServer(): ChildProcess | null {
 }
 
 // ── Required runtime DLL bootstrap ──────────────────────────────────
-// On first launch, the engine needs cuBLAS DLLs that aren't in the zip.
-// Download them automatically from HuggingFace before starting ace-server.
+// On first launch, the CUDA engine variant needs cuBLAS DLLs that aren't
+// in the release ZIP (they're ~530 MB). Download them from HuggingFace
+// before starting ace-server, with clear progress and error messages.
 
 import { modelDownloadService } from './services/modelDownloadService.js';
 
-/** IDs of registry files tagged "required" that must exist before engine start */
+/** IDs of registry files that must exist before engine start (CUDA only) */
 const REQUIRED_RUNTIME_IDS = ['cuda-rt-cublas', 'cuda-rt-cublaslt', 'cuda-rt-cudart'];
 
-async function ensureRequiredRuntime(): Promise<void> {
+async function ensureRequiredRuntime(): Promise<{ ok: boolean; missing: string[] }> {
   const engineDir = path.dirname(config.aceServer.exe);
   const registry = JSON.parse(
     fs.readFileSync(path.join(__dirname, 'data', 'model-registry.json'), 'utf-8')
@@ -267,44 +268,72 @@ async function ensureRequiredRuntime(): Promise<void> {
     }
   }
 
-  if (missing.length === 0) return;
+  if (missing.length === 0) return { ok: true, missing: [] };
 
-  console.log(`[Server] Missing required CUDA runtime: ${missing.map(m => m.filename).join(', ')}`);
-  console.log('[Server] Downloading automatically (required for GPU acceleration)...');
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════╗');
+  console.log('║  First-launch setup: downloading GPU runtime libraries  ║');
+  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log(`  Missing: ${missing.map(m => m.filename).join(', ')}`);
+  console.log('  Source:  HuggingFace (scragnog/HOT-Step-CPP-SuperSep)');
+  console.log('');
 
   // Start all downloads
   const jobIds: string[] = [];
   for (const m of missing) {
     const jobId = modelDownloadService.startDownload(m.id);
     jobIds.push(jobId);
-    console.log(`[Server]   Queued: ${m.filename}`);
+    console.log(`  ⬇ Queued: ${m.filename}`);
   }
+  console.log('');
 
-  // Wait for all downloads to complete
+  // Wait for all downloads to complete, logging progress
+  let lastProgressLog = 0;
   await new Promise<void>((resolve) => {
     const check = () => {
       const jobs = modelDownloadService.getJobs();
       const active = jobs.filter(j => jobIds.includes(j.jobId));
       const allDone = active.every(j => j.status === 'completed' || j.status === 'failed');
 
-      // Log progress
-      for (const j of active) {
-        if (j.status === 'downloading' && j.totalBytes > 0) {
-          const pct = Math.round((j.bytesDownloaded / j.totalBytes) * 100);
-          const mb = Math.round(j.bytesDownloaded / 1024 / 1024);
-          const totalMb = Math.round(j.totalBytes / 1024 / 1024);
-          process.stdout.write(`\r[Server]   ${j.filename}: ${mb}/${totalMb} MB (${pct}%)    `);
+      // Log progress every 2 seconds
+      const now = Date.now();
+      if (now - lastProgressLog > 2000) {
+        lastProgressLog = now;
+        for (const j of active) {
+          if (j.status === 'downloading' && j.totalBytes > 0) {
+            const pct = Math.round((j.bytesDownloaded / j.totalBytes) * 100);
+            const mb = Math.round(j.bytesDownloaded / 1024 / 1024);
+            const totalMb = Math.round(j.totalBytes / 1024 / 1024);
+            const speedMb = (j.speed / 1024 / 1024).toFixed(1);
+            console.log(`  ⬇ ${j.filename}: ${mb}/${totalMb} MB (${pct}%) — ${speedMb} MB/s`);
+          }
         }
       }
 
       if (allDone) {
-        process.stdout.write('\n');
         const failed = active.filter(j => j.status === 'failed');
         if (failed.length > 0) {
-          console.error(`[Server] WARNING: Some runtime downloads failed: ${failed.map(j => j.filename).join(', ')}`);
-          console.error('[Server] The engine may not start. Check your internet connection and try again.');
+          console.log('');
+          console.log('╔══════════════════════════════════════════════════════════╗');
+          console.log('║  ⚠  GPU Runtime Download Failed                         ║');
+          console.log('╠══════════════════════════════════════════════════════════╣');
+          for (const f of failed) {
+            console.log(`║  ✗ ${f.filename}`);
+            if (f.error) console.log(`║    Error: ${f.error}`);
+          }
+          console.log('║                                                          ║');
+          console.log('║  The engine will start on CPU only (much slower).        ║');
+          console.log('║                                                          ║');
+          console.log('║  To fix:                                                 ║');
+          console.log('║  1. Settings → Model Manager → CUDA Runtime → Download  ║');
+          console.log('║  2. Or restart the app with internet access              ║');
+          console.log('╚══════════════════════════════════════════════════════════╝');
+          console.log('');
         } else {
-          console.log('[Server] CUDA runtime downloaded successfully!');
+          console.log('');
+          console.log('  ✓ GPU runtime downloaded successfully!');
+          console.log('');
         }
         resolve();
       } else {
@@ -313,32 +342,52 @@ async function ensureRequiredRuntime(): Promise<void> {
     };
     check();
   });
+
+  // Re-check which files are actually present
+  const stillMissing: string[] = [];
+  for (const m of missing) {
+    if (!fs.existsSync(path.join(engineDir, m.filename))) {
+      stillMissing.push(m.filename);
+    }
+  }
+
+  return { ok: stillMissing.length === 0, missing: stillMissing };
 }
 
 // Bootstrap: download required DLLs (portable only), then start engine
 // In dev/build-from-source mode, CUDA DLLs are in the system PATH via the
 // toolkit install — no need to download them into the engine directory.
 (async () => {
+  let cudaReady = true;
+
   if (PORTABLE_MODE && process.platform === 'win32') {
     // CUDA runtime DLLs are only needed for CUDA builds — skip for Vulkan/CPU
     const variantFile = path.join(path.dirname(config.aceServer.exe), '.variant');
     const variant = fs.existsSync(variantFile)
       ? fs.readFileSync(variantFile, 'utf-8').trim()
       : 'cuda'; // Assume CUDA if no marker (pre-v1.1 builds)
+
     if (variant === 'cuda') {
       try {
         setEngineReady(false, 'Downloading CUDA runtime...');
-        await ensureRequiredRuntime();
+        const result = await ensureRequiredRuntime();
+        cudaReady = result.ok;
+        if (!cudaReady) {
+          console.error(`[Server] CUDA runtime incomplete — missing: ${result.missing.join(', ')}`);
+          console.error('[Server] Engine will start but GPU acceleration will not be available.');
+        }
       } catch (err: any) {
         console.error('[Server] Runtime bootstrap failed:', err.message);
+        cudaReady = false;
       }
     } else {
       console.log(`[Server] Build variant: ${variant} — skipping CUDA runtime download`);
     }
   }
-  setEngineReady(false, 'Starting engine...');
+
+  setEngineReady(false, cudaReady ? 'Starting engine...' : 'Starting engine (CPU only — CUDA runtime missing)...');
   aceProcess = startAceServer();
-  setEngineReady(true, 'Ready');
+  setEngineReady(true, cudaReady ? 'Ready' : 'Ready (CPU only — GPU runtime missing)');
 })();
 
 // Start Express server

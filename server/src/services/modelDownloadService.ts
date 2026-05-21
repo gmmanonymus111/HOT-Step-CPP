@@ -312,6 +312,9 @@ class ModelDownloadService extends EventEmitter {
 
   // ── Internal ────────────────────────────────────────────────
 
+  /** Retry delays in ms (3 attempts: immediate, 2s, 5s) */
+  private static readonly RETRY_DELAYS = [0, 2000, 5000];
+
   private async _executeDownload(job: InternalJob, file: RegistryFile): Promise<void> {
     // Determine target directory based on file role
     const targetDir = this.getTargetDir(file);
@@ -330,38 +333,105 @@ class ModelDownloadService extends EventEmitter {
       return;
     }
 
-    // Check existing .part file for resume
-    let startByte = 0;
-    if (fs.existsSync(partPath)) {
-      startByte = fs.statSync(partPath).size;
-      job.bytesDownloaded = startByte;
+    for (let attempt = 0; attempt < ModelDownloadService.RETRY_DELAYS.length; attempt++) {
+      const delay = ModelDownloadService.RETRY_DELAYS[attempt];
+      if (delay > 0) {
+        console.log(`[ModelManager] Retry ${attempt + 1}/${ModelDownloadService.RETRY_DELAYS.length} for ${file.filename} in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+
+      // Check existing .part file for resume
+      let startByte = 0;
+      if (fs.existsSync(partPath)) {
+        startByte = fs.statSync(partPath).size;
+        job.bytesDownloaded = startByte;
+      }
+
+      job.status = 'downloading';
+      job.abortController = new AbortController();
+      job.error = undefined;
+      this.emit('progress');
+
+      const repoPath = file.repoPath || file.filename;
+      const url = `https://huggingface.co/${file.repo}/resolve/main/${repoPath}`;
+
+      try {
+        await this._downloadWithRedirects(url, partPath, job, startByte);
+
+        if ((job.status as DownloadStatus) === 'cancelled') return;
+
+        // Validate downloaded file before finalising
+        this._validateDownload(partPath, file);
+
+        // Rename .part to final
+        fs.renameSync(partPath, finalPath);
+        job.status = 'completed';
+        job.speed = 0;
+        this.emit('progress');
+        console.log(`[ModelManager] Download complete: ${file.filename}`);
+        return; // Success — exit retry loop
+      } catch (err: any) {
+        if ((job.status as DownloadStatus) === 'cancelled') return;
+
+        const isLastAttempt = attempt === ModelDownloadService.RETRY_DELAYS.length - 1;
+        if (isLastAttempt) {
+          job.status = 'failed';
+          job.error = err.message;
+          job.speed = 0;
+          this.emit('progress');
+          console.error(`[ModelManager] Download failed after ${attempt + 1} attempts: ${file.filename} — ${err.message}`);
+        } else {
+          console.warn(`[ModelManager] Download attempt ${attempt + 1} failed for ${file.filename}: ${err.message}`);
+          job.speedSamples = [];
+        }
+      }
+    }
+  }
+
+  /** Validate a downloaded file is a real binary (not an HTML error page) */
+  private _validateDownload(filePath: string, file: RegistryFile): void {
+    const stat = fs.statSync(filePath);
+
+    // Size check: must be within 5% of expected size
+    if (file.sizeBytes > 0) {
+      const tolerance = file.sizeBytes * 0.05;
+      if (Math.abs(stat.size - file.sizeBytes) > tolerance) {
+        try { fs.unlinkSync(filePath); } catch {}
+        throw new Error(
+          `Size mismatch: expected ${(file.sizeBytes / 1024 / 1024).toFixed(1)} MB, ` +
+          `got ${(stat.size / 1024 / 1024).toFixed(1)} MB — file may be corrupt or an error page`
+        );
+      }
     }
 
-    job.status = 'downloading';
-    job.abortController = new AbortController();
-    this.emit('progress');
+    // PE header check for DLLs
+    if (file.filename.endsWith('.dll')) {
+      const fd = fs.openSync(filePath, 'r');
+      const header = Buffer.alloc(2);
+      fs.readSync(fd, header, 0, 2, 0);
+      fs.closeSync(fd);
+      if (header.toString('ascii') !== 'MZ') {
+        try { fs.unlinkSync(filePath); } catch {}
+        throw new Error(
+          `Invalid PE header — downloaded file is not a valid DLL ` +
+          `(got "${header.toString('ascii')}" instead of "MZ")`
+        );
+      }
+    }
 
-    const repoPath = file.repoPath || file.filename;
-    const url = `https://huggingface.co/${file.repo}/resolve/main/${repoPath}`;
-
-    try {
-      await this._downloadWithRedirects(url, partPath, job, startByte);
-
-      if ((job.status as DownloadStatus) === 'cancelled') return;
-
-      // Rename .part to final
-      fs.renameSync(partPath, finalPath);
-      job.status = 'completed';
-      job.speed = 0;
-      this.emit('progress');
-      console.log(`[ModelManager] Download complete: ${file.filename}`);
-    } catch (err: any) {
-      if ((job.status as DownloadStatus) === 'cancelled') return;
-      job.status = 'failed';
-      job.error = err.message;
-      job.speed = 0;
-      this.emit('progress');
-      console.error(`[ModelManager] Download failed: ${file.filename} — ${err.message}`);
+    // GGUF magic check for model files
+    if (file.filename.endsWith('.gguf')) {
+      const fd = fs.openSync(filePath, 'r');
+      const header = Buffer.alloc(4);
+      fs.readSync(fd, header, 0, 4, 0);
+      fs.closeSync(fd);
+      if (header.toString('ascii') !== 'GGUF') {
+        try { fs.unlinkSync(filePath); } catch {}
+        throw new Error(
+          `Invalid GGUF header — downloaded file is not a valid model ` +
+          `(got "${header.toString('ascii')}" instead of "GGUF")`
+        );
+      }
     }
   }
 

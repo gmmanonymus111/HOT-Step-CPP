@@ -571,4 +571,26 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
     if (backend_path) {
         ggml_backend_load(backend_path);
     }
+
+    // Always log a summary of loaded backends (even in Release builds)
+    {
+        const auto & reg = get_reg();
+        std::string summary;
+        for (const auto & entry : reg.backends) {
+            if (!summary.empty()) summary += ", ";
+            const char * name = ggml_backend_reg_name(entry.reg);
+            size_t n_dev = ggml_backend_reg_dev_count(entry.reg);
+            summary += name;
+            if (n_dev > 0) {
+                summary += " (";
+                for (size_t i = 0; i < n_dev; i++) {
+                    if (i > 0) summary += ", ";
+                    summary += ggml_backend_dev_description(ggml_backend_reg_dev_get(entry.reg, i));
+                }
+                summary += ")";
+            }
+        }
+        GGML_LOG_INFO("load_backend: %zu backend%s loaded: %s\n",
+            reg.backends.size(), reg.backends.size() == 1 ? "" : "s", summary.c_str());
+    }
 }
