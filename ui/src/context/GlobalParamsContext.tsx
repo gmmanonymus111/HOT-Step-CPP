@@ -113,6 +113,9 @@ export interface GlobalParams {
   // Quality Evaluator
   qualityEvalEnabled: boolean; setQualityEvalEnabled: (v: boolean) => void;
   qualityEvalTarget: string; setQualityEvalTarget: (v: string) => void;
+  // Postprocess plugin
+  postprocessEnabled: boolean; setPostprocessEnabled: (v: boolean) => void;
+  postprocessPlugin: string; setPostprocessPlugin: (v: string) => void;
   // Derived
   getGlobalParams: () => Partial<GenerationParams>;
 }

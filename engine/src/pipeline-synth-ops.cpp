@@ -1091,6 +1091,133 @@ int ops_vae_decode(const AceSynth * ctx,
     return 0;
 }
 
+// ─── Postprocess plugin VAE decode ─────────────────────────────────────────
+//
+// Routes latent→audio through a Lua postprocess plugin. The plugin controls
+// tiling, overlap, crossfading, and any DSP post-processing. The engine
+// provides a vae_decode callback that the plugin calls for each tile.
+//
+// Falls back to the built-in ops_vae_decode if the plugin is not found.
+
+int ops_vae_decode_postprocess(const AceSynth * ctx,
+                               int              batch_n,
+                               AceAudio *       out,
+                               SynthState &     s,
+                               const char *     plugin_name,
+                               bool (*cancel)(void *),
+                               void * cancel_data) {
+    // Look up the postprocess plugin
+    auto & reg = PluginRegistry::instance();
+    LuaPlugin * plugin = reg.postprocess_lookup(plugin_name);
+    if (!plugin) {
+        fprintf(stderr, "[Postprocess] WARNING: plugin '%s' not found, falling back to built-in decoder\n",
+                plugin_name ? plugin_name : "(null)");
+        return ops_vae_decode(ctx, batch_n, out, s, cancel, cancel_data);
+    }
+
+    // Acquire VAE decoder (same as ops_vae_decode)
+    VAEGGML * vae = store_require_vae_dec(ctx->store, ctx->vae_dec_key);
+    if (!vae) {
+        fprintf(stderr, "[Postprocess] FATAL: store_require_vae_dec failed\n");
+        return -1;
+    }
+    ModelHandle vae_guard(ctx->store, vae);
+
+    // Latent splice for repaint/lego (identical to ops_vae_decode)
+    bool have_region = s.is_repaint || s.is_lego_region;
+    if (have_region && s.have_cover && s.T_cover > 0) {
+        int copy_T = s.T_cover < s.T ? s.T_cover : s.T;
+        for (int b = 0; b < batch_n; b++) {
+            float * dst = s.output.data() + (size_t) b * s.Oc * s.T;
+            for (int t = 0; t < copy_T; t++) {
+                if (t < s.repaint_t0 || t >= s.repaint_t1) {
+                    memcpy(dst + (size_t) t * 64, s.cover_latents.data() + (size_t) t * 64, 64 * sizeof(float));
+                }
+            }
+        }
+        fprintf(stderr, "[Latent-Splice] kept generated frames [%d, %d) / %d, source elsewhere\n", s.repaint_t0,
+                s.repaint_t1, s.T);
+    }
+
+    int T_latent    = s.T;
+    int T_audio_max = T_latent * 1920;
+
+    fprintf(stderr, "[Postprocess] Using plugin '%s' for VAE decode (T_latent=%d)\n",
+            plugin->name.c_str(), T_latent);
+
+    for (int b = 0; b < batch_n; b++) {
+        if (cancel && cancel(cancel_data)) {
+            fprintf(stderr, "[Postprocess Batch%d] Cancelled\n", b);
+            return -1;
+        }
+
+        float * dit_out = s.output.data() + b * s.Oc * s.T;
+
+        // Build the VAE decode callback for the Lua plugin
+        // This wraps vae_ggml_decode_tiled with the engine's VAE and chunk params
+        PostprocessVaeDecodeFn decode_fn = [&](const float * latent, int T_lat, float * aud_out, int max_T) -> int {
+            return vae_ggml_decode_tiled(vae, latent, T_lat, aud_out, max_T,
+                                         ctx->params.vae_chunk, ctx->params.vae_overlap,
+                                         cancel, cancel_data);
+        };
+
+        // Allocate output buffer
+        std::vector<float> audio(2 * T_audio_max);
+
+        s.timer.reset();
+        int T_audio = lua_call_postprocess(
+            *plugin, dit_out, T_latent, s.Oc, 2,
+            audio.data(), T_audio_max, decode_fn,
+            g_hotstep_params.plugin_params);
+
+        if (T_audio < 0) {
+            fprintf(stderr, "[Postprocess Batch%d] ERROR: plugin decode failed, falling back to built-in\n", b);
+            // Fallback for this batch item
+            T_audio = vae_ggml_decode_tiled(vae, dit_out, T_latent, audio.data(), T_audio_max,
+                                            ctx->params.vae_chunk, ctx->params.vae_overlap,
+                                            cancel, cancel_data);
+            if (T_audio < 0) {
+                out[b].samples     = NULL;
+                out[b].n_samples   = 0;
+                out[b].sample_rate = 48000;
+                continue;
+            }
+        }
+        fprintf(stderr, "[Postprocess Batch%d] Decode: %.1f ms (T_audio=%d)\n", b, s.timer.ms(), T_audio);
+
+        int n_total    = 2 * T_audio;
+        out[b].samples = (float *) malloc((size_t) n_total * sizeof(float));
+        if (!out[b].samples) {
+            fprintf(stderr, "[Postprocess Batch%d] ERROR: OOM allocating output (%d samples)\n", b, n_total);
+            out[b].n_samples   = 0;
+            out[b].sample_rate = 48000;
+            continue;
+        }
+        memcpy(out[b].samples, audio.data(), (size_t) n_total * sizeof(float));
+        out[b].n_samples   = T_audio;
+        out[b].sample_rate = 48000;
+
+        // Waveform hard splice for repaint/lego (audio path only)
+        if (have_region && !s.padded_src.empty()) {
+            int       T_src   = (int) (s.padded_src.size() / 2);
+            const int start_s = (int) ((size_t) s.repaint_t0 * 1920);
+            const int end_s   = (int) ((size_t) s.repaint_t1 * 1920);
+            const int T_clip  = T_audio < T_src ? T_audio : T_src;
+            for (int ch = 0; ch < 2; ch++) {
+                float * pred = out[b].samples + (size_t) ch * T_audio;
+                for (int si = 0; si < start_s && si < T_clip; si++) {
+                    pred[si] = s.padded_src[(size_t) si * 2 + ch];
+                }
+                for (int si = end_s; si < T_clip; si++) {
+                    pred[si] = s.padded_src[(size_t) si * 2 + ch];
+                }
+            }
+            fprintf(stderr, "[WAV-Splice Batch%d] hard splice samples [%d, %d) / %d\n", b, start_s, end_s, T_clip);
+        }
+    }
+    return 0;
+}
+
 // ─── PP-VAE Re-encode ──────────────────────────────────────────────────────
 //
 // Round-trip audio through a separate post-processing VAE to clean up spectral

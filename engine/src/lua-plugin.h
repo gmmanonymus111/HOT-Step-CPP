@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // lua-plugin.h: Lua plugin system for drop-in solvers, schedulers, and guidance modes
 //
 // Provides:
@@ -128,7 +128,7 @@ struct ParamSchema {
 // Plugin types
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-enum class PluginType { Solver, Scheduler, Guidance };
+enum class PluginType { Solver, Scheduler, Guidance, Postprocess };
 
 struct LuaPlugin {
     PluginType               type;
@@ -347,10 +347,10 @@ static bool lua_load_plugin(LuaPlugin & plugin, const char * filepath, const cha
 
     // Detect plugin type from global table name
     bool found = false;
-    const char * type_names[] = {"solver", "scheduler", "guidance"};
-    PluginType   types[]      = {PluginType::Solver, PluginType::Scheduler, PluginType::Guidance};
+    const char * type_names[] = {"solver", "scheduler", "guidance", "postprocess"};
+    PluginType   types[]      = {PluginType::Solver, PluginType::Scheduler, PluginType::Guidance, PluginType::Postprocess};
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         lua_getglobal(L, type_names[i]);
         if (lua_istable(L, -1)) {
             plugin.type = types[i];
@@ -386,7 +386,7 @@ static bool lua_load_plugin(LuaPlugin & plugin, const char * filepath, const cha
     }
 
     if (!found) {
-        fprintf(stderr, "[Plugins] WARNING: %s has no solver/scheduler/guidance table, skipping\n", filepath);
+        fprintf(stderr, "[Plugins] WARNING: %s has no solver/scheduler/guidance/postprocess table, skipping\n", filepath);
         lua_close(L);
         plugin.L = nullptr;
         return false;
@@ -800,4 +800,156 @@ static void lua_call_post_step(LuaPlugin & plugin,
 
     delete cond_ptr;
     delete uncond_ptr;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Postprocess plugin support — replaces built-in tiled VAE decode
+// The Lua plugin defines process() which receives latent data as a Lua table,
+// a vae_decode callback, and returns decoded audio as a Lua table.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// VAE decode callback type for postprocess plugins:
+//   decode_fn(latent_data, T_latent) → (audio_data, T_audio)
+// latent_data is float* [T_latent, 64] time-major, audio_data is float* [2, T_audio]
+using PostprocessVaeDecodeFn = std::function<int(const float * latent, int T_latent, float * audio_out, int max_T_audio)>;
+
+// Call a Lua postprocess plugin's process() function.
+// latents: [B * T * 64] time-major flat array (B batch items × T frames × 64 channels)
+// For each batch item, calls process() which internally calls vae_decode_fn.
+// Returns decoded audio via audio_out (caller-allocated [2 * T_audio_max] per batch item).
+static int lua_call_postprocess(
+    LuaPlugin &   plugin,
+    const float * latents,     // [T * 64] time-major for one batch item
+    int           T_latent,    // number of latent frames
+    int           C_lat,       // latent channels (64)
+    int           C_aud,       // audio channels (2)
+    float *       audio_out,   // output: [2 * T_audio] interleaved by channel
+    int           max_T_audio,
+    PostprocessVaeDecodeFn vae_decode_fn,
+    const std::unordered_map<std::string, std::string> & params)
+{
+    lua_State * L = plugin.L;
+    if (!L) return -1;
+
+    lua_inject_params(L, params, plugin.name);
+
+    // Push process() function
+    lua_getglobal(L, "process");
+    if (!lua_isfunction(L, -1)) {
+        fprintf(stderr, "[Plugins] ERROR: postprocess '%s' has no process() function\n",
+                plugin.name.c_str());
+        lua_pop(L, 1);
+        return -1;
+    }
+
+    int n_latent = T_latent * C_lat;  // total latent floats
+    int upscale  = 1920;
+    int final_samples = T_latent * upscale;
+
+    // Arg 1: latents as Lua table (0-indexed)
+    lua_newtable(L);
+    for (int i = 0; i < n_latent; i++) {
+        lua_pushinteger(L, i);
+        lua_pushnumber(L, (double) latents[i]);
+        lua_settable(L, -3);
+    }
+
+    // Arg 2: B (batch dimension — always 1 here, called per-batch-item)
+    lua_pushinteger(L, 1);
+
+    // Arg 3: C_lat (latent channels)
+    lua_pushinteger(L, C_lat);
+
+    // Arg 4: W (latent width = T_latent)
+    lua_pushinteger(L, T_latent);
+
+    // Arg 5: C_aud (audio channels)
+    lua_pushinteger(L, C_aud);
+
+    // Arg 6: final_samples (expected audio length per channel)
+    lua_pushinteger(L, final_samples);
+
+    // Arg 7: upscale_factor
+    lua_pushinteger(L, upscale);
+
+    // Arg 8: vae_decode_fn closure
+    // Captures the C++ decode function via light userdata.
+    // Lua signature: vae_decode_fn(latent_table, T_latent) → audio_table, T_audio
+    auto * fn_ptr = new PostprocessVaeDecodeFn(std::move(vae_decode_fn));
+    lua_pushlightuserdata(L, fn_ptr);
+    lua_pushcclosure(L, [](lua_State * Ls) -> int {
+        auto * fn = (PostprocessVaeDecodeFn *) lua_touserdata(Ls, lua_upvalueindex(1));
+
+        // Read latent table from Lua (arg 1)
+        luaL_checktype(Ls, 1, LUA_TTABLE);
+        int T_lat = (int) luaL_checkinteger(Ls, 2);
+        int n_lat = T_lat * 64;
+
+        std::vector<float> lat_buf(n_lat);
+        for (int i = 0; i < n_lat; i++) {
+            lua_pushinteger(Ls, i);
+            lua_gettable(Ls, 1);
+            lat_buf[i] = (float) lua_tonumber(Ls, -1);
+            lua_pop(Ls, 1);
+        }
+
+        // Decode
+        int max_T = T_lat * 1920;
+        std::vector<float> aud_buf(2 * max_T);
+        int T_audio = (*fn)(lat_buf.data(), T_lat, aud_buf.data(), max_T);
+
+        if (T_audio < 0) {
+            lua_pushnil(Ls);
+            lua_pushinteger(Ls, 0);
+            return 2;
+        }
+
+        // Return audio as Lua table (0-indexed, [2 * T_audio])
+        lua_newtable(Ls);
+        int total = 2 * T_audio;
+        for (int i = 0; i < total; i++) {
+            lua_pushinteger(Ls, i);
+            lua_pushnumber(Ls, (double) aud_buf[i]);
+            lua_settable(Ls, -3);
+        }
+        lua_pushinteger(Ls, T_audio);
+        return 2;
+    }, 1);
+
+    // 8 args: latents, B, C_lat, W, C_aud, final_samples, upscale_factor, vae_decode_fn
+    // Returns: audio_table, T_audio
+    if (lua_pcall(L, 8, 2, 0) != LUA_OK) {
+        fprintf(stderr, "[Plugins] ERROR in postprocess '%s' process(): %s\n",
+                plugin.name.c_str(), lua_tostring(L, -1));
+        lua_pop(L, 1);
+        delete fn_ptr;
+        return -1;
+    }
+
+    // Read result: audio table at -2, T_audio at -1
+    int T_audio = (int) lua_tointeger(L, -1);
+    if (T_audio <= 0 || !lua_istable(L, -2)) {
+        fprintf(stderr, "[Plugins] ERROR: postprocess '%s' returned invalid audio (T=%d)\n",
+                plugin.name.c_str(), T_audio);
+        lua_pop(L, 2);
+        delete fn_ptr;
+        return -1;
+    }
+
+    // Copy audio from Lua table to output buffer
+    int total = 2 * T_audio;
+    if (T_audio > max_T_audio) {
+        T_audio = max_T_audio;
+        total   = 2 * T_audio;
+    }
+    for (int i = 0; i < total; i++) {
+        lua_pushinteger(L, i);
+        lua_gettable(L, -3);
+        audio_out[i] = (float) lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+
+    lua_pop(L, 2);
+    delete fn_ptr;
+    return T_audio;
 }

@@ -116,6 +116,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // Dynamic Lua plugin params
   pluginParams: readKey('hs-pluginParams', {} as Record<string, string>),
 
+  // Postprocess plugin (replaces built-in VAE tiled decoder)
+  postprocessEnabled: readKey('hs-postprocessEnabled', false),
+  postprocessPlugin: readKey('hs-postprocessPlugin', ''),
+
   // -- Actions --
   setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
   setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
@@ -196,6 +200,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
   setQualityEvalTarget: (v: any) => { set({ qualityEvalTarget: v }); writeKey("hs-qualityEvalTarget", v); },
+  setPostprocessEnabled: (v: any) => { set({ postprocessEnabled: v }); writeKey("hs-postprocessEnabled", v); },
+  setPostprocessPlugin: (v: any) => { set({ postprocessPlugin: v }); writeKey("hs-postprocessPlugin", v); },
 
   // Plugin param helpers
   setPluginParam: (key: string, value: string) => {
@@ -282,6 +288,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       coverArtSubject: (s.postProcessingEnabled && s.coverArtEnabled && s.coverArtSubject) ? s.coverArtSubject : undefined,
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,
       qualityEvalTarget: (s.postProcessingEnabled && s.qualityEvalEnabled) ? s.qualityEvalTarget : undefined,
+      postprocessPlugin: (s.postProcessingEnabled && s.postprocessEnabled && s.postprocessPlugin) ? s.postprocessPlugin : undefined,
     };
   },
 }));

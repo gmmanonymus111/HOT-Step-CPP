@@ -725,7 +725,16 @@ int ace_synth_job_run_vae(AceSynth *    ctx,
     if (!ctx || !job || !out) {
         return -1;
     }
-    int rc = ops_vae_decode(ctx, job->batch_n, out, job->state, cancel, cancel_data);
+
+    // Route through postprocess plugin if one is selected
+    const std::string & pp = job->state.rr.postprocess_plugin;
+    int rc;
+    if (!pp.empty()) {
+        rc = ops_vae_decode_postprocess(ctx, job->batch_n, out, job->state,
+                                        pp.c_str(), cancel, cancel_data);
+    } else {
+        rc = ops_vae_decode(ctx, job->batch_n, out, job->state, cancel, cancel_data);
+    }
     return rc;
 }
 

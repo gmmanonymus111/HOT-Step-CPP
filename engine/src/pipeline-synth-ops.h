@@ -74,6 +74,17 @@ int ops_vae_decode(const AceSynth * ctx,
 // Returns 0 on success, -1 on error.
 int ops_pp_vae_reencode(const AceSynth * ctx, int batch_n, AceAudio * out, SynthState & s);
 
+// Postprocess plugin VAE decode: routes latent→audio through a Lua
+// postprocess plugin instead of the built-in tiled decoder.
+// Falls back to ops_vae_decode if the plugin is not found.
+int ops_vae_decode_postprocess(const AceSynth * ctx,
+                               int              batch_n,
+                               AceAudio *       out,
+                               SynthState &     s,
+                               const char *     plugin_name,
+                               bool (*cancel)(void *),
+                               void * cancel_data);
+
 // LRC alignment extraction using an already-held DiT. Called from inside
 // ops_dit_generate while the DiT is still acquired, avoiding a redundant
 // adapter merge+reload under EVICT_STRICT. Results stored in s.lrc_results.

@@ -119,5 +119,10 @@ export function translateParams(params: any): AceRequest {
     req.plugin_params = params.pluginParams;
   }
 
+  // Postprocess plugin (replaces built-in VAE tiled decoder with Lua plugin)
+  if (params.postprocessPlugin) {
+    req.postprocess_plugin = params.postprocessPlugin;
+  }
+
   return req;
 }

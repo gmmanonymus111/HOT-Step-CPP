@@ -117,6 +117,10 @@ struct AceRequest {
     // for spectral cleanup. Only applies when a PP-VAE GGUF is available.
     bool pp_vae_reencode;  // false
 
+    // Postprocess plugin: name of the Lua postprocess plugin to use for VAE
+    // decode. Empty = disabled (use built-in tiled decoder).
+    std::string postprocess_plugin;  // ""
+
     // LRC timestamp generation toggle. When true, the synth pipeline runs an
     // additional DiT forward pass post-generation to extract cross-attention
     // alignment and produce LRC-format synchronized lyrics.

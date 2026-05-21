@@ -34,20 +34,23 @@ public:
     void init(const std::string & engine_dir, const std::string & project_dir) {
         fprintf(stderr, "[Plugins] Initializing plugin system...\n");
 
-        // Scan engine/plugins/{solvers,schedulers,guidance}/
-        scan_dir(engine_dir + "/plugins/solvers",     PluginType::Solver);
-        scan_dir(engine_dir + "/plugins/schedulers",  PluginType::Scheduler);
-        scan_dir(engine_dir + "/plugins/guidance",    PluginType::Guidance);
+        // Scan engine/plugins/{solvers,schedulers,guidance,postprocess}/
+        scan_dir(engine_dir + "/plugins/solvers",      PluginType::Solver);
+        scan_dir(engine_dir + "/plugins/schedulers",   PluginType::Scheduler);
+        scan_dir(engine_dir + "/plugins/guidance",     PluginType::Guidance);
+        scan_dir(engine_dir + "/plugins/postprocess",  PluginType::Postprocess);
 
-        // Scan project-root/plugins/{solvers,schedulers,guidance}/
+        // Scan project-root/plugins/{solvers,schedulers,guidance,postprocess}/
         if (!project_dir.empty() && project_dir != engine_dir) {
-            scan_dir(project_dir + "/plugins/solvers",     PluginType::Solver);
-            scan_dir(project_dir + "/plugins/schedulers",  PluginType::Scheduler);
-            scan_dir(project_dir + "/plugins/guidance",    PluginType::Guidance);
+            scan_dir(project_dir + "/plugins/solvers",      PluginType::Solver);
+            scan_dir(project_dir + "/plugins/schedulers",   PluginType::Scheduler);
+            scan_dir(project_dir + "/plugins/guidance",     PluginType::Guidance);
+            scan_dir(project_dir + "/plugins/postprocess",  PluginType::Postprocess);
         }
 
-        fprintf(stderr, "[Plugins] Loaded %d solvers, %d schedulers, %d guidance modes\n",
-                (int) solvers_.size(), (int) schedulers_.size(), (int) guidance_.size());
+        fprintf(stderr, "[Plugins] Loaded %d solvers, %d schedulers, %d guidance, %d postprocess\n",
+                (int) solvers_.size(), (int) schedulers_.size(),
+                (int) guidance_.size(), (int) postprocess_.size());
     }
 
     // ── Lookup by name (replacing old static registries) ──
@@ -114,6 +117,20 @@ public:
         return v;
     }
 
+    LuaPlugin * postprocess_lookup(const char * name) {
+        if (!name || !name[0]) {
+            return postprocess_.empty() ? nullptr : &postprocess_.begin()->second;
+        }
+        auto it = postprocess_.find(name);
+        return (it != postprocess_.end()) ? &it->second : nullptr;
+    }
+
+    std::vector<LuaPlugin *> all_postprocess() {
+        std::vector<LuaPlugin *> v;
+        for (auto & [_, p] : postprocess_) v.push_back(&p);
+        return v;
+    }
+
     // ── JSON serialization for GET /plugins ──
 
     std::string to_json() const {
@@ -124,6 +141,8 @@ public:
         json += plugins_to_json_array(schedulers_);
         json += "],\"guidance\":[";
         json += plugins_to_json_array(guidance_);
+        json += "],\"postprocess\":[";
+        json += plugins_to_json_array(postprocess_);
         json += "]}";
         return json;
     }
@@ -132,6 +151,7 @@ private:
     std::unordered_map<std::string, LuaPlugin> solvers_;
     std::unordered_map<std::string, LuaPlugin> schedulers_;
     std::unordered_map<std::string, LuaPlugin> guidance_;
+    std::unordered_map<std::string, LuaPlugin> postprocess_;
 
     void scan_dir(const std::string & dir_path, PluginType expected_type) {
         if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) return;
@@ -144,7 +164,8 @@ private:
                 std::string stem = entry.path().stem().string();
                 if (stem.find("_constants") != std::string::npos ||
                     stem.find("_math") != std::string::npos ||
-                    stem.find("_data") != std::string::npos) {
+                    stem.find("_data") != std::string::npos ||
+                    stem.find("_core") != std::string::npos) {
                     continue;
                 }
                 files.push_back(entry.path());
@@ -163,9 +184,10 @@ private:
                     continue;
                 }
 
-                auto & map = (expected_type == PluginType::Solver)    ? solvers_
-                           : (expected_type == PluginType::Scheduler) ? schedulers_
-                           :                                            guidance_;
+                auto & map = (expected_type == PluginType::Solver)       ? solvers_
+                           : (expected_type == PluginType::Scheduler)    ? schedulers_
+                           : (expected_type == PluginType::Guidance)     ? guidance_
+                           :                                               postprocess_;
 
                 if (map.count(plugin.name)) {
                     fprintf(stderr, "[Plugins] WARNING: duplicate plugin '%s' from %s (keeping first)\n",
@@ -175,7 +197,8 @@ private:
 
                 fprintf(stderr, "[Plugins]   %-12s %-24s (%s)\n",
                         expected_type == PluginType::Solver ? "solver" :
-                        expected_type == PluginType::Scheduler ? "scheduler" : "guidance",
+                        expected_type == PluginType::Scheduler ? "scheduler" :
+                        expected_type == PluginType::Guidance ? "guidance" : "postprocess",
                         plugin.display_name.c_str(), plugin.name.c_str());
 
                 map.emplace(plugin.name, std::move(plugin));

@@ -264,6 +264,24 @@ export const PostProcessingDropdown: React.FC = () => {
       .catch(() => setPpVaeAvailable(false));
   }, []);
 
+  // Postprocess plugin availability — fetch from /api/plugins
+  const [postprocessPlugins, setPostprocessPlugins] = useState<any[]>([]);
+  useEffect(() => {
+    fetch('/api/plugins')
+      .then(r => r.json())
+      .then(data => {
+        const pp = data.postprocess || [];
+        setPostprocessPlugins(pp);
+        // Auto-select first plugin if none selected
+        if (pp.length > 0 && !gp.postprocessPlugin) {
+          gp.setPostprocessPlugin(pp[0].name);
+        }
+      })
+      .catch(() => setPostprocessPlugins([]));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectedPostprocessPlugin = postprocessPlugins.find((p: any) => p.name === gp.postprocessPlugin) || postprocessPlugins[0] || null;
+
   return (
     <div className="space-y-2">
       {/* LRC Subtitle Generation Toggle */}
@@ -277,7 +295,47 @@ export const PostProcessingDropdown: React.FC = () => {
         </div>
         <ToggleSwitch checked={!gp.skipLrc} onChange={v => gp.setSkipLrc(!v)} accentColor="sky" />
       </div>
-      {/* 0. PP-VAE Re-encode (only visible when PP-VAE model is available) */}
+
+      {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline */}
+      {postprocessPlugins.length > 0 && (
+        <Accordion
+          icon={<Zap size={14} />}
+          label="Tiled Decoder"
+          accentColor="cyan"
+          persistKey="hs-ppAccordion-tiled"
+          toggle={{ checked: gp.postprocessEnabled, onChange: gp.setPostprocessEnabled }}
+        >
+          <div className="space-y-2 mt-2">
+            <p className="text-[10px] text-zinc-500 leading-relaxed">
+              Replaces the built-in VAE decoder with an advanced tiled decode pipeline.
+              Features OLA crossfading, optional dual-pass merge, latent channel suppression,
+              and a DSP chain (hum notch, stereo width, soft clip).
+            </p>
+            {gp.postprocessEnabled && (
+              <div className="space-y-2 pt-1">
+                {postprocessPlugins.length > 1 && (
+                  <select
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 outline-none transition-colors cursor-pointer"
+                    value={gp.postprocessPlugin}
+                    onChange={e => gp.setPostprocessPlugin(e.target.value)}
+                  >
+                    {postprocessPlugins.map((p: any) => (
+                      <option key={p.name} value={p.name}>{p.display || p.name}</option>
+                    ))}
+                  </select>
+                )}
+                {selectedPostprocessPlugin && (
+                  <p className="text-[10px] text-cyan-400/60 leading-relaxed">
+                    ✓ {selectedPostprocessPlugin.display || selectedPostprocessPlugin.name} — {selectedPostprocessPlugin.description || 'Active'}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </Accordion>
+      )}
+
+      {/* 1. PP-VAE Re-encode (only visible when PP-VAE model is available) */}
       {ppVaeAvailable && (
         <Accordion
           icon={<AudioWaveform size={14} />}
@@ -591,11 +649,12 @@ export const PostProcessingDropdown: React.FC = () => {
 // ── Badge ───────────────────────────────────────────────────────
 
 export const PostProcessingBadge: React.FC = () => {
-  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, qualityEvalEnabled } = useGlobalParams();
+  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, qualityEvalEnabled, postprocessEnabled, postprocessPlugin } = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
 
   const parts: string[] = [];
+  if (postprocessEnabled && postprocessPlugin) parts.push('TD');
   if (ppVaeReencode) parts.push('PP-VAE');
   if (spectralLifterEnabled) parts.push('SL');
   if (vocalNaturalizerEnabled) parts.push('Nat');

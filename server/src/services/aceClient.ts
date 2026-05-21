@@ -107,6 +107,8 @@ export interface AceRequest {
   get_lrc?: boolean;
   // Lua plugin dynamic parameters
   plugin_params?: Record<string, string | number | boolean>;
+  // Postprocess plugin: name of the Lua postprocess plugin to use for VAE decode
+  postprocess_plugin?: string;
 }
 
 /** Job status from ace-server */
@@ -147,11 +149,11 @@ export interface PluginInfo {
   params: PluginParamSchema[];
 }
 
-/** Full plugin registry from GET /plugins */
 export interface PluginRegistry {
   solvers: PluginInfo[];
   schedulers: PluginInfo[];
   guidance: PluginInfo[];
+  postprocess: PluginInfo[];
 }
 
 async function aceGet(path: string, timeoutMs = TIMEOUT_QUICK): Promise<Response> {

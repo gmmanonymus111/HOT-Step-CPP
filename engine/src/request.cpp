@@ -62,6 +62,7 @@ void request_init(AceRequest * r) {
     r->peak_clip            = 10;
     r->mp3_bitrate          = 128;
     r->pp_vae_reencode      = false;
+    r->postprocess_plugin   = "";
     r->get_lrc              = false;
 }
 
@@ -125,6 +126,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "vae")) && yyjson_is_str(v)) {
         r->vae = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "postprocess_plugin")) && yyjson_is_str(v)) {
+        r->postprocess_plugin = yy_str(v);
     }
 
     // ints
@@ -489,6 +493,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->pp_vae_reencode != def.pp_vae_reencode) {
         yyjson_mut_obj_add_bool(doc, root, "pp_vae_reencode", r->pp_vae_reencode);
     }
+    if (all || r->postprocess_plugin != def.postprocess_plugin) {
+        yyjson_mut_obj_add_str(doc, root, "postprocess_plugin", r->postprocess_plugin.c_str());
+    }
     if (all || r->get_lrc != def.get_lrc) {
         yyjson_mut_obj_add_bool(doc, root, "get_lrc", r->get_lrc);
     }
@@ -578,6 +585,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (!r->vae.empty()) {
         fprintf(f, "[Request] vae: %s\n", r->vae.c_str());
+    }
+    if (!r->postprocess_plugin.empty()) {
+        fprintf(f, "[Request] postprocess_plugin: %s\n", r->postprocess_plugin.c_str());
     }
     fprintf(f, "[Request] audio_codes: %s\n", r->audio_codes.empty() ? "(none)" : "(present)");
 }

@@ -216,6 +216,9 @@ export interface GenerationParams {
   // Audio Quality Evaluator
   qualityEvalEnabled?: boolean;
   qualityEvalTarget?: 'unmastered' | 'mastered' | 'both';
+
+  // Postprocess plugin (replaces built-in VAE tiled decoder)
+  postprocessPlugin?: string;
 }
 
 /** Generation job status from the server */
