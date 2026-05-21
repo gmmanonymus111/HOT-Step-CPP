@@ -19,6 +19,12 @@
 #include <string>
 #include <vector>
 
+// Cross-platform case-insensitive string compare
+#ifndef _MSC_VER
+#include <strings.h>
+#define _stricmp strcasecmp
+#endif
+
 // Structs
 struct VAEResUnit {
     struct ggml_tensor *s1a, *s1b;  // snake1 exp(alpha), exp(beta) [1, C]
