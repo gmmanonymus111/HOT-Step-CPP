@@ -842,16 +842,20 @@ static int lua_call_postprocess(
         return -1;
     }
 
-    int n_latent = T_latent * C_lat;  // total latent floats
     int upscale  = 1920;
     int final_samples = T_latent * upscale;
 
-    // Arg 1: latents as Lua table (1-indexed — core module uses 1-based idx())
+    // Arg 1: latents as Lua table (1-indexed, channel-major [C_lat, T_latent])
+    // C++ layout is time-major [T_latent, C_lat] — transpose for Lua core module
     lua_newtable(L);
-    for (int i = 0; i < n_latent; i++) {
-        lua_pushinteger(L, i + 1);
-        lua_pushnumber(L, (double) latents[i]);
-        lua_settable(L, -3);
+    for (int c = 0; c < C_lat; c++) {
+        for (int t = 0; t < T_latent; t++) {
+            int lua_idx = c * T_latent + t + 1;          // [C, T] channel-major
+            int cpp_idx = t * C_lat + c;                  // [T, C] time-major
+            lua_pushinteger(L, lua_idx);
+            lua_pushnumber(L, (double) latents[cpp_idx]);
+            lua_settable(L, -3);
+        }
     }
 
     // Arg 2: B (batch dimension — always 1 here, called per-batch-item)
@@ -880,17 +884,22 @@ static int lua_call_postprocess(
     lua_pushcclosure(L, [](lua_State * Ls) -> int {
         auto * fn = (PostprocessVaeDecodeFn *) lua_touserdata(Ls, lua_upvalueindex(1));
 
-        // Read latent table from Lua (arg 1) — 1-indexed
+        // Read latent table from Lua (arg 1) — 1-indexed, channel-major [C, T]
         luaL_checktype(Ls, 1, LUA_TTABLE);
         int T_lat = (int) luaL_checkinteger(Ls, 2);
-        int n_lat = T_lat * 64;
+        int C_l   = 64;
+        int n_lat = T_lat * C_l;
 
+        // Read channel-major [C, T] from Lua and transpose to time-major [T, C] for C++
         std::vector<float> lat_buf(n_lat);
-        for (int i = 0; i < n_lat; i++) {
-            lua_pushinteger(Ls, i + 1);
-            lua_gettable(Ls, 1);
-            lat_buf[i] = (float) lua_tonumber(Ls, -1);
-            lua_pop(Ls, 1);
+        for (int c = 0; c < C_l; c++) {
+            for (int t = 0; t < T_lat; t++) {
+                int lua_idx = c * T_lat + t + 1;     // [C, T] channel-major
+                lua_pushinteger(Ls, lua_idx);
+                lua_gettable(Ls, 1);
+                lat_buf[t * C_l + c] = (float) lua_tonumber(Ls, -1);  // [T, C] time-major
+                lua_pop(Ls, 1);
+            }
         }
 
         // Decode
