@@ -63,7 +63,10 @@ function process(latents, B, C_lat, W, C_aud, final_samples, upscale_factor, vae
         if params.soft_clip_db then p.soft_clip_db = params.soft_clip_db end
     end
 
-    return core.execute_tiled_decode(
+    local audio = core.execute_tiled_decode(
         vae_decode_fn, latents, B, C_lat, W,
         C_aud, final_samples, upscale_factor, p)
+
+    -- Bridge expects two return values: audio_table, T_audio
+    return audio, final_samples
 end
