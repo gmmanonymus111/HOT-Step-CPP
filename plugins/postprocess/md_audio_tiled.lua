@@ -39,14 +39,14 @@ postprocess = {
 
 -- Entry point called by the engine via lua_call_postprocess()
 -- Args:
---   latents:       Lua table, 0-indexed [B * C_lat * W] flat time-major
---   B:             batch size (number of latent frames per batch)
+--   latents:       Lua table, 1-indexed [B * C_lat * W] flat row-major
+--   B:             batch size (always 1 — engine calls per-batch-item)
 --   C_lat:         latent channels (64)
 --   W:             latent width (time frames)
 --   C_aud:         audio channels (2)
 --   final_samples: expected audio samples per channel
 --   upscale_factor: 1920 (VAE upsample ratio)
---   vae_decode_fn: callback(latent_table, T_latent) -> audio_table, T_audio
+--   vae_decode_fn: callback(latent_table, T_latent) → audio_table, T_audio
 function process(latents, B, C_lat, W, C_aud, final_samples, upscale_factor, vae_decode_fn)
     -- Build params table from UI-injected globals
     local p = {}

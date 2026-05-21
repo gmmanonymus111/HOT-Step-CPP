@@ -846,10 +846,10 @@ static int lua_call_postprocess(
     int upscale  = 1920;
     int final_samples = T_latent * upscale;
 
-    // Arg 1: latents as Lua table (0-indexed)
+    // Arg 1: latents as Lua table (1-indexed — core module uses 1-based idx())
     lua_newtable(L);
     for (int i = 0; i < n_latent; i++) {
-        lua_pushinteger(L, i);
+        lua_pushinteger(L, i + 1);
         lua_pushnumber(L, (double) latents[i]);
         lua_settable(L, -3);
     }
@@ -880,14 +880,14 @@ static int lua_call_postprocess(
     lua_pushcclosure(L, [](lua_State * Ls) -> int {
         auto * fn = (PostprocessVaeDecodeFn *) lua_touserdata(Ls, lua_upvalueindex(1));
 
-        // Read latent table from Lua (arg 1)
+        // Read latent table from Lua (arg 1) — 1-indexed
         luaL_checktype(Ls, 1, LUA_TTABLE);
         int T_lat = (int) luaL_checkinteger(Ls, 2);
         int n_lat = T_lat * 64;
 
         std::vector<float> lat_buf(n_lat);
         for (int i = 0; i < n_lat; i++) {
-            lua_pushinteger(Ls, i);
+            lua_pushinteger(Ls, i + 1);
             lua_gettable(Ls, 1);
             lat_buf[i] = (float) lua_tonumber(Ls, -1);
             lua_pop(Ls, 1);
@@ -904,11 +904,11 @@ static int lua_call_postprocess(
             return 2;
         }
 
-        // Return audio as Lua table (0-indexed, [2 * T_audio])
+        // Return audio as Lua table (1-indexed, [B * C_aud * T_audio])
         lua_newtable(Ls);
         int total = 2 * T_audio;
         for (int i = 0; i < total; i++) {
-            lua_pushinteger(Ls, i);
+            lua_pushinteger(Ls, i + 1);
             lua_pushnumber(Ls, (double) aud_buf[i]);
             lua_settable(Ls, -3);
         }
@@ -936,14 +936,14 @@ static int lua_call_postprocess(
         return -1;
     }
 
-    // Copy audio from Lua table to output buffer
+    // Copy audio from Lua table to output buffer (1-indexed)
     int total = 2 * T_audio;
     if (T_audio > max_T_audio) {
         T_audio = max_T_audio;
         total   = 2 * T_audio;
     }
     for (int i = 0; i < total; i++) {
-        lua_pushinteger(L, i);
+        lua_pushinteger(L, i + 1);
         lua_gettable(L, -3);
         audio_out[i] = (float) lua_tonumber(L, -1);
         lua_pop(L, 1);
