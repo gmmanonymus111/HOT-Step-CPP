@@ -2,6 +2,7 @@
 // Ported from hot-step-9000 visual design with Tailwind.
 
 import React, { useState, useCallback, useMemo } from 'react';
+import ReactDOM from 'react-dom';
 import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
   Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
@@ -79,6 +80,49 @@ function triggerCoverArtGeneration(song: Song): void {
     setTimeout(() => clearInterval(poll), 300_000);
   }).catch(err => console.error('[CoverArt]', err));
 }
+
+// ── Portal Menu ──────────────────────────────────────────────────────────────
+// Renders dropdown menus at document.body level to escape overflow clipping.
+
+interface PortalMenuProps {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+  children: React.ReactNode;
+}
+
+const PortalMenu: React.FC<PortalMenuProps> = ({ anchorRef, onClose, children }) => {
+  const [pos, setPos] = React.useState<{ top: number; left: number; flipped: boolean }>({ top: 0, left: 0, flipped: false });
+
+  React.useLayoutEffect(() => {
+    if (!anchorRef.current) return;
+    const rect = anchorRef.current.getBoundingClientRect();
+    const menuH = 360; // max estimated height
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const flipped = spaceBelow < menuH && rect.top > spaceBelow;
+    setPos({
+      top: flipped ? rect.top : rect.bottom + 4,
+      left: Math.max(8, rect.right - 168), // align right edge, min 8px from left
+      flipped,
+    });
+  }, [anchorRef]);
+
+  return ReactDOM.createPortal(
+    <>
+      <div className="fixed inset-0 z-[9998]" onClick={onClose} />
+      <div
+        className="fixed z-[9999] bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-xl shadow-xl py-1 min-w-[160px]"
+        style={{
+          top: pos.flipped ? undefined : pos.top,
+          bottom: pos.flipped ? (window.innerHeight - pos.top + 4) : undefined,
+          left: pos.left,
+        }}
+      >
+        {children}
+      </div>
+    </>,
+    document.body
+  );
+};
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -424,6 +468,7 @@ export const SongList: React.FC<SongListProps> = ({
           onDelete={onDelete}
           onReuse={onReuse}
           onDownload={onDownload}
+          onRename={onRename}
           showSourceBadge={showFilters && sourceFilter === 'all'}
           abTrackAId={abTrackAId}
           abTrackBId={abTrackBId}
@@ -546,6 +591,7 @@ const SongItem: React.FC<SongItemProps> = ({
   const [editing, setEditing] = React.useState(false);
   const [editTitle, setEditTitle] = React.useState(song.title || '');
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const menuBtnRef = React.useRef<HTMLButtonElement>(null);
   const { isDisguised, disguiseTitle } = useDisguiseMode();
 
   React.useEffect(() => {
@@ -710,18 +756,16 @@ const SongItem: React.FC<SongItemProps> = ({
             </button>
           )}
           <button
+            ref={menuBtnRef}
             onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
             className="p-1.5 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
           >
             <MoreHorizontal size={16} />
           </button>
 
-          {/* Context Menu */}
+          {/* Context Menu — portaled to body to escape overflow clipping */}
           {showMenu && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-xl shadow-xl py-1 min-w-[160px]">
-
+            <PortalMenu anchorRef={menuBtnRef} onClose={() => setShowMenu(false)}>
                 {onReuse && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onReuse(); setShowMenu(false); }}
@@ -796,8 +840,7 @@ const SongItem: React.FC<SongItemProps> = ({
                 >
                   <ArrowLeftRight size={14} /> Set as Track B
                 </button>
-              </div>
-            </>
+            </PortalMenu>
           )}
         </div>
       )}
@@ -827,12 +870,31 @@ interface SongCardProps {
 
 const SongCard: React.FC<SongCardProps> = ({
   song, isActive, isPlaying, selectionMode, isSelected, onToggleSelect,
-  onPlay, onSelect, onDelete, onReuse, onDownload, onAddToPlaylist,
+  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onAddToPlaylist,
   abTrackAId: _abTrackAId, abTrackBId: _abTrackBId,
 }) => {
   const { t } = useTranslation();
   const [showMenu, setShowMenu] = React.useState(false);
+  const menuBtnRef = React.useRef<HTMLButtonElement>(null);
+  const [editing, setEditing] = React.useState(false);
+  const [editTitle, setEditTitle] = React.useState(song.title || '');
+  const renameInputRef = React.useRef<HTMLInputElement>(null);
   const { isDisguised, disguiseTitle } = useDisguiseMode();
+
+  React.useEffect(() => {
+    if (editing && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [editing]);
+
+  const commitRename = () => {
+    const trimmed = editTitle.trim();
+    if (trimmed && trimmed !== (song.title || '')) {
+      onRename?.(trimmed);
+    }
+    setEditing(false);
+  };
 
   const formatDuration = (val: string | number | undefined) => {
     if (!val) return '--:--';
@@ -922,15 +984,14 @@ const SongCard: React.FC<SongCardProps> = ({
       {!selectionMode && (
         <div className="absolute top-2 right-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
+            ref={menuBtnRef}
             onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
             className="w-7 h-7 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white/70 hover:text-white hover:bg-black/60 transition-colors"
           >
             <MoreHorizontal size={14} />
           </button>
           {showMenu && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-white/10 rounded-xl shadow-xl py-1 min-w-[150px]">
+            <PortalMenu anchorRef={menuBtnRef} onClose={() => setShowMenu(false)}>
                 {onReuse && (
                   <button onClick={(e) => { e.stopPropagation(); onReuse(); setShowMenu(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
@@ -982,18 +1043,45 @@ const SongCard: React.FC<SongCardProps> = ({
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs text-violet-400 hover:bg-violet-500/10 transition-colors">
                   <Image size={12} /> {song.coverUrl || song.cover_url ? 'Regenerate Cover' : 'Generate Cover'}
                 </button>
-              </div>
-            </>
+            </PortalMenu>
           )}
         </div>
       )}
 
       {/* Info overlay — gradient from bottom */}
       <div className="absolute inset-x-0 bottom-0 z-10 p-3 pt-10 bg-gradient-to-t from-black/80 via-black/50 to-transparent pointer-events-none">
-        {/* Title */}
-        <div className={`text-sm font-semibold drop-shadow-sm ${isActive ? 'text-pink-400' : 'text-white'}`}>
-          {disguiseTitle(song.title || 'Untitled')}
-        </div>
+        {/* Title — editable */}
+        {editing ? (
+          <div className="pointer-events-auto">
+            <input
+              ref={renameInputRef}
+              className="w-full text-sm font-semibold bg-black/40 backdrop-blur-sm border border-pink-500/40 rounded-lg px-2 py-0.5 text-white outline-none focus:border-pink-500"
+              value={editTitle}
+              onChange={e => setEditTitle(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitRename();
+                if (e.key === 'Escape') { setEditTitle(song.title || ''); setEditing(false); }
+              }}
+              onClick={e => e.stopPropagation()}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 group/title pointer-events-auto">
+            <div className={`text-sm font-semibold drop-shadow-sm truncate ${isActive ? 'text-pink-400' : 'text-white'}`}>
+              {disguiseTitle(song.title || 'Untitled')}
+            </div>
+            {onRename && !selectionMode && (
+              <button
+                onClick={e => { e.stopPropagation(); setEditTitle(song.title || ''); setEditing(true); }}
+                className="flex-shrink-0 p-0.5 rounded text-white/50 hover:text-white opacity-0 group-hover/title:opacity-100 transition-opacity"
+                title={t('library.rename')}
+              >
+                <Pencil size={11} />
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Style / Caption — wraps, max 3 lines */}
         <div className="text-[11px] text-white/70 mt-0.5 leading-tight line-clamp-3">
@@ -1012,6 +1100,68 @@ const SongCard: React.FC<SongCardProps> = ({
   );
 };
 
+// ── TableTitleCell — Inline-editable title for table rows ─────────────────────
+
+const TableTitleCell: React.FC<{
+  song: Song;
+  isActive: boolean;
+  onRename?: (newTitle: string) => void;
+  disguiseTitle: (t: string) => string;
+}> = ({ song, isActive, onRename, disguiseTitle }) => {
+  const { t } = useTranslation();
+  const [editing, setEditing] = React.useState(false);
+  const [editTitle, setEditTitle] = React.useState(song.title || '');
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const commitRename = () => {
+    const trimmed = editTitle.trim();
+    if (trimmed && trimmed !== (song.title || '')) {
+      onRename?.(trimmed);
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="w-full text-xs font-medium bg-zinc-800 border border-pink-500/40 rounded px-1.5 py-0.5 text-zinc-200 outline-none focus:border-pink-500"
+        value={editTitle}
+        onChange={e => setEditTitle(e.target.value)}
+        onBlur={commitRename}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commitRename();
+          if (e.key === 'Escape') { setEditTitle(song.title || ''); setEditing(false); }
+        }}
+        onClick={e => e.stopPropagation()}
+      />
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-1 group/title min-w-0">
+      <span className={`font-medium truncate ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>
+        {disguiseTitle(song.title || 'Untitled')}
+      </span>
+      {onRename && (
+        <button
+          onClick={e => { e.stopPropagation(); setEditTitle(song.title || ''); setEditing(true); }}
+          className="flex-shrink-0 p-0.5 rounded text-zinc-600 hover:text-zinc-300 opacity-0 group-hover/title:opacity-100 transition-opacity"
+          title={t('library.rename')}
+        >
+          <Pencil size={10} />
+        </button>
+      )}
+    </span>
+  );
+};
 
 // ── SongTable — Table view with resizable columns ────────────────────────────
 
@@ -1027,6 +1177,7 @@ interface SongTableProps {
   onDelete: (song: Song) => void;
   onReuse?: (song: Song) => void;
   onDownload?: (song: Song) => void;
+  onRename?: (song: Song, newTitle: string) => void;
   showSourceBadge?: boolean;
   abTrackAId?: string | null;
   abTrackBId?: string | null;
@@ -1070,7 +1221,7 @@ function saveColWidths(w: Record<string, number>) {
 
 const SongTable: React.FC<SongTableProps> = ({
   songs, currentSongId, isPlaying, selectionMode, selectedIds, onToggleSelect,
-  onPlay, onSelect, onDelete, onReuse, onDownload, showSourceBadge,
+  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, showSourceBadge,
   abTrackAId, abTrackBId,
 }) => {
   const { t } = useTranslation();
@@ -1220,7 +1371,7 @@ const SongTable: React.FC<SongTableProps> = ({
                 </div>
               ),
 
-              title: <span className={`font-medium truncate block ${isActive ? 'text-pink-400' : 'text-zinc-200'}`}>{disguiseTitle(song.title || 'Untitled')}</span>,
+              title: <TableTitleCell song={song} isActive={isActive} onRename={onRename ? (newTitle) => onRename(song, newTitle) : undefined} disguiseTitle={disguiseTitle} />,
               style: <span className="text-zinc-500 truncate block">{isDisguised ? '—' : (song.style || song.caption || '—')}</span>,
               source: badge ? <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>{badge.label}</span> : null,
               bpm: <span className="text-zinc-500 font-mono">{bpm || '—'}</span>,

@@ -2,7 +2,7 @@
 // Ported from hot-step-9000's RightSidebar, simplified for current feature set.
 
 import React from 'react';
-import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 
@@ -14,6 +14,7 @@ interface RightSidebarProps {
   onPlay: (song: Song) => void;
   isPlaying: boolean;
   onDownload?: (song: Song) => void;
+  onRename?: (song: Song, newTitle: string) => void;
 }
 
 export const RightSidebar: React.FC<RightSidebarProps> = ({
@@ -24,9 +25,36 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onPlay,
   isPlaying,
   onDownload,
+  onRename,
 }) => {
   const { t } = useTranslation();
   const gp = song.generationParams;
+
+  // Inline rename state
+  const [editing, setEditing] = React.useState(false);
+  const [editTitle, setEditTitle] = React.useState(song.title || '');
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  // Reset edit state when song changes
+  React.useEffect(() => {
+    setEditing(false);
+    setEditTitle(song.title || '');
+  }, [song.id]);
+
+  const commitRename = () => {
+    const trimmed = editTitle.trim();
+    if (trimmed && trimmed !== (song.title || '')) {
+      onRename?.(song, trimmed);
+    }
+    setEditing(false);
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -54,7 +82,32 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
         {/* Title & Style */}
         <div>
-          <h2 className="text-lg font-bold text-white leading-tight">{song.title || 'Untitled'}</h2>
+          {editing ? (
+            <input
+              ref={inputRef}
+              className="w-full text-lg font-bold bg-zinc-800 border border-pink-500/40 rounded-lg px-2 py-0.5 text-white outline-none focus:border-pink-500"
+              value={editTitle}
+              onChange={e => setEditTitle(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitRename();
+                if (e.key === 'Escape') { setEditTitle(song.title || ''); setEditing(false); }
+              }}
+            />
+          ) : (
+            <div className="flex items-center gap-1.5 group/title">
+              <h2 className="text-lg font-bold text-white leading-tight truncate">{song.title || 'Untitled'}</h2>
+              {onRename && (
+                <button
+                  onClick={() => { setEditTitle(song.title || ''); setEditing(true); }}
+                  className="flex-shrink-0 p-1 rounded-lg text-zinc-600 hover:text-zinc-300 opacity-0 group-hover/title:opacity-100 transition-opacity"
+                  title={t('library.rename')}
+                >
+                  <Pencil size={13} />
+                </button>
+              )}
+            </div>
+          )}
           {song.style && (
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 line-clamp-2">{song.style}</p>
           )}

@@ -14,6 +14,7 @@ import { lireekApi } from '../../services/lireekApi';
 import { writePersistedState } from '../../hooks/usePersistedState';
 import type { Generation, Profile, AlbumPreset } from '../../services/lireekApi';
 import { resolveDuration } from '../../utils/estimateDuration';
+import { useGlobalParamsStore } from '../../stores/globalParamsStore';
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -62,16 +63,18 @@ export function useAudioGeneration({ profiles, showToast: _showToast }: UseAudio
       write('hs-duration', resolveDuration(gen.duration, gen.lyrics || '', gen.bpm || 120));
     }
 
-    // Adapter from album preset — only set the path, scales are global
+    // Adapter from album preset — update Zustand store directly (writePersistedState
+    // only touches localStorage, which the Zustand store doesn't listen to after init)
+    const gps = useGlobalParamsStore.getState();
     if (preset?.adapter_path) {
-      write('hs-adapter', preset.adapter_path);
-      write('hs-adaptersOpen', true);
+      gps.setAdapter(preset.adapter_path);
+      gps.setAdaptersOpen(true);
     }
 
     // Mastering reference from album preset (does NOT force-enable — respects global toggle)
     if (preset?.reference_track_path) {
-      write('hs-masteringReference', preset.reference_track_path);
-      write('hs-timbreReference', true);
+      gps.setMasteringReference(preset.reference_track_path);
+      gps.setTimbreReference(true);
     }
 
     console.log(`[LyricStudioV2] Send to Create: "${gen.title}" (adapter: ${preset?.adapter_path || 'none'}, mastering: ${preset?.reference_track_path || 'none'})`);
