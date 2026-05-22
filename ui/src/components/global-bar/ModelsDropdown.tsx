@@ -1,6 +1,6 @@
 // ModelsDropdown.tsx — Model selection UI for the global param bar
 //
-// Adapted from create/ModelSelector.tsx to read from GlobalParamsContext.
+// Uses custom ModelSelect dropdown to show GGUF/SafeTensors format badges.
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -9,9 +9,8 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { modelApi } from '../../services/api';
 import { formatDitModel, formatLmModel, formatVaeModel, formatEmbeddingModel, getDitModelDescription, getLmModelDescription, getVaeModelDescription } from './modelLabels';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
+import { ModelSelect } from './ModelSelect';
 import type { AceModels } from '../../types';
-
-const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 
 export const ModelsDropdown: React.FC = () => {
   const gp = useGlobalParams();
@@ -57,13 +56,14 @@ export const ModelsDropdown: React.FC = () => {
       {/* DiT Model */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('models.ditModel')}</label>
-        <select className={selectClasses} value={gp.ditModel}
-          onChange={e => gp.setDitModel(e.target.value)}>
-          {ditModels.length === 0 && <option value="">{t('common.loading')}</option>}
-          {ditModels.map(m => (
-            <option key={m} value={m}>{formatDitModel(m)}</option>
-          ))}
-        </select>
+        <ModelSelect
+          id="dit-model-select"
+          value={gp.ditModel}
+          onChange={gp.setDitModel}
+          options={ditModels}
+          formatLabel={formatDitModel}
+          placeholder={t('common.loading')}
+        />
         {getDitModelDescription(gp.ditModel) && (
           <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getDitModelDescription(gp.ditModel)}</p>
         )}
@@ -72,13 +72,14 @@ export const ModelsDropdown: React.FC = () => {
       {/* LM Model */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('models.lmModel')}</label>
-        <select className={selectClasses} value={gp.lmModel}
-          onChange={e => gp.setLmModel(e.target.value)}>
-          {lmModels.length === 0 && <option value="">{t('common.loading')}</option>}
-          {lmModels.map(m => (
-            <option key={m} value={m}>{formatLmModel(m)}</option>
-          ))}
-        </select>
+        <ModelSelect
+          id="lm-model-select"
+          value={gp.lmModel}
+          onChange={gp.setLmModel}
+          options={lmModels}
+          formatLabel={formatLmModel}
+          placeholder={t('common.loading')}
+        />
         {getLmModelDescription(gp.lmModel) && (
           <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getLmModelDescription(gp.lmModel)}</p>
         )}
@@ -88,12 +89,14 @@ export const ModelsDropdown: React.FC = () => {
       {vaeModels.length > 1 && (
         <div>
           <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('models.vaeDecoder')}</label>
-          <select className={selectClasses} value={gp.vaeModel}
-            onChange={e => gp.setVaeModel(e.target.value)}>
-            {vaeModels.map(m => (
-              <option key={m} value={m}>{formatVaeModel(m)}</option>
-            ))}
-          </select>
+          <ModelSelect
+            id="vae-model-select"
+            value={gp.vaeModel}
+            onChange={gp.setVaeModel}
+            options={vaeModels}
+            formatLabel={formatVaeModel}
+            placeholder={t('common.loading')}
+          />
           {getVaeModelDescription(gp.vaeModel) && (
             <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getVaeModelDescription(gp.vaeModel)}</p>
           )}
@@ -104,12 +107,14 @@ export const ModelsDropdown: React.FC = () => {
       {embeddingModels.length > 1 && (
         <div>
           <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('models.textEncoder')}</label>
-          <select className={selectClasses} value={gp.embeddingModel}
-            onChange={e => gp.setEmbeddingModel(e.target.value)}>
-            {embeddingModels.map(m => (
-              <option key={m} value={m}>{formatEmbeddingModel(m)}</option>
-            ))}
-          </select>
+          <ModelSelect
+            id="embedding-model-select"
+            value={gp.embeddingModel}
+            onChange={gp.setEmbeddingModel}
+            options={embeddingModels}
+            formatLabel={formatEmbeddingModel}
+            placeholder={t('common.loading')}
+          />
         </div>
       )}
 
@@ -147,4 +152,3 @@ export const ModelsBadge: React.FC = () => {
     </span>
   );
 };
-

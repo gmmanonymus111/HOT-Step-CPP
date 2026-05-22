@@ -1,6 +1,7 @@
 // modelLabels.ts — Human-friendly labels for model filenames
 //
-// Maps raw .gguf filenames from the models directory to short, readable labels.
+// Maps raw model names (GGUF filenames or safetensors directory names)
+// to short, readable labels. Format badges are handled by ModelSelect.
 
 /** Parse a DiT model filename into a nice label like "Base/Turbo XL-BF16" */
 export function formatDitModel(filename: string): string {
@@ -44,9 +45,13 @@ export function formatLmModel(filename: string): string {
   if (!filename) return '—';
   const name = filename.replace(/\.gguf$/i, '');
 
-  // LM pattern: acestep-5Hz-lm-{size}-{quant}
+  // LM pattern: acestep-5Hz-lm-{size}-{quant} (GGUF)
   const lmMatch = name.match(/^acestep-5Hz-lm-([\d.]+B)-([\w_]+)$/);
   if (lmMatch) return `LM ${lmMatch[1]}-${lmMatch[2]}`;
+
+  // LM safetensors dir: acestep-5Hz-lm-{size} (no quant)
+  const lmStMatch = name.match(/^acestep-5Hz-lm-([\d.]+B)$/);
+  if (lmStMatch) return `LM ${lmStMatch[1]}`;
 
   // Qwen embedding
   const qwenMatch = name.match(/^Qwen3-Embedding-([\d.]+B)-([\w_]+)$/);
@@ -58,22 +63,25 @@ export function formatLmModel(filename: string): string {
 /** Parse a VAE model filename into a nice label like "VAE" or "ScragVAE" */
 export function formatVaeModel(filename: string): string {
   if (!filename) return '—';
-  const isST = /\.safetensors$/i.test(filename);
   const name = filename
     .replace(/\.(gguf|safetensors)$/i, '')
     .replace(/-(BF16|F16|F32)$/i, '');
-  const suffix = isST ? ' (ST)' : '';
-  if (name === 'vae') return 'VAE' + suffix;
-  if (name === 'scragvae') return 'ScragVAE' + suffix;
-  return name + suffix;
+  // Format badge in ModelSelect handles GGUF/ST indication — no suffix needed
+  if (name === 'vae') return 'VAE';
+  if (name === 'scragvae') return 'ScragVAE';
+  return name;
 }
 
 /** Parse an embedding model filename into a nice label like "Qwen3 0.6B-Q8" */
 export function formatEmbeddingModel(filename: string): string {
   if (!filename) return '—';
   const name = filename.replace(/\.gguf$/i, '');
+  // GGUF: Qwen3-Embedding-0.6B-Q8_0
   const qwenMatch = name.match(/^Qwen3-Embedding-([\d.]+B)-([\w_]+)$/);
   if (qwenMatch) return `Qwen3 ${qwenMatch[1]}-${qwenMatch[2]}`;
+  // Safetensors dir: Qwen3-Embedding-0.6B
+  const qwenStMatch = name.match(/^Qwen3-Embedding-([\d.]+B)$/);
+  if (qwenStMatch) return `Qwen3 ${qwenStMatch[1]}`;
   return name;
 }
 
@@ -108,6 +116,7 @@ export function formatScheduler(scheduler: string): string {
 /** Get a contextual description for a DiT model based on its filename */
 export function getDitModelDescription(filename: string): string {
   if (!filename) return '';
+  // Strip both extensions — works for GGUF filenames and safetensors dirs
   const name = filename.replace(/\.gguf$/i, '').toLowerCase();
 
   if (name.includes('turbo') && name.includes('xl')) return 'Extended architecture with turbo training. Fast inference at 8–15 steps with enriched audio quality.';
@@ -136,10 +145,8 @@ export function getLmModelDescription(filename: string): string {
 /** Get a contextual description for a VAE model */
 export function getVaeModelDescription(filename: string): string {
   if (!filename) return '';
-  const isST = /\.safetensors$/i.test(filename);
   const name = filename.replace(/\.(gguf|safetensors)$/i, '').toLowerCase();
-  const stNote = isST ? ' Full F32 precision — best quality for cover/restyle.' : '';
-  if (name.startsWith('vae')) return 'Stock ACE-Step VAE. Standard latent-to-audio decoding.' + stNote;
-  if (name.includes('scragvae') || name.includes('scrag')) return 'ScragVAE — custom-trained for reduced artifacts and improved clarity.' + stNote;
-  return 'Variational autoencoder for latent-to-audio decoding.' + stNote;
+  if (name.startsWith('vae')) return 'Stock ACE-Step VAE. Standard latent-to-audio decoding.';
+  if (name.includes('scragvae') || name.includes('scrag')) return 'ScragVAE — custom-trained for reduced artifacts and improved clarity.';
+  return 'Variational autoencoder for latent-to-audio decoding.';
 }
