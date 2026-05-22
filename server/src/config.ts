@@ -186,6 +186,12 @@ export const config = {
       return path.join(config.data.dir, 'vst', 'chain.json');
     },
   },
+
+  // Whisper speech-to-text (lyrics transcription)
+  whisper: {
+    exe: process.env.WHISPER_EXE || path.join(PROJECT_ROOT, 'tools', 'whisper', `whisper-cli${BIN_EXT}`),
+    modelsDir: process.env.WHISPER_MODELS_DIR || path.join(DEFAULT_MODELS, 'whisper'),
+  },
 };
 
 // ── .env hot-reload infrastructure ──────────────────────────────────
