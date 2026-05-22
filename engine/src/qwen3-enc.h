@@ -15,6 +15,8 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "weight-source.h"
+#include "yyjson.h"
 
 #include <cmath>
 #include <cstdio>
@@ -250,28 +252,47 @@ static struct ggml_tensor * qwen3_build_layers(struct ggml_context * ctx,
 }
 
 // Loading
+static void qwen3_load_layer(WeightCtx *          wctx,
+                             const WeightSource &  ws,
+                             Qwen3Layer *          ly,
+                             const std::string &   prefix,
+                             int                   layer_idx = -1);
+
+// GGUFModel overload: wraps in a WeightSource for backward compat.
+// Used by cond-enc, fsq-tok, fsq-detok which haven't been refactored yet.
 static void qwen3_load_layer(WeightCtx *         wctx,
                              const GGUFModel &   gf,
                              Qwen3Layer *        ly,
                              const std::string & prefix,
                              int                 layer_idx = -1) {
-    ly->input_layernorm     = gf_load_tensor_f32(wctx, gf, prefix + ".input_layernorm.weight");
-    ly->post_attn_layernorm = gf_load_tensor_f32(wctx, gf, prefix + ".post_attention_layernorm.weight");
+    WeightSource ws_tmp;
+    ws_tmp.gf = const_cast<GGUFModel *>(&gf);
+    qwen3_load_layer(wctx, ws_tmp, ly, prefix, layer_idx);
+}
+
+// WeightSource implementation
+static void qwen3_load_layer(WeightCtx *          wctx,
+                             const WeightSource & ws,
+                             Qwen3Layer *         ly,
+                             const std::string &  prefix,
+                             int                  layer_idx) {
+    ly->input_layernorm     = ws_load_tensor_f32(wctx, ws, prefix + ".input_layernorm.weight");
+    ly->post_attn_layernorm = ws_load_tensor_f32(wctx, ws, prefix + ".post_attention_layernorm.weight");
 
     // Attention: try Q+K+V fused, then Q+K partial, then separate
-    ly->qkv = gf_load_qkv_fused(wctx, gf, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight",
+    ly->qkv = ws_load_qkv_fused(wctx, ws, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight",
                                 prefix + ".self_attn.v_proj.weight");
     if (!ly->qkv) {
-        ly->qk = gf_load_pair_fused(wctx, gf, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight");
+        ly->qk = ws_load_pair_fused(wctx, ws, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight");
         if (ly->qk) {
-            ly->v_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.v_proj.weight");
+            ly->v_proj = ws_load_tensor(wctx, ws, prefix + ".self_attn.v_proj.weight");
             if (layer_idx == 0) {
                 fprintf(stderr, "[Qwen3] Attn: Q+K fused, V separate\n");
             }
         } else {
-            ly->q_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.q_proj.weight");
-            ly->k_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.k_proj.weight");
-            ly->v_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.v_proj.weight");
+            ly->q_proj = ws_load_tensor(wctx, ws, prefix + ".self_attn.q_proj.weight");
+            ly->k_proj = ws_load_tensor(wctx, ws, prefix + ".self_attn.k_proj.weight");
+            ly->v_proj = ws_load_tensor(wctx, ws, prefix + ".self_attn.v_proj.weight");
             if (layer_idx == 0) {
                 fprintf(stderr, "[Qwen3] Attn: all separate\n");
             }
@@ -282,28 +303,34 @@ static void qwen3_load_layer(WeightCtx *         wctx,
         }
     }
 
-    ly->o_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.o_proj.weight");
-    ly->q_norm = gf_load_tensor_f32(wctx, gf, prefix + ".self_attn.q_norm.weight");
-    ly->k_norm = gf_load_tensor_f32(wctx, gf, prefix + ".self_attn.k_norm.weight");
+    ly->o_proj = ws_load_tensor(wctx, ws, prefix + ".self_attn.o_proj.weight");
+    ly->q_norm = ws_load_tensor_f32(wctx, ws, prefix + ".self_attn.q_norm.weight");
+    ly->k_norm = ws_load_tensor_f32(wctx, ws, prefix + ".self_attn.k_norm.weight");
 
     // MLP: try gate+up fused, then separate
-    ly->gate_up = gf_load_pair_fused(wctx, gf, prefix + ".mlp.gate_proj.weight", prefix + ".mlp.up_proj.weight");
+    ly->gate_up = ws_load_pair_fused(wctx, ws, prefix + ".mlp.gate_proj.weight", prefix + ".mlp.up_proj.weight");
     if (ly->gate_up) {
         if (layer_idx == 0) {
             fprintf(stderr, "[Qwen3] MLP: gate+up fused\n");
         }
     } else {
-        ly->gate_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.gate_proj.weight");
-        ly->up_proj   = gf_load_tensor(wctx, gf, prefix + ".mlp.up_proj.weight");
+        ly->gate_proj = ws_load_tensor(wctx, ws, prefix + ".mlp.gate_proj.weight");
+        ly->up_proj   = ws_load_tensor(wctx, ws, prefix + ".mlp.up_proj.weight");
         if (layer_idx == 0) {
             fprintf(stderr, "[Qwen3] MLP: gate+up separate\n");
         }
     }
-    ly->down_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.down_proj.weight");
+    ly->down_proj = ws_load_tensor(wctx, ws, prefix + ".mlp.down_proj.weight");
 }
 
-// Load standalone text encoder (Qwen3-Embedding) from GGUF
-// gguf_path: path to the .gguf file
+// Helper: check if path ends with .gguf
+static bool ends_with_gguf(const char * path) {
+    size_t len = strlen(path);
+    return len >= 5 && strcmp(path + len - 5, ".gguf") == 0;
+}
+
+// Load standalone text encoder (Qwen3-Embedding) from GGUF or safetensors
+// gguf_path: path to .gguf file or safetensors directory
 static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
     // Backend init
     BackendPair bp    = backend_init("TextEncoder");
@@ -324,32 +351,79 @@ static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
         /*is_causal*/ true,
     };
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !ends_with_gguf(gguf_path);
+
+    GGUFModel gf = {};
+    STMulti sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        // Safetensors: path is a directory containing model.safetensors + config.json
+        if (!st_multi_open(&sm, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot open safetensors in %s\n", gguf_path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm = &sm;
+        ws.name_prefix = "model.";  // HF text encoder has model. prefix
+
+        // Read config from config.json sidecar (inline to avoid config-json.h include ordering issues)
+        std::string cfg_path = std::string(gguf_path) + WS_SEP + "config.json";
+        yyjson_doc * doc = yyjson_read_file(cfg_path.c_str(), 0, NULL, NULL);
+        if (doc) {
+            yyjson_val * root = yyjson_doc_get_root(doc);
+            if (root && yyjson_is_obj(root)) {
+                yyjson_val * v;
+                if ((v = yyjson_obj_get(root, "hidden_size")) && yyjson_is_int(v))
+                    m->cfg.hidden_size = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "intermediate_size")) && yyjson_is_int(v))
+                    m->cfg.intermediate_size = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "num_attention_heads")) && yyjson_is_int(v))
+                    m->cfg.n_heads = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "num_key_value_heads")) && yyjson_is_int(v))
+                    m->cfg.n_kv_heads = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "head_dim")) && yyjson_is_int(v))
+                    m->cfg.head_dim = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "num_hidden_layers")) && yyjson_is_int(v))
+                    m->cfg.n_layers = (int) yyjson_get_int(v);
+                if ((v = yyjson_obj_get(root, "rope_theta")) && yyjson_is_num(v))
+                    m->cfg.rope_theta = (float) yyjson_get_num(v);
+                if ((v = yyjson_obj_get(root, "rms_norm_eps")) && yyjson_is_num(v))
+                    m->cfg.rms_norm_eps = (float) yyjson_get_num(v);
+            }
+            yyjson_doc_free(doc);
+        } else {
+            fprintf(stderr, "[Load] WARNING: cannot read %s, using defaults\n", cfg_path.c_str());
+        }
+    } else {
+        if (!gf_load(&gf, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
     // embed(1) + 28 layers * 11 weights + final_norm(1) = 310
     int n_tensors = 1 + m->cfg.n_layers * 11 + 1;
     wctx_init(&m->wctx, n_tensors);
 
-    m->embed_tokens = gf_load_tensor(&m->wctx, gf, "embed_tokens.weight");
-    m->final_norm   = gf_load_tensor_f32(&m->wctx, gf, "norm.weight");
+    m->embed_tokens = ws_load_tensor(&m->wctx, ws, "embed_tokens.weight");
+    m->final_norm   = ws_load_tensor_f32(&m->wctx, ws, "norm.weight");
 
-    fprintf(stderr, "[Load] TextEncoder: %dL, H=%d, Nh=%d/%d\n", m->cfg.n_layers, m->cfg.hidden_size, m->cfg.n_heads,
-            m->cfg.n_kv_heads);
+    fprintf(stderr, "[Load] TextEncoder: %dL, H=%d, Nh=%d/%d%s\n", m->cfg.n_layers, m->cfg.hidden_size, m->cfg.n_heads,
+            m->cfg.n_kv_heads, is_st ? " (safetensors)" : " (GGUF)");
     for (int i = 0; i < m->cfg.n_layers; i++) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix, i);
+        qwen3_load_layer(&m->wctx, ws, &m->layers[i], prefix, i);
     }
 
     if (!wctx_alloc(&m->wctx, m->backend)) {
-        gf_close(&gf);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
     return true;
 }

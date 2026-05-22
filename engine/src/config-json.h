@@ -12,12 +12,28 @@
 
 // ─── DiT config from config.json ─────────────────────────────────────
 
-struct DiTGGMLConfig;  // forward decl from dit.h
+// DiT config struct (also used by dit.h)
+struct DiTGGMLConfig {
+    int   hidden_size       = 0;
+    int   intermediate_size = 0;
+    int   n_heads           = 0;
+    int   n_kv_heads        = 0;
+    int   head_dim          = 0;
+    int   n_layers          = 0;
+    int   in_channels       = 0;
+    int   out_channels      = 0;
+    int   patch_size        = 0;
+    int   sliding_window    = 0;
+    float rope_theta        = 0.0f;
+    float rms_norm_eps      = 0.0f;
+};
 
 // Read DiT config values from config.json.
 // Maps HuggingFace config keys to DiTGGMLConfig fields.
+// Template to defer type checking until instantiation (avoids incomplete type errors).
 // Returns true on success.
-static bool config_json_load_dit(DiTGGMLConfig * cfg, const char * json_path) {
+template<typename T>
+static bool config_json_load_dit(T * cfg, const char * json_path) {
     yyjson_doc * doc = yyjson_read_file(json_path, 0, NULL, NULL);
     if (!doc) {
         fprintf(stderr, "[Config] Cannot read %s\n", json_path);
@@ -70,9 +86,9 @@ static bool config_json_load_dit(DiTGGMLConfig * cfg, const char * json_path) {
 
 // ─── Qwen3 config from config.json ───────────────────────────────────
 
-struct Qwen3Config;  // forward decl from qwen3-enc.h
-
-static bool config_json_load_qwen3(Qwen3Config * cfg, const char * json_path) {
+// Template to defer type checking until instantiation.
+template<typename T>
+static bool config_json_load_qwen3(T * cfg, const char * json_path) {
     yyjson_doc * doc = yyjson_read_file(json_path, 0, NULL, NULL);
     if (!doc) {
         fprintf(stderr, "[Config] Cannot read %s\n", json_path);
@@ -102,6 +118,67 @@ static bool config_json_load_qwen3(Qwen3Config * cfg, const char * json_path) {
         cfg->rope_theta = (float) yyjson_get_num(v);
     if ((v = yyjson_obj_get(root, "rms_norm_eps")) && yyjson_is_num(v))
         cfg->rms_norm_eps = (float) yyjson_get_num(v);
+
+    yyjson_doc_free(doc);
+    return true;
+}
+
+// ─── Qwen3 LM config from config.json ────────────────────────────────
+
+// LM config struct (also used by qwen3-lm.h)
+struct Qwen3LMConfig {
+    int   vocab_size        = 0;
+    int   hidden_size       = 0;
+    int   intermediate_size = 0;
+    int   n_heads           = 0;
+    int   n_kv_heads        = 0;
+    int   head_dim          = 0;
+    int   n_layers          = 0;
+    float rope_theta        = 0.0f;
+    float rms_norm_eps      = 0.0f;
+    bool  tie_embeddings    = true;
+    int   max_seq_len       = 8192;
+};
+
+// Read Qwen3 LM config from config.json sidecar.
+// Maps HuggingFace Qwen3ForCausalLM config keys to Qwen3LMConfig fields.
+// Template to defer type checking until instantiation.
+// Returns true on success.
+template<typename T>
+static bool config_json_load_lm(T * cfg, const char * json_path) {
+    yyjson_doc * doc = yyjson_read_file(json_path, 0, NULL, NULL);
+    if (!doc) {
+        fprintf(stderr, "[Config] Cannot read %s\n", json_path);
+        return false;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root)) {
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    yyjson_val * v;
+
+    if ((v = yyjson_obj_get(root, "vocab_size")) && yyjson_is_int(v))
+        cfg->vocab_size = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "hidden_size")) && yyjson_is_int(v))
+        cfg->hidden_size = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "intermediate_size")) && yyjson_is_int(v))
+        cfg->intermediate_size = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "num_attention_heads")) && yyjson_is_int(v))
+        cfg->n_heads = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "num_key_value_heads")) && yyjson_is_int(v))
+        cfg->n_kv_heads = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "head_dim")) && yyjson_is_int(v))
+        cfg->head_dim = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "num_hidden_layers")) && yyjson_is_int(v))
+        cfg->n_layers = (int) yyjson_get_int(v);
+    if ((v = yyjson_obj_get(root, "rope_theta")) && yyjson_is_num(v))
+        cfg->rope_theta = (float) yyjson_get_num(v);
+    if ((v = yyjson_obj_get(root, "rms_norm_eps")) && yyjson_is_num(v))
+        cfg->rms_norm_eps = (float) yyjson_get_num(v);
+    if ((v = yyjson_obj_get(root, "tie_word_embeddings")) && yyjson_is_bool(v))
+        cfg->tie_embeddings = yyjson_get_bool(v);
 
     yyjson_doc_free(doc);
     return true;

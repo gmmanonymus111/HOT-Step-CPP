@@ -13,6 +13,7 @@
 
 #pragma once
 #include "qwen3-enc.h"
+#include "weight-source.h"
 
 // Lyric/Timbre encoder configs
 static Qwen3Config qwen3_lyric_config() {
@@ -80,8 +81,8 @@ struct CondGGML {
     WeightCtx            wctx;
 };
 
-// Load from ACEStep DiT GGUF
-// gguf_path: path to the DiT .gguf file
+// Load from ACEStep DiT GGUF or safetensors directory
+// gguf_path: path to the DiT .gguf file or directory
 // Tensors have prefix "encoder." for lyric/timbre, and "null_condition_emb"
 static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     // Backend init
@@ -95,15 +96,48 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     m->lyric_cfg  = qwen3_lyric_config();
     m->timbre_cfg = qwen3_timbre_config();
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !ends_with_gguf(gguf_path);
+
+    GGUFModel gf = {};
+    STMulti sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        if (!st_multi_open(&sm, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot open safetensors in %s\n", gguf_path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm = &sm;
+        // No name prefix needed for DiT/cond-enc tensors
+    } else {
+        if (!gf_load(&gf, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
     // XL models have encoder_hidden_size in GGUF metadata (2B models omit it).
     // When present, the timbre encoder prepends a learned CLS token.
-    m->use_timbre_cls = (gf_get_u32(gf, "acestep.encoder_hidden_size") > 0);
+    if (is_st) {
+        // Read from config.json sidecar
+        std::string cfg_path = std::string(gguf_path) + WS_SEP + "config.json";
+        yyjson_doc * doc = yyjson_read_file(cfg_path.c_str(), 0, NULL, NULL);
+        int ehs = 0;
+        if (doc) {
+            yyjson_val * root = yyjson_doc_get_root(doc);
+            if (root && yyjson_is_obj(root)) {
+                yyjson_val * v = yyjson_obj_get(root, "encoder_hidden_size");
+                if (v && yyjson_is_int(v)) ehs = (int) yyjson_get_int(v);
+            }
+            yyjson_doc_free(doc);
+        }
+        m->use_timbre_cls = (ehs > 0);
+    } else {
+        m->use_timbre_cls = (gf_get_u32(gf, "acestep.encoder_hidden_size") > 0);
+    }
 
     // Count tensors:
     // lyric: embed_w(1) + embed_b(1) + 8 layers x 11(88) + norm(1) = 91
@@ -113,45 +147,46 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     wctx_init(&m->wctx, n_tensors);
 
     // Lyric encoder
-    m->lyric_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.weight");
-    m->lyric_embed_b = gf_load_tensor_f32(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.bias");
-    m->lyric_norm    = gf_load_tensor_f32(&m->wctx, gf, "encoder.lyric_encoder.norm.weight");
+    m->lyric_embed_w = ws_load_tensor(&m->wctx, ws, "encoder.lyric_encoder.embed_tokens.weight");
+    m->lyric_embed_b = ws_load_tensor_f32(&m->wctx, ws, "encoder.lyric_encoder.embed_tokens.bias");
+    m->lyric_norm    = ws_load_tensor_f32(&m->wctx, ws, "encoder.lyric_encoder.norm.weight");
     fprintf(stderr, "[Load] LyricEncoder: %dL\n", m->lyric_cfg.n_layers);
     for (int i = 0; i < m->lyric_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.lyric_encoder.layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->lyric_layers[i], prefix, i);
+        qwen3_load_layer(&m->wctx, ws, &m->lyric_layers[i], prefix, i);
     }
 
     // Timbre encoder
-    m->timbre_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.weight");
-    m->timbre_embed_b = gf_load_tensor_f32(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.bias");
-    m->timbre_norm    = gf_load_tensor_f32(&m->wctx, gf, "encoder.timbre_encoder.norm.weight");
+    m->timbre_embed_w = ws_load_tensor(&m->wctx, ws, "encoder.timbre_encoder.embed_tokens.weight");
+    m->timbre_embed_b = ws_load_tensor_f32(&m->wctx, ws, "encoder.timbre_encoder.embed_tokens.bias");
+    m->timbre_norm    = ws_load_tensor_f32(&m->wctx, ws, "encoder.timbre_encoder.norm.weight");
     fprintf(stderr, "[Load] TimbreEncoder: %dL\n", m->timbre_cfg.n_layers);
     for (int i = 0; i < m->timbre_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.timbre_encoder.layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->timbre_layers[i], prefix, i);
+        qwen3_load_layer(&m->wctx, ws, &m->timbre_layers[i], prefix, i);
     }
 
     // Timbre CLS token (XL only)
     m->timbre_cls = NULL;
     if (m->use_timbre_cls) {
-        m->timbre_cls = gf_load_tensor_f32(&m->wctx, gf, "encoder.timbre_encoder.special_token");
+        m->timbre_cls = ws_load_tensor_f32(&m->wctx, ws, "encoder.timbre_encoder.special_token");
     }
 
     // Text projector + null condition
-    m->text_proj_w   = gf_load_tensor(&m->wctx, gf, "encoder.text_projector.weight");
-    m->null_cond_emb = gf_load_tensor(&m->wctx, gf, "null_condition_emb");
+    m->text_proj_w   = ws_load_tensor(&m->wctx, ws, "encoder.text_projector.weight");
+    m->null_cond_emb = ws_load_tensor(&m->wctx, ws, "null_condition_emb");
 
     if (!wctx_alloc(&m->wctx, m->backend)) {
-        gf_close(&gf);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
-    fprintf(stderr, "[Load] CondEncoder: lyric(%dL), timbre(%dL%s), text_proj, null_cond\n", m->lyric_cfg.n_layers,
-            m->timbre_cfg.n_layers, m->use_timbre_cls ? ", CLS" : "");
+    fprintf(stderr, "[Load] CondEncoder: lyric(%dL), timbre(%dL%s), text_proj, null_cond%s\n", m->lyric_cfg.n_layers,
+            m->timbre_cfg.n_layers, m->use_timbre_cls ? ", CLS" : "",
+            is_st ? " (safetensors)" : " (GGUF)");
     return true;
 }
 

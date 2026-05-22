@@ -10,6 +10,7 @@
 
 #pragma once
 #include "qwen3-enc.h"
+#include "weight-source.h"
 
 // FSQ constants
 static const int FSQ_NDIMS     = 6;
@@ -65,7 +66,7 @@ struct DetokGGML {
     WeightCtx            wctx;
 };
 
-// Load from DiT GGUF
+// Load from DiT GGUF or safetensors directory
 static bool detok_ggml_load(DetokGGML * m, const char * gguf_path) {
     m->cfg = detok_config();
 
@@ -74,38 +75,55 @@ static bool detok_ggml_load(DetokGGML * m, const char * gguf_path) {
     m->cpu_backend    = bp.cpu_backend;
     m->use_flash_attn = bp.has_gpu;
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !ends_with_gguf(gguf_path);
+
+    GGUFModel gf = {};
+    STMulti sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        if (!st_multi_open(&sm, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot open safetensors in %s\n", gguf_path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm = &sm;
+        // No name prefix needed for DiT/FSQ tensors
+    } else {
+        if (!gf_load(&gf, gguf_path)) {
+            fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
     // FSQ(2) + embed(2) + special(1) + 2 layers x 11(22) + norm(1) + proj(2) = 30
     wctx_init(&m->wctx, 30);
 
-    m->fsq_proj_w = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_out.weight");
-    m->fsq_proj_b = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_out.bias");
+    m->fsq_proj_w = ws_load_tensor(&m->wctx, ws, "tokenizer.quantizer.project_out.weight");
+    m->fsq_proj_b = ws_load_tensor(&m->wctx, ws, "tokenizer.quantizer.project_out.bias");
 
-    m->embed_w    = gf_load_tensor(&m->wctx, gf, "detokenizer.embed_tokens.weight");
-    m->embed_b    = gf_load_tensor(&m->wctx, gf, "detokenizer.embed_tokens.bias");
-    m->norm       = gf_load_tensor(&m->wctx, gf, "detokenizer.norm.weight");
-    m->proj_out_w = gf_load_tensor(&m->wctx, gf, "detokenizer.proj_out.weight");
-    m->proj_out_b = gf_load_tensor(&m->wctx, gf, "detokenizer.proj_out.bias");
+    m->embed_w    = ws_load_tensor(&m->wctx, ws, "detokenizer.embed_tokens.weight");
+    m->embed_b    = ws_load_tensor(&m->wctx, ws, "detokenizer.embed_tokens.bias");
+    m->norm       = ws_load_tensor(&m->wctx, ws, "detokenizer.norm.weight");
+    m->proj_out_w = ws_load_tensor(&m->wctx, ws, "detokenizer.proj_out.weight");
+    m->proj_out_b = ws_load_tensor(&m->wctx, ws, "detokenizer.proj_out.bias");
 
     // special_tokens: GGUF [2048, 5, 1] (ggml order), reshape to [2048, 5]
-    m->special_tok = gf_load_tensor(&m->wctx, gf, "detokenizer.special_tokens");
+    m->special_tok = ws_load_tensor(&m->wctx, ws, "detokenizer.special_tokens");
 
     for (int i = 0; i < m->cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "detokenizer.layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix);
+        qwen3_load_layer(&m->wctx, ws, &m->layers[i], prefix);
     }
 
     if (!wctx_alloc(&m->wctx, m->backend)) {
-        gf_close(&gf);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
     // Scheduler
     m->sched = backend_sched_new(bp, 4096);
@@ -114,7 +132,8 @@ static bool detok_ggml_load(DetokGGML * m, const char * gguf_path) {
         return false;
     }
 
-    fprintf(stderr, "[Load] Detokenizer: FSQ(6->2048) + 2L encoder(S=5, 2048->64)\n");
+    fprintf(stderr, "[Load] Detokenizer: FSQ(6->2048) + 2L encoder(S=5, 2048->64)%s\n",
+            is_st ? " (safetensors)" : " (GGUF)");
     return true;
 }
 

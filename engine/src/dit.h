@@ -11,30 +11,20 @@
 #include "adapter-merge.h"
 #include "adapter-runtime.h"
 #include "backend.h"
+#include "config-json.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
 #include "timer.h"
+#include "weight-source.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
-// Config (populated from GGUF metadata by dit_ggml_load)
-struct DiTGGMLConfig {
-    int   hidden_size;
-    int   intermediate_size;
-    int   n_heads;
-    int   n_kv_heads;
-    int   head_dim;
-    int   n_layers;
-    int   in_channels;
-    int   out_channels;
-    int   patch_size;
-    int   sliding_window;
-    float rope_theta;
-    float rms_norm_eps;
-};
+// Config (populated from GGUF metadata or config.json by dit_ggml_load)
+// DiTGGMLConfig is defined in config-json.h
 
 // Layer weights
 struct DiTGGMLTembWeights {
@@ -128,39 +118,39 @@ struct DiTGGML {
     DiTLoRA lora;
 };
 
+// Helper: check if path ends with .gguf
+static bool dit_ends_with_gguf(const char * path) {
+    size_t len = strlen(path);
+    return len >= 5 && strcmp(path + len - 5, ".gguf") == 0;
+}
+
 // Load timestep embedding weights
 static void dit_ggml_load_temb(DiTGGMLTembWeights * w,
                                WeightCtx *          wctx,
-                               const GGUFModel &    gf,
+                               const WeightSource & ws,
                                const std::string &  prefix) {
-    w->linear_1_w  = gf_load_tensor(wctx, gf, prefix + ".linear_1.weight");
-    w->linear_1_b  = gf_load_tensor_f32(wctx, gf, prefix + ".linear_1.bias");
-    w->linear_2_w  = gf_load_tensor(wctx, gf, prefix + ".linear_2.weight");
-    w->linear_2_b  = gf_load_tensor_f32(wctx, gf, prefix + ".linear_2.bias");
-    w->time_proj_w = gf_load_tensor(wctx, gf, prefix + ".time_proj.weight");
-    w->time_proj_b = gf_load_tensor_f32(wctx, gf, prefix + ".time_proj.bias");
+    w->linear_1_w  = ws_load_tensor(wctx, ws, prefix + ".linear_1.weight");
+    w->linear_1_b  = ws_load_tensor_f32(wctx, ws, prefix + ".linear_1.bias");
+    w->linear_2_w  = ws_load_tensor(wctx, ws, prefix + ".linear_2.weight");
+    w->linear_2_b  = ws_load_tensor_f32(wctx, ws, prefix + ".linear_2.bias");
+    w->time_proj_w = ws_load_tensor(wctx, ws, prefix + ".time_proj.weight");
+    w->time_proj_b = ws_load_tensor_f32(wctx, ws, prefix + ".time_proj.bias");
 }
 
-// Load proj_in weight: GGUF [H, in_ch, P] -> pre-permuted 2D [in_ch*P, H] F32
+// Load proj_in weight: [H, in_ch, P] -> pre-permuted 2D [in_ch*P, H] F32
 // Eliminates runtime permute+cont in the compute graph.
 static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
-                                               const GGUFModel &   gf,
+                                               const WeightSource & ws,
                                                const std::string & name,
                                                int                 H,
                                                int                 in_ch,
                                                int                 P) {
-    int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
-    if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
+    ggml_type    src_type;
+    const void * raw = ws.data(name.c_str(), src_type);
+    if (!raw) {
+        fprintf(stderr, "[WeightSource] FATAL: tensor '%s' not found\n", name.c_str());
         exit(1);
     }
-    struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
-    if (!src) {
-        fprintf(stderr, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
-        exit(1);
-    }
-    size_t       offset = gguf_get_tensor_offset(gf.gguf, idx);
-    const void * raw    = gf.mapping + gf.data_offset + offset;
 
     struct ggml_tensor * dst = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, in_ch * P, H);
     ggml_set_name(dst, name.c_str());
@@ -180,17 +170,17 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
             }
         }
     };
-    if (src->type == GGML_TYPE_BF16) {
+    if (src_type == GGML_TYPE_BF16) {
         const uint16_t * s = (const uint16_t *) raw;
         cvt([&](int i) { return ggml_bf16_to_fp32(*(const ggml_bf16_t *) &s[i]); });
-    } else if (src->type == GGML_TYPE_F16) {
+    } else if (src_type == GGML_TYPE_F16) {
         const ggml_fp16_t * s = (const ggml_fp16_t *) raw;
         cvt([&](int i) { return ggml_fp16_to_fp32(s[i]); });
-    } else if (src->type == GGML_TYPE_F32) {
+    } else if (src_type == GGML_TYPE_F32) {
         const float * s = (const float *) raw;
         cvt([&](int i) { return s[i]; });
     } else {
-        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n", src->type, name.c_str());
+        fprintf(stderr, "[WeightSource] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n", src_type, name.c_str());
         exit(1);
     }
     wctx->pending.push_back({ dst, data, n * sizeof(float), 0 });
@@ -198,26 +188,20 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
     return dst;
 }
 
-// Load proj_out weight: GGUF [H, out_ch, P] -> pre-permuted+transposed 2D [H, out_ch*P] F32
+// Load proj_out weight: [H, out_ch, P] -> pre-permuted+transposed 2D [H, out_ch*P] F32
 // Eliminates runtime permute+cont+transpose+cont in the compute graph.
-static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
-                                                const GGUFModel &   gf,
-                                                const std::string & name,
-                                                int                 H,
-                                                int                 out_ch,
-                                                int                 P) {
-    int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
-    if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
+static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *          wctx,
+                                                const WeightSource & ws,
+                                                const std::string &  name,
+                                                int                  H,
+                                                int                  out_ch,
+                                                int                  P) {
+    ggml_type    src_type;
+    const void * raw = ws.data(name.c_str(), src_type);
+    if (!raw) {
+        fprintf(stderr, "[WeightSource] FATAL: tensor '%s' not found\n", name.c_str());
         exit(1);
     }
-    struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
-    if (!src) {
-        fprintf(stderr, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
-        exit(1);
-    }
-    size_t       offset = gguf_get_tensor_offset(gf.gguf, idx);
-    const void * raw    = gf.mapping + gf.data_offset + offset;
 
     struct ggml_tensor * dst = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, H, out_ch * P);
     ggml_set_name(dst, name.c_str());
@@ -237,17 +221,17 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
             }
         }
     };
-    if (src->type == GGML_TYPE_BF16) {
+    if (src_type == GGML_TYPE_BF16) {
         const uint16_t * s = (const uint16_t *) raw;
         cvt([&](int i) { return ggml_bf16_to_fp32(*(const ggml_bf16_t *) &s[i]); });
-    } else if (src->type == GGML_TYPE_F16) {
+    } else if (src_type == GGML_TYPE_F16) {
         const ggml_fp16_t * s = (const ggml_fp16_t *) raw;
         cvt([&](int i) { return ggml_fp16_to_fp32(s[i]); });
-    } else if (src->type == GGML_TYPE_F32) {
+    } else if (src_type == GGML_TYPE_F32) {
         const float * s = (const float *) raw;
         cvt([&](int i) { return s[i]; });
     } else {
-        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_out pre-permute\n", src->type,
+        fprintf(stderr, "[WeightSource] FATAL: unsupported type %d for '%s' in proj_out pre-permute\n", src_type,
                 name.c_str());
         exit(1);
     }
@@ -256,9 +240,9 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
     return dst;
 }
 
-// Load full DiT model from GGUF
+// Load full DiT model from GGUF or safetensors
 static bool dit_ggml_load(DiTGGML *    m,
-                          const char * gguf_path,
+                          const char * path,
                           const char * adapter_path  = nullptr,
                           float        adapter_scale = 1.0f) {
     // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
@@ -269,32 +253,60 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->sched          = backend_sched_new(bp, 8192);
     m->use_flash_attn = bp.has_gpu;
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !dit_ends_with_gguf(path);
+
+    GGUFModel gf = {};
+    STMulti   sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        if (!st_multi_open(&sm, path)) {
+            fprintf(stderr, "[DiT] FATAL: cannot open safetensors in %s\n", path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm    = &sm;
+        // No name prefix needed for DiT — names match safetensors directly
+    } else {
+        if (!gf_load(&gf, path)) {
+            fprintf(stderr, "[Load] FATAL: cannot load %s\n", path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
-    // config from GGUF metadata (all keys required)
-    DiTGGMLConfig & cfg   = m->cfg;
-    cfg.n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
-    cfg.hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
-    cfg.intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
-    cfg.n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
-    cfg.n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
-    cfg.head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
-    cfg.in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
-    cfg.out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
-    cfg.patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
-    cfg.sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
-    cfg.rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
-    cfg.rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
+    // config from GGUF metadata or config.json sidecar
+    DiTGGMLConfig & cfg = m->cfg;
+    if (is_st) {
+        // Read config from config.json sidecar
+        std::string cfg_path = std::string(path) + WS_SEP + "config.json";
+        if (!config_json_load_dit(&cfg, cfg_path.c_str())) {
+            fprintf(stderr, "[DiT] FATAL: cannot read config.json from %s\n", cfg_path.c_str());
+            st_multi_close(&sm);
+            return false;
+        }
+    } else {
+        // config from GGUF metadata (all keys required)
+        cfg.n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
+        cfg.hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
+        cfg.intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
+        cfg.n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
+        cfg.n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
+        cfg.head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
+        cfg.in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
+        cfg.out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
+        cfg.patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
+        cfg.sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
+        cfg.rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
+        cfg.rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
+    }
 
     if (!cfg.n_layers || !cfg.hidden_size || !cfg.intermediate_size || !cfg.n_heads || !cfg.n_kv_heads ||
         !cfg.head_dim || !cfg.in_channels || !cfg.out_channels || !cfg.patch_size || !cfg.sliding_window ||
         cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f) {
-        fprintf(stderr, "[Load] FATAL: incomplete DiT config in GGUF\n");
-        gf_close(&gf);
+        fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", path);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
 
@@ -303,18 +315,18 @@ static bool dit_ggml_load(DiTGGML *    m,
     wctx_init(&m->wctx, n_tensors);
 
     // Timestep embeddings
-    dit_ggml_load_temb(&m->time_embed, &m->wctx, gf, "decoder.time_embed");
-    dit_ggml_load_temb(&m->time_embed_r, &m->wctx, gf, "decoder.time_embed_r");
+    dit_ggml_load_temb(&m->time_embed, &m->wctx, ws, "decoder.time_embed");
+    dit_ggml_load_temb(&m->time_embed_r, &m->wctx, ws, "decoder.time_embed_r");
 
     // proj_in: Conv1d weight [hidden, in_ch, patch_size]
     // Pre-permuted to 2D [in_ch*P, H] F32 at load time
     m->proj_in_w =
-        dit_load_proj_in_w(&m->wctx, gf, "decoder.proj_in.1.weight", cfg.hidden_size, cfg.in_channels, cfg.patch_size);
-    m->proj_in_b = gf_load_tensor_f32(&m->wctx, gf, "decoder.proj_in.1.bias");
+        dit_load_proj_in_w(&m->wctx, ws, "decoder.proj_in.1.weight", cfg.hidden_size, cfg.in_channels, cfg.patch_size);
+    m->proj_in_b = ws_load_tensor_f32(&m->wctx, ws, "decoder.proj_in.1.bias");
 
     // condition_embedder
-    m->cond_emb_w = gf_load_tensor(&m->wctx, gf, "decoder.condition_embedder.weight");
-    m->cond_emb_b = gf_load_tensor_f32(&m->wctx, gf, "decoder.condition_embedder.bias");
+    m->cond_emb_w = ws_load_tensor(&m->wctx, ws, "decoder.condition_embedder.weight");
+    m->cond_emb_b = ws_load_tensor_f32(&m->wctx, ws, "decoder.condition_embedder.bias");
 
     // Layers
     for (int i = 0; i < cfg.n_layers; i++) {
@@ -326,9 +338,9 @@ static bool dit_ggml_load(DiTGGML *    m,
         // Self-attention: try full QKV, partial QK, separate
         // HOT-Step: Runtime LoRA needs individual projections (no fusion)
         bool skip_fusion = (g_hotstep_params.adapter_mode == "runtime" && adapter_path);
-        ly.self_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn_norm.weight");
+        ly.self_attn_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".self_attn_norm.weight");
         if (!skip_fusion) {
-        ly.sa_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
+        ly.sa_qkv = ws_load_qkv_fused(&m->wctx, ws, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
                                       p + ".self_attn.v_proj.weight");
         } else {
             ly.sa_qkv = nullptr;
@@ -337,19 +349,19 @@ static bool dit_ggml_load(DiTGGML *    m,
         if (!ly.sa_qkv) {
             // Try Q+K fusion (same input, often same type in K-quants)
             if (!skip_fusion) {
-            ly.sa_qk = gf_load_pair_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight");
+            ly.sa_qk = ws_load_pair_fused(&m->wctx, ws, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight");
             } else {
                 ly.sa_qk = nullptr;
             }
             if (ly.sa_qk) {
-                ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
+                ly.sa_v_proj = ws_load_tensor(&m->wctx, ws, p + ".self_attn.v_proj.weight");
                 if (i == 0) {
                     fprintf(stderr, "[DiT] Self-attn: Q+K fused, V separate\n");
                 }
             } else {
-                ly.sa_q_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_proj.weight");
-                ly.sa_k_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_proj.weight");
-                ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
+                ly.sa_q_proj = ws_load_tensor(&m->wctx, ws, p + ".self_attn.q_proj.weight");
+                ly.sa_k_proj = ws_load_tensor(&m->wctx, ws, p + ".self_attn.k_proj.weight");
+                ly.sa_v_proj = ws_load_tensor(&m->wctx, ws, p + ".self_attn.v_proj.weight");
                 if (i == 0) {
                     fprintf(stderr, "[DiT] Self-attn: all separate%s\n",
                             skip_fusion ? " (runtime LoRA)" : " (3 types differ)");
@@ -360,24 +372,24 @@ static bool dit_ggml_load(DiTGGML *    m,
                 fprintf(stderr, "[DiT] Self-attn: Q+K+V fused\n");
             }
         }
-        ly.sa_q_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.q_norm.weight");
-        ly.sa_k_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.k_norm.weight");
-        ly.sa_o_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.o_proj.weight");
+        ly.sa_q_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".self_attn.q_norm.weight");
+        ly.sa_k_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".self_attn.k_norm.weight");
+        ly.sa_o_proj = ws_load_tensor(&m->wctx, ws, p + ".self_attn.o_proj.weight");
 
         // Cross-attention: try full QKV, K+V fused, separate
-        ly.cross_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn_norm.weight");
+        ly.cross_attn_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".cross_attn_norm.weight");
         if (!skip_fusion) {
-        ly.ca_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".cross_attn.q_proj.weight", p + ".cross_attn.k_proj.weight",
+        ly.ca_qkv = ws_load_qkv_fused(&m->wctx, ws, p + ".cross_attn.q_proj.weight", p + ".cross_attn.k_proj.weight",
                                       p + ".cross_attn.v_proj.weight");
         } else {
             ly.ca_qkv = nullptr;
         }
         if (!ly.ca_qkv) {
-            ly.ca_q_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
+            ly.ca_q_proj = ws_load_tensor(&m->wctx, ws, p + ".cross_attn.q_proj.weight");
             // Try K+V fusion (same input enc, may share type)
             if (!skip_fusion) {
             ly.ca_kv =
-                gf_load_pair_fused(&m->wctx, gf, p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight");
+                ws_load_pair_fused(&m->wctx, ws, p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight");
             } else {
                 ly.ca_kv = nullptr;
             }
@@ -386,8 +398,8 @@ static bool dit_ggml_load(DiTGGML *    m,
                     fprintf(stderr, "[DiT] Cross-attn: Q separate, K+V fused\n");
                 }
             } else {
-                ly.ca_k_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_proj.weight");
-                ly.ca_v_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.v_proj.weight");
+                ly.ca_k_proj = ws_load_tensor(&m->wctx, ws, p + ".cross_attn.k_proj.weight");
+                ly.ca_v_proj = ws_load_tensor(&m->wctx, ws, p + ".cross_attn.v_proj.weight");
                 if (i == 0) {
                     fprintf(stderr, "[DiT] Cross-attn: all separate%s\n",
                             skip_fusion ? " (runtime LoRA)" : "");
@@ -398,14 +410,14 @@ static bool dit_ggml_load(DiTGGML *    m,
                 fprintf(stderr, "[DiT] Cross-attn: Q+K+V fused\n");
             }
         }
-        ly.ca_q_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.q_norm.weight");
-        ly.ca_k_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
-        ly.ca_o_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.o_proj.weight");
+        ly.ca_q_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".cross_attn.q_norm.weight");
+        ly.ca_k_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".cross_attn.k_norm.weight");
+        ly.ca_o_proj = ws_load_tensor(&m->wctx, ws, p + ".cross_attn.o_proj.weight");
 
         // MLP: try gate+up fusion (same input, same pattern as QKV)
-        ly.mlp_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".mlp_norm.weight");
+        ly.mlp_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".mlp_norm.weight");
         if (!skip_fusion) {
-        ly.gate_up  = gf_load_pair_fused(&m->wctx, gf, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight");
+        ly.gate_up  = ws_load_pair_fused(&m->wctx, ws, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight");
         } else {
             ly.gate_up = nullptr;
         }
@@ -414,30 +426,30 @@ static bool dit_ggml_load(DiTGGML *    m,
                 fprintf(stderr, "[DiT] MLP: gate+up fused\n");
             }
         } else {
-            ly.gate_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.gate_proj.weight");
-            ly.up_proj   = gf_load_tensor(&m->wctx, gf, p + ".mlp.up_proj.weight");
+            ly.gate_proj = ws_load_tensor(&m->wctx, ws, p + ".mlp.gate_proj.weight");
+            ly.up_proj   = ws_load_tensor(&m->wctx, ws, p + ".mlp.up_proj.weight");
             if (i == 0) {
                 fprintf(stderr, "[DiT] MLP: gate+up separate%s\n",
                         skip_fusion ? " (runtime LoRA)" : " (types differ)");
             }
         }
-        ly.down_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.down_proj.weight");
+        ly.down_proj = ws_load_tensor(&m->wctx, ws, p + ".mlp.down_proj.weight");
 
         // AdaLN scale_shift_table [1, 6, hidden] in GGUF
-        ly.scale_shift_table = gf_load_tensor_f32(&m->wctx, gf, p + ".scale_shift_table");
+        ly.scale_shift_table = ws_load_tensor_f32(&m->wctx, ws, p + ".scale_shift_table");
 
         ly.layer_type = (i % 2 == 0) ? 0 : 1;  // 0=sliding, 1=full
     }
 
     // Output
-    m->norm_out        = gf_load_tensor_f32(&m->wctx, gf, "decoder.norm_out.weight");
-    m->out_scale_shift = gf_load_tensor_f32(&m->wctx, gf, "decoder.scale_shift_table");
-    m->proj_out_w = dit_load_proj_out_w(&m->wctx, gf, "decoder.proj_out.1.weight", cfg.hidden_size, cfg.out_channels,
+    m->norm_out        = ws_load_tensor_f32(&m->wctx, ws, "decoder.norm_out.weight");
+    m->out_scale_shift = ws_load_tensor_f32(&m->wctx, ws, "decoder.scale_shift_table");
+    m->proj_out_w = dit_load_proj_out_w(&m->wctx, ws, "decoder.proj_out.1.weight", cfg.hidden_size, cfg.out_channels,
                                         cfg.patch_size);
-    m->proj_out_b = gf_load_tensor_f32(&m->wctx, gf, "decoder.proj_out.1.bias");
+    m->proj_out_b = ws_load_tensor_f32(&m->wctx, ws, "decoder.proj_out.1.bias");
 
     // Null condition embedding for CFG (base/sft models; turbo has it but unused at inference)
-    m->null_condition_emb = gf_try_load_tensor(&m->wctx, gf, "null_condition_emb");
+    m->null_condition_emb = ws_try_load_tensor(&m->wctx, ws, "null_condition_emb");
     if (m->null_condition_emb) {
         fprintf(stderr, "[Load] null_condition_emb found (CFG available)\n");
     }
@@ -449,39 +461,48 @@ static bool dit_ggml_load(DiTGGML *    m,
 
     // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
     // HOT-Step: skip merge in runtime mode — runtime adapter loaded after wctx_alloc
-    bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
-    if (adapter_path && !runtime_mode) {
-        Timer adapter_timer;
-        if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
-            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
-            gf_close(&gf);
-            return false;
+    if (adapter_path && is_st) {
+        // Adapter merge with safetensors base model not yet supported
+        fprintf(stderr, "[DiT] WARNING: adapter merge with safetensors base model not yet supported, adapter ignored\n");
+        // TODO: refactor adapter-merge.h to take WeightSource instead of GGUFModel
+    } else if (adapter_path && !is_st) {
+        bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
+        if (!runtime_mode) {
+            Timer adapter_timer;
+            if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
+                fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
+                gf_close(&gf);
+                return false;
+            }
+            fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
+        } else {
+            fprintf(stderr, "[Adapter] mode=runtime, deferring delta precompute\n");
         }
-        fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
-    } else if (adapter_path && runtime_mode) {
-        fprintf(stderr, "[Adapter] mode=runtime, deferring delta precompute\n");
     }
 
     // Allocate backend buffer and copy weights
     if (!wctx_alloc(&m->wctx, m->backend)) {
-        gf_close(&gf);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
 
     // HOT-Step: load runtime adapter AFTER wctx_alloc (base weights on GPU first)
-    if (adapter_path && runtime_mode) {
-        Timer rt_timer;
-        if (!adapter_load_runtime(&m->lora, gf, adapter_path, adapter_scale,
-                                   g_hotstep_params.adapter_group_scales, m->backend)) {
-            fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed, continuing without adapter\n");
+    if (adapter_path && !is_st) {
+        bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
+        if (runtime_mode) {
+            Timer rt_timer;
+            if (!adapter_load_runtime(&m->lora, gf, adapter_path, adapter_scale,
+                                       g_hotstep_params.adapter_group_scales, m->backend)) {
+                fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed, continuing without adapter\n");
+            }
+            fprintf(stderr, "[Adapter-RT] Load time: %.1f ms\n", rt_timer.ms());
         }
-        fprintf(stderr, "[Adapter-RT] Load time: %.1f ms\n", rt_timer.ms());
     }
 
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
-    fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d\n", cfg.n_layers, cfg.hidden_size, cfg.n_heads,
-            cfg.n_kv_heads, cfg.head_dim);
+    fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d%s\n", cfg.n_layers, cfg.hidden_size, cfg.n_heads,
+            cfg.n_kv_heads, cfg.head_dim, is_st ? " (safetensors)" : " (GGUF)");
     return true;
 }
 
@@ -495,34 +516,44 @@ static void dit_ggml_free(DiTGGML * m) {
     *m = {};
 }
 
-// Read DiT config from GGUF metadata without loading any tensor weights.
+// Read DiT config from GGUF metadata or config.json without loading any tensor weights.
 // Used by the orchestrator to keep patch_size, in_channels, out_channels
 // accessible during text encoding while the DiT itself is not yet loaded.
 // Returns true on success, false on I/O or missing key.
-static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * gguf_path) {
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
+static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * path) {
+    bool is_st = !dit_ends_with_gguf(path);
+
+    if (is_st) {
+        std::string cfg_path = std::string(path) + WS_SEP + "config.json";
+        if (!config_json_load_dit(cfg, cfg_path.c_str())) {
+            fprintf(stderr, "[Load] FATAL: cannot read config from %s\n", cfg_path.c_str());
+            return false;
+        }
+    } else {
+        GGUFModel gf;
+        if (!gf_load(&gf, path)) {
+            fprintf(stderr, "[Load] FATAL: cannot load %s\n", path);
+            return false;
+        }
+        cfg->n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
+        cfg->hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
+        cfg->intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
+        cfg->n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
+        cfg->n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
+        cfg->head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
+        cfg->in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
+        cfg->out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
+        cfg->patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
+        cfg->sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
+        cfg->rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
+        cfg->rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
+        gf_close(&gf);
     }
-    cfg->n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
-    cfg->hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
-    cfg->intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
-    cfg->n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
-    cfg->n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
-    cfg->head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
-    cfg->in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
-    cfg->out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
-    cfg->patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
-    cfg->sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
-    cfg->rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
-    cfg->rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
-    gf_close(&gf);
 
     if (!cfg->n_layers || !cfg->hidden_size || !cfg->intermediate_size || !cfg->n_heads || !cfg->n_kv_heads ||
         !cfg->head_dim || !cfg->in_channels || !cfg->out_channels || !cfg->patch_size || !cfg->sliding_window ||
         cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f) {
-        fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", gguf_path);
+        fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", path);
         return false;
     }
     return true;

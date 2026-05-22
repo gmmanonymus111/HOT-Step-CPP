@@ -14,6 +14,7 @@
 #pragma once
 #include "fsq-detok.h"
 #include "qwen3-enc.h"
+#include "weight-source.h"
 
 struct TokGGML {
     // audio_acoustic_proj: Linear(64, 2048)
@@ -62,7 +63,7 @@ static int fsq_encode_index(const float * raw_vals) {
     return index;
 }
 
-// Load tokenizer weights from DiT GGUF
+// Load tokenizer weights from DiT GGUF or safetensors directory
 static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
     BackendPair bp    = backend_init("Tokenizer");
     m->backend        = bp.backend;
@@ -80,35 +81,52 @@ static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
     m->cfg.rope_theta        = 1000000.0f;
     m->cfg.is_causal         = false;
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[Tok] FATAL: cannot load %s\n", gguf_path);
-        return false;
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !ends_with_gguf(gguf_path);
+
+    GGUFModel gf = {};
+    STMulti sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        if (!st_multi_open(&sm, gguf_path)) {
+            fprintf(stderr, "[Tok] FATAL: cannot open safetensors in %s\n", gguf_path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm = &sm;
+        // No name prefix needed for DiT/FSQ tensors
+    } else {
+        if (!gf_load(&gf, gguf_path)) {
+            fprintf(stderr, "[Tok] FATAL: cannot load %s\n", gguf_path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
     // proj(2) + embed(2) + special(1) + 2 layers x 11(22) + norm(1) + fsq_in(2) = 30
     wctx_init(&m->wctx, 30);
 
-    m->proj_w      = gf_load_tensor(&m->wctx, gf, "tokenizer.audio_acoustic_proj.weight");
-    m->proj_b      = gf_load_tensor(&m->wctx, gf, "tokenizer.audio_acoustic_proj.bias");
-    m->embed_w     = gf_load_tensor(&m->wctx, gf, "tokenizer.attention_pooler.embed_tokens.weight");
-    m->embed_b     = gf_load_tensor(&m->wctx, gf, "tokenizer.attention_pooler.embed_tokens.bias");
-    m->special_tok = gf_load_tensor(&m->wctx, gf, "tokenizer.attention_pooler.special_token");
-    m->norm        = gf_load_tensor(&m->wctx, gf, "tokenizer.attention_pooler.norm.weight");
-    m->fsq_in_w    = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_in.weight");
-    m->fsq_in_b    = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_in.bias");
+    m->proj_w      = ws_load_tensor(&m->wctx, ws, "tokenizer.audio_acoustic_proj.weight");
+    m->proj_b      = ws_load_tensor(&m->wctx, ws, "tokenizer.audio_acoustic_proj.bias");
+    m->embed_w     = ws_load_tensor(&m->wctx, ws, "tokenizer.attention_pooler.embed_tokens.weight");
+    m->embed_b     = ws_load_tensor(&m->wctx, ws, "tokenizer.attention_pooler.embed_tokens.bias");
+    m->special_tok = ws_load_tensor(&m->wctx, ws, "tokenizer.attention_pooler.special_token");
+    m->norm        = ws_load_tensor(&m->wctx, ws, "tokenizer.attention_pooler.norm.weight");
+    m->fsq_in_w    = ws_load_tensor(&m->wctx, ws, "tokenizer.quantizer.project_in.weight");
+    m->fsq_in_b    = ws_load_tensor(&m->wctx, ws, "tokenizer.quantizer.project_in.bias");
 
     for (int i = 0; i < 2; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "tokenizer.attention_pooler.layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix);
+        qwen3_load_layer(&m->wctx, ws, &m->layers[i], prefix);
     }
 
     if (!wctx_alloc(&m->wctx, m->backend)) {
-        gf_close(&gf);
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
         return false;
     }
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
     // Scheduler
     m->sched = backend_sched_new(bp, 4096);
@@ -117,7 +135,8 @@ static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
         return false;
     }
 
-    fprintf(stderr, "[Tok] Loaded: 2 layers, H=%d, pool_window=5\n", m->cfg.hidden_size);
+    fprintf(stderr, "[Tok] Loaded: 2 layers, H=%d, pool_window=5%s\n", m->cfg.hidden_size,
+            is_st ? " (safetensors)" : " (GGUF)");
     return true;
 }
 

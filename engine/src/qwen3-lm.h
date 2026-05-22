@@ -1,9 +1,11 @@
 // qwen3-lm.h : Qwen3 causal LM with KV cache (GGML)
 // Autoregressive text + audio code generation for ACE-Step
-// Loads from GGUF, supports prefill + decode, tied lm_head
+// Loads from GGUF or safetensors, supports prefill + decode, tied lm_head
 #pragma once
 
+#include "config-json.h"
 #include "qwen3-enc.h"  // Qwen3Layer, Qwen3Config, layer build helpers
+#include "weight-source.h"
 
 #include <cmath>
 #include <cstdio>
@@ -12,19 +14,7 @@
 #include <vector>
 
 // LM config (superset of encoder config)
-struct Qwen3LMConfig {
-    int   vocab_size;
-    int   hidden_size;
-    int   intermediate_size;
-    int   n_heads;
-    int   n_kv_heads;
-    int   head_dim;
-    int   n_layers;
-    float rope_theta;
-    float rms_norm_eps;
-    bool  tie_embeddings;
-    int   max_seq_len;  // KV cache capacity
-};
+// Qwen3LMConfig is defined in config-json.h
 
 // KV cache set (one per CFG path: conditional + unconditional)
 #define QW3LM_MAX_KV_SETS 32  // batch N * 2 (cond + uncond CFG)
@@ -120,8 +110,8 @@ static bool qw3lm_json_bool(const char * json, const char * key, bool fb) {
     return (strncmp(p, "true", 4) == 0);
 }
 
-// Load config from GGUF KV metadata (acestep.config_json)
-static Qwen3LMConfig qw3lm_load_config(const GGUFModel & gf) {
+// Load config from GGUF KV metadata (acestep.config_json) or config.json sidecar
+static Qwen3LMConfig qw3lm_load_config(const char * path, bool is_st) {
     // 0.6B defaults
     Qwen3LMConfig c = {
         /*vocab_size*/ 217204,
@@ -137,25 +127,42 @@ static Qwen3LMConfig qw3lm_load_config(const GGUFModel & gf) {
         /*max_seq_len*/ 8192,
     };
 
-    const char * j = gf_get_str(gf, "acestep.config_json");
-    if (!j || !j[0]) {
-        fprintf(stderr, "[LM-Config] No acestep.config_json, using 0.6B defaults\n");
-        return c;
+    if (is_st) {
+        // Safetensors: read from config.json sidecar
+        std::string cfg_path = std::string(path) + WS_SEP + "config.json";
+        if (!config_json_load_lm(&c, cfg_path.c_str())) {
+            fprintf(stderr, "[LM-Config] Cannot read %s, using 0.6B defaults\n", cfg_path.c_str());
+        }
+    } else {
+        // GGUF: read from KV metadata
+        GGUFModel gf_tmp;
+        if (!gf_load(&gf_tmp, path)) {
+            fprintf(stderr, "[LM-Config] Cannot load %s for config, using 0.6B defaults\n", path);
+            return c;
+        }
+        const char * j = gf_get_str(gf_tmp, "acestep.config_json");
+        if (!j || !j[0]) {
+            fprintf(stderr, "[LM-Config] No acestep.config_json, using 0.6B defaults\n");
+            gf_close(&gf_tmp);
+            return c;
+        }
+
+        c.vocab_size        = qw3lm_json_int(j, "vocab_size", c.vocab_size);
+        c.hidden_size       = qw3lm_json_int(j, "hidden_size", c.hidden_size);
+        c.intermediate_size = qw3lm_json_int(j, "intermediate_size", c.intermediate_size);
+        c.n_heads           = qw3lm_json_int(j, "num_attention_heads", c.n_heads);
+        c.n_kv_heads        = qw3lm_json_int(j, "num_key_value_heads", c.n_kv_heads);
+        c.head_dim          = qw3lm_json_int(j, "head_dim", c.head_dim);
+        c.n_layers          = qw3lm_json_int(j, "num_hidden_layers", c.n_layers);
+        c.rope_theta        = qw3lm_json_float(j, "rope_theta", c.rope_theta);
+        c.rms_norm_eps      = qw3lm_json_float(j, "rms_norm_eps", c.rms_norm_eps);
+        c.tie_embeddings    = qw3lm_json_bool(j, "tie_word_embeddings", c.tie_embeddings);
+        gf_close(&gf_tmp);
     }
 
-    c.vocab_size        = qw3lm_json_int(j, "vocab_size", c.vocab_size);
-    c.hidden_size       = qw3lm_json_int(j, "hidden_size", c.hidden_size);
-    c.intermediate_size = qw3lm_json_int(j, "intermediate_size", c.intermediate_size);
-    c.n_heads           = qw3lm_json_int(j, "num_attention_heads", c.n_heads);
-    c.n_kv_heads        = qw3lm_json_int(j, "num_key_value_heads", c.n_kv_heads);
-    c.head_dim          = qw3lm_json_int(j, "head_dim", c.head_dim);
-    c.n_layers          = qw3lm_json_int(j, "num_hidden_layers", c.n_layers);
-    c.rope_theta        = qw3lm_json_float(j, "rope_theta", c.rope_theta);
-    c.rms_norm_eps      = qw3lm_json_float(j, "rms_norm_eps", c.rms_norm_eps);
-    c.tie_embeddings    = qw3lm_json_bool(j, "tie_word_embeddings", c.tie_embeddings);
-
-    fprintf(stderr, "[LM-Config] %dL, H=%d, V=%d, Nh=%d, Nkv=%d, D=%d, tied=%d\n", c.n_layers, c.hidden_size,
-            c.vocab_size, c.n_heads, c.n_kv_heads, c.head_dim, c.tie_embeddings);
+    fprintf(stderr, "[LM-Config] %dL, H=%d, V=%d, Nh=%d, Nkv=%d, D=%d, tied=%d%s\n", c.n_layers, c.hidden_size,
+            c.vocab_size, c.n_heads, c.n_kv_heads, c.head_dim, c.tie_embeddings,
+            is_st ? " (safetensors)" : " (GGUF)");
     return c;
 }
 
@@ -234,19 +241,16 @@ static void qw3lm_copy_kv(Qwen3LM * m, int src, int dst) {
     m->kv_pos[dst] = m->kv_pos[src];
 }
 
-// Load model weights from GGUF
-static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int n_kv_sets) {
+// Load model weights from GGUF or safetensors
+static bool qw3lm_load(Qwen3LM * m, const char * path, int max_seq_len, int n_kv_sets) {
     *m = {};
 
     qw3lm_init_backend(m);
 
-    GGUFModel gf;
-    if (!gf_load(&gf, gguf_path)) {
-        fprintf(stderr, "[LM-Load] FATAL: cannot load %s\n", gguf_path);
-        return false;
-    }
+    // Detect format: .gguf → GGUF path, directory → safetensors path
+    bool is_st = !ends_with_gguf(path);
 
-    m->cfg = qw3lm_load_config(gf);
+    m->cfg = qw3lm_load_config(path, is_st);
     if (max_seq_len > 0) {
         m->cfg.max_seq_len = max_seq_len;
     }
@@ -254,29 +258,49 @@ static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int
 
     if (c.n_layers > QW3LM_MAX_LAYERS) {
         fprintf(stderr, "[LM-Load] FATAL: %d layers > max %d\n", c.n_layers, QW3LM_MAX_LAYERS);
-        gf_close(&gf);
         return false;
+    }
+
+    GGUFModel gf = {};
+    STMulti   sm = {};
+    WeightSource ws;
+
+    if (is_st) {
+        if (!st_multi_open(&sm, path)) {
+            fprintf(stderr, "[LM-Load] FATAL: cannot open safetensors in %s\n", path);
+            return false;
+        }
+        ws.is_st = true;
+        ws.sm    = &sm;
+        // LM uses model. prefix in both GGUF and HF safetensors — names match, no prefix needed
+    } else {
+        if (!gf_load(&gf, path)) {
+            fprintf(stderr, "[LM-Load] FATAL: cannot load %s\n", path);
+            return false;
+        }
+        ws.gf = &gf;
     }
 
     // embed(1) + layers * 11 + final_norm(1) = 2 + n_layers * 11
     int n_tensors = 2 + c.n_layers * 11;
     wctx_init(&m->wctx, n_tensors);
 
-    m->embed_tokens = gf_load_tensor(&m->wctx, gf, "model.embed_tokens.weight");
-    m->final_norm   = gf_load_tensor_f32(&m->wctx, gf, "model.norm.weight");
+    m->embed_tokens = ws_load_tensor(&m->wctx, ws, "model.embed_tokens.weight");
+    m->final_norm   = ws_load_tensor_f32(&m->wctx, ws, "model.norm.weight");
 
     for (int i = 0; i < c.n_layers; i++) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "model.layers.%d", i);
-        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix, i);
+        qwen3_load_layer(&m->wctx, ws, &m->layers[i], prefix, i);
     }
 
     wctx_alloc(&m->wctx, m->backend);
-    gf_close(&gf);
+    if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
 
     // KV cache
     qw3lm_alloc_kv_cache(m, n_kv_sets > 0 ? n_kv_sets : 1);
 
+    fprintf(stderr, "[LM-Load] %d layers loaded%s\n", c.n_layers, is_st ? " (safetensors)" : " (GGUF)");
     return true;
 }
 
