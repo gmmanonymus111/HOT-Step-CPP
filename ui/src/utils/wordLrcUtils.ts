@@ -13,6 +13,7 @@ export interface LyricsLine {
   end: number;
   text: string;
   words: LyricsWord[];
+  section?: string;
 }
 
 export interface LyricsJson {

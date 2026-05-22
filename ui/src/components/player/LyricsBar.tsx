@@ -73,6 +73,11 @@ export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) =
     const wordLine = wordData && wordLineIdx >= 0 ? wordData.lines[wordLineIdx] : null;
     const activeWordIdx = wordLine ? findActiveWordIndex(wordLine.words, currentTime) : -1;
 
+    // Section marker — show when the current line's section differs from the previous
+    const currentSection = wordLine?.section || null;
+    const prevSection = wordData && wordLineIdx > 0 ? wordData.lines[wordLineIdx - 1]?.section : null;
+    const showSection = currentSection && currentSection !== prevSection;
+
     // Derive display text for LRC fallback
     const displayText = currentIdx >= 0 ? lines[currentIdx]?.text ?? '' : '';
 
@@ -101,7 +106,16 @@ export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) =
                 className="overflow-hidden transition-all duration-300 ease-out"
                 style={{ maxHeight: expanded ? '60px' : '0px', opacity: expanded ? 1 : 0 }}
             >
-                <div className="px-8 pb-3 flex items-center justify-center">
+                <div className="px-8 pb-3 flex items-center justify-center gap-3">
+                    {/* Section badge */}
+                    {showSection && (
+                        <span
+                            className="flex-shrink-0 px-2.5 py-0.5 rounded-full text-[10px] font-semibold tracking-wider uppercase bg-gradient-to-r from-violet-500/25 to-pink-500/25 text-violet-300 border border-violet-500/20"
+                            style={{ animation: 'fade-in 0.3s ease-out' }}
+                        >
+                            {currentSection}
+                        </span>
+                    )}
                     <span
                         className="text-lg md:text-xl font-bold text-white tracking-wide text-center transition-opacity duration-300"
                         style={{
