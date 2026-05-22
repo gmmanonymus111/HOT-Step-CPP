@@ -12,8 +12,11 @@
 
 #include "model-store.h"
 
+#include "config-json.h"
 #include "gguf-weights.h"
+#include "silence-latent.h"
 #include "timer.h"
+#include "weight-source.h"
 
 #include <cassert>
 #include <cstdio>
@@ -516,7 +519,22 @@ BPETokenizer * store_bpe(ModelStore * s, const char * lm_path) {
         return static_cast<BPETokenizer *>(it->second.ptr);
     }
     auto * bpe = new BPETokenizer();
-    if (!load_bpe_from_gguf(bpe, lm_path)) {
+
+    // Detect format: .gguf file or safetensors directory
+    bool loaded = false;
+    size_t len = strlen(lm_path);
+    bool is_gguf = (len >= 5 && strcmp(lm_path + len - 5, ".gguf") == 0);
+
+    if (is_gguf) {
+        loaded = load_bpe_from_gguf(bpe, lm_path);
+    } else {
+        // Safetensors directory: load from sidecar files
+        std::string vocab_path  = std::string(lm_path) + WS_SEP + "vocab.json";
+        std::string merges_path = std::string(lm_path) + WS_SEP + "merges.txt";
+        loaded = load_bpe_from_files(bpe, vocab_path.c_str(), merges_path.c_str());
+    }
+
+    if (!loaded) {
         delete bpe;
         return nullptr;
     }
@@ -536,20 +554,40 @@ const float * store_silence(ModelStore * s, const char * dit_path) {
     if (it != s->silence_by_path.end()) {
         return static_cast<const std::vector<float> *>(it->second.ptr)->data();
     }
-    GGUFModel gf = {};
-    if (!gf_load(&gf, dit_path)) {
-        fprintf(stderr, "[Store] FATAL: silence cannot open %s\n", dit_path);
-        return nullptr;
-    }
-    const void * sl = gf_get_data(gf, "silence_latent");
-    if (!sl) {
-        fprintf(stderr, "[Store] FATAL: silence_latent not found in %s\n", dit_path);
+
+    auto * vec = new std::vector<float>();
+
+    // Detect format: .gguf file or safetensors directory
+    size_t len = strlen(dit_path);
+    bool is_gguf = (len >= 5 && strcmp(dit_path + len - 5, ".gguf") == 0);
+
+    if (is_gguf) {
+        // GGUF: silence_latent is embedded as a tensor (already transposed by convert.py)
+        GGUFModel gf = {};
+        if (!gf_load(&gf, dit_path)) {
+            fprintf(stderr, "[Store] FATAL: silence cannot open %s\n", dit_path);
+            delete vec;
+            return nullptr;
+        }
+        const void * sl = gf_get_data(gf, "silence_latent");
+        if (!sl) {
+            fprintf(stderr, "[Store] FATAL: silence_latent not found in %s\n", dit_path);
+            gf_close(&gf);
+            delete vec;
+            return nullptr;
+        }
+        vec->resize(15000 * 64);
+        memcpy(vec->data(), sl, 15000 * 64 * sizeof(float));
         gf_close(&gf);
-        return nullptr;
+    } else {
+        // Safetensors directory: read from silence_latent.pt sidecar
+        std::string pt_path = std::string(dit_path) + WS_SEP + "silence_latent.pt";
+        if (!sl_read_silence_latent(pt_path.c_str(), *vec)) {
+            fprintf(stderr, "[Store] FATAL: cannot read %s\n", pt_path.c_str());
+            delete vec;
+            return nullptr;
+        }
     }
-    auto * vec = new std::vector<float>(15000 * 64);
-    memcpy(vec->data(), sl, 15000 * 64 * sizeof(float));
-    gf_close(&gf);
 
     CpuEntry e;
     e.ptr     = vec;
@@ -596,62 +634,113 @@ const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
         delete meta;
         return nullptr;
     }
-    GGUFModel gf = {};
-    if (!gf_load(&gf, dit_path)) {
-        fprintf(stderr, "[Store] FATAL: DiT cannot reopen %s for metadata\n", dit_path);
-        delete meta;
-        return nullptr;
-    }
-    meta->is_turbo = gf_get_bool(gf, "acestep.is_turbo");
 
-    // Detect blend/merge models from filename:
-    //   - "merge" in name (e.g. "acestep-v15-merge-base-turbo-xl-ta-0.5")
-    //   - "sftturbo" in name (e.g. "acestep-v15-xl-sftturbo50")
-    // These have is_turbo=true in GGUF but should NOT have guidance forced to 1.0.
-    {
-        std::string basename = dit_path;
-        auto slash = basename.find_last_of("/\\");
-        if (slash != std::string::npos) basename = basename.substr(slash + 1);
-        for (auto & c : basename) c = (char)tolower((unsigned char)c);
-        meta->is_merge = (basename.find("merge") != std::string::npos ||
-                          basename.find("sftturbo") != std::string::npos);
-    }
+    // Detect format: .gguf file or safetensors directory
+    size_t len = strlen(dit_path);
+    bool is_gguf = (len >= 5 && strcmp(dit_path + len - 5, ".gguf") == 0);
 
-    // silence_latent: [15000, 64] f32, also accessible via store_silence for
-    // callers that only need the pointer. Cached here too so DiTMeta is
-    // self-contained.
-    const void * sl = gf_get_data(gf, "silence_latent");
-    if (!sl) {
-        fprintf(stderr, "[Store] FATAL: silence_latent not found in %s\n", dit_path);
-        gf_close(&gf);
-        delete meta;
-        return nullptr;
-    }
-    meta->silence_full.resize(15000 * 64);
-    memcpy(meta->silence_full.data(), sl, 15000 * 64 * sizeof(float));
+    if (is_gguf) {
+        // GGUF path: read metadata from GGUF KV + embedded tensors
+        GGUFModel gf = {};
+        if (!gf_load(&gf, dit_path)) {
+            fprintf(stderr, "[Store] FATAL: DiT cannot reopen %s for metadata\n", dit_path);
+            delete meta;
+            return nullptr;
+        }
+        meta->is_turbo = gf_get_bool(gf, "acestep.is_turbo");
 
-    // null_condition_emb: present on some variants, absent on others.
-    struct ggml_tensor * nce_meta = ggml_get_tensor(gf.meta, "null_condition_emb");
-    if (nce_meta) {
-        int          emb_n = (int) ggml_nelements(nce_meta);
-        const void * raw   = gf_get_data(gf, "null_condition_emb");
-        meta->null_cond_cpu.resize(emb_n);
-        if (nce_meta->type == GGML_TYPE_BF16) {
-            const uint16_t * src = (const uint16_t *) raw;
-            for (int i = 0; i < emb_n; i++) {
-                uint32_t w = (uint32_t) src[i] << 16;
-                memcpy(&meta->null_cond_cpu[i], &w, 4);
-            }
-        } else if (nce_meta->type == GGML_TYPE_F32) {
-            memcpy(meta->null_cond_cpu.data(), raw, emb_n * sizeof(float));
-        } else {
-            fprintf(stderr, "[Store] FATAL: null_condition_emb unexpected type %d\n", nce_meta->type);
+        // Detect blend/merge models from filename
+        {
+            std::string basename = dit_path;
+            auto slash = basename.find_last_of("/\\");
+            if (slash != std::string::npos) basename = basename.substr(slash + 1);
+            for (auto & c : basename) c = (char)tolower((unsigned char)c);
+            meta->is_merge = (basename.find("merge") != std::string::npos ||
+                              basename.find("sftturbo") != std::string::npos);
+        }
+
+        // silence_latent
+        const void * sl = gf_get_data(gf, "silence_latent");
+        if (!sl) {
+            fprintf(stderr, "[Store] FATAL: silence_latent not found in %s\n", dit_path);
             gf_close(&gf);
             delete meta;
             return nullptr;
         }
+        meta->silence_full.resize(15000 * 64);
+        memcpy(meta->silence_full.data(), sl, 15000 * 64 * sizeof(float));
+
+        // null_condition_emb
+        struct ggml_tensor * nce_meta = ggml_get_tensor(gf.meta, "null_condition_emb");
+        if (nce_meta) {
+            int          emb_n = (int) ggml_nelements(nce_meta);
+            const void * raw   = gf_get_data(gf, "null_condition_emb");
+            meta->null_cond_cpu.resize(emb_n);
+            if (nce_meta->type == GGML_TYPE_BF16) {
+                const uint16_t * src = (const uint16_t *) raw;
+                for (int i = 0; i < emb_n; i++) {
+                    uint32_t w = (uint32_t) src[i] << 16;
+                    memcpy(&meta->null_cond_cpu[i], &w, 4);
+                }
+            } else if (nce_meta->type == GGML_TYPE_F32) {
+                memcpy(meta->null_cond_cpu.data(), raw, emb_n * sizeof(float));
+            } else {
+                fprintf(stderr, "[Store] FATAL: null_condition_emb unexpected type %d\n", nce_meta->type);
+                gf_close(&gf);
+                delete meta;
+                return nullptr;
+            }
+        }
+        gf_close(&gf);
+    } else {
+        // Safetensors directory path: read from sidecar files
+        std::string cfg_path = std::string(dit_path) + WS_SEP + "config.json";
+        meta->is_turbo = config_json_get_is_turbo(cfg_path.c_str());
+        meta->is_merge = config_json_get_is_merge(cfg_path.c_str());
+
+        // Also detect merge from directory name
+        {
+            std::string basename = dit_path;
+            auto slash = basename.find_last_of("/\\");
+            if (slash != std::string::npos) basename = basename.substr(slash + 1);
+            for (auto & c : basename) c = (char)tolower((unsigned char)c);
+            if (basename.find("merge") != std::string::npos ||
+                basename.find("sftturbo") != std::string::npos) {
+                meta->is_merge = true;
+            }
+        }
+
+        // silence_latent from silence_latent.pt
+        std::string pt_path = std::string(dit_path) + WS_SEP + "silence_latent.pt";
+        if (!sl_read_silence_latent(pt_path.c_str(), meta->silence_full)) {
+            fprintf(stderr, "[Store] FATAL: cannot read %s\n", pt_path.c_str());
+            delete meta;
+            return nullptr;
+        }
+
+        // null_condition_emb: read from safetensors model file
+        STMulti sm = {};
+        if (st_multi_open(&sm, dit_path)) {
+            auto [shard_idx, e] = sm.find("null_condition_emb");
+            if (e) {
+                ggml_type nce_type = st_ggml_type(*e);
+                size_t    n = 1;
+                for (int d = 0; d < e->n_dims; d++) n *= (size_t) e->shape[d];
+                const void * raw = sm.data(shard_idx, *e);
+                meta->null_cond_cpu.resize(n);
+                if (nce_type == GGML_TYPE_BF16) {
+                    const uint16_t * src = (const uint16_t *) raw;
+                    for (size_t i = 0; i < n; i++) {
+                        uint32_t w = (uint32_t) src[i] << 16;
+                        memcpy(&meta->null_cond_cpu[i], &w, 4);
+                    }
+                } else if (nce_type == GGML_TYPE_F32) {
+                    memcpy(meta->null_cond_cpu.data(), raw, n * sizeof(float));
+                }
+            }
+            st_multi_close(&sm);
+        }
     }
-    gf_close(&gf);
 
     CpuEntry e;
     e.ptr     = meta;
