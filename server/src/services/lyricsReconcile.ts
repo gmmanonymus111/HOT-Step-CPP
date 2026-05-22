@@ -375,6 +375,11 @@ export function reconcileLyrics(
     lines.push(buildLine(currentWords, section));
   }
 
+  // 7. Post-process: compress sparse leading words at section transitions
+  //    When there's a gap between lines (instrumental break), whisper may place
+  //    the first words of the new line during the break. Detect and compress.
+  compressSparseLeading(lines);
+
   return {
     version: 1,
     method: 'whisper',
@@ -406,4 +411,77 @@ function buildLine(words: LyricsWord[], section?: string): LyricsLine {
   };
   if (section) line.section = section;
   return line;
+}
+
+// ──────────────────────────────────────────────
+// Post-process: compress sparse leading words
+//
+// At section transitions, whisper may place the first few words of a
+// new line during the instrumental break before the singing actually
+// starts. This creates a "slow start" where the lyrics highlight
+// crawls through words during the gap, then catches up.
+//
+// Detection: for each line that follows a >2s gap, check if the
+// leading words are spaced much wider than the rest of the line.
+// Fix: push those leading words forward to cluster with the dense
+// vocal content.
+// ──────────────────────────────────────────────
+
+const GAP_THRESHOLD_S = 2.0;      // min gap between lines to trigger compression
+const SPARSE_RATIO = 3.0;         // word gap must be this many times the median to be "sparse"
+
+function compressSparseLeading(lines: LyricsLine[]): void {
+  for (let li = 1; li < lines.length; li++) {
+    const prevEnd = lines[li - 1].end;
+    const line = lines[li];
+    const words = line.words;
+
+    // Only process lines after a significant gap
+    const gap = words[0].start - prevEnd;
+    if (gap < GAP_THRESHOLD_S || words.length < 4) continue;
+
+    // Calculate inter-word gaps
+    const gaps: number[] = [];
+    for (let i = 1; i < words.length; i++) {
+      gaps.push(words[i].start - words[i - 1].end);
+    }
+
+    // Find median gap (represents normal singing pace)
+    const sorted = [...gaps].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    if (median <= 0) continue;
+
+    // Find where the "dense zone" starts — first word where the gap
+    // to the next word is within normal singing pace
+    let denseStart = 0;
+    for (let i = 0; i < gaps.length; i++) {
+      if (gaps[i] <= median * SPARSE_RATIO) {
+        denseStart = i;
+        break;
+      }
+    }
+
+    // If no sparse leading words found, skip
+    if (denseStart === 0) continue;
+
+    // Compress: push sparse leading words to just before the dense zone
+    // Each word gets a small offset before the dense zone start
+    const denseStartTime = words[denseStart].start;
+    const wordSpacing = Math.min(median, 0.15); // max 150ms between compressed words
+
+    for (let i = denseStart - 1; i >= 0; i--) {
+      const offset = (denseStart - i) * wordSpacing;
+      const newStart = denseStartTime - offset;
+      // Don't push earlier than the previous line's end
+      words[i].start = Math.max(newStart, prevEnd + 0.1);
+      words[i].end = Math.max(words[i].start + 0.1, words[i].end);
+      // Ensure end doesn't exceed next word's start
+      if (i < words.length - 1) {
+        words[i].end = Math.min(words[i].end, words[i + 1].start);
+      }
+    }
+
+    // Update line start time
+    line.start = words[0].start;
+  }
 }
