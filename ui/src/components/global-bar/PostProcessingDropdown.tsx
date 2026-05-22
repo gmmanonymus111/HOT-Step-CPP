@@ -48,6 +48,7 @@ const Accordion: React.FC<AccordionProps> = ({
     amber: 'border-amber-500/20 bg-amber-500/5',
     emerald: 'border-emerald-500/20 bg-emerald-500/5',
     pink: 'border-pink-500/20 bg-pink-500/5',
+    sky: 'border-sky-500/20 bg-sky-500/5',
   };
   const activeStyle = toggle?.checked ? (accentMap[accentColor] || '') : '';
 
@@ -296,6 +297,82 @@ export const PostProcessingDropdown: React.FC = () => {
         </div>
         <ToggleSwitch checked={!gp.skipLrc} onChange={v => gp.setSkipLrc(!v)} accentColor="sky" />
       </div>
+
+      {/* Whisper Lyrics Transcription */}
+      <Accordion
+        icon={<Mic2 size={14} />}
+        label="Whisper Lyrics"
+        accentColor="sky"
+        persistKey="hs-ppAccordion-whisper"
+        toggle={{ checked: gp.whisperLyricsEnabled, onChange: gp.setWhisperLyricsEnabled }}
+      >
+        <div className="space-y-3 mt-2">
+          <p className="text-[10px] text-zinc-500 leading-relaxed">
+            Transcribes actual sung lyrics using Whisper AI with word-level timestamps.
+            Uses source lyrics as a spelling guide. Requires a Whisper model from the Model Manager.
+          </p>
+          {gp.whisperLyricsEnabled && (
+            <div className="space-y-2 pt-1">
+              {/* Model selector */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Model</label>
+                <select
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 outline-none transition-colors cursor-pointer"
+                  value={gp.whisperModel}
+                  onChange={e => gp.setWhisperModel(e.target.value)}
+                >
+                  <option value="">Auto-detect</option>
+                  <option value="ggml-large-v3-turbo.bin">Large v3 Turbo (recommended)</option>
+                  <option value="ggml-large-v3.bin">Large v3 (best accuracy)</option>
+                  <option value="ggml-medium.bin">Medium</option>
+                  <option value="ggml-base.bin">Base (fastest)</option>
+                </select>
+              </div>
+              {/* Language */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Language</label>
+                <select
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 outline-none transition-colors cursor-pointer"
+                  value={gp.whisperLanguage}
+                  onChange={e => gp.setWhisperLanguage(e.target.value)}
+                >
+                  <option value="auto">Auto-detect</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="zh">Chinese</option>
+                  <option value="ko">Korean</option>
+                  <option value="es">Spanish</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="ru">Russian</option>
+                </select>
+              </div>
+              {/* Beam size */}
+              <EditableSlider
+                label="Beam Size"
+                value={gp.whisperBeamSize}
+                min={1} max={10} step={1}
+                onChange={gp.setWhisperBeamSize}
+                formatDisplay={v => v === 1 ? 'Greedy' : `${v} beams`}
+                tooltip="Higher = more accurate but slower. 5 is recommended."
+              />
+              {/* Vocal isolation toggle */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Mic2 size={14} className="text-sky-400" />
+                  <span className="text-sm text-zinc-600 dark:text-zinc-400">Isolate vocals first</span>
+                </div>
+                <ToggleSwitch checked={gp.whisperIsolateVocals} onChange={gp.setWhisperIsolateVocals} accentColor="sky" />
+              </div>
+              {gp.whisperIsolateVocals && (
+                <p className="text-[10px] text-sky-400/60 leading-relaxed">
+                  Runs stem separation to isolate vocals before transcription. May improve accuracy for busy mixes.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </Accordion>
 
       {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline */}
       {postprocessPlugins.length > 0 && (
@@ -661,7 +738,7 @@ export const PostProcessingDropdown: React.FC = () => {
 // ── Badge ───────────────────────────────────────────────────────
 
 export const PostProcessingBadge: React.FC = () => {
-  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, qualityEvalEnabled, postprocessEnabled, postprocessPlugin } = useGlobalParams();
+  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, qualityEvalEnabled, postprocessEnabled, postprocessPlugin, whisperLyricsEnabled } = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
 
@@ -674,6 +751,7 @@ export const PostProcessingBadge: React.FC = () => {
   if (masteringEnabled && masteringReference) parts.push('Master');
   if (coverArtEnabled) parts.push('Cover');
   if (qualityEvalEnabled) parts.push('QE');
+  if (whisperLyricsEnabled) parts.push('Whisper');
 
   if (parts.length === 0) return null;
 

@@ -219,6 +219,13 @@ export interface GenerationParams {
 
   // Postprocess plugin (replaces built-in VAE tiled decoder)
   postprocessPlugin?: string;
+
+  // Whisper Lyrics Transcription
+  whisperLyricsEnabled?: boolean;
+  whisperModel?: string;
+  whisperLanguage?: string;
+  whisperBeamSize?: number;
+  whisperIsolateVocals?: boolean;
 }
 
 /** Generation job status from the server */

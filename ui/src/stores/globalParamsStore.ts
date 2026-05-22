@@ -116,6 +116,13 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // Dynamic Lua plugin params
   pluginParams: readKey('hs-pluginParams', {} as Record<string, string>),
 
+  // Whisper Lyrics Transcription
+  whisperLyricsEnabled: readKey("hs-whisperLyricsEnabled", false),
+  whisperModel: readKey("hs-whisperModel", ''),
+  whisperLanguage: readKey("hs-whisperLang", 'auto'),
+  whisperBeamSize: readKey("hs-whisperBeam", 5),
+  whisperIsolateVocals: readKey("hs-whisperIsolate", false),
+
   // Postprocess plugin (replaces built-in VAE tiled decoder)
   postprocessEnabled: readKey('hs-postprocessEnabled', false),
   postprocessPlugin: readKey('hs-postprocessPlugin', ''),
@@ -200,6 +207,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
   setQualityEvalTarget: (v: any) => { set({ qualityEvalTarget: v }); writeKey("hs-qualityEvalTarget", v); },
+  setWhisperLyricsEnabled: (v: any) => { set({ whisperLyricsEnabled: v }); writeKey("hs-whisperLyricsEnabled", v); },
+  setWhisperModel: (v: any) => { set({ whisperModel: v }); writeKey("hs-whisperModel", v); },
+  setWhisperLanguage: (v: any) => { set({ whisperLanguage: v }); writeKey("hs-whisperLang", v); },
+  setWhisperBeamSize: (v: any) => { set({ whisperBeamSize: v }); writeKey("hs-whisperBeam", v); },
+  setWhisperIsolateVocals: (v: any) => { set({ whisperIsolateVocals: v }); writeKey("hs-whisperIsolate", v); },
   setPostprocessEnabled: (v: any) => { set({ postprocessEnabled: v }); writeKey("hs-postprocessEnabled", v); },
   setPostprocessPlugin: (v: any) => { set({ postprocessPlugin: v }); writeKey("hs-postprocessPlugin", v); },
 
@@ -289,6 +301,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,
       qualityEvalTarget: (s.postProcessingEnabled && s.qualityEvalEnabled) ? s.qualityEvalTarget : undefined,
       postprocessPlugin: (s.postProcessingEnabled && s.postprocessEnabled && s.postprocessPlugin) ? s.postprocessPlugin : undefined,
+      whisperLyricsEnabled: s.whisperLyricsEnabled,
+      whisperModel: s.whisperLyricsEnabled ? s.whisperModel : undefined,
+      whisperLanguage: s.whisperLyricsEnabled ? s.whisperLanguage : undefined,
+      whisperBeamSize: s.whisperLyricsEnabled ? s.whisperBeamSize : undefined,
+      whisperIsolateVocals: s.whisperLyricsEnabled ? s.whisperIsolateVocals : undefined,
     };
   },
 }));
