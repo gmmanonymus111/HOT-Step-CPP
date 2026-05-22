@@ -264,6 +264,33 @@ struct WeightSource {
             return mt->type;
         }
     }
+
+    // Enumerate all tensor names (in canonical/loader form, prefix stripped).
+    // For GGUF: direct from gguf_get_tensor_name.
+    // For safetensors: iterate all STFile entries, strip name_prefix if set.
+    std::vector<std::string> tensor_names() const {
+        std::vector<std::string> names;
+        if (is_st) {
+            for (const auto & shard : sm->shards) {
+                for (const auto & e : shard.entries) {
+                    std::string n = e.name;
+                    // Strip prefix if it matches
+                    if (!name_prefix.empty() &&
+                        n.compare(0, name_prefix.size(), name_prefix) == 0) {
+                        n = n.substr(name_prefix.size());
+                    }
+                    names.push_back(n);
+                }
+            }
+        } else {
+            int64_t n = gguf_get_n_tensors(gf->gguf);
+            names.reserve((size_t) n);
+            for (int64_t i = 0; i < n; i++) {
+                names.push_back(gguf_get_tensor_name(gf->gguf, i));
+            }
+        }
+        return names;
+    }
 };
 
 // ─── ws_load_* functions ─────────────────────────────────────────────
