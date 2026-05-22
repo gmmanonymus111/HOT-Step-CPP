@@ -390,10 +390,19 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
     }
 
-    // When mastering is enabled, request wav32 (float) from the engine.
-    const synthFormat = (job.params.masteringEnabled && job.params.masteringReference) ? 'wav32' : 'wav16';
+    // When any post-processing is enabled, request wav32 (float) from the engine.
+    // wav16 applies peak normalization to 0 dBFS + hard clip — any downstream gain
+    // (PP-VAE, Spectral Lifter, Ozone VST) will push samples over and cause clipping.
+    // wav32 skips normalization entirely, preserving natural headroom for PP stages.
+    const ppEnabled = job.params.postProcessingEnabled !== false;
+    const anyPpActive = ppEnabled && (
+      !!job.params.ppVaeReencode ||
+      !!job.params.spectralLifterEnabled ||
+      !!job.params.masteringEnabled
+    );
+    const synthFormat = (anyPpActive || (job.params.masteringEnabled && job.params.masteringReference)) ? 'wav32' : 'wav16';
     if (synthFormat === 'wav32') {
-      logGeneration(job.id, 'INFO', '[Synth Phase] Using wav32 (raw float) for mastering input — normalization deferred to mastering');
+      logGeneration(job.id, 'INFO', '[Synth Phase] Using wav32 (raw float) for post-processing — normalization deferred');
     }
 
     // LRC: auto-enable synchronized lyric timestamps for non-instrumental tracks
