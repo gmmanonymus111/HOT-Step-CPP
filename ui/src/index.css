@@ -382,3 +382,26 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+/* ========================================
+   Word-level Lyrics Highlighting
+   ======================================== */
+
+.lyrics-word-container {
+  display: inline;
+}
+.lyrics-word {
+  transition: color 0.15s ease, text-shadow 0.15s ease;
+  display: inline;
+}
+.lyrics-word--past {
+  color: rgba(255, 255, 255, 0.9);
+}
+.lyrics-word--active {
+  color: #ec4899;
+  text-shadow: 0 0 20px rgba(236, 72, 153, 0.6), 0 0 40px rgba(236, 72, 153, 0.3);
+  font-weight: 800;
+}
+.lyrics-word--future {
+  color: rgba(255, 255, 255, 0.35);
+}

@@ -5,6 +5,8 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Music } from 'lucide-react';
 import { parseLrc, type LrcLine } from '../../utils/lrcUtils';
+import { fetchLyricsJson, findCurrentLineIndex, findActiveWordIndex, type LyricsJson } from '../../utils/wordLrcUtils';
+import { WordHighlighter } from './WordHighlighter';
 
 interface LyricsBarProps {
     audioUrl?: string;
@@ -29,28 +31,53 @@ function findCurrentIndex(lines: LrcLine[], time: number): number {
 
 export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) => {
     const [fetchedLrc, setFetchedLrc] = useState<string | null>(null);
+    const [wordData, setWordData] = useState<LyricsJson | null>(null);
     const [expanded, setExpanded] = useState(true);
 
-    // Fetch LRC — stays cached because we never unmount
+    // Fetch lyrics — try .lyrics.json first (word-level), fall back to .lrc
     useEffect(() => {
-        if (!audioUrl) { setFetchedLrc(null); return; }
+        if (!audioUrl) { setFetchedLrc(null); setWordData(null); return; }
         let cancelled = false;
-        const lrcUrl = audioUrl.replace(/\.\w+$/, '.lrc');
-        fetch(lrcUrl)
-            .then(res => { if (!res.ok) throw new Error('No LRC'); return res.text(); })
-            .then(text => { if (!cancelled && text.includes('[')) setFetchedLrc(text); })
-            .catch(() => { if (!cancelled) setFetchedLrc(null); });
+
+        (async () => {
+            // Try word-level lyrics first
+            const json = await fetchLyricsJson(audioUrl);
+            if (cancelled) return;
+            if (json) {
+                setWordData(json);
+                setFetchedLrc(null); // Clear LRC — word data takes priority
+                return;
+            }
+
+            // Fall back to .lrc
+            setWordData(null);
+            try {
+                const lrcUrl = audioUrl.replace(/\.\w+$/, '.lrc');
+                const res = await fetch(lrcUrl);
+                if (!res.ok) throw new Error('No LRC');
+                const text = await res.text();
+                if (!cancelled && text.includes('[')) setFetchedLrc(text);
+            } catch {
+                if (!cancelled) setFetchedLrc(null);
+            }
+        })();
+
         return () => { cancelled = true; };
     }, [audioUrl]);
 
     const lines = useMemo(() => fetchedLrc ? parseLrc(fetchedLrc) : [], [fetchedLrc]);
     const currentIdx = findCurrentIndex(lines, currentTime);
 
-    // Derive display text directly — no stale closure, no animation key
+    // Word-level indices
+    const wordLineIdx = wordData ? findCurrentLineIndex(wordData.lines, currentTime) : -1;
+    const wordLine = wordData && wordLineIdx >= 0 ? wordData.lines[wordLineIdx] : null;
+    const activeWordIdx = wordLine ? findActiveWordIndex(wordLine.words, currentTime) : -1;
+
+    // Derive display text for LRC fallback
     const displayText = currentIdx >= 0 ? lines[currentIdx]?.text ?? '' : '';
 
-    // Don't render if no LRC data at all
-    if (lines.length === 0) return null;
+    // Don't render if no lyrics data at all
+    if (lines.length === 0 && !wordData) return null;
 
     return (
         <div className="flex-shrink-0 border-t border-zinc-200 dark:border-white/5 bg-black/80 backdrop-blur-sm z-30 transition-all duration-300">
@@ -61,6 +88,11 @@ export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) =
             >
                 <Music size={11} className="text-pink-500/60" />
                 <span className="font-medium tracking-wide uppercase text-[10px]">Lyrics</span>
+                {wordData && (
+                    <span className="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider bg-pink-500/20 text-pink-400 uppercase">
+                        Whisper
+                    </span>
+                )}
                 {expanded ? <ChevronDown size={11} /> : <ChevronUp size={11} />}
             </button>
 
@@ -73,10 +105,14 @@ export const LyricsBar: React.FC<LyricsBarProps> = ({ audioUrl, currentTime }) =
                     <span
                         className="text-lg md:text-xl font-bold text-white tracking-wide text-center transition-opacity duration-300"
                         style={{
-                            textShadow: '0 0 30px rgba(236, 72, 153, 0.4), 0 2px 8px rgba(0,0,0,0.5)',
+                            textShadow: wordData ? undefined : '0 0 30px rgba(236, 72, 153, 0.4), 0 2px 8px rgba(0,0,0,0.5)',
                         }}
                     >
-                        {displayText || '♪ ♪ ♪'}
+                        {wordData && wordLine ? (
+                            <WordHighlighter words={wordLine.words} activeWordIndex={activeWordIdx} />
+                        ) : (
+                            displayText || '♪ ♪ ♪'
+                        )}
                     </span>
                 </div>
             </div>
