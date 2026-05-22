@@ -538,6 +538,50 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         }
       }
 
+      // ── Whisper Lyrics Transcription (optional) ──
+      if (job.params.whisperLyricsEnabled) {
+        try {
+          const { isWhisperAvailable, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
+          const { reconcileLyrics } = await import('../services/lyricsReconcile.js');
+
+          if (!isWhisperAvailable()) {
+            logGeneration(job.id, 'WARNING', '[Whisper] whisper-cli.exe not found — skipping transcription');
+          } else if (!findWhisperModel(job.params.whisperModel)) {
+            logGeneration(job.id, 'WARNING', '[Whisper] No Whisper model found — skipping transcription');
+          } else {
+            const whisperStart = Date.now();
+            logGeneration(job.id, 'INFO', `[Whisper] Track ${trackIdx + 1}: starting transcription...`);
+
+            const sourceLyrics = synthReq.lyrics || '';
+
+            const whisperResult = await transcribeWithWhisper(filepath, sourceLyrics, {
+              model: job.params.whisperModel,
+              language: job.params.whisperLanguage || 'auto',
+              beamSize: job.params.whisperBeamSize || 5,
+            });
+
+            if (whisperResult && whisperResult.segments?.length > 0) {
+              const modelName = job.params.whisperModel || 'auto';
+              const lyricsJson = reconcileLyrics(whisperResult, sourceLyrics, modelName, false);
+
+              const lyricsJsonFilename = filename.replace(/\.[^.]+$/, '.lyrics.json');
+              const lyricsJsonPath = path.join(config.data.audioDir, lyricsJsonFilename);
+              fs.writeFileSync(lyricsJsonPath, JSON.stringify(lyricsJson, null, 2));
+
+              const elapsed = Date.now() - whisperStart;
+              const wordCount = lyricsJson.lines.reduce((n: number, l: any) => n + l.words.length, 0);
+              logGeneration(job.id, 'INFO',
+                `[Whisper] Track ${trackIdx + 1}: saved ${lyricsJsonFilename} (${lyricsJson.lines.length} lines, ${wordCount} words, ${elapsed}ms)`
+              );
+            } else {
+              logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackIdx + 1}: no segments returned`);
+            }
+          }
+        } catch (err: any) {
+          logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackIdx + 1}: failed: ${err.message}`);
+        }
+      }
+
       // Fetch and save companion latent file (post-DiT neural representation)
       let latentUrl = '';
       try {
