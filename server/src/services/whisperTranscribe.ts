@@ -303,8 +303,8 @@ export async function transcribeWithWhisper(
 
   // Build CLI args
   //   --split-on-word:  split segments at word boundaries, not BPE token boundaries
-  //   --max-len 50:     phrase-level segments (~5-8 words). Short enough for decent
-  //                     per-word interpolation, long enough for stable timestamp anchors.
+  //   --max-len 1:      with --split-on-word, each segment is one whole word with
+  //                     its own timestamp from whisper (real word-level timing).
   //   NOTE: --prompt removed — vocabulary priming seeds hallucinations during instrumentals.
   //         The reconciliation service handles word matching post-hoc instead.
   //   NOTE: --no-fallback removed — causes repetition loops when decoder gets stuck.
@@ -313,7 +313,7 @@ export async function transcribeWithWhisper(
     '-f', audioPath,
     '-oj',                    // output JSON (writes <input>.json sidecar)
     '--split-on-word',        // split at word boundaries, not BPE tokens
-    '--max-len', '50',        // phrase-level segments for stable timestamps
+    '--max-len', '1',         // 1 word per segment = real per-word timestamps
     '--beam-size', String(beamSize),
     '--no-prints',            // suppress progress to stderr
   ];
