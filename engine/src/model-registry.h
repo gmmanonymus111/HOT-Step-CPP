@@ -11,6 +11,7 @@
 //   registry_scan_adapters(&reg, "./adapters");
 //   const ModelEntry * dit = registry_find(reg.dit, "acestep-v15-turbo-Q8_0.gguf");
 
+#include "config-json.h"
 #include "gguf.h"
 
 #include <algorithm>
@@ -262,6 +263,55 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
             fprintf(stderr, "[Registry] %s -> VAE (safetensors)\n", fname.c_str());
             count++;
         }
+    }
+
+    // Scan subdirectories for safetensors model checkpoints (HuggingFace format).
+    // Each subdirectory should contain model.safetensors (or sharded index) + config.json.
+    // Classification uses config.json content, not directory name.
+    std::vector<std::string> subdirs;
+    registry_list_subdirs(models_dir, &subdirs);
+    std::sort(subdirs.begin(), subdirs.end());
+
+    for (const auto & dname : subdirs) {
+        std::string dir_path = std::string(models_dir) + REGISTRY_SEP + dname;
+
+        // Must have config.json
+        std::string cfg_path = dir_path + REGISTRY_SEP + "config.json";
+        if (!registry_is_file(cfg_path.c_str())) {
+            continue;
+        }
+
+        // Must have model.safetensors or model.safetensors.index.json (sharded)
+        std::string st_path = dir_path + REGISTRY_SEP + "model.safetensors";
+        std::string st_index = dir_path + REGISTRY_SEP + "model.safetensors.index.json";
+        if (!registry_is_file(st_path.c_str()) && !registry_is_file(st_index.c_str())) {
+            continue;
+        }
+
+        // Classify by config.json content
+        std::string type = config_json_classify(cfg_path.c_str());
+        if (type.empty()) {
+            fprintf(stderr, "[Registry] WARNING: skipping %s/ (unrecognized config.json)\n", dname.c_str());
+            continue;
+        }
+
+        // ModelEntry.path is the directory path for safetensors models.
+        // The loader will find model.safetensors + sidecar files inside.
+        ModelEntry entry = { dname, dir_path };
+        if (type == "LM") {
+            reg->lm.push_back(entry);
+        } else if (type == "DiT") {
+            reg->dit.push_back(entry);
+        } else if (type == "Text-Enc") {
+            reg->text_enc.push_back(entry);
+        } else if (type == "VAE") {
+            reg->vae.push_back(entry);
+        }
+
+        bool is_sharded = registry_is_file(st_index.c_str());
+        fprintf(stderr, "[Registry] %s/ -> %s (safetensors%s)\n", dname.c_str(), type.c_str(),
+                is_sharded ? ", sharded" : "");
+        count++;
     }
 
     return count > 0;
