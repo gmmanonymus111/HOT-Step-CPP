@@ -427,6 +427,77 @@ static bool load_bpe_from_gguf(BPETokenizer * tok, const char * gguf_path) {
     return true;
 }
 
+// Load tokenizer from HuggingFace sidecar files (vocab.json + merges.txt).
+// Used when loading from safetensors model directories.
+// Requires yyjson for JSON parsing.
+#include "yyjson.h"
+
+static bool load_bpe_from_files(BPETokenizer * tok, const char * vocab_json_path, const char * merges_txt_path) {
+    build_byte_encoder(tok->byte2str);
+
+    // ── Read vocab.json ──────────────────────────────────────────────
+    yyjson_doc * doc = yyjson_read_file(vocab_json_path, 0, NULL, NULL);
+    if (!doc) {
+        fprintf(stderr, "[BPE] Failed to read %s\n", vocab_json_path);
+        return false;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root)) {
+        fprintf(stderr, "[BPE] Invalid vocab.json format in %s\n", vocab_json_path);
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    // vocab.json is {token_string: token_id, ...}
+    yyjson_val * key, * val;
+    yyjson_obj_iter iter;
+    yyjson_obj_iter_init(root, &iter);
+    while ((key = yyjson_obj_iter_next(&iter))) {
+        val = yyjson_obj_iter_get_val(key);
+        if (yyjson_is_int(val)) {
+            tok->vocab[yyjson_get_str(key)] = (int) yyjson_get_int(val);
+        }
+    }
+    yyjson_doc_free(doc);
+
+    // ── Read merges.txt ──────────────────────────────────────────────
+    FILE * f = fopen(merges_txt_path, "r");
+    if (!f) {
+        fprintf(stderr, "[BPE] Failed to read %s\n", merges_txt_path);
+        return false;
+    }
+
+    int  n_merges = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        // Strip trailing newline/CR
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+        if (len == 0) continue;
+        // Skip #version: header
+        if (line[0] == '#') continue;
+
+        tok->merges[std::string(line)] = n_merges;
+        n_merges++;
+    }
+    fclose(f);
+
+    tok->n_vocab = (int) tok->vocab.size();
+    tok->eos_id  = 151643;
+
+    tok->id_to_str.resize(tok->n_vocab);
+    for (auto & kv : tok->vocab) {
+        if (kv.second >= 0 && kv.second < tok->n_vocab) {
+            tok->id_to_str[kv.second] = kv.first;
+        }
+    }
+
+    fprintf(stderr, "[BPE] Loaded from files: %d vocab, %d merges\n", tok->n_vocab, n_merges);
+    return true;
+}
+
 // Byte-level encode: raw text bytes -> GPT-2 BPE string
 static std::string byte_level_encode(const BPETokenizer * tok, const std::string & text) {
     std::string out;
