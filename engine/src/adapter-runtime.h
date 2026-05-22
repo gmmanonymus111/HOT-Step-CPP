@@ -14,6 +14,7 @@
 #include "adapter-merge.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "weight-source.h"
 
 #include <cstdio>
 #include <string>
@@ -158,7 +159,7 @@ static void adapter_stage_delta(DiTLoRA * lora, DiTLoRADelta * slot,
 // ─── LoRA runtime loading ───
 
 static bool adapter_runtime_lora(DiTLoRA *                  lora,
-                                  const GGUFModel &          gf,
+                                  const WeightSource &       ws,
                                   const STFile &             st,
                                   const std::string &        cfg_dir,
                                   float                      scale,
@@ -201,14 +202,14 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
         }
         const STEntry * eb = it->second;
 
-        // Check GGUF tensor exists
-        int64_t tidx = gguf_find_tensor(gf.gguf, gguf_name.c_str());
-        if (tidx < 0) {
-            fprintf(stderr, "[Adapter-RT] WARNING: tensor %s not found in GGUF model, skipping\n", gguf_name.c_str());
+        // Check base tensor exists
+        if (!ws.exists(gguf_name.c_str())) {
+            fprintf(stderr, "[Adapter-RT] WARNING: tensor %s not found in base model, skipping\n", gguf_name.c_str());
             skipped++; continue;
         }
-        struct ggml_tensor * tmeta = ggml_get_tensor(gf.meta, gguf_name.c_str());
-        int64_t ne0 = tmeta->ne[0], ne1 = tmeta->ne[1];
+        int n_dims; int64_t ne_arr[4];
+        ws.shape(gguf_name.c_str(), n_dims, ne_arr);
+        int64_t ne0 = ne_arr[0], ne1 = ne_arr[1];
 
         DiTLoRADelta * slot = dit_lora_slot(lora, gguf_name);
         if (!slot) {
@@ -279,7 +280,7 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
 // ─── LoKr runtime loading ───
 
 static bool adapter_runtime_lokr(DiTLoRA *                  lora,
-                                  const GGUFModel &          gf,
+                                  const WeightSource &       ws,
                                   const STFile &             st,
                                   float                      user_scale,
                                   const AdapterGroupScales & gs,
@@ -303,7 +304,7 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
         else if (suffix == "dora_scale") m.dora_scale = &e;
     }
 
-    std::unordered_map<std::string, std::string> name_map = lokr_build_reverse_map(gf);
+    std::unordered_map<std::string, std::string> name_map = lokr_build_reverse_map(ws);
     int lokr_dim = adapter_read_lokr_dim(st);
     int merged = 0, skipped = 0;
 
@@ -326,13 +327,13 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
         }
         const std::string & gguf_name = nm_it->second;
 
-        int64_t tidx = gguf_find_tensor(gf.gguf, gguf_name.c_str());
-        if (tidx < 0) {
-            fprintf(stderr, "[Adapter-RT] WARNING: tensor %s not found in GGUF model, skipping\n", gguf_name.c_str());
+        if (!ws.exists(gguf_name.c_str())) {
+            fprintf(stderr, "[Adapter-RT] WARNING: tensor %s not found in base model, skipping\n", gguf_name.c_str());
             skipped++; continue;
         }
-        struct ggml_tensor * tmeta = ggml_get_tensor(gf.meta, gguf_name.c_str());
-        int64_t ne0 = tmeta->ne[0], ne1 = tmeta->ne[1];
+        int n_dims; int64_t ne_arr[4];
+        ws.shape(gguf_name.c_str(), n_dims, ne_arr);
+        int64_t ne0 = ne_arr[0], ne1 = ne_arr[1];
 
         DiTLoRADelta * slot = dit_lora_slot(lora, gguf_name);
         if (!slot) {
@@ -458,7 +459,7 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
 // ─── Main entry point ───
 
 static bool adapter_load_runtime(DiTLoRA *                  lora,
-                                  const GGUFModel &          gf,
+                                  const WeightSource &       ws,
                                   const char *               adapter_path,
                                   float                      adapter_scale,
                                   const AdapterGroupScales & gs,
@@ -505,7 +506,7 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_runtime_lokr(lora, gf, st, adapter_scale, gs, backend);
+        ok = adapter_runtime_lokr(lora, ws, st, adapter_scale, gs, backend);
     } else {
         std::string cfg_dir;
         size_t slash = path_str.find_last_of("/\\");
@@ -515,7 +516,7 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
         } else {
             cfg_dir = path_str;  // directory format
         }
-        ok = adapter_runtime_lora(lora, gf, st, cfg_dir, adapter_scale, gs, backend);
+        ok = adapter_runtime_lora(lora, ws, st, cfg_dir, adapter_scale, gs, backend);
     }
 
     st_close(&st);

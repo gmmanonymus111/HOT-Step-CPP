@@ -36,6 +36,7 @@
 #include "gguf-weights.h"
 #include "safetensors.h"
 #include "weight-ctx.h"
+#include "weight-source.h"
 #include "yyjson.h"
 #include "hot-step-params.h"  // HOT-Step: per-group adapter scales via sideband
 
@@ -296,28 +297,17 @@ static bool adapter_backend_can_encode(ggml_backend_t backend, enum ggml_type ty
 // Example:
 //   GGUF tensor "decoder.layers.0.self_attn.q_proj.weight"
 //   -> "lycoris_layers_0_self_attn_q_proj" -> "decoder.layers.0.self_attn.q_proj.weight"
-static std::unordered_map<std::string, std::string> lokr_build_reverse_map(const GGUFModel & gf) {
+static std::unordered_map<std::string, std::string> lokr_build_reverse_map(const WeightSource & ws) {
     std::unordered_map<std::string, std::string> out;
-    int                                          n_tensors = (int) gguf_get_n_tensors(gf.gguf);
-    static const char *                          suffix    = ".weight";
-    size_t                                       slen      = strlen(suffix);
-    for (int i = 0; i < n_tensors; i++) {
-        const char * name = gguf_get_tensor_name(gf.gguf, i);
-        std::string  s    = name;
+    auto names = ws.tensor_names();
+    for (const auto & s : names) {
         // only decoder.*.weight tensors qualify as LoKr targets
-        if (s.size() <= slen || s.compare(s.size() - slen, slen, suffix) != 0) {
-            continue;
-        }
-        if (s.compare(0, 8, "decoder.") != 0) {
-            continue;
-        }
-        // strip "decoder." prefix and ".weight" suffix, flatten dots to underscores
+        static const char * suffix = ".weight";
+        size_t slen = strlen(suffix);
+        if (s.size() <= slen || s.compare(s.size() - slen, slen, suffix) != 0) continue;
+        if (s.compare(0, 8, "decoder.") != 0) continue;
         std::string path = s.substr(8, s.size() - 8 - slen);
-        for (char & c : path) {
-            if (c == '.') {
-                c = '_';
-            }
-        }
+        for (char & c : path) { if (c == '.') c = '_'; }
         out["lycoris_" + path] = s;
     }
     return out;
@@ -500,8 +490,8 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 //   delta = (alpha / rank) * scale * B @ A
 // Applied to base weights in place. Alpha is read per tensor if present
 // (ComfyUI baked), else from adapter_config.json, else defaults to rank.
-static bool adapter_merge_lora(WeightCtx *         wctx,
-                               const GGUFModel &   gf,
+static bool adapter_merge_lora(WeightCtx *            wctx,
+                               const WeightSource &   ws,
                                const STFile &      st,
                                const std::string & cfg_dir,
                                float               scale,
@@ -561,19 +551,18 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         }
         const STEntry * eb = it->second;
 
-        int64_t tidx = gguf_find_tensor(gf.gguf, gguf_name.c_str());
-        if (tidx < 0) {
-            fprintf(stderr, "[Adapter] WARNING: tensor %s not in GGUF, skipping\n", gguf_name.c_str());
+        if (!ws.exists(gguf_name.c_str())) {
+            fprintf(stderr, "[Adapter] WARNING: tensor %s not in base model, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
-        struct ggml_tensor * tmeta = ggml_get_tensor(gf.meta, gguf_name.c_str());
-        enum ggml_type       ttype = tmeta->type;
-        int64_t              ne0   = tmeta->ne[0];
-        int64_t              ne1   = tmeta->ne[1];
-
-        size_t       toff     = gguf_get_tensor_offset(gf.gguf, tidx);
-        const void * base_ptr = gf.mapping + gf.data_offset + toff;
+        enum ggml_type ttype = ws.type(gguf_name.c_str());
+        int n_dims; int64_t ne_arr[4];
+        ws.shape(gguf_name.c_str(), n_dims, ne_arr);
+        int64_t ne0 = ne_arr[0];
+        int64_t ne1 = ne_arr[1];
+        ggml_type data_type;
+        const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
 
         // LoRA shapes (safetensors PyTorch convention, row major):
         //   A: [rank, in_features]
@@ -700,8 +689,8 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
 // (1, 3, 0, 2). The fast pair (d, b) then collapses into in_feat and the
 // slow pair (c, a) into out_feat under reshape_2d. Net effect:
 //   delta_rm[aa*c + cc, bb*d + dd] = W1[aa, bb] * W2[cc, dd]
-static bool adapter_merge_lokr(WeightCtx *       wctx,
-                               const GGUFModel & gf,
+static bool adapter_merge_lokr(WeightCtx *          wctx,
+                               const WeightSource & ws,
                                const STFile &    st,
                                float             user_scale,
                                ggml_backend_t    backend) {
@@ -742,7 +731,7 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
         }
     }
 
-    std::unordered_map<std::string, std::string> name_map = lokr_build_reverse_map(gf);
+    std::unordered_map<std::string, std::string> name_map = lokr_build_reverse_map(ws);
 
     std::unordered_map<const void *, size_t> pending_idx;
     pending_idx.reserve(wctx->pending.size());
@@ -781,19 +770,18 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
         }
         const std::string & gguf_name = nm_it->second;
 
-        int64_t tidx = gguf_find_tensor(gf.gguf, gguf_name.c_str());
-        if (tidx < 0) {
-            fprintf(stderr, "[Adapter] WARNING: tensor %s not in GGUF, skipping\n", gguf_name.c_str());
+        if (!ws.exists(gguf_name.c_str())) {
+            fprintf(stderr, "[Adapter] WARNING: tensor %s not in base model, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
-        struct ggml_tensor * tmeta = ggml_get_tensor(gf.meta, gguf_name.c_str());
-        enum ggml_type       ttype = tmeta->type;
-        int64_t              ne0   = tmeta->ne[0];
-        int64_t              ne1   = tmeta->ne[1];
-
-        size_t       toff     = gguf_get_tensor_offset(gf.gguf, tidx);
-        const void * base_ptr = gf.mapping + gf.data_offset + toff;
+        enum ggml_type ttype = ws.type(gguf_name.c_str());
+        int n_dims; int64_t ne_arr[4];
+        ws.shape(gguf_name.c_str(), n_dims, ne_arr);
+        int64_t ne0 = ne_arr[0];
+        int64_t ne1 = ne_arr[1];
+        ggml_type data_type;
+        const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
 
         // LoKr shapes (safetensors row major):
         //   w1 : (a, b)
@@ -987,18 +975,18 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 
 // Main adapter merge entry point.
 //
-// Call after all GGUF tensors are loaded into wctx->pending but before wctx_alloc.
+// Call after all tensors are loaded into wctx->pending but before wctx_alloc.
 // Detects the adapter algorithm from the safetensors payload and dispatches to
 // the matching merge path. The adapter_path points to either:
 //   PEFT directory  : a folder with adapter_model.safetensors + adapter_config.json
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
 // Directories exist only for PEFT. LyCORIS ships as a single file for both LoRA
 // and LoKr payloads.
-static bool adapter_merge(WeightCtx *       wctx,
-                          const GGUFModel & gf,
-                          const char *      adapter_path,
-                          float             scale,
-                          ggml_backend_t    backend) {
+static bool adapter_merge(WeightCtx *          wctx,
+                          const WeightSource & ws,
+                          const char *         adapter_path,
+                          float                scale,
+                          ggml_backend_t       backend) {
     std::string sf_path;
     std::string cfg_dir;
 
@@ -1040,9 +1028,9 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, gf, st, scale, backend);
+        ok = adapter_merge_lokr(wctx, ws, st, scale, backend);
     } else {
-        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, scale, backend);
+        ok = adapter_merge_lora(wctx, ws, st, cfg_dir, scale, backend);
     }
 
     st_close(&st);

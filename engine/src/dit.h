@@ -461,17 +461,13 @@ static bool dit_ggml_load(DiTGGML *    m,
 
     // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
     // HOT-Step: skip merge in runtime mode — runtime adapter loaded after wctx_alloc
-    if (adapter_path && is_st) {
-        // Adapter merge with safetensors base model not yet supported
-        fprintf(stderr, "[DiT] WARNING: adapter merge with safetensors base model not yet supported, adapter ignored\n");
-        // TODO: refactor adapter-merge.h to take WeightSource instead of GGUFModel
-    } else if (adapter_path && !is_st) {
+    if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
         if (!runtime_mode) {
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
+            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend)) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
-                gf_close(&gf);
+                if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;
             }
             fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
@@ -487,13 +483,13 @@ static bool dit_ggml_load(DiTGGML *    m,
     }
 
     // HOT-Step: load runtime adapter AFTER wctx_alloc (base weights on GPU first)
-    if (adapter_path && !is_st) {
+    if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
         if (runtime_mode) {
             Timer rt_timer;
-            if (!adapter_load_runtime(&m->lora, gf, adapter_path, adapter_scale,
+            if (!adapter_load_runtime(&m->lora, ws, adapter_path, adapter_scale,
                                        g_hotstep_params.adapter_group_scales, m->backend)) {
-                fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed, continuing without adapter\n");
+                fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed\n");
             }
             fprintf(stderr, "[Adapter-RT] Load time: %.1f ms\n", rt_timer.ms());
         }
