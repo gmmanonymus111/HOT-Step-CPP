@@ -23,7 +23,7 @@ const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 b
 export const GenerationDropdown: React.FC = () => {
   const gp = useGlobalParams();
   const { t } = useTranslation();
-  const { registry, findSolver, findGuidance } = usePluginRegistry();
+  const { registry, findSolver, findScheduler, findGuidance } = usePluginRegistry();
   const [compositeOpen, setCompositeOpen] = usePersistedState('hs-genAccordion-composite', false);
   const [dcwOpen, setDcwOpen] = usePersistedState('hs-genAccordion-dcw', false);
   const [latentOpen, setLatentOpen] = usePersistedState('hs-genAccordion-latent', false);
@@ -208,6 +208,23 @@ export const GenerationDropdown: React.FC = () => {
           ) : null;
         })()}
       </div>
+
+      {/* ── Dynamic Scheduler Controls ── */}
+      {(() => {
+        const sched = findScheduler(schedulerKey);
+        if (!sched || !sched.params || sched.params.length === 0) return null;
+        return (
+          <PluginControls
+            pluginName={sched.name}
+            displayName={sched.display}
+            accent={sched.accent}
+            params={sched.params}
+            values={gp.pluginParams}
+            onChange={gp.setPluginParam}
+            onReset={() => gp.resetPluginParams(sched.name)}
+          />
+        );
+      })()}
 
       {/* ── Beta (Custom) Sub-Controls ── */}
       {gp.scheduler.startsWith('beta:') && (() => {

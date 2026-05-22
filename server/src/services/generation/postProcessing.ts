@@ -163,6 +163,7 @@ export async function runPostProcessingChain(
     }
 
     if (ppMasterOn) {
+      setStage(`Applying VST chain${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
       try {
         const applied = await applyVstChain(processedPath);
         if (applied) {

@@ -41,4 +41,5 @@ export interface PluginRegistry {
   solvers: PluginInfo[];
   schedulers: PluginInfo[];
   guidance: PluginInfo[];
+  postprocess?: PluginInfo[];
 }

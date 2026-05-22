@@ -22,6 +22,7 @@ import { ToggleSwitch } from './BarSection';
 import { formatReferenceName } from './modelLabels';
 import { VstChainDropdown } from './VstChainDropdown';
 import { CoverArtContent, CoverArtBadge } from './CoverArtDropdown';
+import { PluginControls } from './PluginControls';
 import { EditableSlider } from '../shared/EditableSlider';
 
 // ── Accordion Section ───────────────────────────────────────────
@@ -328,6 +329,17 @@ export const PostProcessingDropdown: React.FC = () => {
                   <p className="text-[10px] text-cyan-400/60 leading-relaxed">
                     ✓ {selectedPostprocessPlugin.display || selectedPostprocessPlugin.name} — {selectedPostprocessPlugin.description || 'Active'}
                   </p>
+                )}
+                {selectedPostprocessPlugin?.params?.length > 0 && (
+                  <PluginControls
+                    pluginName={selectedPostprocessPlugin.name}
+                    displayName={selectedPostprocessPlugin.display || selectedPostprocessPlugin.name}
+                    accent={selectedPostprocessPlugin.accent || 'cyan'}
+                    params={selectedPostprocessPlugin.params}
+                    values={gp.pluginParams}
+                    onChange={gp.setPluginParam}
+                    onReset={() => gp.resetPluginParams(selectedPostprocessPlugin.name)}
+                  />
                 )}
               </div>
             )}
