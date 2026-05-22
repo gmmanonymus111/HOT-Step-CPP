@@ -437,7 +437,7 @@ router.post('/:id/retranscribe', async (req, res) => {
     const song = getDb().prepare('SELECT * FROM songs WHERE id = ?').get(id) as any;
     if (!song) return res.status(404).json({ error: 'Song not found' });
 
-    const audioFilename = song.audio_filename || song.filename;
+    const audioFilename = song.audio_url ? path.basename(song.audio_url) : '';
     if (!audioFilename) return res.status(400).json({ error: 'No audio file' });
     const audioPath = path.join(config.data.audioDir, audioFilename);
     if (!fs.existsSync(audioPath)) return res.status(404).json({ error: 'Audio file not found' });
@@ -448,11 +448,12 @@ router.post('/:id/retranscribe', async (req, res) => {
       return res.status(400).json({ error: 'No source lyrics available' });
     }
 
-    const { isWhisperAvailable, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
+    const { ensureWhisperCli, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
     const { reconcileLyrics } = await import('../services/lyricsReconcile.js');
 
-    if (!isWhisperAvailable()) {
-      return res.status(400).json({ error: 'Whisper CLI not found. Download it from the Model Manager.' });
+    const whisperReady = await ensureWhisperCli();
+    if (!whisperReady) {
+      return res.status(400).json({ error: 'Whisper CLI not available and auto-download failed.' });
     }
 
     const whisperModel = req.body?.model || '';

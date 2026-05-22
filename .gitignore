@@ -60,6 +60,9 @@ engine/.cache/
 *.pth
 *.onnx
 
+# Downloaded tools (whisper.cpp, etc.)
+tools/
+
 # Test output logs
 engine/tests/*.log
 

@@ -541,11 +541,12 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       // ── Whisper Lyrics Transcription (optional) ──
       if (job.params.whisperLyricsEnabled) {
         try {
-          const { isWhisperAvailable, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
+          const { ensureWhisperCli, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
           const { reconcileLyrics } = await import('../services/lyricsReconcile.js');
 
-          if (!isWhisperAvailable()) {
-            logGeneration(job.id, 'WARNING', '[Whisper] whisper-cli.exe not found — skipping transcription');
+          const whisperReady = await ensureWhisperCli();
+          if (!whisperReady) {
+            logGeneration(job.id, 'WARNING', '[Whisper] whisper-cli not available and auto-download failed — skipping');
           } else if (!findWhisperModel(job.params.whisperModel)) {
             logGeneration(job.id, 'WARNING', '[Whisper] No Whisper model found — skipping transcription');
           } else {

@@ -14,9 +14,17 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import https from 'https';
+import { pipeline } from 'stream/promises';
 import { config } from '../config.js';
 
 const execFileAsync = promisify(execFile);
+
+// ── Auto-download constants ─────────────────────────────────────────
+// whisper.cpp v1.8.4 CUDA 12.4 build (works with CUDA 12.x and 13.x)
+const WHISPER_RELEASE_URL = 'https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip';
+const WHISPER_FALLBACK_URL = 'https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip';
+
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -125,6 +133,120 @@ export function findWhisperModel(preferredModel?: string): string | null {
   return null;
 }
 
+// ── Auto-download ───────────────────────────────────────────────────
+
+/** Download a file from a URL, following redirects. */
+function httpsDownload(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const doRequest = (reqUrl: string, redirectsLeft: number) => {
+      https.get(reqUrl, (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+          return doRequest(res.headers.location, redirectsLeft - 1);
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`HTTP ${res.statusCode} for ${reqUrl}`));
+        }
+        const fileStream = fs.createWriteStream(dest);
+        res.pipe(fileStream);
+        fileStream.on('finish', () => { fileStream.close(); resolve(); });
+        fileStream.on('error', reject);
+      }).on('error', reject);
+    };
+    doRequest(url, 5);
+  });
+}
+
+/**
+ * Ensure whisper-cli.exe is available, downloading it if needed.
+ * Downloads CUDA build first, falls back to CPU-only.
+ * Returns true if whisper-cli is ready, false if download failed.
+ */
+export async function ensureWhisperCli(): Promise<boolean> {
+  const whisperExe = config.whisper.exe;
+  if (fs.existsSync(whisperExe)) return true;
+
+  const whisperDir = path.dirname(whisperExe);
+  fs.mkdirSync(whisperDir, { recursive: true });
+
+  const zipPath = path.join(whisperDir, 'whisper-download.zip');
+
+  // Try CUDA build first, fall back to CPU
+  for (const url of [WHISPER_RELEASE_URL, WHISPER_FALLBACK_URL]) {
+    try {
+      console.log(`[Whisper] Downloading whisper-cli from: ${url}`);
+      console.log(`[Whisper] This is a one-time download (~30 MB)...`);
+
+      await httpsDownload(url, zipPath);
+
+      if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 1_000_000) {
+        console.warn('[Whisper] Downloaded file too small, trying next URL...');
+        try { fs.unlinkSync(zipPath); } catch {}
+        continue;
+      }
+
+      // Extract with PowerShell
+      console.log('[Whisper] Extracting...');
+      await execFileAsync('powershell', [
+        '-NoProfile', '-Command',
+        `Expand-Archive -Path '${zipPath}' -DestinationPath '${whisperDir}' -Force`,
+      ], { timeout: 60_000 });
+
+      // Clean up zip
+      try { fs.unlinkSync(zipPath); } catch {}
+
+      // Check if whisper-cli.exe landed (might be in a subdirectory)
+      if (fs.existsSync(whisperExe)) {
+        console.log(`[Whisper] ✓ whisper-cli ready at: ${whisperExe}`);
+        return true;
+      }
+
+      // Search for it in subdirectories (some releases nest in a folder)
+      const found = findFileRecursive(whisperDir, 'whisper-cli.exe');
+      if (found && found !== whisperExe) {
+        // Move all files from nested dir up to whisperDir
+        const nestedDir = path.dirname(found);
+        if (nestedDir !== whisperDir) {
+          for (const f of fs.readdirSync(nestedDir)) {
+            const src = path.join(nestedDir, f);
+            const dest = path.join(whisperDir, f);
+            if (!fs.existsSync(dest)) fs.renameSync(src, dest);
+          }
+          // Clean up empty nested dir
+          try { fs.rmdirSync(nestedDir); } catch {}
+        }
+        if (fs.existsSync(whisperExe)) {
+          console.log(`[Whisper] ✓ whisper-cli ready at: ${whisperExe}`);
+          return true;
+        }
+      }
+
+      console.warn('[Whisper] Extracted but whisper-cli.exe not found in expected location');
+    } catch (err: any) {
+      console.error(`[Whisper] Download failed: ${err.message}`);
+      try { fs.unlinkSync(zipPath); } catch {}
+    }
+  }
+
+  console.error('[Whisper] Could not download whisper-cli.exe — feature unavailable');
+  return false;
+}
+
+/** Recursively find a file by name in a directory. */
+function findFileRecursive(dir: string, filename: string): string | null {
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isFile() && entry.name.toLowerCase() === filename.toLowerCase()) return fullPath;
+      if (entry.isDirectory()) {
+        const found = findFileRecursive(fullPath, filename);
+        if (found) return found;
+      }
+    }
+  } catch {}
+  return null;
+}
+
 /**
  * Check whether whisper-cli is available at the configured path.
  */
@@ -142,6 +264,8 @@ export function isWhisperAvailable(): boolean {
  * Runs whisper.cpp with JSON output (-oj) and word-level timestamps (--max-len 1).
  * Source lyrics are passed as a vocabulary-priming --prompt to improve accuracy.
  *
+ * If whisper-cli.exe is missing, attempts to auto-download it first.
+ *
  * @param audioPath    Absolute path to the audio file (WAV/MP3)
  * @param sourceLyrics Original lyrics text for vocabulary priming
  * @param options      Optional overrides for model, language, beam size
@@ -152,13 +276,14 @@ export async function transcribeWithWhisper(
   sourceLyrics: string,
   options: WhisperOptions = {},
 ): Promise<WhisperResult | null> {
-  const whisperExe = config.whisper.exe;
-
-  // Validate exe exists
-  if (!fs.existsSync(whisperExe)) {
-    console.error(`[Whisper] whisper-cli not found at: ${whisperExe}`);
+  // Auto-download if needed
+  const ready = await ensureWhisperCli();
+  if (!ready) {
+    console.error('[Whisper] whisper-cli not available and auto-download failed');
     return null;
   }
+
+  const whisperExe = config.whisper.exe;
 
   // Find model
   const modelPath = findWhisperModel(options.model);
