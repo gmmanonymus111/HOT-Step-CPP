@@ -25,6 +25,7 @@ export interface LyricsLine {
   end: number;
   text: string;
   words: LyricsWord[];
+  section?: string;  // e.g. 'Verse 1', 'Chorus', 'Bridge'
 }
 
 export interface LyricsJson {
@@ -235,18 +236,33 @@ export function reconcileLyrics(
     }
   }
 
-  // 2. Extract source words, preserving line structure
+  // 2. Extract source words, preserving line structure + section markers
   //    sourceLineIdx[i] = which source line word i belongs to
-  const sourceLines = sourceLyrics
+  //    sourceLineSection[lineNum] = section name for that source line
+  const allLines = sourceLyrics
     .split('\n')
     .map(line => line.trim())
-    .filter(line => line.length > 0 && !SECTION_MARKER.test(line));
+    .filter(line => line.length > 0);
+
+  const sourceLines: string[] = [];       // lyrics lines only (no section markers)
+  const sourceLineSection: string[] = []; // section name for each source line
+  let currentSection = '';
+
+  for (const line of allLines) {
+    if (SECTION_MARKER.test(line)) {
+      // Extract section name: "[Verse 1]" → "Verse 1"
+      currentSection = line.replace(/^\[/, '').replace(/\]$/, '');
+    } else {
+      sourceLines.push(line);
+      sourceLineSection.push(currentSection);
+    }
+  }
 
   const sourceWords: string[] = [];
   const sourceLineIdx: number[] = [];  // maps word index → source line number
 
   for (let lineNum = 0; lineNum < sourceLines.length; lineNum++) {
-    const words = sourceLines[lineNum].split(/\s+/).filter(w => w.length > 0);
+    const words = sourceLines[lineNum].split(/\s+/).filter((w: string) => w.length > 0);
     for (const w of words) {
       sourceLineIdx.push(lineNum);
       sourceWords.push(w);
@@ -260,8 +276,9 @@ export function reconcileLyrics(
   const aligned = needlemanWunsch(sourceWords, whisperTexts);
 
   // 5. Build merged word list, carrying source line index
+  //    Ad-lib words (hallucinations) are EXCLUDED from output.
   interface MergedWord extends LyricsWord {
-    srcLine: number;  // -1 for ad-lib/whisper-only words
+    srcLine: number;  // -1 for whisper-only words
   }
   const mergedWords: MergedWord[] = [];
 
@@ -289,7 +306,7 @@ export function reconcileLyrics(
         srcLine: sourceLineIdx[pair.sourceIdx],
       });
     } else if (pair.sourceIdx === null && pair.whisperIdx !== null) {
-      // Ad-lib: whisper heard something not in source
+      // Ad-lib: whisper heard something not in source (could be repeat or hallucination)
       const ww = whisperWords[pair.whisperIdx];
       mergedWords.push({
         word: ww.word,
@@ -297,27 +314,39 @@ export function reconcileLyrics(
         end: ww.end,
         confidence: ww.probability ?? 0,
         source: 'ad-lib',
-        srcLine: -1,  // no source line
+        srcLine: -1,
       });
     }
     // pair.whisperIdx === null → source word with no whisper match → drop
   }
+
+  // 5b. Trim intro/outro hallucinations
+  //     Drop everything before the first 'matched' word and after the last.
+  //     Mid-song ad-libs (genuine repeats) are preserved.
+  const firstMatched = mergedWords.findIndex((w: MergedWord) => w.source === 'matched');
+  let lastMatched = -1;
+  for (let i = mergedWords.length - 1; i >= 0; i--) {
+    if (mergedWords[i].source === 'matched') { lastMatched = i; break; }
+  }
+  const trimmedWords = firstMatched >= 0
+    ? mergedWords.slice(firstMatched, lastMatched + 1)
+    : mergedWords;  // no matches at all — keep everything as fallback
 
   // 6. Group words into lines using source line boundaries
   //    Primary break: when source line index changes
   //    Secondary break: timing gap > threshold, or line too long
   const lines: LyricsLine[] = [];
 
-  if (mergedWords.length === 0) {
+  if (trimmedWords.length === 0) {
     return { version: 1, method: 'whisper', whisperModel, vocalsIsolated, lines: [] };
   }
 
-  let currentWords: LyricsWord[] = [stripSrcLine(mergedWords[0])];
-  let currentSrcLine = mergedWords[0].srcLine;
+  let currentWords: LyricsWord[] = [stripSrcLine(trimmedWords[0])];
+  let currentSrcLine = trimmedWords[0].srcLine;
 
-  for (let i = 1; i < mergedWords.length; i++) {
-    const prev = mergedWords[i - 1];
-    const curr = mergedWords[i];
+  for (let i = 1; i < trimmedWords.length; i++) {
+    const prev = trimmedWords[i - 1];
+    const curr = trimmedWords[i];
     const gap = curr.start - prev.end;
 
     // Break at source line boundary (when the source line changes)
@@ -327,7 +356,8 @@ export function reconcileLyrics(
     const lengthBreak = currentWords.length >= LINE_MAX_WORDS;
 
     if (srcLineChanged || timingBreak || lengthBreak) {
-      lines.push(buildLine(currentWords));
+      const section = currentSrcLine >= 0 ? sourceLineSection[currentSrcLine] : undefined;
+      lines.push(buildLine(currentWords, section));
       currentWords = [stripSrcLine(curr)];
       currentSrcLine = curr.srcLine;
     } else {
@@ -341,7 +371,8 @@ export function reconcileLyrics(
 
   // Flush remaining words
   if (currentWords.length > 0) {
-    lines.push(buildLine(currentWords));
+    const section = currentSrcLine >= 0 ? sourceLineSection[currentSrcLine] : undefined;
+    lines.push(buildLine(currentWords, section));
   }
 
   return {
@@ -366,11 +397,13 @@ function stripSrcLine(word: LyricsWord & { srcLine?: number }): LyricsWord {
 // Build a LyricsLine from a group of words
 // ──────────────────────────────────────────────
 
-function buildLine(words: LyricsWord[]): LyricsLine {
-  return {
+function buildLine(words: LyricsWord[], section?: string): LyricsLine {
+  const line: LyricsLine = {
     start: words[0].start,
     end: words[words.length - 1].end,
     text: words.map(w => w.word).join(' '),
     words,
   };
+  if (section) line.section = section;
+  return line;
 }
