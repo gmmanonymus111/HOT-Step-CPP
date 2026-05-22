@@ -430,4 +430,64 @@ router.post('/:id/crop', (req, res) => {
 });
 
 
+// POST /api/songs/:id/retranscribe — Re-run Whisper transcription
+router.post('/:id/retranscribe', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const song = getDb().prepare('SELECT * FROM songs WHERE id = ?').get(id) as any;
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+
+    const audioFilename = song.audio_filename || song.filename;
+    if (!audioFilename) return res.status(400).json({ error: 'No audio file' });
+    const audioPath = path.join(config.data.audioDir, audioFilename);
+    if (!fs.existsSync(audioPath)) return res.status(404).json({ error: 'Audio file not found' });
+
+    const genParams = song.generation_params ? JSON.parse(song.generation_params) : {};
+    const sourceLyrics = genParams.lyrics || song.lyrics || '';
+    if (!sourceLyrics.trim()) {
+      return res.status(400).json({ error: 'No source lyrics available' });
+    }
+
+    const { isWhisperAvailable, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
+    const { reconcileLyrics } = await import('../services/lyricsReconcile.js');
+
+    if (!isWhisperAvailable()) {
+      return res.status(400).json({ error: 'Whisper CLI not found. Download it from the Model Manager.' });
+    }
+
+    const whisperModel = req.body?.model || '';
+    const modelPath = findWhisperModel(whisperModel);
+    if (!modelPath) {
+      return res.status(400).json({ error: 'No Whisper model found. Download one from the Model Manager.' });
+    }
+
+    console.log(`[Retranscribe] Song ${id}: starting`);
+
+    const whisperResult = await transcribeWithWhisper(audioPath, sourceLyrics, {
+      model: whisperModel,
+      language: req.body?.language || 'auto',
+      beamSize: req.body?.beamSize || 5,
+    });
+
+    if (!whisperResult || !whisperResult.segments?.length) {
+      return res.status(500).json({ error: 'Whisper returned no transcription' });
+    }
+
+    const lyricsJson = reconcileLyrics(whisperResult, sourceLyrics, whisperModel || 'auto', false);
+
+    const lyricsJsonFilename = audioFilename.replace(/\.[^.]+$/, '.lyrics.json');
+    const lyricsJsonPath = path.join(config.data.audioDir, lyricsJsonFilename);
+    fs.writeFileSync(lyricsJsonPath, JSON.stringify(lyricsJson, null, 2));
+
+    const wordCount = lyricsJson.lines.reduce((n: number, l: any) => n + l.words.length, 0);
+    console.log(`[Retranscribe] Song ${id}: saved ${lyricsJsonFilename} (${lyricsJson.lines.length} lines, ${wordCount} words)`);
+
+    res.json({ success: true, lineCount: lyricsJson.lines.length, wordCount });
+  } catch (err: any) {
+    console.error('[Retranscribe] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 export default router;

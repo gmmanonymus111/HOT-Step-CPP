@@ -284,3 +284,20 @@ export const modelManagerApi = {
   /** SSE endpoint URL for download progress */
   downloadsStreamUrl: `${BASE}/model-manager/downloads`,
 };
+
+// ── Retranscribe Lyrics ─────────────────────────────────────
+export async function retranscribeLyrics(
+  songId: string,
+  options?: { model?: string; language?: string; beamSize?: number }
+): Promise<{ success: boolean; lineCount: number; wordCount: number }> {
+  const res = await fetch(`/api/songs/${songId}/retranscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options || {}),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}

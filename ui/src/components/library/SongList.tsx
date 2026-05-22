@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom';
 import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
   Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
-  LayoutGrid, List as ListIcon, Table2, ArrowLeftRight, Upload,
+  LayoutGrid, List as ListIcon, Table2, ArrowLeftRight, Upload, Mic2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
@@ -809,6 +809,24 @@ const SongItem: React.FC<SongItemProps> = ({
                   <Upload size={14} /> {t('library.exportParams')}
                 </button>
 
+                {/* Retranscribe Lyrics */}
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    setShowMenu(false);
+                    try {
+                      const { retranscribeLyrics } = await import('../../services/api');
+                      const result = await retranscribeLyrics(song.id);
+                      console.log(`[Retranscribe] ${result.wordCount} words, ${result.lineCount} lines`);
+                    } catch (err: any) {
+                      console.error('[Retranscribe] Failed:', err.message);
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-sky-400 hover:bg-sky-500/10 transition-colors"
+                >
+                  <Mic2 size={14} /> Retranscribe Lyrics
+                </button>
+
                 {/* Cover Art Generation */}
                 <div className="border-t border-zinc-200 dark:border-white/5 my-1" />
                 <button
@@ -1031,6 +1049,22 @@ const SongCard: React.FC<SongCardProps> = ({
                 }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
                   <Upload size={12} /> {t('library.exportParams')}
+                </button>
+
+                {/* Retranscribe Lyrics */}
+                <button onClick={async (e) => {
+                  e.stopPropagation();
+                  setShowMenu(false);
+                  try {
+                    const { retranscribeLyrics } = await import('../../services/api');
+                    const result = await retranscribeLyrics(song.id);
+                    console.log(`[Retranscribe] ${result.wordCount} words, ${result.lineCount} lines`);
+                  } catch (err: any) {
+                    console.error('[Retranscribe] Failed:', err.message);
+                  }
+                }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-sky-400 hover:bg-sky-500/10 transition-colors">
+                  <Mic2 size={12} /> Retranscribe Lyrics
                 </button>
 
                 {/* Cover Art Generation */}
