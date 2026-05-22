@@ -415,6 +415,8 @@ function normaliseWhisperJson(raw: any): WhisperResult {
       for (const tok of seg.tokens) {
         const tokText = (tok?.text ?? '').trim();
         if (tokText.length === 0) continue;
+        // Skip special tokens (whisper uses [_BEG_], [_TT_xxx], etc.)
+        if (tokText.startsWith('[') && tokText.endsWith(']')) continue;
 
         words.push({
           word: tokText,
@@ -423,6 +425,17 @@ function normaliseWhisperJson(raw: any): WhisperResult {
           probability: tok?.p ?? 0,
         });
       }
+    }
+
+    // With --max-len 1, each segment IS roughly a word.
+    // If token parsing yielded nothing, synthesise a word from the segment itself.
+    if (words.length === 0 && text.length > 0) {
+      words.push({
+        word: text,
+        start: startMs / 1000,
+        end: endMs / 1000,
+        probability: 1.0,
+      });
     }
 
     if (text.length > 0) {
