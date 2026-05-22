@@ -302,13 +302,22 @@ export async function transcribeWithWhisper(
   const language = options.language ?? 'auto';
 
   // Build CLI args
+  //   --dtw:           compute token-level timestamps via Dynamic Time Warping (word-level!)
+  //   --split-on-word: split segments at word boundaries, not BPE token boundaries
+  //   --suppress-nst:  suppress non-speech tokens (reduces hallucination in silence)
+  //   --no-fallback:   don't retry with higher temperature (reduces hallucination)
+  const modelBasename = path.basename(modelPath, '.bin').replace('ggml-', '');
   const args: string[] = [
     '-m', modelPath,
     '-f', audioPath,
-    '-oj',                  // output JSON (writes <input>.json sidecar)
-    '--max-len', '1',       // word-level segmentation
+    '-oj',                    // output JSON (writes <input>.json sidecar)
+    '--dtw', modelBasename,   // token-level timestamps via DTW (e.g. 'large-v3-turbo')
+    '--split-on-word',        // split at word boundaries, not BPE tokens
+    '--max-len', '0',         // no max segment length (natural sentence boundaries)
     '--beam-size', String(beamSize),
-    '--no-prints',          // suppress progress to stderr
+    '--no-prints',            // suppress progress to stderr
+    '--suppress-nst',         // suppress non-speech tokens
+    '--no-fallback',          // don't retry with higher temperature
   ];
 
   // Language (skip if auto-detect)
@@ -405,14 +414,14 @@ function normaliseWhisperJson(raw: any): WhisperResult {
     return { segments };
   }
 
-  // Debug: log first segment structure to help diagnose parsing issues
-  if (transcription.length > 0) {
-    const first = transcription[0];
-    console.log(`[Whisper] JSON sample — first segment: text="${first?.text}", ` +
-      `offsets=${JSON.stringify(first?.offsets)}, ` +
-      `tokens=${Array.isArray(first?.tokens) ? first.tokens.length + ' items' : 'none'}`);
-    if (Array.isArray(first?.tokens) && first.tokens.length > 0) {
-      const t = first.tokens[0];
+  // Debug: log first non-empty segment structure to help diagnose parsing issues
+  const firstNonEmpty = transcription.find((s: any) => (s?.text ?? '').trim().length > 0);
+  if (firstNonEmpty) {
+    console.log(`[Whisper] JSON sample — first segment: text="${firstNonEmpty?.text}", ` +
+      `offsets=${JSON.stringify(firstNonEmpty?.offsets)}, ` +
+      `tokens=${Array.isArray(firstNonEmpty?.tokens) ? firstNonEmpty.tokens.length + ' items' : 'none'}`);
+    if (Array.isArray(firstNonEmpty?.tokens) && firstNonEmpty.tokens.length > 0) {
+      const t = firstNonEmpty.tokens[0];
       console.log(`[Whisper] JSON sample — first token: ${JSON.stringify(t)}`);
     }
   }
@@ -422,40 +431,104 @@ function normaliseWhisperJson(raw: any): WhisperResult {
     const endMs = seg?.offsets?.to ?? 0;
     const text = (seg?.text ?? '').trim();
 
-    const words: WhisperWord[] = [];
-    if (Array.isArray(seg?.tokens)) {
-      for (const tok of seg.tokens) {
-        const tokText = (tok?.text ?? '').trim();
-        if (tokText.length === 0) continue;
-        // Skip special tokens (whisper uses [_BEG_], [_TT_xxx], etc.)
-        if (tokText.startsWith('[') && tokText.endsWith(']')) continue;
+    // Skip empty segments
+    if (text.length === 0) continue;
+    // Skip punctuation-only segments
+    if (/^[\s.,!?;:'"()\-–—…]+$/.test(text)) continue;
 
-        words.push({
-          word: tokText,
-          start: (tok?.offsets?.from ?? 0) / 1000,
-          end: (tok?.offsets?.to ?? 0) / 1000,
-          probability: tok?.p ?? 0,
-        });
+    const words: WhisperWord[] = [];
+
+    if (Array.isArray(seg?.tokens) && seg.tokens.length > 0) {
+      // With --dtw, tokens are BPE sub-word pieces with timestamps.
+      // Word-starting tokens have a leading space (e.g. " Hello").
+      // Merge consecutive sub-tokens into whole words.
+      let currentWord = '';
+      let wordStart = 0;
+      let wordEnd = 0;
+      let wordProb = 0;
+      let tokenCount = 0;
+
+      for (const tok of seg.tokens) {
+        const rawText = tok?.text ?? '';
+
+        // Skip special tokens ([_BEG_], [_TT_xxx], [_SOT_], etc.)
+        if (/^\[.*\]$/.test(rawText.trim())) continue;
+        // Skip empty tokens
+        if (rawText.trim().length === 0 && currentWord.length === 0) continue;
+
+        // DTW timestamps can be in t_dtw (ms) or offsets.from/to
+        const tokStartMs = tok?.t_dtw ?? tok?.offsets?.from ?? 0;
+        const tokEndMs = tok?.offsets?.to ?? tokStartMs;
+
+        // Leading space = start of new word
+        const isNewWord = rawText.startsWith(' ') || rawText.startsWith('\u00a0');
+
+        if (isNewWord && currentWord.length > 0) {
+          // Flush previous word
+          const trimmed = currentWord.trim();
+          if (trimmed.length > 0 && !/^[.,!?;:'"()\-–—…]+$/.test(trimmed)) {
+            words.push({
+              word: trimmed,
+              start: wordStart / 1000,
+              end: wordEnd / 1000,
+              probability: tokenCount > 0 ? wordProb / tokenCount : 0,
+            });
+          }
+          currentWord = rawText;
+          wordStart = tokStartMs;
+          wordEnd = tokEndMs;
+          wordProb = tok?.p ?? 0;
+          tokenCount = 1;
+        } else {
+          // Continue building current word
+          if (currentWord.length === 0) {
+            wordStart = tokStartMs;
+          }
+          currentWord += rawText;
+          wordEnd = tokEndMs;
+          wordProb += tok?.p ?? 0;
+          tokenCount++;
+        }
+      }
+
+      // Flush last word
+      if (currentWord.trim().length > 0) {
+        const trimmed = currentWord.trim();
+        if (!/^[.,!?;:'"()\-–—…]+$/.test(trimmed)) {
+          words.push({
+            word: trimmed,
+            start: wordStart / 1000,
+            end: wordEnd / 1000,
+            probability: tokenCount > 0 ? wordProb / tokenCount : 0,
+          });
+        }
       }
     }
 
-    // With --max-len 1, each segment IS roughly a word.
-    // If token parsing yielded nothing, synthesise a word from the segment itself.
+    // Fallback: if no tokens or token parsing yielded nothing,
+    // split segment text into words with interpolated timestamps
     if (words.length === 0 && text.length > 0) {
-      words.push({
-        word: text,
-        start: startMs / 1000,
-        end: endMs / 1000,
-        probability: 1.0,
-      });
+      const textWords = text.split(/\s+/).filter((w: string) => w.length > 0 && !/^[.,!?;:'"()\-–—…]+$/.test(w));
+      if (textWords.length > 0) {
+        const segDuration = (endMs - startMs) / 1000;
+        const wordDuration = segDuration / textWords.length;
+        for (let i = 0; i < textWords.length; i++) {
+          words.push({
+            word: textWords[i],
+            start: startMs / 1000 + i * wordDuration,
+            end: startMs / 1000 + (i + 1) * wordDuration,
+            probability: 1.0,
+          });
+        }
+      }
     }
 
-    if (text.length > 0) {
+    if (words.length > 0) {
       segments.push({
         start: startMs / 1000,
         end: endMs / 1000,
         text,
-        words: words.length > 0 ? words : undefined,
+        words,
       });
     }
   }
