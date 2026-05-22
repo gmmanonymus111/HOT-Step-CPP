@@ -1842,10 +1842,10 @@
       "role": "whisper",
       "subdir": "whisper",
       "displayName": "Large v3 Turbo",
-      "sizeBytes": 848035840,
+      "sizeBytes": 1624555275,
       "repo": "ggerganov/whisper.cpp",
       "repoPath": "ggml-large-v3-turbo.bin",
-      "description": "Best balance of speed and accuracy. Recommended. ~5-10s per 30s track on GPU.",
+      "description": "Best balance of speed and accuracy (1.5 GB). Recommended. ~5-10s per 30s track on GPU.",
       "tags": ["recommended"]
     },
     {
@@ -1854,10 +1854,10 @@
       "role": "whisper",
       "subdir": "whisper",
       "displayName": "Large v3",
-      "sizeBytes": 1610612736,
+      "sizeBytes": 3095033483,
       "repo": "ggerganov/whisper.cpp",
       "repoPath": "ggml-large-v3.bin",
-      "description": "Maximum accuracy. Slower but best for difficult transcriptions. ~10-20s per 30s track on GPU.",
+      "description": "Maximum accuracy (2.9 GB). Slower but best for difficult transcriptions. ~10-20s per 30s track on GPU.",
       "tags": []
     },
     {
@@ -1866,10 +1866,10 @@
       "role": "whisper",
       "subdir": "whisper",
       "displayName": "Medium",
-      "sizeBytes": 511705088,
+      "sizeBytes": 1533763059,
       "repo": "ggerganov/whisper.cpp",
       "repoPath": "ggml-medium.bin",
-      "description": "Good accuracy with lower VRAM usage. ~3-8s per 30s track on GPU.",
+      "description": "Good accuracy with lower VRAM usage (1.4 GB). ~3-8s per 30s track on GPU.",
       "tags": []
     },
     {
@@ -1878,10 +1878,10 @@
       "role": "whisper",
       "subdir": "whisper",
       "displayName": "Base",
-      "sizeBytes": 155189248,
+      "sizeBytes": 147951465,
       "repo": "ggerganov/whisper.cpp",
       "repoPath": "ggml-base.bin",
-      "description": "Fastest, smallest. Good for quick previews but lower accuracy. ~1-3s per 30s track on GPU.",
+      "description": "Fastest, smallest (141 MB). Good for quick previews but lower accuracy. ~1-3s per 30s track on GPU.",
       "tags": []
     }
   ]
