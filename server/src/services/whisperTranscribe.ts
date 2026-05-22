@@ -304,8 +304,8 @@ export async function transcribeWithWhisper(
   // Build CLI args
   //   --split-on-word: split segments at word boundaries, not BPE token boundaries
   //   --max-len 1:     with --split-on-word, this gives exactly 1 word per segment
-  //   --suppress-nst:  suppress non-speech tokens (reduces hallucination in silence)
-  //   --no-fallback:   don't retry with higher temperature (reduces hallucination)
+  //   NOTE: --no-fallback removed — it causes repetition loops when decoder gets stuck
+  //   NOTE: --suppress-nst removed — too aggressive, interferes with decoding
   const args: string[] = [
     '-m', modelPath,
     '-f', audioPath,
@@ -314,8 +314,6 @@ export async function transcribeWithWhisper(
     '--max-len', '1',         // with --split-on-word: 1 word per segment
     '--beam-size', String(beamSize),
     '--no-prints',            // suppress progress to stderr
-    '--suppress-nst',         // suppress non-speech tokens
-    '--no-fallback',          // don't retry with higher temperature
   ];
 
   // Language (skip if auto-detect)
