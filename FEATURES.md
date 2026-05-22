@@ -10,7 +10,7 @@ Built on acestep.cpp (GGML/CUDA), with extensive modifications to the sampling, 
 
 ### Lua Plugin Architecture
 
-All solvers, schedulers, and guidance modes are implemented as hot-loadable Lua plugins. Drop a `.lua` file into the appropriate `engine/plugins/` subdirectory and it appears in the UI at next launch — no C++ rebuild required. Each plugin can declare its own user-facing parameters (sliders, toggles, dropdowns) via a schema table, which the UI renders dynamically.
+All solvers, schedulers, guidance modes, and postprocess plugins are implemented as hot-loadable Lua plugins. Drop a `.lua` file into the appropriate `engine/plugins/` subdirectory and it appears in the UI at next launch — no C++ rebuild required. Each plugin can declare its own user-facing parameters (sliders, toggles, dropdowns) via a schema table, which the UI renders dynamically. Solvers can declare `owns_loop=true` to take full control of the denoising loop for adaptive solvers like DOPRI5.
 
 The engine provides a native C++ bridge for performance-critical operations (APG momentum smoothing, perpendicular projection, norm thresholding) that Lua plugins can call via the `apg()` function. Advanced plugins can also declare a `post_step()` hook that receives model evaluation callbacks for techniques requiring extra forward passes at arbitrary latent positions. See the **[Plugin Authoring Guide](PLUGINS.md)** for the full API reference.
 
@@ -68,6 +68,14 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 | **SMC-CFG** | Sliding Mode Control guidance — control-theoretic correction for stability at high scales (Han et al. 2025) |
 | **CFG-MP** | Manifold Projection — iterative post-step projection using extra model evaluations to reduce the prediction gap (Su et al. 2025). Uses the `post_step()` hook for model callbacks |
 
+#### Postprocess Plugins
+
+Lua postprocess plugins that replace or augment the built-in VAE tiled decoder. Each plugin can declare its own UI parameters.
+
+| Plugin | Description |
+|--------|-------------|
+| **MD Audio Tiled Core** | Advanced tiled VAE decode with OLA crossfading, dual-pass merge, and integrated DSP chain. By [MDMAchine](https://github.com/MDMAchine). |
+
 ### Other Engine Features
 
 | Feature | Description |
@@ -79,6 +87,8 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 | **Latent Post-Processing** | Latent shift, latent rescale, and custom timestep scheduling — expose the latent space for experimentation. |
 | **LM Seed Locking** | Ties the LM seed to the DiT seed — locking the seed locks both, randomising randomises both. |
 | **Upstream Sync Infrastructure** | Marker-based system for tracking acestep.cpp divergence and cleanly merging upstream changes. |
+| **Safetensors Model Support** | Dual-format model loading — HuggingFace safetensors directories work alongside GGUF files for DiT, LM, Text Encoder, VAE, and Cond Encoder. Auto-detected by path (directory = safetensors, `.gguf` = GGUF). BF16 safetensors produce bit-perfect output vs BF16 GGUF. Format-agnostic `WeightSource` abstraction enables adapters to work with both base model formats. |
+| **Cover Noise Method** | Configurable noise injection method for cover generation with rescale implementation. |
 
 ---
 
@@ -93,6 +103,7 @@ Classifier-free guidance strategies, all routed through the native APG bridge:
 | **Adapter Browser** | File browser modal with scan endpoints, trigger word injection, and support for absolute paths outside the registry. |
 | **Adapter Scale Override Presets** | Predefined scale profiles (e.g. "vocals up", "instruments up") selectable from the sidebar. |
 | **Merge Model Detection** | Correctly identifies SFT-turbo blend models and skips inappropriate guidance clamping that would degrade output. |
+| **Safetensors Base Model Support** | Adapter merge and runtime LoRA work with both GGUF and safetensors base models via the `WeightSource` abstraction — no format-specific code paths. |
 
 ---
 
@@ -141,6 +152,7 @@ AI-driven song creation — minimal input, maximum automation:
 | **Random Genre** | One-click random genre selection from the full taxonomy. |
 | **Serial Queue** | Jobs run one at a time through an internal queue — queue multiple while one generates. |
 | **Live Progress** | Real-time stage updates (generating lyrics → resolving metadata → submitting → generating audio) with elapsed time. |
+| **Structured LLM Metadata** | AI-generated metadata (BPM, duration, key, time signature) via structured LLM prompts with editable system prompt. Caption rewrite operates independently of LM skip. |
 
 #### Custom-Gen
 
@@ -173,6 +185,13 @@ Full manual control for power users:
 | **Toggle Switches** | All boolean controls use styled toggle switches instead of plain checkboxes. |
 | **Persistent UI State** | Accordion states, sidebar collapse, scroll positions, and panel sizes all persist across navigation. |
 | **Per-Track Download Buttons** | Download individual tracks directly from the playlist sidebar. |
+| **A/B Comparison** | Dual-track playback for comparing two generations side by side. Global A/B mini-bar above the player for cross-view comparison with seed-locked comparison support. |
+| **Library View Modes** | Three view modes — Grid (card overlay with cover art), List, and Table. Table mode has resizable columns with drag handles and localStorage persistence. |
+| **Send to Playlist Toggle** | Toggle in the generation queue to auto-send completed tracks to the playlist sidebar. |
+| **Player Stop Button** | Dedicated Stop button to decouple playbar collapse from pause behaviour. |
+| **Model Descriptions** | Rich model descriptions shown in the Models tab dropdowns — each model displays its characteristics, recommended use case, and format badge (GGUF/ST). |
+| **Format Badges** | Custom model dropdowns with visual GGUF/ST format badges to distinguish between quantised GGUF files and native safetensors models. |
+| **Dynamic Plugin Parameters** | Solver, scheduler, guidance, and postprocess plugins can declare custom UI parameters (sliders, toggles, dropdowns) that render dynamically — no hardcoded UI needed. |
 
 ---
 
@@ -183,7 +202,7 @@ A complete AI-powered lyrics and music generation workspace, powered by the Lire
 | Feature | Description |
 |---------|-------------|
 | **Lireek Backend** | Full server-side lyric engine with SQLite database for artists, albums, profiles, and generations. |
-| **LLM Orchestration** | 6 LLM provider integrations (Gemini, LM Studio, OpenAI-compatible, etc.) with real-time SSE streaming. |
+| **LLM Orchestration** | 7 LLM provider integrations (Gemini, LM Studio, OpenAI-compatible, etc.) with real-time SSE streaming. |
 | **Artist Profiles** | Per-artist configuration with adapter presets, reference tracks, style summaries, and computed generation statistics. |
 | **Lyric Profiler** | Statistical analysis engine — contraction rates, rhyme schemes, meter patterns, perspective tracking — computed locally without LLM calls. |
 | **Streaming Generation** | Real-time SSE streaming of lyrics with live UI updates as the LLM writes. |
@@ -197,6 +216,7 @@ A complete AI-powered lyrics and music generation workspace, powered by the Lire
 | **Profile Stats Recalculation** | One-click re-run of all local statistical analysis without making any LLM calls. |
 | **LRC Synced Lyrics** | Timestamped lyric display synced to audio playback with seeking support. |
 | **Track Cropping** | Destructive IN/OUT point editing for trimming generated tracks to clean boundaries. |
+| **Subject Field** | Optional subject field for guiding lyric generation — sets the topic without dictating specific content. |
 
 ---
 
@@ -221,6 +241,19 @@ Full-featured cover generation workspace with audio analysis, stem manipulation,
 | **Album Adapter Presets** | Per-album adapter presets with bound reference tracks — select an album to auto-load the matching adapter and reference. |
 | **Cover Generation UI** | Full workspace with metadata extraction, artist grid, cover-specific sliders, progress tracking, and recent covers list. |
 | **Persistent State** | All settings, selections, and analysis results persist across navigation and reloads. |
+
+---
+
+## Repaint Studio
+
+Region-based audio regeneration with waveform selection and synchronized lyrics editing:
+
+| Feature | Description |
+|---------|-------------|
+| **Waveform Region Selector** | Visual waveform display with click-drag region selection for choosing which section of a track to regenerate. |
+| **LRC Lyrics Editor** | Synchronized lyrics editor showing timestamped lyrics aligned to the selected region. |
+| **Selective Regeneration** | Regenerate only the selected portion of a track while preserving the rest — fix problematic sections without re-generating the entire song. |
+| **WIP Status** | Includes a dismissable notice banner indicating the feature is under active development. |
 
 ---
 
@@ -306,6 +339,8 @@ In-app LLM-powered assistant with full context awareness:
 | **Configurable Download Defaults** | Set preferred export format, filename prefix, and download behaviour. |
 | **Environment Editor** | Read and edit the server's `.env` file directly from the Settings UI with categorised sections, masked API keys, and save confirmation. |
 | **Runtime Config Reload** | Hot-reload LLM provider settings and API keys without restarting the server. Engine-level changes show a restart notification. |
+| **VAE Chunk/Overlap Settings** | Exposed VAE chunk size and overlap parameters for tuning memory usage on Vulkan/low-VRAM GPUs. |
+| **OpenAI-Compatible Provider** | Generic OpenAI-compatible LLM provider supporting oMLX, vLLM, LocalAI, and similar endpoints. Configurable base URL and API key. |
 
 ---
 
@@ -313,7 +348,7 @@ In-app LLM-powered assistant with full context awareness:
 
 | Feature | Description |
 |---------|-------------|
-| **In-App Model Downloads** | Browse and download 100+ GGUF models directly from the app — no manual file management needed. |
+| **In-App Model Downloads** | Browse and download 100+ GGUF and safetensors models directly from the app — no manual file management needed. |
 | **Curated Starter Packs** | 4 pre-configured bundles (Quick Start, Minimal, XL Quality, Blackwell Optimized) with one-click download of the full pipeline. |
 | **Tabbed Model Catalogue** | Browse all available models organised by role (DiT, LM, Text Encoder, VAE, PP-VAE) with descriptions and quantisation badges. |
 | **Concurrent Resumable Downloads** | Multiple simultaneous downloads with HTTP Range-based resumption — interruptions resume from where they left off. |
@@ -335,3 +370,4 @@ In-app LLM-powered assistant with full context awareness:
 | **Quant Benchmark** | Automated inference benchmarking with peak VRAM tracking and results logging. |
 | **MXFP4 Tensor Core Tests** | Blackwell GPU stress tests demonstrating 22–33% speedup with MXFP4 quantisation. |
 | **Graceful Shutdown** | Proper Windows process cleanup with a "you can close this page" confirmation screen. |
+| **Smart Update Scripts** | `update-and-build.bat` / `.sh` scripts for source builders — pulls latest changes, rebuilds engine, and reinstalls dependencies in one step. |
