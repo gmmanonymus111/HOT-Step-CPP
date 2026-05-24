@@ -28,9 +28,13 @@ struct BackendPair {
     bool           has_gpu;
 };
 
-// Cached backend state (shared across all modules in the same binary)
-static BackendPair g_backend_cache = {};
-static int         g_backend_refs  = 0;
+// Cached backend state (shared across all modules in the same binary).
+// Must be `inline` (not `static`) so every TU that includes this header
+// shares a single instance. `static` would give each TU its own copy,
+// breaking the refcount guard and causing duplicate ggml_backend_load_all
+// calls (see GitHub #49).
+inline BackendPair g_backend_cache = {};
+inline int         g_backend_refs  = 0;
 
 // Physical core count heuristic (logical / 2 for HT/SMT).
 // Used for GGML CPU thread count: GEMM shares SIMD units across hyperthreads,

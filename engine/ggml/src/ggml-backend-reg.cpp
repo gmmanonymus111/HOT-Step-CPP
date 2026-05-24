@@ -181,6 +181,14 @@ struct ggml_backend_registry {
             return;
         }
 
+        // HOT-Step patch: prevent duplicate backend registration (fixes #49).
+        // DLL-reloaded backends get fresh pointers, so check by name too.
+        for (const auto & entry : backends) {
+            if (entry.reg == reg || strcmp(ggml_backend_reg_name(entry.reg), ggml_backend_reg_name(reg)) == 0) {
+                return;
+            }
+        }
+
 #ifndef NDEBUG
         GGML_LOG_DEBUG("%s: registered backend %s (%zu devices)\n",
             __func__, ggml_backend_reg_name(reg), ggml_backend_reg_dev_count(reg));
@@ -545,6 +553,14 @@ void ggml_backend_load_all() {
 }
 
 void ggml_backend_load_all_from_path(const char * dir_path) {
+    // HOT-Step patch: make idempotent — backends are process-lifetime singletons
+    // in the registry, so re-scanning DLLs just creates duplicates (fixes #49).
+    static bool loaded = false;
+    if (loaded) {
+        return;
+    }
+    loaded = true;
+
 #ifdef NDEBUG
     bool silent = true;
 #else
