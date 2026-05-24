@@ -261,7 +261,7 @@ jobs:
         run: |
           Push-Location ui
           npm install
-          npm run build
+          npx vite build
           Pop-Location
 
       # ── Assemble Release Package ───────────────────────────────
@@ -554,7 +554,7 @@ jobs:
       # ── Build UI ───────────────────────────────────────────────
       - name: Build UI
         run: |
-          cd ui && npm install && npm run build
+          cd ui && npm install && npx vite build
 
       # ── Assemble Release Package ───────────────────────────────
       - name: Download portable Node.js
@@ -835,7 +835,7 @@ jobs:
       # ── Build UI ───────────────────────────────────────────────
       - name: Build UI
         run: |
-          cd ui && npm install && npm run build
+          cd ui && npm install && npx vite build
 
       # ── Assemble Release Package ───────────────────────────────
       - name: Assemble release
