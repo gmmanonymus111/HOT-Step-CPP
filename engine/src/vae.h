@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Cross-platform case-insensitive string compare
@@ -65,18 +66,174 @@ struct VAEGGML {
     std::vector<float> scratch_in;  // transposed input [64 * T]
 };
 
+// Auto-remap PyTorch Sequential layers.N naming to named-module naming.
+// Builds a remap table from the safetensors entries on first call.
+// Returns the remapped name, or the original name if no remap needed.
+struct VaeKeyRemap {
+    bool                                              built = false;
+    std::unordered_map<std::string, std::string>      map;   // named-module -> layers.N
+
+    // Build the remap table by scanning all safetensors entries.
+    // Only builds if sequential naming (layers.N) is detected.
+    void build(const STFile & st) {
+        if (built) return;
+        built = true;
+
+        // Detect sequential naming: look for "decoder.layers." or "encoder.layers."
+        bool has_sequential = false;
+        for (const auto & e : st.entries) {
+            if (e.name.find("decoder.layers.") == 0 || e.name.find("encoder.layers.") == 0) {
+                has_sequential = true;
+                break;
+            }
+        }
+        if (!has_sequential) return;
+
+        fprintf(stderr, "[VAE] Detected PyTorch Sequential naming, building auto-remap table\n");
+
+        // Build reverse map: for each sequential key, compute the named-module equivalent.
+        // The C++ loader will ask for named-module keys; we map them to the sequential keys.
+        for (const auto & e : st.entries) {
+            std::string k = e.name;
+            std::string remapped = remap_sequential_key(k);
+            if (remapped != k) {
+                map[remapped] = k;  // named-module -> sequential
+            }
+        }
+
+        fprintf(stderr, "[VAE] Auto-remap: %zu key mappings built\n", map.size());
+    }
+
+    // Remap a single PyTorch Sequential key to named-module convention.
+    // decoder.layers.0.* -> decoder.conv1.*
+    // decoder.layers.1..5.* -> decoder.block.0..4.*
+    // decoder.layers.6.* -> decoder.snake1.*
+    // decoder.layers.7.* -> decoder.conv2.*
+    // block.N.layers.0.* -> block.N.snake1.*
+    // block.N.layers.1.* -> block.N.conv_t1.*
+    // block.N.layers.2..4.* -> block.N.res_unit1..3.*
+    // res_unitR.layers.0..3.* -> res_unitR.snake1/conv1/snake2/conv2.*
+    // Same pattern for encoder (with conv1 for downsample instead of conv_t1).
+    static std::string remap_sequential_key(const std::string & k) {
+        std::string r = k;
+
+        // --- Top-level decoder layers ---
+        r = replace_prefix(r, "decoder.layers.0.", "decoder.conv1.");
+        r = replace_prefix(r, "decoder.layers.6.", "decoder.snake1.");
+        r = replace_prefix(r, "decoder.layers.7.", "decoder.conv2.");
+        for (int n = 1; n <= 5; n++) {
+            std::string from = "decoder.layers." + std::to_string(n) + ".";
+            std::string to   = "decoder.block." + std::to_string(n - 1) + ".";
+            r = replace_prefix(r, from, to);
+        }
+
+        // --- Top-level encoder layers ---
+        r = replace_prefix(r, "encoder.layers.0.", "encoder.conv1.");
+        r = replace_prefix(r, "encoder.layers.6.", "encoder.snake1.");
+        r = replace_prefix(r, "encoder.layers.7.", "encoder.conv2.");
+        for (int n = 1; n <= 5; n++) {
+            std::string from = "encoder.layers." + std::to_string(n) + ".";
+            std::string to   = "encoder.block." + std::to_string(n - 1) + ".";
+            r = replace_prefix(r, from, to);
+        }
+
+        // --- Inside blocks: layers.0..4 -> snake1/conv_t1(decoder) or conv1(encoder)/res_unitN ---
+        // Decoder blocks: snake1, conv_t1, res_unit1..3
+        r = replace_block_layer(r, "decoder.block.", 0, "snake1.");
+        r = replace_block_layer(r, "decoder.block.", 1, "conv_t1.");
+        for (int ru = 0; ru < 3; ru++) {
+            std::string to = "res_unit" + std::to_string(ru + 1) + ".";
+            r = replace_block_layer(r, "decoder.block.", ru + 2, to);
+        }
+        // Encoder blocks: res_unit1..3, snake1, conv1 (downsample)
+        for (int ru = 0; ru < 3; ru++) {
+            std::string to = "res_unit" + std::to_string(ru + 1) + ".";
+            r = replace_block_layer(r, "encoder.block.", ru, to);
+        }
+        r = replace_block_layer(r, "encoder.block.", 3, "snake1.");
+        r = replace_block_layer(r, "encoder.block.", 4, "conv1.");
+
+        // --- Inside res_units: layers.0..3 -> snake1/conv1/snake2/conv2 ---
+        static const char * ru_map[] = { "snake1.", "conv1.", "snake2.", "conv2." };
+        for (int ru = 1; ru <= 3; ru++) {
+            std::string ru_pfx = "res_unit" + std::to_string(ru) + ".";
+            for (int l = 0; l < 4; l++) {
+                std::string from = ru_pfx + "layers." + std::to_string(l) + ".";
+                std::string to   = ru_pfx + ru_map[l];
+                r = replace_anywhere(r, from, to);
+            }
+        }
+
+        return r;
+    }
+
+private:
+    // Replace prefix at the start of the string
+    static std::string replace_prefix(const std::string & s, const std::string & from, const std::string & to) {
+        if (s.compare(0, from.size(), from) == 0) {
+            return to + s.substr(from.size());
+        }
+        return s;
+    }
+
+    // Replace "<block_prefix>N.layers.<layer_idx>." with "<block_prefix>N.<replacement>"
+    // for any block number N (0..9)
+    static std::string replace_block_layer(const std::string & s, const std::string & block_prefix,
+                                           int layer_idx, const std::string & replacement) {
+        std::string layer_str = ".layers." + std::to_string(layer_idx) + ".";
+        // Find block prefix
+        if (s.compare(0, block_prefix.size(), block_prefix) != 0) return s;
+        // Find block number
+        size_t num_start = block_prefix.size();
+        size_t num_end = s.find('.', num_start);
+        if (num_end == std::string::npos) return s;
+        std::string block_num = s.substr(num_start, num_end - num_start);
+        // Check if followed by .layers.<layer_idx>.
+        std::string full_from = block_prefix + block_num + layer_str;
+        if (s.compare(0, full_from.size(), full_from) == 0) {
+            return block_prefix + block_num + "." + replacement + s.substr(full_from.size());
+        }
+        return s;
+    }
+
+    // Replace first occurrence of 'from' anywhere in the string
+    static std::string replace_anywhere(const std::string & s, const std::string & from, const std::string & to) {
+        size_t pos = s.find(from);
+        if (pos == std::string::npos) return s;
+        return s.substr(0, pos) + to + s.substr(pos + from.size());
+    }
+};
+
 // Abstracts tensor data access for VAE loading from GGUF or safetensors.
 struct VaeWeightSource {
-    bool        is_st = false;
-    GGUFModel * gf    = nullptr;
-    STFile *    st    = nullptr;
+    bool            is_st = false;
+    GGUFModel *     gf    = nullptr;
+    STFile *        st    = nullptr;
+    VaeKeyRemap     remap;  // lazy-built auto-remap for sequential naming
+
+    // Resolve a tensor name through the remap table (safetensors only).
+    // Returns the original name if no remap is needed.
+    const char * resolve(const char * name) {
+        if (!is_st) return name;
+        remap.build(*st);
+        auto it = remap.map.find(name);
+        if (it != remap.map.end()) {
+            return it->second.c_str();
+        }
+        return name;
+    }
 
     // Get raw data pointer + type for a named tensor
-    const void * data(const char * name, ggml_type & type) const {
+    const void * data(const char * name, ggml_type & type) {
         if (is_st) {
-            const void * p = st_find_data(*st, name, &type);
+            const char * resolved = resolve(name);
+            const void * p = st_find_data(*st, resolved, &type);
             if (!p) {
-                fprintf(stderr, "[VAE] FATAL: tensor '%s' not found in safetensors\n", name);
+                fprintf(stderr, "[VAE] FATAL: tensor '%s' not found in safetensors", name);
+                if (strcmp(name, resolved) != 0) {
+                    fprintf(stderr, " (tried remap: '%s')", resolved);
+                }
+                fprintf(stderr, "\n");
             }
             return p;
         } else {
@@ -91,9 +248,10 @@ struct VaeWeightSource {
     }
 
     // Get shape info for a named tensor (n_dims and ne[])
-    bool shape(const char * name, int & n_dims, int64_t ne[4]) const {
+    bool shape(const char * name, int & n_dims, int64_t ne[4]) {
         if (is_st) {
-            const STEntry * e = st_find(*st, name);
+            const char * resolved = resolve(name);
+            const STEntry * e = st_find(*st, resolved);
             if (!e) return false;
             n_dims = e->n_dims;
             // Reverse shape: safetensors is PyTorch order [dim0..dimN], ggml is [neN..ne0]
@@ -114,8 +272,8 @@ struct VaeWeightSource {
 
 // Load helpers
 
-// Type-aware element reader: extract float from GGUF data at index.
-// Supports F32, BF16, F16 source tensors.
+// Type-aware element reader: extract float from tensor data at index.
+// Supports F32, BF16, F16 source tensors (format-agnostic: works for both GGUF and safetensors).
 static inline float vae_read_float(const void * data, int idx, ggml_type type) {
     switch (type) {
         case GGML_TYPE_F32:
@@ -125,7 +283,7 @@ static inline float vae_read_float(const void * data, int idx, ggml_type type) {
         case GGML_TYPE_F16:
             return ggml_fp16_to_fp32(((const ggml_fp16_t *) data)[idx]);
         default:
-            fprintf(stderr, "[VAE] FATAL: unsupported GGUF tensor type %d\n", (int) type);
+            fprintf(stderr, "[VAE] FATAL: unsupported tensor type %d\n", (int) type);
             return 0.0f;
     }
 }
@@ -133,10 +291,11 @@ static inline float vae_read_float(const void * data, int idx, ggml_type type) {
 // Fuse weight_norm: w = g*v/||v||, write f32 into pre-allocated ggml_tensor
 // Works for Conv1d [OC,IC,K]: weight_norm normalizes over dim=0 (shape[0]).
 // Type-aware: reads F32, BF16, or F16 source tensors.
-static void vae_fuse_wn(struct ggml_tensor * dst, const VaeWeightSource & ws, const std::string & pfx) {
+static void vae_fuse_wn(struct ggml_tensor * dst, VaeWeightSource & ws, const std::string & pfx) {
     ggml_type v_type, g_type;
     const void * v = ws.data((pfx + ".weight_v").c_str(), v_type);
     const void * g = ws.data((pfx + ".weight_g").c_str(), g_type);
+    if (!v || !g) { fprintf(stderr, "[VAE] FATAL: missing weight_norm tensors for '%s', aborting load\n", pfx.c_str()); exit(1); }
     int n_dims_v; int64_t ne_v[4];
     ws.shape((pfx + ".weight_v").c_str(), n_dims_v, ne_v);
     int dim0 = (int) ne_v[n_dims_v - 1];
@@ -172,10 +331,11 @@ static void vae_fuse_wn(struct ggml_tensor * dst, const VaeWeightSource & ws, co
 // We need dst [IC, K*OC] in GGML (ne[0]=IC): element (ic, k_oc) = data[ic + k_oc*IC].
 // So we transpose during fuse: data[k_oc * IC + ic] = fused[ic * K_OC + k_oc].
 // Type-aware: reads F32, BF16, or F16 source tensors.
-static void vae_fuse_wn_ct(struct ggml_tensor * dst, const VaeWeightSource & ws, const std::string & pfx) {
+static void vae_fuse_wn_ct(struct ggml_tensor * dst, VaeWeightSource & ws, const std::string & pfx) {
     ggml_type v_type, g_type;
     const void * v = ws.data((pfx + ".weight_v").c_str(), v_type);
     const void * g = ws.data((pfx + ".weight_g").c_str(), g_type);
+    if (!v || !g) { fprintf(stderr, "[VAE] FATAL: missing weight_norm tensors for '%s', aborting load\n", pfx.c_str()); exit(1); }
     int n_dims_v; int64_t ne_v[4];
     ws.shape((pfx + ".weight_v").c_str(), n_dims_v, ne_v);
     int dim0 = (int) ne_v[n_dims_v - 1];
@@ -207,12 +367,13 @@ static void vae_fuse_wn_ct(struct ggml_tensor * dst, const VaeWeightSource & ws,
 
 // Load snake param [1,C,1] -> exp -> f32 [1, C]
 // Type-aware: reads F32, BF16, or F16 source tensors.
-static void vae_load_snake(struct ggml_tensor * dst, const VaeWeightSource & ws, const std::string & name) {
+static void vae_load_snake(struct ggml_tensor * dst, VaeWeightSource & ws, const std::string & name) {
     int n_dims; int64_t ne[4];
     ws.shape(name.c_str(), n_dims, ne);
     int C = (int) ne[1];  // PyTorch [1,C,1] -> ggml ne=[1,C,1], middle dim
     ggml_type type;
     const void * raw = ws.data(name.c_str(), type);
+    if (!raw) { fprintf(stderr, "[VAE] FATAL: missing tensor '%s', aborting load\n", name.c_str()); exit(1); }
     std::vector<float> d(C);
     for (int i = 0; i < C; i++) {
         d[i] = expf(vae_read_float(raw, i, type));
@@ -222,12 +383,13 @@ static void vae_load_snake(struct ggml_tensor * dst, const VaeWeightSource & ws,
 
 // Load snake param [1,C,1] -> 1/exp -> f32 [1, C] (reciprocal for mul fusion)
 // Type-aware: reads F32, BF16, or F16 source tensors.
-static void vae_load_snake_inv(struct ggml_tensor * dst, const VaeWeightSource & ws, const std::string & name) {
+static void vae_load_snake_inv(struct ggml_tensor * dst, VaeWeightSource & ws, const std::string & name) {
     int n_dims; int64_t ne[4];
     ws.shape(name.c_str(), n_dims, ne);
     int C = (int) ne[1];
     ggml_type type;
     const void * raw = ws.data(name.c_str(), type);
+    if (!raw) { fprintf(stderr, "[VAE] FATAL: missing tensor '%s', aborting load\n", name.c_str()); exit(1); }
     std::vector<float> d(C);
     for (int i = 0; i < C; i++) {
         d[i] = 1.0f / expf(vae_read_float(raw, i, type));
@@ -237,12 +399,13 @@ static void vae_load_snake_inv(struct ggml_tensor * dst, const VaeWeightSource &
 
 // Load bias [C] -> f32
 // Type-aware: reads F32, BF16, or F16 source tensors.
-static void vae_load_bias(struct ggml_tensor * dst, const VaeWeightSource & ws, const std::string & name) {
+static void vae_load_bias(struct ggml_tensor * dst, VaeWeightSource & ws, const std::string & name) {
     int n_dims; int64_t ne[4];
     ws.shape(name.c_str(), n_dims, ne);
     int C = (int) ne[0];  // 1D: ne[0] = C
     ggml_type type;
     const void * raw = ws.data(name.c_str(), type);
+    if (!raw) { fprintf(stderr, "[VAE] FATAL: missing tensor '%s', aborting load\n", name.c_str()); exit(1); }
     std::vector<float> d(C);
     for (int i = 0; i < C; i++) {
         d[i] = vae_read_float(raw, i, type);
