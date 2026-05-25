@@ -27,13 +27,31 @@ export function getProvider(name: string): LLMProvider {
 }
 
 export async function listProviders(): Promise<ProviderInfo[]> {
-  const results = [];
-  for (const p of Object.values(providers)) {
-    if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider || p instanceof OpenAICompatProvider) {
-      results.push(await p.toInfoAsync());
-    } else {
-      results.push(p.toInfo());
+  const PROVIDER_TIMEOUT_MS = 5000;
+
+  const promises = Object.values(providers).map(async (p): Promise<ProviderInfo> => {
+    try {
+      if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider || p instanceof OpenAICompatProvider) {
+        // Race against a timeout so one dead provider can't block the rest
+        const info = await Promise.race([
+          p.toInfoAsync(),
+          new Promise<ProviderInfo>((_, reject) =>
+            setTimeout(() => reject(new Error(`${p.name} timed out`)), PROVIDER_TIMEOUT_MS)
+          ),
+        ]);
+        return info;
+      } else {
+        return p.toInfo();
+      }
+    } catch (err: any) {
+      console.warn(`[LLM Registry] Provider ${p.name} failed: ${err.message}`);
+      // Return the provider as unavailable rather than dropping it
+      return { ...p.toInfo(), available: false, models: p.defaultModel ? [p.defaultModel] : [] };
     }
-  }
-  return results;
+  });
+
+  const settled = await Promise.allSettled(promises);
+  return settled
+    .filter((r): r is PromiseFulfilledResult<ProviderInfo> => r.status === 'fulfilled')
+    .map(r => r.value);
 }

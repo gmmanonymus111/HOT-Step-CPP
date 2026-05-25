@@ -368,7 +368,7 @@ export const lireekApi = {
 
   // ── LLM Providers ───────────────────────────────────────────────────────
   getProviders: (): Promise<{ id: string; name: string; available: boolean; models: string[]; default_model: string }[]> =>
-    api('/api/lireek/providers'),
+    api('/api/lireek/providers', { timeoutMs: 15000 }),
 };
 
 // ── SSE Streaming ─────────────────────────────────────────────────────────

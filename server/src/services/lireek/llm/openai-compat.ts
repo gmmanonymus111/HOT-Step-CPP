@@ -21,7 +21,7 @@ export class OpenAICompatProvider extends LLMProvider {
       if (config.lireek.openaiCompatApiKey) {
         headers['Authorization'] = `Bearer ${config.lireek.openaiCompatApiKey}`;
       }
-      const resp = await fetch(`${baseUrl}/models`, { headers });
+      const resp = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(3000) });
       if (!resp.ok) return [];
       const data = await resp.json();
       this.availableModels = data.data?.map((m: any) => m.id).sort().reverse() || [];

@@ -14,7 +14,7 @@ export class LMStudioProvider extends LLMProvider {
   private async getLocalModels(): Promise<string[]> {
     try {
       const baseUrl = config.lireek.lmstudioBaseUrl.replace('/v1', '');
-      const resp = await fetch(`${baseUrl}/v1/models`);
+      const resp = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(3000) });
       if (!resp.ok) return [];
       const data = await resp.json();
       this.availableModels = data.data?.map((m: any) => m.id).sort().reverse() || [];

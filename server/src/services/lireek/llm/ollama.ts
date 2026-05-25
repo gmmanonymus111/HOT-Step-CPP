@@ -14,7 +14,7 @@ export class OllamaProvider extends LLMProvider {
   
   private async getLocalModels(): Promise<string[]> {
     try {
-      const resp = await fetch(`${config.lireek.ollamaBaseUrl}/api/tags`);
+      const resp = await fetch(`${config.lireek.ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(3000) });
       if (!resp.ok) return [];
       const data = await resp.json();
       this.availableModels = data.models?.map((m: any) => m.name) || [];

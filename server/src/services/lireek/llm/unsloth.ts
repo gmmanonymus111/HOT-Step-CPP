@@ -55,7 +55,8 @@ export class UnslothProvider extends LLMProvider {
     try {
       const token = await this.authenticate();
       const resp = await fetch(`${config.lireek.unslothBaseUrl}/v1/models`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: AbortSignal.timeout(3000),
       });
       if (!resp.ok) return [];
       const data = await resp.json();
