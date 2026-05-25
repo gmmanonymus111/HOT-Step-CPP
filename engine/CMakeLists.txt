@@ -67,7 +67,7 @@ if(NOT MSVC)
     add_compile_definitions(_FORTIFY_SOURCE=2)
 endif()
 
-# CUDA architectures: cover Turing to Blackwell for distributed binaries.
+# CUDA architectures: cover Turing to Blackwell for distributed binaries (CI: CUDA 13.1).
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     find_package(CUDAToolkit QUIET)

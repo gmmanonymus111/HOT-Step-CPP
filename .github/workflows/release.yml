@@ -69,12 +69,12 @@ jobs:
           git submodule update --init base cmake pluginterfaces public.sdk
 
       # ── SDK Setup ──────────────────────────────────────────────
-      - name: Install CUDA Toolkit 12.8
+      - name: Install CUDA Toolkit 13.1
         if: matrix.variant == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
-          cuda: '12.8.0'
+          cuda: '13.1.0'
           method: 'network'
 
       - name: Download Vulkan SDK runtime (for glslc)
@@ -716,12 +716,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Install CUDA Toolkit 12.8
+      - name: Install CUDA Toolkit 13.1
         if: matrix.variant == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
-          cuda: '12.8.0'
+          cuda: '13.1.0'
           method: 'network'
 
       - name: Install Vulkan SDK (headers + loader)

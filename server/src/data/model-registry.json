@@ -1821,20 +1821,20 @@
     },
     {
       "id": "cuda-rt-cudart",
-      "filename": "cudart64_12.dll",
+      "filename": "cudart64_13.dll",
       "role": "runtime",
       "displayName": "CUDA Runtime",
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 573952,
+      "sizeBytes": 540784,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "NVIDIA CUDA Runtime library — required for GPU initialisation.",
       "tags": [
         "runtime",
         "required"
       ],
-      "repoPath": "runtime/cudart64_12.dll"
+      "repoPath": "runtime/cudart64_13.dll"
     },
     {
       "id": "whisper-large-v3-turbo",
