@@ -72,7 +72,7 @@ import { usePlaylist, addToPlaylist } from './components/lyric-studio/playlistSt
 import { DisguiseModeProvider } from './hooks/useDisguiseMode';
 import { ABCompareModal } from './components/shared/ABCompareModal';
 import { useABCompareSelector, playAB, openModal as openABModal, clear as clearAB } from './stores/abCompareStore';
-import { useDiscoMode, toggleDiscoMode, setDiscoPlaying } from './stores/discoStore';
+import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setKickStemUrl, syncKickStem } from './stores/discoStore';
 import { DiscoPulseWrapper } from './components/shared/DiscoPulseWrapper';
 
 /** Derive top-level view from the browser URL */
@@ -298,7 +298,18 @@ const AppContent: React.FC = () => {
   // Sync disco beat detection loop with playback state
   useEffect(() => {
     setDiscoPlaying(isPlaying);
+    if (isPlaying) {
+      syncKickStem('play', currentTime);
+    } else {
+      syncKickStem('pause');
+    }
   }, [isPlaying]);
+
+  // Load kick stem URL when track changes
+  useEffect(() => {
+    const kickUrl = currentTrack?.kickStemUrl || '';
+    setKickStemUrl(kickUrl);
+  }, [currentTrack?.id, currentTrack?.kickStemUrl]);
 
   // ── Trim mode waveform click handler ──
   const handleWaveformClick = useCallback((timeSec: number) => {
@@ -306,6 +317,12 @@ const AppContent: React.FC = () => {
       pbHandleTrimClick(timeSec);
     }
   }, [trimMode]);
+
+  // Wrap seek to also sync kick stem
+  const handleSeek = useCallback((time: number) => {
+    pbSeek(time);
+    syncKickStem('seek', time);
+  }, []);
 
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: ToastType; isVisible: boolean }>({
@@ -352,7 +369,20 @@ const AppContent: React.FC = () => {
   const handleSongCreated = useCallback((song: Song) => {
     setSongs(prev => [song, ...prev.filter(s => s.id !== song.id)]);
     setSongCreatedCount(c => c + 1);
-  }, []);
+
+    // Auto-extract kick stem for disco mode if setting enabled
+    if (settings.discoKickExtract && song.id && !song.kick_stem_url) {
+      console.log(`[Disco] Auto-extracting kick stem for song ${song.id}`);
+      fetch(`/api/songs/${song.id}/extract-kick`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.status === 'started') {
+            console.log(`[Disco] Kick extraction started (aceJobId=${data.aceJobId})`);
+          }
+        })
+        .catch(err => console.warn('[Disco] Kick extraction failed:', err));
+    }
+  }, [settings.discoKickExtract]);
 
   // Play a song from the library (used by SongList, RightSidebar)
   const playSong = useCallback((song: Song) => {
@@ -1217,7 +1247,7 @@ const AppContent: React.FC = () => {
           onStop={pbStop}
           currentTime={currentTime}
           duration={duration}
-          onSeek={pbSeek}
+          onSeek={handleSeek}
           onNext={pbNext}
           onPrevious={pbPrevious}
           volume={volume}

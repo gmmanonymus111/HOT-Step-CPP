@@ -23,6 +23,7 @@ export interface PlaybackTrack {
   title: string;
   audioUrl: string;
   masteredAudioUrl?: string;
+  kickStemUrl?: string;
   artistName?: string;
   coverUrl?: string;
   duration?: number;                  // Always seconds, never string

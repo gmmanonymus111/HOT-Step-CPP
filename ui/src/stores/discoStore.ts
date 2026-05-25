@@ -1,9 +1,12 @@
 // discoStore.ts — Disco mode state + beat detection engine.
 //
-// Creates a dedicated AnalyserNode (smoothingTimeConstant=0.15) and uses
-// adaptive normalisation to extract maximum dynamic range from kick band
-// energy. The raw energy varies ~0.15 between kick hits and gaps — we
-// stretch that to fill 0–1 using a rolling min/max tracker.
+// Two modes of beat detection:
+// 1. KICK STEM (preferred) — plays an isolated kick drum WAV silently via a
+//    hidden Audio element, connected to a dedicated AnalyserNode. The signal
+//    is near-silence between hits and spikes sharply on kicks. Simple threshold.
+// 2. FULL MIX FALLBACK — reads from audioMotion's AnalyserNode via the shared
+//    audio graph. Uses adaptive normalisation to extract dynamics from a noisy
+//    signal. Works but much less reactive.
 
 import { useSyncExternalStore, useRef, useCallback } from 'react';
 
@@ -12,6 +15,7 @@ import { useSyncExternalStore, useRef, useCallback } from 'react';
 interface DiscoState {
   discoMode: boolean;
   pulseIntensity: number;  // 0.0–1.0
+  kickStemLoaded: boolean; // true when using isolated kick stem (not fallback)
 }
 
 // ── localStorage ─────────────────────────────────────────────────────────────
@@ -30,59 +34,147 @@ function saveDiscoPrefs(discoMode: boolean): void {
   localStorage.setItem(DISCO_PREFS_KEY, JSON.stringify({ discoMode }));
 }
 
-// ── Audio Graph — Dedicated Beat Detection AnalyserNode ──────────────────────
+// ── Audio: Kick Stem (preferred path) ────────────────────────────────────────
 
-let _audioMotion: any = null;
-let _beatAnalyser: AnalyserNode | null = null;
-let _freqData: Uint8Array | null = null;
-
-// Kick drum FFT bin range
+let _kickAudio: HTMLAudioElement | null = null;
+let _kickCtx: AudioContext | null = null;
+let _kickAnalyser: AnalyserNode | null = null;
+let _kickSource: MediaElementAudioSourceNode | null = null;
+let _kickFreqData: Uint8Array | null = null;
+let _kickStemUrl: string = '';
 let _kickBinStart = 0;
 let _kickBinEnd = 0;
 
+/** Load a kick stem URL for beat detection. Pass '' to unload. */
+export function setKickStemUrl(url: string): void {
+  // Skip if already loaded
+  if (url === _kickStemUrl) return;
+  _kickStemUrl = url;
+
+  if (!url || url.startsWith('extracting:')) {
+    // Unload
+    _kickAudio?.pause();
+    _kickAudio = null;
+    _kickSource = null;  // Can't disconnect — MediaElementSource is permanent
+    _kickAnalyser = null;
+    _kickFreqData = null;
+    setState({ kickStemLoaded: false });
+    console.log('[Disco] Kick stem unloaded');
+    return;
+  }
+
+  // Create or reuse Audio element
+  if (!_kickAudio) {
+    _kickAudio = new Audio();
+    _kickAudio.crossOrigin = 'anonymous';
+    _kickAudio.volume = 0; // Silent — only for analysis
+    _kickAudio.preload = 'auto';
+  }
+
+  _kickAudio.src = url;
+  _kickAudio.load();
+
+  // Create AudioContext + AnalyserNode on first use
+  if (!_kickCtx) {
+    _kickCtx = new AudioContext();
+  }
+
+  // Connect audio element to analyser (only once — MediaElementSource is permanent)
+  if (!_kickSource) {
+    _kickSource = _kickCtx.createMediaElementSource(_kickAudio);
+    _kickAnalyser = _kickCtx.createAnalyser();
+    _kickAnalyser.fftSize = 2048;
+    _kickAnalyser.smoothingTimeConstant = 0.1; // Very low — we want raw transients
+    _kickSource.connect(_kickAnalyser);
+    // DON'T connect to destination — we don't want to hear the kick stem
+    // (the main WaveSurfer already plays the full mix)
+
+    _kickFreqData = new Uint8Array(_kickAnalyser.frequencyBinCount);
+
+    // Compute FFT bin indices for kick drum range (40–200Hz)
+    const binHz = _kickCtx.sampleRate / _kickAnalyser.fftSize;
+    _kickBinStart = Math.floor(40 / binHz);
+    _kickBinEnd = Math.ceil(200 / binHz);
+    console.log(`[Disco] Kick analyser: bins ${_kickBinStart}-${_kickBinEnd} (${(binHz * _kickBinStart).toFixed(0)}-${(binHz * _kickBinEnd).toFixed(0)}Hz)`);
+  }
+
+  setState({ kickStemLoaded: true });
+  console.log(`[Disco] Kick stem loaded: ${url}`);
+}
+
+/** Sync kick stem playback with main player */
+export function syncKickStem(action: 'play' | 'pause' | 'seek', time?: number): void {
+  if (!_kickAudio || !_kickStemUrl) return;
+
+  // Resume AudioContext on first interaction (Chrome autoplay policy)
+  if (_kickCtx?.state === 'suspended') {
+    _kickCtx.resume();
+  }
+
+  switch (action) {
+    case 'play':
+      if (time !== undefined) _kickAudio.currentTime = time;
+      _kickAudio.play().catch(() => {}); // Ignore autoplay errors
+      break;
+    case 'pause':
+      _kickAudio.pause();
+      break;
+    case 'seek':
+      if (time !== undefined) _kickAudio.currentTime = time;
+      break;
+  }
+}
+
+function readKickStemEnergy(): number {
+  if (!_kickAnalyser || !_kickFreqData) return -1; // -1 = not available
+
+  _kickAnalyser.getByteFrequencyData(_kickFreqData);
+
+  let sum = 0;
+  let count = 0;
+  for (let i = _kickBinStart; i <= _kickBinEnd && i < _kickFreqData.length; i++) {
+    sum += _kickFreqData[i];
+    count++;
+  }
+  return count > 0 ? (sum / count) / 255 : 0;
+}
+
+// ── Audio: Full Mix Fallback ─────────────────────────────────────────────────
+
+let _audioMotion: any = null;
+let _fallbackAnalyser: AnalyserNode | null = null;
+let _fallbackFreqData: Uint8Array | null = null;
+let _fallbackBinStart = 0;
+let _fallbackBinEnd = 0;
+
 export function registerAudioMotion(instance: any): void {
   _audioMotion = instance;
-
   try {
     const ctx: AudioContext = instance.audioCtx;
-
-    _beatAnalyser = ctx.createAnalyser();
-    _beatAnalyser.fftSize = 2048;
-    _beatAnalyser.smoothingTimeConstant = 0.15; // Very low — we want raw transients
-
+    _fallbackAnalyser = ctx.createAnalyser();
+    _fallbackAnalyser.fftSize = 2048;
+    _fallbackAnalyser.smoothingTimeConstant = 0.15;
     const sources = instance.connectedSources;
-    if (sources && sources.length > 0) {
-      sources[0].connect(_beatAnalyser);
-      console.log('[Disco] Beat analyser connected');
-    }
-
-    _freqData = new Uint8Array(_beatAnalyser.frequencyBinCount);
-
-    const binHz = ctx.sampleRate / _beatAnalyser.fftSize;
-    _kickBinStart = Math.floor(50 / binHz);
-    _kickBinEnd = Math.ceil(180 / binHz);
-    console.log(`[Disco] Kick bins: ${_kickBinStart}-${_kickBinEnd} (binHz=${binHz.toFixed(1)})`);
-  } catch (err) {
-    console.error('[Disco] Failed to create beat analyser:', err);
-  }
+    if (sources?.[0]) sources[0].connect(_fallbackAnalyser);
+    _fallbackFreqData = new Uint8Array(_fallbackAnalyser.frequencyBinCount);
+    const binHz = ctx.sampleRate / _fallbackAnalyser.fftSize;
+    _fallbackBinStart = Math.floor(50 / binHz);
+    _fallbackBinEnd = Math.ceil(180 / binHz);
+  } catch { /* non-fatal */ }
 }
 
 export function unregisterAudioMotion(): void {
   _audioMotion = null;
-  _beatAnalyser = null;
-  _freqData = null;
+  _fallbackAnalyser = null;
+  _fallbackFreqData = null;
 }
 
-/** Read kick energy from dedicated low-smoothing AnalyserNode */
-function readKickEnergy(): number {
-  if (!_beatAnalyser || !_freqData) return 0;
-  _beatAnalyser.getByteFrequencyData(_freqData);
-
-  let sum = 0;
-  let count = 0;
-  for (let i = _kickBinStart; i <= _kickBinEnd && i < _freqData.length; i++) {
-    sum += _freqData[i];
-    count++;
+function readFallbackEnergy(): number {
+  if (!_fallbackAnalyser || !_fallbackFreqData) return 0;
+  _fallbackAnalyser.getByteFrequencyData(_fallbackFreqData);
+  let sum = 0, count = 0;
+  for (let i = _fallbackBinStart; i <= _fallbackBinEnd && i < _fallbackFreqData.length; i++) {
+    sum += _fallbackFreqData[i]; count++;
   }
   return count > 0 ? (sum / count) / 255 : 0;
 }
@@ -94,49 +186,44 @@ const prefs = loadDiscoPrefs();
 let _state: DiscoState = {
   discoMode: prefs.discoMode,
   pulseIntensity: 0,
+  kickStemLoaded: false,
 };
 
 // ── Reactivity (useSyncExternalStore) ────────────────────────────────────────
 
 const _listeners = new Set<() => void>();
-
-function notify(): void {
-  _listeners.forEach(cb => cb());
-}
-
+function notify(): void { _listeners.forEach(cb => cb()); }
 function setState(updates: Partial<DiscoState>): void {
   _state = { ..._state, ...updates };
   notify();
 }
-
 function subscribe(cb: () => void): () => void {
   _listeners.add(cb);
   return () => _listeners.delete(cb);
 }
+function getSnapshot(): DiscoState { return _state; }
 
-function getSnapshot(): DiscoState {
-  return _state;
-}
-
-// ── Beat Detection Loop (Adaptive Normalisation) ─────────────────────────────
+// ── Beat Detection Loop ──────────────────────────────────────────────────────
 
 let _rafId: number | null = null;
-let _lastFrameTime = 0;
 let _debugFrameCount = 0;
+let _pulse = 0;
 
-// Adaptive normalisation — tracks rolling min/max to stretch available range
-let _rollingMin = 1.0;       // Tracks recent minimum energy (floor)
-let _rollingMax = 0.0;       // Tracks recent maximum energy (ceiling)
-let _pulse = 0;              // Current output pulse (0–1)
+// Kick stem mode: simple threshold (the signal is clean!)
+const KICK_THRESHOLD = 0.12;   // Energy above this = kick hit
+const KICK_ATTACK = 0.7;       // How fast pulse rises (0-1, higher = snappier)
+const KICK_DECAY = 0.88;       // Per-frame decay (~180ms to near-zero at 60fps)
 
-// Tuning knobs
-const MIN_DECAY = 0.002;     // How fast the floor rises per frame (adapts upward)
-const MAX_DECAY = 0.005;     // How fast the ceiling drops per frame (adapts downward)
-const MIN_RANGE = 0.03;      // Minimum gap between min and max to avoid noise amplification
-const ATTACK_SPEED = 0.6;    // How fast pulse rises toward target (0–1, higher = snappier)
-const DECAY_SPEED = 0.85;    // Per-frame pulse decay multiplier (lower = faster drop)
+// Fallback mode: adaptive normalisation (same as before)
+let _rollingMin = 1.0;
+let _rollingMax = 0.0;
+const FB_MIN_DECAY = 0.002;
+const FB_MAX_DECAY = 0.005;
+const FB_MIN_RANGE = 0.03;
+const FB_ATTACK = 0.6;
+const FB_DECAY = 0.85;
 
-function beatDetectionLoop(timestamp: number): void {
+function beatDetectionLoop(): void {
   if (!_state.discoMode) {
     _rafId = null;
     _pulse = 0;
@@ -144,52 +231,41 @@ function beatDetectionLoop(timestamp: number): void {
     return;
   }
 
-  _lastFrameTime = timestamp;
+  // Try kick stem first, fall back to full mix
+  const kickEnergy = readKickStemEnergy();
+  const usingKick = kickEnergy >= 0;
 
-  const rawEnergy = readKickEnergy();
-
-  // Update rolling min/max with slow adaptation
-  // Min creeps upward, max creeps downward — they converge toward current energy
-  // When energy spikes above max or drops below min, they snap to the new value
-  if (rawEnergy < _rollingMin) {
-    _rollingMin = rawEnergy;  // Snap to new low
+  if (usingKick) {
+    // ── KICK STEM MODE: simple threshold detection ──
+    if (kickEnergy > KICK_THRESHOLD) {
+      const target = Math.min(1.0, (kickEnergy - KICK_THRESHOLD) / (1 - KICK_THRESHOLD));
+      _pulse += (target - _pulse) * KICK_ATTACK;
+    } else {
+      _pulse *= KICK_DECAY;
+    }
   } else {
-    _rollingMin += MIN_DECAY; // Slowly rise
-  }
-
-  if (rawEnergy > _rollingMax) {
-    _rollingMax = rawEnergy;  // Snap to new high
-  } else {
-    _rollingMax -= MAX_DECAY; // Slowly drop
-  }
-
-  // Ensure min < max with minimum range
-  if (_rollingMax - _rollingMin < MIN_RANGE) {
-    const mid = (_rollingMax + _rollingMin) / 2;
-    _rollingMin = mid - MIN_RANGE / 2;
-    _rollingMax = mid + MIN_RANGE / 2;
-  }
-
-  // Normalise raw energy into 0–1 using the adaptive range
-  const normalised = Math.max(0, Math.min(1,
-    (rawEnergy - _rollingMin) / (_rollingMax - _rollingMin)
-  ));
-
-  // Apply dynamics: fast attack, fast decay
-  if (normalised > _pulse) {
-    // Attack — lerp quickly toward the peak
-    _pulse += (normalised - _pulse) * ATTACK_SPEED;
-  } else {
-    // Decay — multiplicative drop
-    _pulse *= DECAY_SPEED;
+    // ── FALLBACK MODE: adaptive normalisation ──
+    const raw = readFallbackEnergy();
+    if (raw < _rollingMin) _rollingMin = raw; else _rollingMin += FB_MIN_DECAY;
+    if (raw > _rollingMax) _rollingMax = raw; else _rollingMax -= FB_MAX_DECAY;
+    if (_rollingMax - _rollingMin < FB_MIN_RANGE) {
+      const mid = (_rollingMax + _rollingMin) / 2;
+      _rollingMin = mid - FB_MIN_RANGE / 2;
+      _rollingMax = mid + FB_MIN_RANGE / 2;
+    }
+    const norm = Math.max(0, Math.min(1, (raw - _rollingMin) / (_rollingMax - _rollingMin)));
+    if (norm > _pulse) _pulse += (norm - _pulse) * FB_ATTACK;
+    else _pulse *= FB_DECAY;
   }
 
   if (_pulse < 0.01) _pulse = 0;
 
-  // Debug: log every 30 frames (~2x per second) to see more detail
+  // Debug: log twice per second
   _debugFrameCount++;
   if (_debugFrameCount % 30 === 0) {
-    console.log(`[Disco] raw=${rawEnergy.toFixed(3)} min=${_rollingMin.toFixed(3)} max=${_rollingMax.toFixed(3)} norm=${normalised.toFixed(3)} pulse=${_pulse.toFixed(3)}`);
+    const mode = usingKick ? 'KICK' : 'FALLBACK';
+    const energy = usingKick ? kickEnergy : readFallbackEnergy();
+    console.log(`[Disco] [${mode}] energy=${energy.toFixed(3)} pulse=${_pulse.toFixed(3)}`);
   }
 
   // Notify subscribers
@@ -203,7 +279,6 @@ function beatDetectionLoop(timestamp: number): void {
 
 function startLoop(): void {
   if (_rafId !== null) return;
-  _lastFrameTime = 0;
   _rollingMin = 1.0;
   _rollingMax = 0.0;
   _pulse = 0;
@@ -218,6 +293,8 @@ function stopLoop(): void {
   }
   _pulse = 0;
   setState({ pulseIntensity: 0 });
+  // Pause kick stem when stopping
+  syncKickStem('pause');
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -242,16 +319,13 @@ export function setDiscoPlaying(isPlaying: boolean): void {
 export function useDiscoSelector<T>(selector: (state: DiscoState) => T): T {
   const selectorRef = useRef(selector);
   selectorRef.current = selector;
-
   const selectedRef = useRef<T>(selector(_state));
-
   const getSelectedSnapshot = useCallback(() => {
     const next = selectorRef.current(_state);
     if (Object.is(selectedRef.current, next)) return selectedRef.current;
     selectedRef.current = next;
     return next;
   }, []);
-
   return useSyncExternalStore(subscribe, getSelectedSnapshot);
 }
 
@@ -261,4 +335,8 @@ export function usePulseIntensity(): number {
 
 export function useDiscoMode(): boolean {
   return useDiscoSelector(s => s.discoMode);
+}
+
+export function useKickStemLoaded(): boolean {
+  return useDiscoSelector(s => s.kickStemLoaded);
 }

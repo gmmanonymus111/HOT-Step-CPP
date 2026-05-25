@@ -32,6 +32,7 @@ export interface AppSettings {
   // Adapter trigger word
   triggerUseFilename: boolean;
   triggerPlacement: 'prepend' | 'append' | 'replace';
+  discoKickExtract: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -42,6 +43,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   downloadOpusBitrate: 192,
   triggerUseFilename: false,
   triggerPlacement: 'prepend',
+  discoKickExtract: false,
 };
 
 interface SettingsPanelProps {
@@ -483,6 +485,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           badges={[
             { text: '−12s', type: 'speed' },
           ]}
+        />
+      </div>
+
+      {/* Disco Mode */}
+      <div className="border-t border-zinc-200 dark:border-white/5 pt-4 mt-4">
+        <h4 className="text-sm font-medium text-zinc-900 dark:text-white mb-3 flex items-center gap-2">
+          🪩 Disco Mode
+        </h4>
+        <SettingRow
+          label="Extract kick drum for visualisations"
+          description="After generation, extract a kick drum stem for beat-reactive visual effects. Takes ~60-90s extra per song."
+          checked={settings.discoKickExtract}
+          onChange={v => update('discoKickExtract', v)}
         />
       </div>
 

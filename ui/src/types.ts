@@ -35,6 +35,8 @@ export interface Song {
   // Mastered version
   masteredAudioUrl?: string;
   mastered_audio_url?: string;
+  kickStemUrl?: string;
+  kick_stem_url?: string;
   // Latent file
   latentUrl?: string;
   latent_url?: string;
