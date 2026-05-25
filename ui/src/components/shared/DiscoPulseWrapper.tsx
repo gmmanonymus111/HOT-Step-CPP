@@ -3,7 +3,7 @@
 // Uses a spinning conic-gradient masked to a border ring around the panel.
 // CSS mask-composite: exclude cuts out the interior, so the gradient is
 // ONLY visible as a glowing border — no layout changes or margin tricks needed.
-// Also applies a subtle scale pulse on kick hits for a physical "jump" feel.
+// Also applies a subtle scale pulse on drum hits for a physical "jump" feel.
 //
 // Structure:
 //   <wrapper>          ← position: relative, isolation: isolate, transform: scale()
@@ -14,11 +14,13 @@
 //   </wrapper>
 
 import React, { useRef, useEffect } from 'react';
-import { usePulseIntensity, useDiscoMode } from '../../stores/discoStore';
+import { usePulseIntensity, useSnarePulse, useDiscoMode } from '../../stores/discoStore';
 
 interface DiscoPulseWrapperProps {
   /** Base hue for this panel's glow (0-360). Each panel gets a different hue. */
   hue?: number;
+  /** Which drum stem drives this panel's pulse. Default: 'kick' */
+  stem?: 'kick' | 'snare';
   /** Extra CSS classes to pass through to the content wrapper */
   className?: string;
   /** Inline styles for the content wrapper */
@@ -28,12 +30,14 @@ interface DiscoPulseWrapperProps {
 
 export const DiscoPulseWrapper: React.FC<DiscoPulseWrapperProps> = ({
   hue = 145,
+  stem = 'kick',
   className = '',
   style,
   children,
 }) => {
   const discoMode = useDiscoMode();
-  const pulseIntensity = usePulseIntensity();
+  const kickPulse = usePulseIntensity();
+  const snarePulse = useSnarePulse();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
 
@@ -49,16 +53,18 @@ export const DiscoPulseWrapper: React.FC<DiscoPulseWrapperProps> = ({
       return;
     }
 
+    const pulse = stem === 'snare' ? snarePulse : kickPulse;
+
     // Power curve: low-intensity moments are subtle, hits POP
-    const intensity = Math.pow(pulseIntensity, 0.6);
+    const intensity = Math.pow(pulse, 0.6);
 
     // Glow opacity
     glow.style.opacity = String(Math.min(1, intensity * 1.3));
 
-    // Scale pulse: subtle but physical — 1.0 → 1.008 on hard kicks
+    // Scale pulse: subtle but physical — 1.0 → 1.008 on hard hits
     const scale = 1 + intensity * 0.008;
     wrapper.style.transform = `scale(${scale})`;
-  }, [pulseIntensity, discoMode]);
+  }, [kickPulse, snarePulse, discoMode, stem]);
 
   // Clean up on disco mode toggle off
   useEffect(() => {

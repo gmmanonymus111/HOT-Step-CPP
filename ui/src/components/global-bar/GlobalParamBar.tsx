@@ -17,6 +17,7 @@ import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
 import { LmThinkingDropdown, LmThinkingBadge } from './LmThinkingDropdown';
 import { PostProcessingDropdown, PostProcessingBadge } from './PostProcessingDropdown';
 import { VramIndicator } from '../shared/VramIndicator';
+import { DiscoPulseWrapper } from '../shared/DiscoPulseWrapper';
 
 type SectionId = 'models' | 'adapters' | 'generation' | 'lm' | 'postprocessing' | null;
 
@@ -219,6 +220,7 @@ export const GlobalParamBar: React.FC = () => {
 
         {/* Sections — separated by dividers */}
         <div className="flex-1 flex items-stretch divide-x divide-white/5">
+          <DiscoPulseWrapper hue={0} stem="snare">
           <BarSection
             id="models"
             label={t('globalBar.models')}
@@ -231,7 +233,9 @@ export const GlobalParamBar: React.FC = () => {
           >
             <ModelsDropdown />
           </BarSection>
+          </DiscoPulseWrapper>
 
+          <DiscoPulseWrapper hue={72} stem="snare">
           <BarSection
             id="adapters"
             label={t('globalBar.adapters')}
@@ -244,7 +248,9 @@ export const GlobalParamBar: React.FC = () => {
           >
             <AdaptersDropdown />
           </BarSection>
+          </DiscoPulseWrapper>
 
+          <DiscoPulseWrapper hue={144} stem="snare">
           <BarSection
             id="generation"
             label={t('globalBar.generation')}
@@ -257,7 +263,9 @@ export const GlobalParamBar: React.FC = () => {
           >
             <GenerationDropdown />
           </BarSection>
+          </DiscoPulseWrapper>
 
+          <DiscoPulseWrapper hue={216} stem="snare">
           <BarSection
             id="lm"
             label={t('globalBar.lm')}
@@ -277,7 +285,9 @@ export const GlobalParamBar: React.FC = () => {
           >
             <LmThinkingDropdown />
           </BarSection>
+          </DiscoPulseWrapper>
 
+          <DiscoPulseWrapper hue={288} stem="snare">
           <BarSection
             id="postprocessing"
             label={t('globalBar.postProcessing')}
@@ -297,6 +307,7 @@ export const GlobalParamBar: React.FC = () => {
           >
             <PostProcessingDropdown />
           </BarSection>
+          </DiscoPulseWrapper>
         </div>
 
         {/* Right — Export/Import + VRAM */}

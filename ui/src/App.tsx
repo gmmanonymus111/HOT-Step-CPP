@@ -74,7 +74,7 @@ import { ABCompareModal } from './components/shared/ABCompareModal';
 import { useABCompareSelector, playAB, openModal as openABModal, clear as clearAB } from './stores/abCompareStore';
 import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setDiscoDataUrl, syncStems, updateMainTime } from './stores/discoStore';
 import { DiscoPulseWrapper } from './components/shared/DiscoPulseWrapper';
-import { SnareFlashOverlay } from './components/shared/SnareFlashOverlay';
+
 import { HiHatParticles } from './components/shared/HiHatParticles';
 
 /** Derive top-level view from the browser URL */
@@ -1349,9 +1349,6 @@ const AppContent: React.FC = () => {
         />
         <HiHatParticles />
       </DiscoPulseWrapper>
-
-      {/* Snare flash — full viewport white flash on snare hits */}
-      <SnareFlashOverlay />
 
       {/* Modals */}
       <Toast
