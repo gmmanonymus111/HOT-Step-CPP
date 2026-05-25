@@ -24,6 +24,8 @@ export interface PlaybackTrack {
   audioUrl: string;
   masteredAudioUrl?: string;
   kickStemUrl?: string;
+  snareStemUrl?: string;
+  hihatStemUrl?: string;
   artistName?: string;
   coverUrl?: string;
   duration?: number;                  // Always seconds, never string

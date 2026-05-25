@@ -37,6 +37,10 @@ export interface Song {
   mastered_audio_url?: string;
   kickStemUrl?: string;
   kick_stem_url?: string;
+  snareStemUrl?: string;
+  snare_stem_url?: string;
+  hihatStemUrl?: string;
+  hihat_stem_url?: string;
   // Latent file
   latentUrl?: string;
   latent_url?: string;
