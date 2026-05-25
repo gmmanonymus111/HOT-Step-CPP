@@ -3,9 +3,10 @@
 // Uses a spinning conic-gradient masked to a border ring around the panel.
 // CSS mask-composite: exclude cuts out the interior, so the gradient is
 // ONLY visible as a glowing border — no layout changes or margin tricks needed.
+// Also applies a subtle scale pulse on kick hits for a physical "jump" feel.
 //
 // Structure:
-//   <wrapper>          ← position: relative, isolation: isolate
+//   <wrapper>          ← position: relative, isolation: isolate, transform: scale()
 //     <glow>           ← spinning gradient, masked to border ring
 //       <glow-bg>      ← oversized spinning conic-gradient
 //     </glow>
@@ -33,32 +34,43 @@ export const DiscoPulseWrapper: React.FC<DiscoPulseWrapperProps> = ({
 }) => {
   const discoMode = useDiscoMode();
   const pulseIntensity = usePulseIntensity();
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
 
-  // Modulate glow intensity via direct DOM writes (avoids React re-renders at 60fps)
+  // Modulate glow + scale via direct DOM writes (avoids React re-renders at 60fps)
   useEffect(() => {
+    const wrapper = wrapperRef.current;
     const glow = glowRef.current;
-    if (!glow) return;
+    if (!wrapper || !glow) return;
 
     if (!discoMode) {
       glow.style.opacity = '0';
+      wrapper.style.transform = '';
       return;
     }
 
     // Power curve: low-intensity moments are subtle, hits POP
     const intensity = Math.pow(pulseIntensity, 0.6);
+
+    // Glow opacity
     glow.style.opacity = String(Math.min(1, intensity * 1.3));
+
+    // Scale pulse: subtle but physical — 1.0 → 1.008 on hard kicks
+    const scale = 1 + intensity * 0.008;
+    wrapper.style.transform = `scale(${scale})`;
   }, [pulseIntensity, discoMode]);
 
   // Clean up on disco mode toggle off
   useEffect(() => {
-    if (!discoMode && glowRef.current) {
-      glowRef.current.style.opacity = '0';
+    if (!discoMode) {
+      if (glowRef.current) glowRef.current.style.opacity = '0';
+      if (wrapperRef.current) wrapperRef.current.style.transform = '';
     }
   }, [discoMode]);
 
   return (
     <div
+      ref={wrapperRef}
       className={`disco-wrapper ${discoMode ? 'disco-active' : ''} ${className}`}
       style={style}
     >
