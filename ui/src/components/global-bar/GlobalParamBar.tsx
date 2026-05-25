@@ -220,7 +220,7 @@ export const GlobalParamBar: React.FC = () => {
 
         {/* Sections — separated by dividers */}
         <div className="flex-1 flex items-stretch divide-x divide-white/5">
-          <DiscoPulseWrapper hue={0} stem="snare">
+          <DiscoPulseWrapper hue={0} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="models"
             label={t('globalBar.models')}
@@ -235,7 +235,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
 
-          <DiscoPulseWrapper hue={72} stem="snare">
+          <DiscoPulseWrapper hue={72} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="adapters"
             label={t('globalBar.adapters')}
@@ -250,7 +250,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
 
-          <DiscoPulseWrapper hue={144} stem="snare">
+          <DiscoPulseWrapper hue={144} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="generation"
             label={t('globalBar.generation')}
@@ -265,7 +265,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
 
-          <DiscoPulseWrapper hue={216} stem="snare">
+          <DiscoPulseWrapper hue={216} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="lm"
             label={t('globalBar.lm')}
@@ -287,7 +287,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
 
-          <DiscoPulseWrapper hue={288} stem="snare">
+          <DiscoPulseWrapper hue={288} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="postprocessing"
             label={t('globalBar.postProcessing')}
