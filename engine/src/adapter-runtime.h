@@ -191,6 +191,19 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
 
     int merged = 0, skipped = 0;
 
+    // Determine precision-rounding type for delta computation.
+    // BF16 is ideal (matches storage format) but requires a bf16→f32 copy
+    // shader.  Vulkan lacks this, so fall back to F16 (more mantissa bits,
+    // so the delta is actually slightly more precise — negligible difference).
+    ggml_type round_type = GGML_TYPE_BF16;
+    {
+        std::string bname = ggml_backend_name(backend);
+        if (bname.find("Vulkan") != std::string::npos) {
+            round_type = GGML_TYPE_F16;
+            fprintf(stderr, "[Adapter-RT] Vulkan backend: using F16 precision rounding\n");
+        }
+    }
+
     for (const auto & kv : a_map) {
         const std::string & gguf_name = kv.first;
         const STEntry *     ea        = kv.second;
@@ -250,8 +263,8 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
         auto build = [&](struct ggml_context * ctx) {
             struct ggml_tensor * ta     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_feat, rank);
             struct ggml_tensor * tb     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, out_feat);
-            struct ggml_tensor * ta_br  = ggml_cast(ctx, ggml_cast(ctx, ta, GGML_TYPE_BF16), GGML_TYPE_F32);
-            struct ggml_tensor * tb_br  = ggml_cast(ctx, ggml_cast(ctx, tb, GGML_TYPE_BF16), GGML_TYPE_F32);
+            struct ggml_tensor * ta_br  = ggml_cast(ctx, ggml_cast(ctx, ta, round_type), GGML_TYPE_F32);
+            struct ggml_tensor * tb_br  = ggml_cast(ctx, ggml_cast(ctx, tb, round_type), GGML_TYPE_F32);
             struct ggml_tensor * ta_t   = ggml_cont(ctx, ggml_transpose(ctx, ta_br));
             struct ggml_tensor * tdelta = ggml_scale(ctx, ggml_mul_mat(ctx, ta_t, tb_br), scaling);
             adapter_delta_build db;
