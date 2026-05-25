@@ -72,7 +72,7 @@ import { usePlaylist, addToPlaylist } from './components/lyric-studio/playlistSt
 import { DisguiseModeProvider } from './hooks/useDisguiseMode';
 import { ABCompareModal } from './components/shared/ABCompareModal';
 import { useABCompareSelector, playAB, openModal as openABModal, clear as clearAB } from './stores/abCompareStore';
-import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setStemUrls, syncStems } from './stores/discoStore';
+import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setDiscoDataUrl, syncStems, updateMainTime } from './stores/discoStore';
 import { DiscoPulseWrapper } from './components/shared/DiscoPulseWrapper';
 import { SnareFlashOverlay } from './components/shared/SnareFlashOverlay';
 import { HiHatParticles } from './components/shared/HiHatParticles';
@@ -297,46 +297,42 @@ const AppContent: React.FC = () => {
     if (el) setSpectrumMediaEl(el);
   }, [playMastered, currentTrack, isPlaying]);
 
-  // Sync disco beat detection loop with playback state
+  // Sync disco beat detection with playback state
   useEffect(() => {
     setDiscoPlaying(isPlaying);
-    if (isPlaying) {
-      syncStems('play', currentTime);
-    } else {
-      syncStems('pause');
-    }
+    syncStems(isPlaying ? 'play' : 'pause', currentTime);
   }, [isPlaying]);
 
-  // Load all drum stem URLs when track changes — trigger on-demand extraction if missing
+  // Feed current time to disco store every frame — this is the sync backbone.
+  // Pre-analyzed stems look up energy at this time, so it's always in sync
+  // with the main player regardless of seek, pause, rate changes.
   useEffect(() => {
-    const kickUrl = currentTrack?.kickStemUrl || '';
-    const snareUrl = currentTrack?.snareStemUrl || '';
-    const hihatUrl = currentTrack?.hihatStemUrl || '';
-    setStemUrls({ kick: kickUrl, snare: snareUrl, hihat: hihatUrl });
+    updateMainTime(currentTime);
+  }, [currentTime]);
 
-    // If disco kick extraction is on and this track has no stems, trigger extraction
-    const hasSomeStems = kickUrl || snareUrl || hihatUrl;
-    if (settings.discoKickExtract && currentTrack?.id && !hasSomeStems) {
-      console.log(`[Disco] Track ${currentTrack.id} has no drum stems — triggering extraction`);
+  // Load disco data JSON when track changes — trigger on-demand extraction if missing
+  useEffect(() => {
+    const discoUrl = currentTrack?.discoDataUrl || '';
+    setDiscoDataUrl(discoUrl);
+
+    // If disco extraction is on and this track has no disco data, trigger extraction
+    if (settings.discoKickExtract && currentTrack?.id && !discoUrl) {
+      console.log(`[Disco] Track ${currentTrack.id} has no disco data — triggering extraction`);
       let cancelled = false;
       (async () => {
         try {
           const res = await fetch(`/api/songs/${currentTrack.id}/extract-kick`, { method: 'POST' });
           const data = await res.json();
           if (cancelled) return;
-          if (data.status === 'exists') {
-            console.log(`[Disco] Drum stems already exist for ${currentTrack.id}`);
-            setStemUrls({
-              kick: data.kickStemUrl || '',
-              snare: data.snareStemUrl || '',
-              hihat: data.hihatStemUrl || '',
-            });
+          if (data.status === 'exists' && data.discoDataUrl) {
+            console.log(`[Disco] Disco data already exists for ${currentTrack.id}`);
+            setDiscoDataUrl(data.discoDataUrl);
             return;
           }
           if (data.status !== 'started') return;
-          console.log(`[Disco] Drum stem extraction started for ${currentTrack.id}`);
+          console.log(`[Disco] Stem extraction started for ${currentTrack.id}`);
 
-          // Poll until stems appear on the song
+          // Poll until disco data URL appears on the song
           for (let i = 0; i < 360 && !cancelled; i++) {
             await new Promise(r => setTimeout(r, 5000));
             if (cancelled) return;
@@ -344,25 +340,21 @@ const AppContent: React.FC = () => {
               const songRes = await fetch(`/api/songs/${currentTrack.id}`);
               const songData = await songRes.json();
               const s = songData.song || songData;
-              const ks = s.kick_stem_url || '';
-              if (ks && !ks.startsWith('extracting:')) {
-                console.log(`[Disco] Drum stems ready for ${currentTrack.id}`);
-                setStemUrls({
-                  kick: ks,
-                  snare: s.snare_stem_url || '',
-                  hihat: s.hihat_stem_url || '',
-                });
+              const ddUrl = s.disco_data_url || '';
+              if (ddUrl) {
+                console.log(`[Disco] Disco data ready for ${currentTrack.id}: ${ddUrl}`);
+                setDiscoDataUrl(ddUrl);
                 return;
               }
             } catch { /* keep polling */ }
           }
         } catch (err) {
-          console.warn('[Disco] On-demand stem extraction failed:', err);
+          console.warn('[Disco] On-demand extraction failed:', err);
         }
       })();
       return () => { cancelled = true; };
     }
-  }, [currentTrack?.id, currentTrack?.kickStemUrl, currentTrack?.snareStemUrl, currentTrack?.hihatStemUrl, settings.discoKickExtract]);
+  }, [currentTrack?.id, currentTrack?.discoDataUrl, settings.discoKickExtract]);
 
   // ── Trim mode waveform click handler ──
   const handleWaveformClick = useCallback((timeSec: number) => {
@@ -447,17 +439,17 @@ const AppContent: React.FC = () => {
     setSongs(prev => [song, ...prev.filter(s => s.id !== song.id)]);
     setSongCreatedCount(c => c + 1);
 
-    // Auto-extract kick stem for disco mode if setting enabled
-    if (settings.discoKickExtract && song.id && !song.kick_stem_url) {
-      console.log(`[Disco] Auto-extracting kick stem for song ${song.id}`);
+    // Auto-extract drum stems + disco data for disco mode if setting enabled
+    if (settings.discoKickExtract && song.id && !song.disco_data_url) {
+      console.log(`[Disco] Auto-extracting drum stems for song ${song.id}`);
       fetch(`/api/songs/${song.id}/extract-kick`, { method: 'POST' })
         .then(r => r.json())
         .then(data => {
           if (data.status === 'started') {
-            console.log(`[Disco] Kick extraction started (aceJobId=${data.aceJobId})`);
+            console.log(`[Disco] Stem extraction + analysis started for ${song.id}`);
           }
         })
-        .catch(err => console.warn('[Disco] Kick extraction failed:', err));
+        .catch(err => console.warn('[Disco] Stem extraction failed:', err));
     }
   }, [settings.discoKickExtract]);
 

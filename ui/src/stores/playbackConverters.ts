@@ -36,6 +36,7 @@ export function songToTrack(song: Song): PlaybackTrack {
     kickStemUrl: song.kickStemUrl || song.kick_stem_url || '',
     snareStemUrl: song.snareStemUrl || song.snare_stem_url || '',
     hihatStemUrl: song.hihatStemUrl || song.hihat_stem_url || '',
+    discoDataUrl: song.discoDataUrl || song.disco_data_url || '',
     artistName: song.artistName || '',
     coverUrl: song.coverUrl || song.cover_url || '',
     duration: coerceDuration(song.duration),
@@ -77,6 +78,7 @@ export function recentSongToTrack(rs: {
   kick_stem_url?: string;
   snare_stem_url?: string;
   hihat_stem_url?: string;
+  disco_data_url?: string;
 }): PlaybackTrack {
   return {
     id: rs.hotstep_job_id || `recent-${rs.ag_id}`,
@@ -86,6 +88,7 @@ export function recentSongToTrack(rs: {
     kickStemUrl: rs.kick_stem_url || '',
     snareStemUrl: rs.snare_stem_url || '',
     hihatStemUrl: rs.hihat_stem_url || '',
+    discoDataUrl: rs.disco_data_url || '',
     artistName: rs.artist_name || '',
     coverUrl: rs.cover_url || rs.album_image || rs.artist_image || '',
     duration: coerceDuration(rs.duration),

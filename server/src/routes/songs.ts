@@ -10,6 +10,7 @@ import { config } from '../config.js';
 import { getUserId } from './auth.js';
 import { deleteAudioGenerationsByJobIds } from '../db/lireekDb.js';
 import { cropWavFile, cropLrcFile } from '../services/audioCrop.js';
+import { analyzeAndSaveDiscoData } from '../services/disco-analyzer.js';
 
 const router = Router();
 
@@ -101,6 +102,7 @@ router.get('/recent', (req, res) => {
       kick_stem_url: s.kick_stem_url || '',
       snare_stem_url: s.snare_stem_url || '',
       hihat_stem_url: s.hihat_stem_url || '',
+      disco_data_url: s.disco_data_url || '',
       cover_url: s.cover_url || '',
       duration: s.duration || 0,
       lyrics: s.lyrics || '',
@@ -513,11 +515,29 @@ router.post('/:id/extract-kick', async (req, res) => {
 
     // Already has all drum stems?
     if (song.kick_stem_url && song.snare_stem_url && song.hihat_stem_url) {
+      // Backfill disco data if stems exist but analysis doesn't
+      let discoDataUrl = song.disco_data_url || '';
+      if (!discoDataUrl) {
+        try {
+          discoDataUrl = analyzeAndSaveDiscoData(req.params.id, config.data.audioDir, {
+            kick: song.kick_stem_url,
+            snare: song.snare_stem_url,
+            hihat: song.hihat_stem_url,
+          });
+          if (discoDataUrl) {
+            getDb().prepare('UPDATE songs SET disco_data_url = ? WHERE id = ?')
+              .run(discoDataUrl, req.params.id);
+          }
+        } catch (err: any) {
+          console.warn(`[KickExtract] Disco analysis backfill failed: ${err.message}`);
+        }
+      }
       res.json({
         status: 'exists',
         kickStemUrl: song.kick_stem_url,
         snareStemUrl: song.snare_stem_url,
         hihatStemUrl: song.hihat_stem_url,
+        discoDataUrl,
       });
       return;
     }
@@ -564,6 +584,44 @@ router.post('/:id/extract-kick', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[KickExtract] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/songs/:id/analyze-disco — generate disco data from existing stems (no re-extraction)
+router.post('/:id/analyze-disco', (req, res) => {
+  try {
+    const song = getDb().prepare('SELECT * FROM songs WHERE id = ?')
+      .get(req.params.id) as any;
+    if (!song) { res.status(404).json({ error: 'Song not found' }); return; }
+
+    // Already has disco data?
+    if (song.disco_data_url) {
+      res.json({ status: 'exists', discoDataUrl: song.disco_data_url });
+      return;
+    }
+
+    // Need at least one stem
+    const stemUrls = {
+      kick: song.kick_stem_url || undefined,
+      snare: song.snare_stem_url || undefined,
+      hihat: song.hihat_stem_url || undefined,
+    };
+    const hasStem = stemUrls.kick || stemUrls.snare || stemUrls.hihat;
+    if (!hasStem) {
+      res.status(400).json({ error: 'No stem files to analyze' });
+      return;
+    }
+
+    const discoDataUrl = analyzeAndSaveDiscoData(req.params.id, config.data.audioDir, stemUrls);
+    if (discoDataUrl) {
+      getDb().prepare('UPDATE songs SET disco_data_url = ? WHERE id = ?')
+        .run(discoDataUrl, req.params.id);
+    }
+
+    res.json({ status: 'created', discoDataUrl });
+  } catch (err: any) {
+    console.error('[DiscoAnalyze] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -631,6 +689,22 @@ async function extractDrumStemsBackground(songId: string, aceJobId: string, aceU
   // Update DB with all stems at once
   getDb().prepare('UPDATE songs SET kick_stem_url = ?, snare_stem_url = ?, hihat_stem_url = ? WHERE id = ?')
     .run(kickUrl, snareUrl, hihatUrl, songId);
+
+  // Analyze stems and save compact disco data JSON
+  try {
+    const discoDataUrl = analyzeAndSaveDiscoData(songId, config.data.audioDir, {
+      kick: kickUrl,
+      snare: snareUrl,
+      hihat: hihatUrl,
+    });
+    if (discoDataUrl) {
+      getDb().prepare('UPDATE songs SET disco_data_url = ? WHERE id = ?')
+        .run(discoDataUrl, songId);
+      console.log(`[DrumStems] Song ${songId}: disco data saved → ${discoDataUrl}`);
+    }
+  } catch (err: any) {
+    console.error(`[DrumStems] Song ${songId}: disco analysis failed (non-fatal):`, err.message);
+  }
 
   console.log(`[DrumStems] Song ${songId}: all drum stems processed`);
 }

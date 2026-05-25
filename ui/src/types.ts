@@ -41,6 +41,8 @@ export interface Song {
   snare_stem_url?: string;
   hihatStemUrl?: string;
   hihat_stem_url?: string;
+  discoDataUrl?: string;
+  disco_data_url?: string;
   // Latent file
   latentUrl?: string;
   latent_url?: string;

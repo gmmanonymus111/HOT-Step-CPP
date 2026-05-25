@@ -1,12 +1,19 @@
 // discoStore.ts — Disco mode state + multi-stem beat detection engine.
 //
-// Three stem channels, each with its own HTMLAudioElement + AnalyserNode:
-//   1. KICK   — punch/impact → scale pulse on panels
+// SYNC STRATEGY: Pre-analyzed disco data is loaded as a tiny JSON file
+// (~30-60 KB) generated server-side during stem extraction. Energy per
+// ~16ms window is already computed. During playback, we look up energy
+// at the main player's currentTime — a pure array index. Zero sync
+// issues, zero Web Audio API overhead.
+//
+// Fallback chain:
+//   1. Disco JSON (preferred — tiny, instant, server-analyzed)
+//   2. audioMotion analyser (basic kick detection from full mix)
+//
+// Three stem channels:
+//   1. KICK   — punch/impact → scale pulse + rainbow border
 //   2. SNARE  — crack/flash → full-viewport white flash
 //   3. HI-HAT — shimmer → floating particles
-//
-// Fallback: if no stems available, uses audioMotion's AnalyserNode for
-// basic kick detection from the full mix.
 
 import { useSyncExternalStore, useRef, useCallback } from 'react';
 
@@ -14,12 +21,20 @@ import { useSyncExternalStore, useRef, useCallback } from 'react';
 
 interface DiscoState {
   discoMode: boolean;
-  kickPulse: number;     // 0.0–1.0 (legacy: also exposed as pulseIntensity)
+  kickPulse: number;     // 0.0–1.0
   snarePulse: number;    // 0.0–1.0
-  hihatEnergy: number;   // 0.0–1.0 (continuous energy, not pulsed)
-  kickStemLoaded: boolean;
-  snareStemLoaded: boolean;
-  hihatStemLoaded: boolean;
+  hihatEnergy: number;   // 0.0–1.0 (continuous)
+  discoDataLoaded: boolean;
+}
+
+/** Server-generated disco data — matches disco-analyzer.ts output */
+interface DiscoData {
+  version: number;
+  fps: number;
+  duration: number;
+  kick: number[];
+  snare: number[];
+  hihat: number[];
 }
 
 // ── localStorage ─────────────────────────────────────────────────────────────
@@ -38,154 +53,85 @@ function saveDiscoPrefs(discoMode: boolean): void {
   localStorage.setItem(DISCO_PREFS_KEY, JSON.stringify({ discoMode }));
 }
 
-// ── Audio: Multi-Stem Channels ───────────────────────────────────────────────
+// ── Disco Data Management ────────────────────────────────────────────────────
 
-interface StemChannel {
-  audio: HTMLAudioElement | null;
-  analyser: AnalyserNode | null;
-  source: MediaElementAudioSourceNode | null;
-  freqData: Uint8Array | null;
-  url: string;
-  binStart: number;
-  binEnd: number;
-  loaded: boolean;
-}
+let _discoData: DiscoData | null = null;
+let _discoDataUrl = '';
+let _discoDataLoading = false;
 
-// Shared AudioContext for all stem channels
-let _stemCtx: AudioContext | null = null;
-
-// Track main player state for auto-play on stem load
-let _mainIsPlaying = false;
+// Track main player state
 let _mainCurrentTime = 0;
+let _mainIsPlaying = false;
 
-// Frequency ranges for each stem type
-const STEM_FREQ_RANGES = {
-  kick:  { lo: 40,   hi: 200  },
-  snare: { lo: 200,  hi: 2000 },
-  hihat: { lo: 6000, hi: 16000 },
-} as const;
-
-function createChannel(): StemChannel {
-  return {
-    audio: null, analyser: null, source: null, freqData: null,
-    url: '', binStart: 0, binEnd: 0, loaded: false,
-  };
+/** Look up normalised energy at a given time */
+function getEnergyAtTime(energyArray: number[] | undefined, fps: number, timeSec: number): number {
+  if (!energyArray || energyArray.length === 0) return -1;
+  const idx = Math.floor(timeSec * fps);
+  if (idx < 0 || idx >= energyArray.length) return 0;
+  return energyArray[idx];
 }
 
-const _stems: Record<'kick' | 'snare' | 'hihat', StemChannel> = {
-  kick:  createChannel(),
-  snare: createChannel(),
-  hihat: createChannel(),
-};
+/** Load disco data JSON from server */
+function loadDiscoData(url: string): void {
+  if (url === _discoDataUrl) return;
+  _discoDataUrl = url;
 
-type StemKey = keyof typeof _stems;
-
-function ensureContext(): AudioContext {
-  if (!_stemCtx) _stemCtx = new AudioContext();
-  return _stemCtx;
-}
-
-/** Load a stem URL for a specific channel. Pass '' to unload. */
-function loadStemChannel(key: StemKey, url: string): void {
-  const ch = _stems[key];
-  if (url === ch.url) return;
-  ch.url = url;
-
-  if (!url || url.startsWith('extracting:')) {
-    ch.audio?.pause();
-    ch.audio = null;
-    ch.source = null;
-    ch.analyser = null;
-    ch.freqData = null;
-    ch.loaded = false;
-    updateStemLoadedState();
-    console.log(`[Disco] ${key} stem unloaded`);
+  if (!url) {
+    _discoData = null;
+    _discoDataLoading = false;
+    setState({ discoDataLoaded: false });
+    console.log('[Disco] Disco data unloaded');
     return;
   }
 
-  // Create or reuse Audio element
-  if (!ch.audio) {
-    ch.audio = new Audio();
-    ch.audio.crossOrigin = 'anonymous';
-    ch.audio.volume = 1; // Must be non-zero for signal
-    ch.audio.preload = 'auto';
-  }
+  _discoDataLoading = true;
+  console.log(`[Disco] Loading disco data: ${url}`);
 
-  ch.audio.src = url;
-  ch.audio.load();
-
-  const ctx = ensureContext();
-
-  // Connect audio → analyser (only once — MediaElementSource is permanent)
-  if (!ch.source) {
-    ch.source = ctx.createMediaElementSource(ch.audio);
-    ch.analyser = ctx.createAnalyser();
-    ch.analyser.fftSize = 2048;
-    ch.analyser.smoothingTimeConstant = key === 'hihat' ? 0.3 : 0.1;
-    ch.source.connect(ch.analyser);
-    // Don't connect to ctx.destination — inaudible analysis only
-
-    ch.freqData = new Uint8Array(ch.analyser.frequencyBinCount);
-
-    const binHz = ctx.sampleRate / ch.analyser.fftSize;
-    const range = STEM_FREQ_RANGES[key];
-    ch.binStart = Math.floor(range.lo / binHz);
-    ch.binEnd = Math.ceil(range.hi / binHz);
-    console.log(`[Disco] ${key} analyser: bins ${ch.binStart}-${ch.binEnd} (${(binHz * ch.binStart).toFixed(0)}-${(binHz * ch.binEnd).toFixed(0)}Hz)`);
-  }
-
-  ch.loaded = true;
-  updateStemLoadedState();
-  console.log(`[Disco] ${key} stem loaded: ${url}`);
-
-  // Auto-start if main player is already playing
-  if (_mainIsPlaying) {
-    console.log(`[Disco] Main player already playing — auto-starting ${key} stem at ${_mainCurrentTime.toFixed(1)}s`);
-    ch.audio.currentTime = _mainCurrentTime;
-    if (_stemCtx?.state === 'suspended') _stemCtx.resume();
-    ch.audio.play().catch(() => {});
-  }
+  fetch(url)
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((data: DiscoData) => {
+      if (_discoDataUrl !== url) return; // URL changed while loading
+      _discoData = data;
+      _discoDataLoading = false;
+      setState({ discoDataLoaded: true });
+      const totalWindows = Math.max(data.kick?.length || 0, data.snare?.length || 0, data.hihat?.length || 0);
+      console.log(`[Disco] Disco data ready: ${totalWindows} windows, ${data.duration?.toFixed(1)}s, fps=${data.fps}`);
+    })
+    .catch(err => {
+      console.warn('[Disco] Disco data load failed:', err);
+      _discoData = null;
+      _discoDataLoading = false;
+      setState({ discoDataLoaded: false });
+    });
 }
 
-function updateStemLoadedState(): void {
-  setState({
-    kickStemLoaded: _stems.kick.loaded,
-    snareStemLoaded: _stems.snare.loaded,
-    hihatStemLoaded: _stems.hihat.loaded,
-  });
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/** Set the disco data URL — this is the primary data source */
+export function setDiscoDataUrl(url: string): void {
+  loadDiscoData(url);
 }
 
-function readStemEnergy(key: StemKey): number {
-  const ch = _stems[key];
-  if (!ch.analyser || !ch.freqData) return -1;
-
-  ch.analyser.getByteFrequencyData(ch.freqData);
-
-  let sum = 0, count = 0;
-  for (let i = ch.binStart; i <= ch.binEnd && i < ch.freqData.length; i++) {
-    sum += ch.freqData[i];
-    count++;
-  }
-  return count > 0 ? (sum / count) / 255 : 0;
+/** Legacy: kept for backward compat. Stem URLs are no longer used for analysis. */
+export function setStemUrls(_urls: { kick?: string; snare?: string; hihat?: string }): void {
+  // No-op — analysis now comes from disco data JSON
 }
 
-// ── Public Stem API ──────────────────────────────────────────────────────────
-
-/** Load all drum stem URLs at once. Pass '' for any stem to unload it. */
-export function setStemUrls(urls: { kick?: string; snare?: string; hihat?: string }): void {
-  if (urls.kick !== undefined) loadStemChannel('kick', urls.kick);
-  if (urls.snare !== undefined) loadStemChannel('snare', urls.snare);
-  if (urls.hihat !== undefined) loadStemChannel('hihat', urls.hihat);
+/** Legacy alias */
+export function setKickStemUrl(_url: string): void {
+  // No-op
 }
 
-/** Legacy: load just the kick stem URL */
-export function setKickStemUrl(url: string): void {
-  loadStemChannel('kick', url);
+/** Update main player time — called from App.tsx on every currentTime change */
+export function updateMainTime(time: number): void {
+  _mainCurrentTime = time;
 }
 
-/** Sync all stem playback with main player */
+/** Sync main player state (play/pause) */
 export function syncStems(action: 'play' | 'pause' | 'seek', time?: number): void {
-  // Track main player state
   if (action === 'play') {
     _mainIsPlaying = true;
     if (time !== undefined) _mainCurrentTime = time;
@@ -193,27 +139,6 @@ export function syncStems(action: 'play' | 'pause' | 'seek', time?: number): voi
     _mainIsPlaying = false;
   } else if (action === 'seek' && time !== undefined) {
     _mainCurrentTime = time;
-  }
-
-  // Resume AudioContext on first interaction
-  if (_stemCtx?.state === 'suspended') _stemCtx.resume();
-
-  for (const key of ['kick', 'snare', 'hihat'] as StemKey[]) {
-    const ch = _stems[key];
-    if (!ch.audio || !ch.url) continue;
-
-    switch (action) {
-      case 'play':
-        if (time !== undefined) ch.audio.currentTime = time;
-        ch.audio.play().catch(() => {});
-        break;
-      case 'pause':
-        ch.audio.pause();
-        break;
-      case 'seek':
-        if (time !== undefined) ch.audio.currentTime = time;
-        break;
-    }
   }
 }
 
@@ -271,9 +196,7 @@ let _state: DiscoState = {
   kickPulse: 0,
   snarePulse: 0,
   hihatEnergy: 0,
-  kickStemLoaded: false,
-  snareStemLoaded: false,
-  hihatStemLoaded: false,
+  discoDataLoaded: false,
 };
 
 // ── Reactivity (useSyncExternalStore) ────────────────────────────────────────
@@ -288,7 +211,6 @@ function subscribe(cb: () => void): () => void {
   _listeners.add(cb);
   return () => _listeners.delete(cb);
 }
-function getSnapshot(): DiscoState { return _state; }
 
 // ── Beat Detection Loop ──────────────────────────────────────────────────────
 
@@ -308,10 +230,10 @@ const KICK_DECAY = 0.88;
 // Snare: threshold detection (snappier than kick)
 const SNARE_THRESHOLD = 0.10;
 const SNARE_ATTACK = 0.8;
-const SNARE_DECAY = 0.82;  // Faster decay — snare is crackly
+const SNARE_DECAY = 0.82;
 
 // Hi-hat: continuous energy (smoothed for particle spawning)
-const HIHAT_SMOOTH = 0.3;  // Smoothing factor (0=no smooth, 1=frozen)
+const HIHAT_SMOOTH = 0.3;
 
 // Fallback mode: adaptive normalisation
 let _rollingMin = 1.0;
@@ -332,11 +254,14 @@ function beatDetectionLoop(): void {
     return;
   }
 
-  // ── Kick ──
-  const kickEnergy = readStemEnergy('kick');
-  const usingKick = kickEnergy >= 0;
+  const t = _mainCurrentTime;
+  const fps = _discoData?.fps || 60;
 
-  if (usingKick) {
+  // ── Kick ──
+  const kickEnergy = _discoData ? getEnergyAtTime(_discoData.kick, fps, t) : -1;
+  const usingDiscoData = kickEnergy >= 0;
+
+  if (usingDiscoData) {
     if (kickEnergy > KICK_THRESHOLD) {
       const target = Math.min(1.0, (kickEnergy - KICK_THRESHOLD) / (1 - KICK_THRESHOLD));
       _kickPulse += (target - _kickPulse) * KICK_ATTACK;
@@ -358,24 +283,28 @@ function beatDetectionLoop(): void {
     else _kickPulse *= FB_DECAY;
   }
 
-  // ── Snare ──
-  const snareEnergy = readStemEnergy('snare');
-  if (snareEnergy >= 0) {
-    if (snareEnergy > SNARE_THRESHOLD) {
-      const target = Math.min(1.0, (snareEnergy - SNARE_THRESHOLD) / (1 - SNARE_THRESHOLD));
-      _snarePulse += (target - _snarePulse) * SNARE_ATTACK;
-    } else {
-      _snarePulse *= SNARE_DECAY;
+  // ── Snare (disco data only) ──
+  if (_discoData) {
+    const snareEnergy = getEnergyAtTime(_discoData.snare, fps, t);
+    if (snareEnergy >= 0) {
+      if (snareEnergy > SNARE_THRESHOLD) {
+        const target = Math.min(1.0, (snareEnergy - SNARE_THRESHOLD) / (1 - SNARE_THRESHOLD));
+        _snarePulse += (target - _snarePulse) * SNARE_ATTACK;
+      } else {
+        _snarePulse *= SNARE_DECAY;
+      }
     }
   }
 
-  // ── Hi-Hat ──
-  const hihatEnergy = readStemEnergy('hihat');
-  if (hihatEnergy >= 0) {
-    _hihatSmoothed = _hihatSmoothed * HIHAT_SMOOTH + hihatEnergy * (1 - HIHAT_SMOOTH);
+  // ── Hi-Hat (disco data only) ──
+  if (_discoData) {
+    const hihatEnergy = getEnergyAtTime(_discoData.hihat, fps, t);
+    if (hihatEnergy >= 0) {
+      _hihatSmoothed = _hihatSmoothed * HIHAT_SMOOTH + hihatEnergy * (1 - HIHAT_SMOOTH);
+    }
   }
 
-  // Clamp tiny values to zero
+  // Clamp tiny values
   if (_kickPulse < 0.01) _kickPulse = 0;
   if (_snarePulse < 0.01) _snarePulse = 0;
   if (_hihatSmoothed < 0.01) _hihatSmoothed = 0;
@@ -383,8 +312,8 @@ function beatDetectionLoop(): void {
   // Debug: log twice per second
   _debugFrameCount++;
   if (_debugFrameCount % 30 === 0) {
-    const mode = usingKick ? 'STEMS' : 'FALLBACK';
-    console.log(`[Disco] [${mode}] kick=${_kickPulse.toFixed(3)} snare=${_snarePulse.toFixed(3)} hihat=${_hihatSmoothed.toFixed(3)}`);
+    const mode = usingDiscoData ? 'DISCO' : 'FALLBACK';
+    console.log(`[Disco] [${mode}] t=${t.toFixed(2)}s kick=${_kickPulse.toFixed(3)} snare=${_snarePulse.toFixed(3)} hihat=${_hihatSmoothed.toFixed(3)}`);
   }
 
   // Notify subscribers if anything changed
@@ -425,20 +354,15 @@ function stopLoop(): void {
   _snarePulse = 0;
   _hihatSmoothed = 0;
   setState({ kickPulse: 0, snarePulse: 0, hihatEnergy: 0 });
-  syncStems('pause');
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public Mode API ──────────────────────────────────────────────────────────
 
 export function setDiscoMode(on: boolean): void {
   setState({ discoMode: on });
   saveDiscoPrefs(on);
   if (on) {
     startLoop();
-    // If main player is already playing, resume stems so beat detection gets signal
-    if (_mainIsPlaying) {
-      syncStems('play', _mainCurrentTime);
-    }
   } else {
     stopLoop();
   }
@@ -449,6 +373,7 @@ export function toggleDiscoMode(): void {
 }
 
 export function setDiscoPlaying(isPlaying: boolean): void {
+  _mainIsPlaying = isPlaying;
   if (_state.discoMode && isPlaying) startLoop();
   else if (!isPlaying) stopLoop();
 }
@@ -477,8 +402,13 @@ export function useDiscoMode(): boolean {
   return useDiscoSelector(s => s.discoMode);
 }
 
+export function useDiscoDataLoaded(): boolean {
+  return useDiscoSelector(s => s.discoDataLoaded);
+}
+
+/** @deprecated Use useDiscoDataLoaded instead */
 export function useKickStemLoaded(): boolean {
-  return useDiscoSelector(s => s.kickStemLoaded);
+  return useDiscoDataLoaded();
 }
 
 export function useSnarePulse(): number {
