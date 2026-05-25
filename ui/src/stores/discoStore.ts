@@ -79,6 +79,7 @@ function getSnapshot(): DiscoState {
 let _rafId: number | null = null;
 let _smoothedEnergy = 0;
 let _lastFrameTime = 0;
+let _debugFrameCount = 0;
 
 // Envelope follower parameters
 const ATTACK_MS = 30;    // Fast attack — snappy response to beat hits
@@ -102,6 +103,12 @@ function beatDetectionLoop(timestamp: number): void {
     } catch {
       rawEnergy = 0;
     }
+  }
+
+  // Debug: log once per second so we can verify values are coming through
+  _debugFrameCount++;
+  if (_debugFrameCount % 60 === 0) {
+    console.log(`[Disco] raw=${rawEnergy.toFixed(3)} smoothed=${_smoothedEnergy.toFixed(3)} audioMotion=${!!_audioMotion}`);
   }
 
   // Envelope follower: fast attack, slow decay
