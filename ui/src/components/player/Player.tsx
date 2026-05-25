@@ -9,6 +9,7 @@ import {
   RotateCcw, Trash2, Download,
   Music, Sparkles, Activity, ListMusic, Scissors, X,
 } from 'lucide-react';
+import { DiscoIcon } from './DiscoIcon';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
@@ -44,6 +45,8 @@ interface PlayerProps {
   onTogglePlaylist: () => void;
   trimMode: boolean;
   onToggleTrimMode: () => void;
+  discoMode: boolean;
+  onToggleDisco: () => void;
   abMode: boolean;
   abActiveLabel: 'A' | 'B';
   onToggleAB: () => void;
@@ -87,6 +90,8 @@ export const Player: React.FC<PlayerProps> = ({
   onTogglePlaylist,
   trimMode,
   onToggleTrimMode,
+  discoMode,
+  onToggleDisco,
   abMode,
   abActiveLabel,
   onToggleAB,
@@ -168,6 +173,13 @@ export const Player: React.FC<PlayerProps> = ({
           title={spectrumEnabled ? t('player.spectrumOn') : t('player.spectrumOff')}
         >
           <Activity size={16} />
+        </button>
+        <button
+          onClick={onToggleDisco}
+          className={`p-1.5 rounded-lg transition-colors ${discoMode ? 'text-yellow-400 animate-pulse' : 'text-zinc-500 hover:text-yellow-400 hover:bg-yellow-500/5'}`}
+          title={discoMode ? 'Disco mode ON' : 'Disco mode OFF'}
+        >
+          <DiscoIcon size={16} />
         </button>
         <span className="text-[10px] text-zinc-500 font-mono w-10 flex-shrink-0">{formatTime(duration)}</span>
       </div>
