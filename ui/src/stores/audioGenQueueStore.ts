@@ -97,9 +97,18 @@ function _restore(): AudioGenQueueState {
     if (!raw) return { items: [], completionCounter: 0 };
     const parsed = JSON.parse(raw);
     const items: AudioQueueItem[] = (parsed.items || []).map((item: AudioQueueItem) => {
-      if (item.status === 'loading-adapter' ||
-          (item.status === 'generating' && !item.jobId)) {
-        return { ...item, status: 'pending' as AudioQueueStatus, stage: undefined, progress: undefined };
+      // After a page reload / app restart, any in-flight items are dead:
+      // the server's job map is in-memory and won't have the old jobId.
+      // Reset them to pending so the queue re-submits from scratch.
+      if (item.status === 'loading-adapter' || item.status === 'generating') {
+        return {
+          ...item,
+          status: 'pending' as AudioQueueStatus,
+          jobId: undefined,
+          stage: undefined,
+          progress: undefined,
+          elapsed: undefined,
+        };
       }
       return item;
     });
@@ -131,7 +140,6 @@ function _genId(): string { return `aq-${Date.now()}-${_nextId++}`; }
 
 // ── Resume tracking ──────────────────────────────────────────────────────────
 
-const _resumedJobIds = new Set<string>();
 let _resumeCalled = false;
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -504,34 +512,11 @@ export function resumeQueue(token: string): void {
   if (_resumeCalled) return;
   _resumeCalled = true;
 
-  let didFix = false;
-  for (const item of _state.items) {
-    // Reset items that were mid-processing but have no job ID (interrupted before submission)
-    if ((item.status === 'generating' || item.status === 'loading-adapter') && !item.jobId) {
-      item.status = 'pending';
-      item.stage = undefined;
-      item.progress = undefined;
-      didFix = true;
-    }
-  }
-  if (didFix) _emit(true);
-
+  // _restore() already reset any in-flight items to 'pending' (with jobId cleared).
+  // All we need to do is kick the queue processor if there's work to do.
   const hasPending = _state.items.some(i => i.status === 'pending');
-  const inFlight = _state.items.filter(i => i.status === 'generating' && i.jobId);
-
-  const resumePromises: Promise<void>[] = [];
-  for (const item of inFlight) {
-    if (_resumedJobIds.has(item.jobId!)) continue;
-    _resumedJobIds.add(item.jobId!);
-    resumePromises.push(_resumePolling(item, token));
-  }
-
   if (hasPending) {
-    if (resumePromises.length > 0) {
-      Promise.all(resumePromises).then(() => _processQueue(token));
-    } else {
-      _processQueue(token);
-    }
+    _processQueue(token);
   }
 }
 
@@ -741,20 +726,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
   }
 }
 
-async function _resumePolling(item: AudioQueueItem, token: string): Promise<void> {
-  try {
-    await _pollUntilDone(item, token);
-    item.status = 'succeeded';
-    _state.completionCounter++;
-    // Notify App.tsx so Library updates in real-time
-    if (item.songId) _notifySongCreated(item.songId);
-    _maybeAutoAddToPlaylist(item);
-  } catch (err) {
-    item.status = 'failed';
-    item.error = (err as Error).message;
-  }
-  _emit(true);
-}
+
 
 // ── React hooks ──────────────────────────────────────────────────────────────
 
