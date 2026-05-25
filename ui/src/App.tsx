@@ -305,11 +305,51 @@ const AppContent: React.FC = () => {
     }
   }, [isPlaying]);
 
-  // Load kick stem URL when track changes
+  // Load kick stem URL when track changes — trigger on-demand extraction if missing
   useEffect(() => {
     const kickUrl = currentTrack?.kickStemUrl || '';
     setKickStemUrl(kickUrl);
-  }, [currentTrack?.id, currentTrack?.kickStemUrl]);
+
+    // If disco kick extraction is on and this track has no kick stem, trigger it
+    if (settings.discoKickExtract && currentTrack?.id && !kickUrl) {
+      console.log(`[Disco] Track ${currentTrack.id} has no kick stem — triggering extraction`);
+      let cancelled = false;
+      (async () => {
+        try {
+          const res = await fetch(`/api/songs/${currentTrack.id}/extract-kick`, { method: 'POST' });
+          const data = await res.json();
+          if (cancelled) return;
+          if (data.status === 'exists') {
+            // Already had one — update the track
+            console.log(`[Disco] Kick stem already exists for ${currentTrack.id}`);
+            setKickStemUrl(data.kickStemUrl);
+            return;
+          }
+          if (data.status !== 'started') return;
+          console.log(`[Disco] Kick extraction started for ${currentTrack.id} (aceJobId=${data.aceJobId})`);
+
+          // Poll until the kick stem URL appears on the song
+          for (let i = 0; i < 360 && !cancelled; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            if (cancelled) return;
+            try {
+              const songRes = await fetch(`/api/songs/${currentTrack.id}`);
+              const songData = await songRes.json();
+              const ksUrl = songData.song?.kick_stem_url || songData.song?.kickStemUrl || '';
+              if (ksUrl && !ksUrl.startsWith('extracting:')) {
+                console.log(`[Disco] Kick stem ready for ${currentTrack.id}: ${ksUrl}`);
+                setKickStemUrl(ksUrl);
+                return;
+              }
+            } catch { /* keep polling */ }
+          }
+        } catch (err) {
+          console.warn('[Disco] On-demand kick extraction failed:', err);
+        }
+      })();
+      return () => { cancelled = true; };
+    }
+  }, [currentTrack?.id, currentTrack?.kickStemUrl, settings.discoKickExtract]);
 
   // ── Trim mode waveform click handler ──
   const handleWaveformClick = useCallback((timeSec: number) => {
