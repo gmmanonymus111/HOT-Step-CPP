@@ -551,53 +551,53 @@ const AppContent: React.FC = () => {
   const renderContent = () => {
     if (activeView === 'settings') {
       return (
-        <div className="flex-1 overflow-y-auto">
+        <DiscoPulseWrapper hue={DISCO.activity} className="flex-1 overflow-y-auto">
           <SettingsPanel
             settings={settings}
             onSettingsChange={setSettings}
             onNukeComplete={() => { setSongs([]); setSelectedSong(null); }}
           />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
     if (activeView === 'lyric-studio') {
       return (
-        <div className="flex-1 overflow-hidden">
+        <DiscoPulseWrapper hue={DISCO.songGrid} className="flex-1 overflow-hidden">
           <LyricStudioV2 />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
     if (activeView === 'cover-studio') {
       return (
-        <div className="flex-1 overflow-hidden">
+        <DiscoPulseWrapper hue={DISCO.activity} className="flex-1 overflow-hidden">
           <CoverStudio />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
     if (activeView === 'stem-studio') {
       return (
-        <div className="flex-1 overflow-hidden">
+        <DiscoPulseWrapper hue={DISCO.assistant} className="flex-1 overflow-hidden">
           <StemStudio />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
     if (activeView === 'stem-builder') {
       return (
-        <div className="flex-1 overflow-hidden">
+        <DiscoPulseWrapper hue={DISCO.assistant} className="flex-1 overflow-hidden">
           <StemBuilder />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
     if (activeView === 'repaint') {
       return (
-        <div className="flex-1 overflow-hidden">
+        <DiscoPulseWrapper hue={DISCO.createPanel} className="flex-1 overflow-hidden">
           <RepaintStudio />
-        </div>
+        </DiscoPulseWrapper>
       );
     }
 
