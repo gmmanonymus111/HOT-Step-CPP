@@ -1,8 +1,9 @@
 // discoStore.ts — Disco mode state + beat detection engine.
 //
-// Creates a dedicated AnalyserNode (smoothingTimeConstant=0.2) connected to
-// the same audio graph as audioMotion. This gives us raw transient data for
-// kick detection, while audioMotion keeps its smooth display (smoothing=0.7).
+// Creates a dedicated AnalyserNode (smoothingTimeConstant=0.15) and uses
+// adaptive normalisation to extract maximum dynamic range from kick band
+// energy. The raw energy varies ~0.15 between kick hits and gaps — we
+// stretch that to fill 0–1 using a rolling min/max tracker.
 
 import { useSyncExternalStore, useRef, useCallback } from 'react';
 
@@ -10,7 +11,7 @@ import { useSyncExternalStore, useRef, useCallback } from 'react';
 
 interface DiscoState {
   discoMode: boolean;
-  pulseIntensity: number;  // 0.0–1.0, onset-detected pulse
+  pulseIntensity: number;  // 0.0–1.0
 }
 
 // ── localStorage ─────────────────────────────────────────────────────────────
@@ -34,41 +35,33 @@ function saveDiscoPrefs(discoMode: boolean): void {
 let _audioMotion: any = null;
 let _beatAnalyser: AnalyserNode | null = null;
 let _freqData: Uint8Array | null = null;
-let _sampleRate = 44100;
 
-// Kick drum FFT bin range (computed from sample rate + fftSize)
+// Kick drum FFT bin range
 let _kickBinStart = 0;
 let _kickBinEnd = 0;
 
 export function registerAudioMotion(instance: any): void {
   _audioMotion = instance;
 
-  // Create our own AnalyserNode with LOW smoothing for beat detection
   try {
     const ctx: AudioContext = instance.audioCtx;
-    _sampleRate = ctx.sampleRate;
 
     _beatAnalyser = ctx.createAnalyser();
     _beatAnalyser.fftSize = 2048;
-    _beatAnalyser.smoothingTimeConstant = 0.2;  // Much lower than audioMotion's 0.7
+    _beatAnalyser.smoothingTimeConstant = 0.15; // Very low — we want raw transients
 
-    // Connect the audio source to our analyser
     const sources = instance.connectedSources;
     if (sources && sources.length > 0) {
       sources[0].connect(_beatAnalyser);
-      console.log('[Disco] Beat analyser connected to audio source');
-    } else {
-      console.warn('[Disco] No connected sources found on audioMotion');
+      console.log('[Disco] Beat analyser connected');
     }
 
-    // Allocate frequency data buffer
     _freqData = new Uint8Array(_beatAnalyser.frequencyBinCount);
 
-    // Compute FFT bin indices for kick drum range (50–180Hz)
-    const binHz = _sampleRate / _beatAnalyser.fftSize;
+    const binHz = ctx.sampleRate / _beatAnalyser.fftSize;
     _kickBinStart = Math.floor(50 / binHz);
     _kickBinEnd = Math.ceil(180 / binHz);
-    console.log(`[Disco] Kick bins: ${_kickBinStart}-${_kickBinEnd} (${(_kickBinStart * binHz).toFixed(0)}-${(_kickBinEnd * binHz).toFixed(0)}Hz, binHz=${binHz.toFixed(1)})`);
+    console.log(`[Disco] Kick bins: ${_kickBinStart}-${_kickBinEnd} (binHz=${binHz.toFixed(1)})`);
   } catch (err) {
     console.error('[Disco] Failed to create beat analyser:', err);
   }
@@ -80,23 +73,18 @@ export function unregisterAudioMotion(): void {
   _freqData = null;
 }
 
-/** Read kick drum energy from our dedicated low-smoothing AnalyserNode */
+/** Read kick energy from dedicated low-smoothing AnalyserNode */
 function readKickEnergy(): number {
   if (!_beatAnalyser || !_freqData) return 0;
-
   _beatAnalyser.getByteFrequencyData(_freqData);
 
-  // Average the kick drum bins (50–180Hz)
   let sum = 0;
   let count = 0;
   for (let i = _kickBinStart; i <= _kickBinEnd && i < _freqData.length; i++) {
     sum += _freqData[i];
     count++;
   }
-  if (count === 0) return 0;
-
-  // Normalise from 0-255 to 0-1
-  return (sum / count) / 255;
+  return count > 0 ? (sum / count) / 255 : 0;
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -130,23 +118,23 @@ function getSnapshot(): DiscoState {
   return _state;
 }
 
-// ── Beat Detection Loop (Onset Detection) ────────────────────────────────────
+// ── Beat Detection Loop (Adaptive Normalisation) ─────────────────────────────
 
 let _rafId: number | null = null;
 let _lastFrameTime = 0;
 let _debugFrameCount = 0;
 
-// Onset detection state
-let _runningAvg = 0;         // Slow-moving average of kick energy
-let _pulse = 0;              // Current pulse value (0–1), decays per frame
-let _lastHitTime = 0;        // Prevent double-triggers
+// Adaptive normalisation — tracks rolling min/max to stretch available range
+let _rollingMin = 1.0;       // Tracks recent minimum energy (floor)
+let _rollingMax = 0.0;       // Tracks recent maximum energy (ceiling)
+let _pulse = 0;              // Current output pulse (0–1)
 
-// Tuning knobs — calibrated for low-smoothing AnalyserNode
-const AVG_SMOOTHING = 0.96;  // Slow-moving baseline
-const ONSET_THRESHOLD = 0.06; // Absolute delta above running avg to trigger
-const REFRACTORY_MS = 100;   // Min ms between hits
-const DECAY_RATE = 0.92;     // Per-frame decay (~200ms to near-zero at 60fps)
-const HIT_SCALE = 3.0;       // How much to amplify the hit intensity
+// Tuning knobs
+const MIN_DECAY = 0.002;     // How fast the floor rises per frame (adapts upward)
+const MAX_DECAY = 0.005;     // How fast the ceiling drops per frame (adapts downward)
+const MIN_RANGE = 0.03;      // Minimum gap between min and max to avoid noise amplification
+const ATTACK_SPEED = 0.6;    // How fast pulse rises toward target (0–1, higher = snappier)
+const DECAY_SPEED = 0.85;    // Per-frame pulse decay multiplier (lower = faster drop)
 
 function beatDetectionLoop(timestamp: number): void {
   if (!_state.discoMode) {
@@ -156,37 +144,55 @@ function beatDetectionLoop(timestamp: number): void {
     return;
   }
 
-  const dt = _lastFrameTime ? timestamp - _lastFrameTime : 16;
   _lastFrameTime = timestamp;
 
-  // Read from our dedicated low-smoothing AnalyserNode
   const rawEnergy = readKickEnergy();
 
-  // Update running average (slow-moving baseline)
-  _runningAvg = _runningAvg * AVG_SMOOTHING + rawEnergy * (1 - AVG_SMOOTHING);
-
-  // Onset detection: sudden increase above baseline
-  const delta = rawEnergy - _runningAvg;
-  const timeSinceHit = timestamp - _lastHitTime;
-
-  if (delta > ONSET_THRESHOLD && timeSinceHit > REFRACTORY_MS) {
-    // HIT! Spike proportional to delta strength
-    const hitIntensity = Math.min(1.0, delta * HIT_SCALE);
-    _pulse = Math.max(_pulse, hitIntensity);
-    _lastHitTime = timestamp;
+  // Update rolling min/max with slow adaptation
+  // Min creeps upward, max creeps downward — they converge toward current energy
+  // When energy spikes above max or drops below min, they snap to the new value
+  if (rawEnergy < _rollingMin) {
+    _rollingMin = rawEnergy;  // Snap to new low
+  } else {
+    _rollingMin += MIN_DECAY; // Slowly rise
   }
 
-  // Decay the pulse each frame
-  _pulse *= DECAY_RATE;
+  if (rawEnergy > _rollingMax) {
+    _rollingMax = rawEnergy;  // Snap to new high
+  } else {
+    _rollingMax -= MAX_DECAY; // Slowly drop
+  }
+
+  // Ensure min < max with minimum range
+  if (_rollingMax - _rollingMin < MIN_RANGE) {
+    const mid = (_rollingMax + _rollingMin) / 2;
+    _rollingMin = mid - MIN_RANGE / 2;
+    _rollingMax = mid + MIN_RANGE / 2;
+  }
+
+  // Normalise raw energy into 0–1 using the adaptive range
+  const normalised = Math.max(0, Math.min(1,
+    (rawEnergy - _rollingMin) / (_rollingMax - _rollingMin)
+  ));
+
+  // Apply dynamics: fast attack, fast decay
+  if (normalised > _pulse) {
+    // Attack — lerp quickly toward the peak
+    _pulse += (normalised - _pulse) * ATTACK_SPEED;
+  } else {
+    // Decay — multiplicative drop
+    _pulse *= DECAY_SPEED;
+  }
+
   if (_pulse < 0.01) _pulse = 0;
 
-  // Debug: log once per second
+  // Debug: log every 30 frames (~2x per second) to see more detail
   _debugFrameCount++;
-  if (_debugFrameCount % 60 === 0) {
-    console.log(`[Disco] raw=${rawEnergy.toFixed(3)} avg=${_runningAvg.toFixed(3)} delta=${delta.toFixed(3)} pulse=${_pulse.toFixed(3)} analyser=${!!_beatAnalyser}`);
+  if (_debugFrameCount % 30 === 0) {
+    console.log(`[Disco] raw=${rawEnergy.toFixed(3)} min=${_rollingMin.toFixed(3)} max=${_rollingMax.toFixed(3)} norm=${normalised.toFixed(3)} pulse=${_pulse.toFixed(3)}`);
   }
 
-  // Only notify if meaningfully changed
+  // Notify subscribers
   if (Math.abs(_pulse - _state.pulseIntensity) > 0.003) {
     _state = { ..._state, pulseIntensity: _pulse };
     notify();
@@ -198,9 +204,9 @@ function beatDetectionLoop(timestamp: number): void {
 function startLoop(): void {
   if (_rafId !== null) return;
   _lastFrameTime = 0;
-  _runningAvg = 0;
+  _rollingMin = 1.0;
+  _rollingMax = 0.0;
   _pulse = 0;
-  _lastHitTime = 0;
   _debugFrameCount = 0;
   _rafId = requestAnimationFrame(beatDetectionLoop);
 }
@@ -211,7 +217,6 @@ function stopLoop(): void {
     _rafId = null;
   }
   _pulse = 0;
-  _runningAvg = 0;
   setState({ pulseIntensity: 0 });
 }
 
@@ -220,11 +225,7 @@ function stopLoop(): void {
 export function setDiscoMode(on: boolean): void {
   setState({ discoMode: on });
   saveDiscoPrefs(on);
-  if (on) {
-    startLoop();
-  } else {
-    stopLoop();
-  }
+  if (on) startLoop(); else stopLoop();
 }
 
 export function toggleDiscoMode(): void {
@@ -232,11 +233,8 @@ export function toggleDiscoMode(): void {
 }
 
 export function setDiscoPlaying(isPlaying: boolean): void {
-  if (_state.discoMode && isPlaying) {
-    startLoop();
-  } else if (!isPlaying) {
-    stopLoop();
-  }
+  if (_state.discoMode && isPlaying) startLoop();
+  else if (!isPlaying) stopLoop();
 }
 
 // ── React Hooks ──────────────────────────────────────────────────────────────
