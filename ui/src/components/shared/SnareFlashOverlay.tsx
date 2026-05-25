@@ -22,7 +22,7 @@ export const SnareFlashOverlay: React.FC = () => {
 
     // Sharp power curve — only visible on strong hits
     const intensity = Math.pow(snarePulse, 0.8);
-    el.style.opacity = String(Math.min(0.07, intensity * 0.07));
+    el.style.opacity = String(Math.min(0.15, intensity * 0.15));
   }, [snarePulse, discoMode]);
 
   if (!discoMode) return null;

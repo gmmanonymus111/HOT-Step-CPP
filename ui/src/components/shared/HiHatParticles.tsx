@@ -33,9 +33,9 @@ export const HiHatParticles: React.FC = () => {
     el.style.width = `${size}px`;
     el.style.height = `${size}px`;
 
-    // Slight colour tint — white to light cyan/blue
-    const hue = 180 + Math.random() * 60; // 180-240 (cyan to blue)
-    el.style.background = `hsl(${hue}, 80%, 85%)`;
+    // Rainbow colours — full spectrum like the border glow
+    const hue = Math.random() * 360;
+    el.style.background = `hsl(${hue}, 90%, 70%)`;
 
     container.appendChild(el);
     activeCount.current++;
