@@ -72,8 +72,10 @@ import { usePlaylist, addToPlaylist } from './components/lyric-studio/playlistSt
 import { DisguiseModeProvider } from './hooks/useDisguiseMode';
 import { ABCompareModal } from './components/shared/ABCompareModal';
 import { useABCompareSelector, playAB, openModal as openABModal, clear as clearAB } from './stores/abCompareStore';
-import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setKickStemUrl, syncKickStem } from './stores/discoStore';
+import { useDiscoMode, toggleDiscoMode, setDiscoPlaying, setStemUrls, syncStems } from './stores/discoStore';
 import { DiscoPulseWrapper } from './components/shared/DiscoPulseWrapper';
+import { SnareFlashOverlay } from './components/shared/SnareFlashOverlay';
+import { HiHatParticles } from './components/shared/HiHatParticles';
 
 /** Derive top-level view from the browser URL */
 function viewFromUrl(path = window.location.pathname): string {
@@ -299,20 +301,23 @@ const AppContent: React.FC = () => {
   useEffect(() => {
     setDiscoPlaying(isPlaying);
     if (isPlaying) {
-      syncKickStem('play', currentTime);
+      syncStems('play', currentTime);
     } else {
-      syncKickStem('pause');
+      syncStems('pause');
     }
   }, [isPlaying]);
 
-  // Load kick stem URL when track changes — trigger on-demand extraction if missing
+  // Load all drum stem URLs when track changes — trigger on-demand extraction if missing
   useEffect(() => {
     const kickUrl = currentTrack?.kickStemUrl || '';
-    setKickStemUrl(kickUrl);
+    const snareUrl = currentTrack?.snareStemUrl || '';
+    const hihatUrl = currentTrack?.hihatStemUrl || '';
+    setStemUrls({ kick: kickUrl, snare: snareUrl, hihat: hihatUrl });
 
-    // If disco kick extraction is on and this track has no kick stem, trigger it
-    if (settings.discoKickExtract && currentTrack?.id && !kickUrl) {
-      console.log(`[Disco] Track ${currentTrack.id} has no kick stem — triggering extraction`);
+    // If disco kick extraction is on and this track has no stems, trigger extraction
+    const hasSomeStems = kickUrl || snareUrl || hihatUrl;
+    if (settings.discoKickExtract && currentTrack?.id && !hasSomeStems) {
+      console.log(`[Disco] Track ${currentTrack.id} has no drum stems — triggering extraction`);
       let cancelled = false;
       (async () => {
         try {
@@ -320,36 +325,44 @@ const AppContent: React.FC = () => {
           const data = await res.json();
           if (cancelled) return;
           if (data.status === 'exists') {
-            // Already had one — update the track
-            console.log(`[Disco] Kick stem already exists for ${currentTrack.id}`);
-            setKickStemUrl(data.kickStemUrl);
+            console.log(`[Disco] Drum stems already exist for ${currentTrack.id}`);
+            setStemUrls({
+              kick: data.kickStemUrl || '',
+              snare: data.snareStemUrl || '',
+              hihat: data.hihatStemUrl || '',
+            });
             return;
           }
           if (data.status !== 'started') return;
-          console.log(`[Disco] Kick extraction started for ${currentTrack.id} (aceJobId=${data.aceJobId})`);
+          console.log(`[Disco] Drum stem extraction started for ${currentTrack.id}`);
 
-          // Poll until the kick stem URL appears on the song
+          // Poll until stems appear on the song
           for (let i = 0; i < 360 && !cancelled; i++) {
             await new Promise(r => setTimeout(r, 5000));
             if (cancelled) return;
             try {
               const songRes = await fetch(`/api/songs/${currentTrack.id}`);
               const songData = await songRes.json();
-              const ksUrl = songData.song?.kick_stem_url || songData.song?.kickStemUrl || '';
-              if (ksUrl && !ksUrl.startsWith('extracting:')) {
-                console.log(`[Disco] Kick stem ready for ${currentTrack.id}: ${ksUrl}`);
-                setKickStemUrl(ksUrl);
+              const s = songData.song || songData;
+              const ks = s.kick_stem_url || '';
+              if (ks && !ks.startsWith('extracting:')) {
+                console.log(`[Disco] Drum stems ready for ${currentTrack.id}`);
+                setStemUrls({
+                  kick: ks,
+                  snare: s.snare_stem_url || '',
+                  hihat: s.hihat_stem_url || '',
+                });
                 return;
               }
             } catch { /* keep polling */ }
           }
         } catch (err) {
-          console.warn('[Disco] On-demand kick extraction failed:', err);
+          console.warn('[Disco] On-demand stem extraction failed:', err);
         }
       })();
       return () => { cancelled = true; };
     }
-  }, [currentTrack?.id, currentTrack?.kickStemUrl, settings.discoKickExtract]);
+  }, [currentTrack?.id, currentTrack?.kickStemUrl, currentTrack?.snareStemUrl, currentTrack?.hihatStemUrl, settings.discoKickExtract]);
 
   // ── Trim mode waveform click handler ──
   const handleWaveformClick = useCallback((timeSec: number) => {
@@ -361,7 +374,7 @@ const AppContent: React.FC = () => {
   // Wrap seek to also sync kick stem
   const handleSeek = useCallback((time: number) => {
     pbSeek(time);
-    syncKickStem('seek', time);
+    syncStems('seek', time);
   }, []);
 
   // Toast state
@@ -1030,7 +1043,7 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-white dark:bg-suno text-zinc-900 dark:text-white font-sans antialiased selection:bg-pink-500/30 transition-all duration-300">
+    <div className={`flex flex-col h-screen bg-white dark:bg-suno text-zinc-900 dark:text-white font-sans antialiased selection:bg-pink-500/30 transition-all duration-300 ${discoMode ? 'disco-hue-drift' : ''}`}>
       {/* Global Parameter Bar — full width, above everything */}
       <GlobalParamBar />
 
@@ -1188,7 +1201,7 @@ const AppContent: React.FC = () => {
       </div>
 
       {/* ── Bottom Player Area: Markers → Waveform → Transport ── */}
-      <DiscoPulseWrapper hue={DISCO.player} className="flex-shrink-0 bg-white dark:bg-zinc-950 border-t border-zinc-200 dark:border-white/5">
+      <DiscoPulseWrapper hue={DISCO.player} className="flex-shrink-0 bg-white dark:bg-zinc-950 border-t border-zinc-200 dark:border-white/5" style={{ position: 'relative' }}>
         {/* Collapsible visualisation area — animates up when playing, down when paused/stopped.
             Uses CSS Grid 0fr→1fr trick so the transition tracks actual content height perfectly,
             unlike max-height which over-shoots and makes the expand feel instant. */}
@@ -1318,7 +1331,11 @@ const AppContent: React.FC = () => {
           discoMode={discoMode}
           onToggleDisco={toggleDiscoMode}
         />
+        <HiHatParticles />
       </DiscoPulseWrapper>
+
+      {/* Snare flash — full viewport white flash on snare hits */}
+      <SnareFlashOverlay />
 
       {/* Modals */}
       <Toast

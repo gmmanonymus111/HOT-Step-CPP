@@ -479,4 +479,61 @@ input[type="range"]::-webkit-slider-thumb:hover {
   transition: opacity 0.4s ease;
 }
 
+/* ── Background Hue Drift ──────────────────────────────────────────────
+   Slow 30s colour cycle on the app background. Very low chroma (0.012)
+   keeps it dark — barely perceptible mood shifts. */
 
+.disco-hue-drift {
+  animation: disco-bg-drift 30s linear infinite;
+}
+
+@keyframes disco-bg-drift {
+  0%   { background-color: oklch(0.145 0.012 270); }  /* hint of purple */
+  25%  { background-color: oklch(0.145 0.012 330); }  /* hint of pink */
+  50%  { background-color: oklch(0.145 0.012 200); }  /* hint of teal */
+  75%  { background-color: oklch(0.145 0.012 145); }  /* hint of green */
+  100% { background-color: oklch(0.145 0.012 270); }  /* back to purple */
+}
+
+/* ── Snare Flash Overlay ───────────────────────────────────────────────
+   Full-viewport white flash on snare hits. Controlled via JS opacity. */
+
+.disco-snare-flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: white;
+  opacity: 0;
+  will-change: opacity;
+  mix-blend-mode: overlay;
+}
+
+/* ── Hi-Hat Particles ──────────────────────────────────────────────────
+   Tiny dots that float upward and fade out from the waveform area. */
+
+.disco-particle {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: white;
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: disco-particle-rise 1.2s ease-out forwards;
+}
+
+@keyframes disco-particle-rise {
+  0% {
+    opacity: 0.8;
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-60px) scale(0.3);
+  }
+}
