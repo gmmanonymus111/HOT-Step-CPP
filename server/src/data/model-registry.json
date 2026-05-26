@@ -67,12 +67,22 @@
     },
     {
       "id": "cuda-runtime",
-      "name": "CUDA Runtime",
-      "description": "NVIDIA CUDA runtime libraries required for GPU-accelerated generation. ~510 MB download. Required on machines without CUDA Toolkit.",
+      "name": "CUDA 13 Runtime",
+      "description": "NVIDIA CUDA 13.x runtime libraries required for GPU-accelerated generation. ~510 MB download.",
       "fileIds": [
         "cuda-rt-cublas",
         "cuda-rt-cublaslt",
         "cuda-rt-cudart"
+      ]
+    },
+    {
+      "id": "cuda12-runtime",
+      "name": "CUDA 12 Runtime",
+      "description": "NVIDIA CUDA 12.x runtime libraries for the CUDA 12.8 compatibility build. ~810 MB download.",
+      "fileIds": [
+        "cuda-rt-cublas-12",
+        "cuda-rt-cublaslt-12",
+        "cuda-rt-cudart-12"
       ]
     },
     {
@@ -1795,12 +1805,13 @@
       "quant": null,
       "sizeBytes": 51569776,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "NVIDIA cuBLAS library — required for CUDA-accelerated matrix operations.",
+      "description": "NVIDIA cuBLAS library — required for CUDA 13.x accelerated matrix operations.",
       "tags": [
         "runtime",
-        "required"
+        "required",
+        "cuda13"
       ],
-      "repoPath": "runtime/cublas64_13.dll"
+      "repoPath": "runtime/cuda13/cublas64_13.dll"
     },
     {
       "id": "cuda-rt-cublaslt",
@@ -1812,12 +1823,13 @@
       "quant": null,
       "sizeBytes": 480693360,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "NVIDIA cuBLAS Light library — extended matrix operation support.",
+      "description": "NVIDIA cuBLAS Light library — CUDA 13.x extended matrix operation support.",
       "tags": [
         "runtime",
-        "required"
+        "required",
+        "cuda13"
       ],
-      "repoPath": "runtime/cublasLt64_13.dll"
+      "repoPath": "runtime/cuda13/cublasLt64_13.dll"
     },
     {
       "id": "cuda-rt-cudart",
@@ -1829,12 +1841,67 @@
       "quant": null,
       "sizeBytes": 540784,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "NVIDIA CUDA Runtime library — required for GPU initialisation.",
+      "description": "NVIDIA CUDA 13.x Runtime library — required for GPU initialisation.",
       "tags": [
         "runtime",
-        "required"
+        "required",
+        "cuda13"
       ],
-      "repoPath": "runtime/cudart64_13.dll"
+      "repoPath": "runtime/cuda13/cudart64_13.dll"
+    },
+    {
+      "id": "cuda-rt-cublas-12",
+      "filename": "cublas64_12.dll",
+      "role": "runtime",
+      "displayName": "cuBLAS (CUDA 12)",
+      "scale": null,
+      "variant": null,
+      "quant": null,
+      "sizeBytes": 113712640,
+      "repo": "scragnog/HOT-Step-CPP-SuperSep",
+      "description": "NVIDIA cuBLAS library — required for CUDA 12.x accelerated matrix operations.",
+      "tags": [
+        "runtime",
+        "required",
+        "cuda12"
+      ],
+      "repoPath": "runtime/cuda12/cublas64_12.dll"
+    },
+    {
+      "id": "cuda-rt-cublaslt-12",
+      "filename": "cublasLt64_12.dll",
+      "role": "runtime",
+      "displayName": "cuBLAS LT (CUDA 12)",
+      "scale": null,
+      "variant": null,
+      "quant": null,
+      "sizeBytes": 692441600,
+      "repo": "scragnog/HOT-Step-CPP-SuperSep",
+      "description": "NVIDIA cuBLAS Light library — CUDA 12.x extended matrix operation support.",
+      "tags": [
+        "runtime",
+        "required",
+        "cuda12"
+      ],
+      "repoPath": "runtime/cuda12/cublasLt64_12.dll"
+    },
+    {
+      "id": "cuda-rt-cudart-12",
+      "filename": "cudart64_12.dll",
+      "role": "runtime",
+      "displayName": "CUDA Runtime (CUDA 12)",
+      "scale": null,
+      "variant": null,
+      "quant": null,
+      "sizeBytes": 573952,
+      "repo": "scragnog/HOT-Step-CPP-SuperSep",
+      "description": "NVIDIA CUDA 12.x Runtime library — required for GPU initialisation.",
+      "tags": [
+        "runtime",
+        "required",
+        "cuda12"
+      ],
+      "repoPath": "runtime/cuda12/cudart64_12.dll"
     },
     {
       "id": "whisper-large-v3-turbo",

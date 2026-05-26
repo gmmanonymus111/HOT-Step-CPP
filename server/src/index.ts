@@ -250,8 +250,25 @@ function startAceServer(): ChildProcess | null {
 
 import { modelDownloadService } from './services/modelDownloadService.js';
 
+/** Detect CUDA major version from engine build marker */
+function detectCudaMajorVersion(): number {
+  try {
+    const versionFile = path.join(path.dirname(config.aceServer.exe), '.cuda-version');
+    if (fs.existsSync(versionFile)) {
+      return parseInt(fs.readFileSync(versionFile, 'utf-8').trim(), 10);
+    }
+  } catch {}
+  return 13; // Default: assume CUDA 13 (latest release)
+}
+
 /** IDs of registry files that must exist before engine start (CUDA only) */
-const REQUIRED_RUNTIME_IDS = ['cuda-rt-cublas', 'cuda-rt-cublaslt', 'cuda-rt-cudart'];
+function getRequiredRuntimeIds(): string[] {
+  const cudaMajor = detectCudaMajorVersion();
+  if (cudaMajor <= 12) {
+    return ['cuda-rt-cublas-12', 'cuda-rt-cublaslt-12', 'cuda-rt-cudart-12'];
+  }
+  return ['cuda-rt-cublas', 'cuda-rt-cublaslt', 'cuda-rt-cudart'];
+}
 
 async function ensureRequiredRuntime(): Promise<{ ok: boolean; missing: string[] }> {
   const engineDir = path.dirname(config.aceServer.exe);
@@ -260,6 +277,7 @@ async function ensureRequiredRuntime(): Promise<{ ok: boolean; missing: string[]
   );
 
   const missing: Array<{ id: string; filename: string }> = [];
+  const REQUIRED_RUNTIME_IDS = getRequiredRuntimeIds();
   for (const id of REQUIRED_RUNTIME_IDS) {
     const file = registry.files.find((f: any) => f.id === id);
     if (!file) continue;

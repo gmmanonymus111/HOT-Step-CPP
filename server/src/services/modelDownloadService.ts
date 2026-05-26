@@ -38,10 +38,22 @@ function detectEngineVariant(): string {
 }
 const ENGINE_VARIANT = detectEngineVariant();
 
+// Detect CUDA major version for runtime DLL selection
+function detectCudaMajorVersion(): number {
+  try {
+    const versionFile = path.join(path.dirname(config.aceServer.exe), '.cuda-version');
+    if (fs.existsSync(versionFile)) {
+      return parseInt(fs.readFileSync(versionFile, 'utf-8').trim(), 10);
+    }
+  } catch {}
+  return 13; // Default: assume CUDA 13 (latest)
+}
+const CUDA_MAJOR = detectCudaMajorVersion();
+
 // IDs of CUDA-only file entries
 const CUDA_ONLY_FILE_PREFIXES = ['cuda-rt-', 'supersep-rt-'];
 // IDs of CUDA-only packs (hidden entirely for non-CUDA)
-const CUDA_ONLY_PACKS = ['cuda-runtime', 'supersep-runtime', 'blackwell'];
+const CUDA_ONLY_PACKS = ['cuda-runtime', 'cuda12-runtime', 'supersep-runtime', 'blackwell'];
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -107,24 +119,48 @@ class ModelDownloadService extends EventEmitter {
 
   /** Get all files in the registry, enriched with installed status.
    *  Filters out CUDA-specific entries for non-CUDA engine variants. */
-  getRegistry(): { packs: any[]; files: (RegistryFile & { installed: boolean })[]; modelsDir: string; variant: string } {
+  getRegistry(): { packs: any[]; files: (RegistryFile & { installed: boolean })[]; modelsDir: string; variant: string; cudaMajor: number } {
     const installed = this.getInstalledFiles();
     const isCuda = ENGINE_VARIANT === 'cuda';
+    const wrongCudaTag = CUDA_MAJOR <= 12 ? 'cuda13' : 'cuda12';
 
-    // Filter files: hide CUDA-only entries for non-CUDA builds
+    // Filter files: hide CUDA-only entries for non-CUDA builds,
+    // and hide wrong-CUDA-version entries
     const filteredFiles = registry.files
       .filter((f: RegistryFile) => isCuda || !CUDA_ONLY_FILE_PREFIXES.some(p => f.id.startsWith(p)))
+      .filter((f: RegistryFile) => !f.tags?.includes(wrongCudaTag))
       .map((f: RegistryFile) => ({
         ...f,
         installed: installed.has(f.filename),
       }));
 
     // Filter packs: hide CUDA-only packs, strip CUDA file IDs from remaining
+    // Also hide the wrong-version CUDA runtime pack and remap IDs in model packs
     const filteredPacks = registry.packs
       .filter((p: any) => isCuda || !CUDA_ONLY_PACKS.includes(p.id))
-      .map((p: any) => isCuda ? p : {
-        ...p,
-        fileIds: p.fileIds.filter((id: string) => !CUDA_ONLY_FILE_PREFIXES.some(pfx => id.startsWith(pfx))),
+      .filter((p: any) => {
+        // Show only the correct CUDA runtime pack
+        if (p.id === 'cuda-runtime') return CUDA_MAJOR >= 13;
+        if (p.id === 'cuda12-runtime') return CUDA_MAJOR <= 12;
+        return true;
+      })
+      .map((p: any) => {
+        if (!isCuda) {
+          return { ...p, fileIds: p.fileIds.filter((id: string) => !CUDA_ONLY_FILE_PREFIXES.some(pfx => id.startsWith(pfx))) };
+        }
+        // Remap cuda-rt-* IDs in packs to version-specific ones for CUDA 12
+        if (CUDA_MAJOR <= 12) {
+          return {
+            ...p,
+            fileIds: p.fileIds.map((id: string) => {
+              if (['cuda-rt-cublas', 'cuda-rt-cublaslt', 'cuda-rt-cudart'].includes(id)) {
+                return `${id}-12`;
+              }
+              return id;
+            }),
+          };
+        }
+        return p;
       });
 
     return {
@@ -132,6 +168,7 @@ class ModelDownloadService extends EventEmitter {
       files: filteredFiles,
       modelsDir: this.modelsDir,
       variant: ENGINE_VARIANT,
+      cudaMajor: CUDA_MAJOR,
     };
   }
 

@@ -67,7 +67,7 @@ if(NOT MSVC)
     add_compile_definitions(_FORTIFY_SOURCE=2)
 endif()
 
-# CUDA architectures: cover Turing to Blackwell for distributed binaries (CI: CUDA 13.1).
+# CUDA architectures: cover Turing to Blackwell for distributed binaries (CI: CUDA 13.1 / 12.8).
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     find_package(CUDAToolkit QUIET)
@@ -255,7 +255,11 @@ link_ggml_backends(ace-server)
 find_package(CUDAToolkit QUIET)
 if(CUDAToolkit_FOUND)
     target_compile_definitions(ace-server PRIVATE GGML_USE_CUDA)
-    target_link_libraries(ace-server PRIVATE CUDA::cudart)
+    if(GGML_STATIC)
+        target_link_libraries(ace-server PRIVATE CUDA::cudart_static)
+    else()
+        target_link_libraries(ace-server PRIVATE CUDA::cudart)
+    endif()
     # Copy CUDA runtime DLL to build dir (needed for portable release builds —
     # end users don't have the CUDA Toolkit, so cudart64_*.dll must ship with the binary)
     if(WIN32)
@@ -269,6 +273,10 @@ if(CUDAToolkit_FOUND)
             )
         endif()
     endif()
+    # Write CUDA version marker next to ace-server (server reads this to
+    # select the correct runtime DLLs — cuBLAS/cudart/cuDNN for 12 vs 13)
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:ace-server>/.cuda-version"
+         CONTENT "${CUDAToolkit_VERSION_MAJOR}")
 endif()
 
 # Copy ONNX Runtime DLLs next to ace-server at build time

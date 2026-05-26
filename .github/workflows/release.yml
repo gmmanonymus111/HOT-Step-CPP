@@ -3,7 +3,7 @@
 # Triggered by: pushing a version tag (e.g. git tag v1.1.0 && git push origin v1.1.0)
 #
 # Jobs:
-#   1. build-windows (matrix: cuda/vulkan/cpu) — parallel Windows builds
+#   1. build-windows (matrix: cuda13.1/cuda12.8/vulkan/cpu) — parallel Windows builds
 #   2. build-macos — Apple Silicon Metal build
 #   3. release — collect all artifacts, generate notes, create draft GitHub Release
 #
@@ -32,25 +32,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [cuda, vulkan, cpu]
+        variant: [cuda13.1, cuda12.8, vulkan, cpu]
         include:
-          - variant: cuda
+          - variant: cuda13.1
             cmake_flags: >-
               -DGGML_CUDA=ON -DGGML_VULKAN=OFF
               -DGGML_BACKEND_DL=ON
               -DHOT_STEP_STATIC_RUNTIME=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
           - variant: vulkan
             cmake_flags: >-
               -DGGML_CUDA=OFF -DGGML_VULKAN=ON
               -DGGML_BACKEND_DL=ON
               -DHOT_STEP_STATIC_RUNTIME=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
           - variant: cpu
             cmake_flags: >-
               -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
               -DGGML_BACKEND_DL=OFF
               -DHOT_STEP_STATIC_RUNTIME=ON
+            cuda_version: ''
 
     steps:
       - name: Checkout
@@ -69,12 +79,12 @@ jobs:
           git submodule update --init base cmake pluginterfaces public.sdk
 
       # ── SDK Setup ──────────────────────────────────────────────
-      - name: Install CUDA Toolkit 13.1
-        if: matrix.variant == 'cuda'
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
         uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
-          cuda: '13.1.0'
+          cuda: ${{ matrix.cuda_version }}
           method: 'network'
 
       - name: Download Vulkan SDK runtime (for glslc)
@@ -430,7 +440,15 @@ jobs:
           New-Item -ItemType Directory -Force "$dist/adapters" | Out-Null
 
           # Build variant marker (so server knows whether CUDA runtime is needed)
-          Set-Content -Path "$dist/engine/.variant" -Value $variant -NoNewline
+          # Both CUDA variants are 'cuda' from the server's perspective
+          $serverVariant = if ($variant -match '^cuda') { 'cuda' } else { $variant }
+          Set-Content -Path "$dist/engine/.variant" -Value $serverVariant -NoNewline
+
+          # CUDA version marker (for runtime DLL version selection)
+          if ($variant -match '^cuda') {
+            $cudaMajor = '${{ matrix.cuda_version }}'.Split('.')[0]
+            Set-Content -Path "$dist/engine/.cuda-version" -Value $cudaMajor -NoNewline
+          }
 
           # Config and docs
           Copy-Item ".env.example" "$dist/.env.example"
@@ -678,22 +696,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [cuda, vulkan, cpu]
+        variant: [cuda13.1, cuda12.8, vulkan, cpu]
         include:
-          - variant: cuda
+          - variant: cuda13.1
             cmake_flags: >-
               -DGGML_CUDA=ON -DGGML_VULKAN=OFF
               -DGGML_BACKEND_DL=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_STATIC=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
           - variant: vulkan
             cmake_flags: >-
               -DGGML_CUDA=OFF -DGGML_VULKAN=ON
               -DGGML_BACKEND_DL=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
           - variant: cpu
             cmake_flags: >-
               -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
               -DGGML_BACKEND_DL=OFF
+            cuda_version: ''
 
     steps:
       - name: Checkout
@@ -716,12 +744,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Install CUDA Toolkit 13.1
-        if: matrix.variant == 'cuda'
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
         uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
-          cuda: '13.1.0'
+          cuda: ${{ matrix.cuda_version }}
           method: 'network'
 
       - name: Install Vulkan SDK (headers + loader)
@@ -927,7 +955,15 @@ jobs:
           mkdir -p "$DIST/models" "$DIST/adapters"
 
           # Build variant marker (so server knows whether CUDA runtime is needed)
-          echo -n "$VARIANT" > "$DIST/engine/.variant"
+          # Both CUDA variants are 'cuda' from the server's perspective
+          SERVER_VARIANT=$(echo "$VARIANT" | sed 's/^cuda.*/cuda/')
+          echo -n "$SERVER_VARIANT" > "$DIST/engine/.variant"
+
+          # CUDA version marker (for runtime DLL version selection)
+          if [[ "$VARIANT" =~ ^cuda ]]; then
+            CUDA_MAJOR=$(echo '${{ matrix.cuda_version }}' | cut -d. -f1)
+            echo -n "$CUDA_MAJOR" > "$DIST/engine/.cuda-version"
+          fi
 
           # Config and docs
           cp .env.example "$DIST/.env.example"
@@ -1035,14 +1071,18 @@ jobs:
             [ -f "$f" ] || continue
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | awk '{print $1}')
-            if echo "$NAME" | grep -q "win.*cuda"; then
-              echo "| Windows | CUDA (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            if echo "$NAME" | grep -q "win.*cuda13"; then
+              echo "| Windows | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*cuda12"; then
+              echo "| Windows | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "win.*vulkan"; then
               echo "| Windows | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "win.*cpu"; then
               echo "| Windows | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
-            elif echo "$NAME" | grep -q "linux.*cuda"; then
-              echo "| Linux | CUDA (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda13"; then
+              echo "| Linux | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda12"; then
+              echo "| Linux | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "linux.*vulkan"; then
               echo "| Linux | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "linux.*cpu"; then
