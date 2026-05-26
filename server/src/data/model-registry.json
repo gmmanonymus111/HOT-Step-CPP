@@ -1590,7 +1590,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 15099904,
+      "sizeBytes": 15151416,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "Core ONNX Runtime inference library. Required for all SuperSep stem separation.",
       "tags": [
@@ -1607,7 +1607,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 294391808,
+      "sizeBytes": 294311736,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "CUDA execution provider for GPU-accelerated stem separation.",
       "tags": [
@@ -1641,7 +1641,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 314880,
+      "sizeBytes": 264304,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "NVIDIA cuDNN core library.",
       "tags": [
@@ -1658,7 +1658,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 269025280,
+      "sizeBytes": 269016688,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN advanced operations (attention, RNN, etc.).",
       "tags": [
@@ -1675,7 +1675,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 2936832,
+      "sizeBytes": 2984560,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN convolution operations.",
       "tags": [
@@ -1692,7 +1692,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 482058240,
+      "sizeBytes": 482077808,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "Pre-compiled cuDNN engine kernels for optimal GPU performance.",
       "tags": [
@@ -1709,7 +1709,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 31981568,
+      "sizeBytes": 31965808,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "Runtime-compiled cuDNN engine kernels.",
       "tags": [
@@ -1726,7 +1726,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 104960,
+      "sizeBytes": 155248,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN Tensor IR engines.",
       "tags": [
@@ -1743,7 +1743,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 99942400,
+      "sizeBytes": 99894384,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN graph operations and fusion.",
       "tags": [
@@ -1760,7 +1760,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 61759488,
+      "sizeBytes": 61770864,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN heuristic engine selection.",
       "tags": [
@@ -1777,7 +1777,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 105611264,
+      "sizeBytes": 105601136,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "cuDNN base operations library.",
       "tags": [
@@ -1810,7 +1810,7 @@
       "scale": null,
       "variant": null,
       "quant": null,
-      "sizeBytes": 480641024,
+      "sizeBytes": 480693360,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "NVIDIA cuBLAS Light library — extended matrix operation support.",
       "tags": [
