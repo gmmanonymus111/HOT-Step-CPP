@@ -21,6 +21,12 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
+# Force UTF-8 output on Windows
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 # ── Matrix definition ──
 
 SOLVERS = [
@@ -254,10 +260,15 @@ def main():
                     "--keep-loaded",
                 ]
 
+                # Run steps_benchmark.py with UTF-8 forced
+                env = os.environ.copy()
+                env["PYTHONUTF8"] = "1"
+
                 try:
                     result = subprocess.run(
                         cmd,
                         cwd=str(script_dir),
+                        env=env,
                         timeout=7200,  # 2h max per combo
                     )
                     if result.returncode == 0:
