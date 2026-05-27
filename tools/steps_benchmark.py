@@ -531,22 +531,16 @@ Examples:
 
                     audio_data = engine.get_result(job_id)
 
-                    # PP-VAE re-encode (if enabled in params)
-                    pp_vae_on = raw_params.get("ppVaeReencode", False)
-                    if pp_vae_on:
-                        try:
-                            blend = raw_params.get("ppVaeBlend", 0.0)
-                            audio_data = engine.pp_vae_reencode(audio_data, blend)
-                        except Exception as pp_err:
-                            print(f"PP-VAE failed ({pp_err}), saving raw ... ", end="", flush=True)
+                    # PP-VAE skipped in benchmarks — lossy re-encode
+                    # would obscure solver/scheduler/guidance differences.
+                    # Method still available via engine.pp_vae_reencode()
 
                     with open(filepath, "wb") as f_out:
                         f_out.write(audio_data)
 
                     elapsed = time.time() - t0
                     size_kb = len(audio_data) / 1024
-                    pp_tag = "+PP" if pp_vae_on else ""
-                    print(f"OK{pp_tag} ({elapsed:.1f}s, {size_kb:.0f} KB)")
+                    print(f"OK ({elapsed:.1f}s, {size_kb:.0f} KB)")
 
                 except Exception as e:
                     elapsed = time.time() - t0
