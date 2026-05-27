@@ -1,4 +1,4 @@
-﻿// pipeline-synth-ops.cpp: primitive operations of the synthesis pipeline
+// pipeline-synth-ops.cpp: primitive operations of the synthesis pipeline
 //
 // Each op takes AceSynth (the pipeline context) and SynthState (the transient
 // job state). See pipeline-synth-ops.h for the per-op contract and
@@ -214,9 +214,9 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
     if (s.num_steps <= 0) {
         s.num_steps = ctx->meta->is_turbo ? 8 : 50;
     }
-    if (s.num_steps > 100) {
-        fprintf(stderr, "[Resolve-Params] WARNING: inference_steps %d clamped to 100\n", s.num_steps);
-        s.num_steps = 100;
+    if (s.num_steps > 200) {
+        fprintf(stderr, "[Resolve-Params] WARNING: inference_steps %d clamped to 200\n", s.num_steps);
+        s.num_steps = 200;
     }
 
     if (s.guidance_scale <= 0.0f) {
