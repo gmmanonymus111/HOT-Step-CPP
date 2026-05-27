@@ -365,8 +365,8 @@ Examples:
                         help="Comma-separated step counts to benchmark (default: 8,25,50,75,100,150,200)")
     parser.add_argument("--seeds", default="42",
                         help="Comma-separated seeds for reproducibility (default: 42)")
-    parser.add_argument("--output", default="./benchmark_results",
-                        help="Output directory (default: ./benchmark_results)")
+    parser.add_argument("--output", default=None,
+                        help="Output directory (default: ./benchmark_results_YYYY-MM-DD_HH-MM)")
     parser.add_argument("--engine", default="http://127.0.0.1:8085",
                         help="ace-server URL (default: http://127.0.0.1:8085)")
     parser.add_argument("--format", default="wav16", choices=["wav16", "wav24", "wav32", "mp3"],
@@ -397,7 +397,11 @@ Examples:
         "inferenceSteps", "guidanceScale", "inferMethod", "ditModel",
     ])
 
-    out_dir = Path(args.output)
+    if args.output:
+        out_dir = Path(args.output)
+    else:
+        timestamp = time.strftime("%Y-%m-%d_%H-%M")
+        out_dir = Path(f"./benchmark_results_{timestamp}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ext = "wav" if args.format.startswith("wav") else "mp3"
@@ -650,6 +654,7 @@ Examples:
         "engine": args.engine,
         "format": args.format,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "generation_params": raw_params,
     }
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
