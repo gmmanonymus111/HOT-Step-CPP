@@ -1,3 +1,6 @@
 [submodule "engine/vendor/vst3sdk"]
 	path = engine/vendor/vst3sdk
 	url = https://github.com/steinbergmedia/vst3sdk.git
+[submodule "engine/ggml"]
+	path = engine/ggml
+	url = https://github.com/ggml-org/ggml.git
