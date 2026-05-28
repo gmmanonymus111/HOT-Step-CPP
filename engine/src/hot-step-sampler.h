@@ -671,13 +671,23 @@ static int dit_ggml_generate(DiTGGML *           model,
         int middle_len   = middle_end - middle_start;
 
         if (middle_len > 1) {
-            // compute_interval: how often to compute in the middle region
-            // cache_ratio=0.5 → interval=2 (compute every 2nd step)
-            // cache_ratio=0.33 → interval=2 (compute 2 out of 3)
-            // cache_ratio=0.67 → interval=3 (compute every 3rd step)
-            int compute_interval = std::max(2, (int) roundf(1.0f / (1.0f - cache_ratio)));
-            for (int s = middle_start; s < middle_end; s++) {
-                step_computes[s] = ((s - middle_start) % compute_interval == 0);
+            // Target number of cached steps in the middle region.
+            // Distribute cache slots evenly: pick the steps whose positions
+            // in the middle region are furthest from compute boundaries.
+            int target_cached = std::min(middle_len - 1,
+                                         (int) roundf(cache_ratio * middle_len));
+            int target_compute = middle_len - target_cached;
+
+            if (target_compute > 0 && target_cached > 0) {
+                // Mark all middle steps as cached, then un-cache evenly spaced ones
+                for (int s = middle_start; s < middle_end; s++) {
+                    step_computes[s] = false;
+                }
+                // Place compute steps evenly: stride = middle_len / target_compute
+                for (int ci = 0; ci < target_compute; ci++) {
+                    int idx = middle_start + (int) roundf((float) ci * middle_len / target_compute);
+                    if (idx < middle_end) step_computes[idx] = true;
+                }
             }
         }
 
