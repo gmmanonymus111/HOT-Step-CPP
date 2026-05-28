@@ -447,12 +447,17 @@ static int dit_ggml_generate(DiTGGML *           model,
             ggml_backend_tensor_set(t_tr, &t_val, 0, sizeof(float));
         }
 
-        // Re-upload constants (scheduler may reuse input buffers as scratch)
-        ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
-        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+        // Re-upload constants only for 2-pass CFG path (which changes enc_hidden
+        // between cond/uncond passes, using N instead of N_graph). In batched CFG
+        // and cond-only modes, enc_hidden/positions/masks never change — only
+        // input_latents and timestep change per step. Saves ~7-8MB PCIe/step.
+        if (do_cfg && !batch_cfg) {
+            ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
+            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+        }
 
         // Pack xt into input tensor (cond + uncond slots)
         for (int b = 0; b < N; b++) {
