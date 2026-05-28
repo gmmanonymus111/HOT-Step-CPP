@@ -37,7 +37,7 @@ struct VAEResUnit {
 
 struct VAEBlock {
     struct ggml_tensor *sa, *sb;    // snake exp(a/b) [1, in_ch]
-    struct ggml_tensor *ctw, *ctb;  // conv_transpose F16 [K, OC, IC] standard layout, bias [out_ch]
+    struct ggml_tensor *ctw, *ctb;  // conv_transpose F32 [K, OC, IC] standard layout, bias [out_ch]
     int                 in_ch, out_ch, stride, kernel;
     VAEResUnit          ru[3];
 };
@@ -457,7 +457,7 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
         int C        = out_ch[i];
         b.sa         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, in_ch[i]);
         b.sb         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, in_ch[i]);
-        b.ctw        = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, b.kernel, out_ch[i], in_ch[i]);
+        b.ctw        = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, b.kernel, out_ch[i], in_ch[i]);
         b.ctb        = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_ch[i]);
         for (int r = 0; r < 3; r++) {
             VAEResUnit & ru = b.ru[r];
@@ -586,6 +586,7 @@ static struct ggml_tensor * vae_conv_t1d(struct ggml_context * ctx,
                          OL_crop, OC_dim, 1,
                          y->nb[1], y->nb[2],
                          padding * y->nb[0]);
+        y = ggml_cont(ctx, y);  // view is non-contiguous; reshape_2d requires contiguous
     }
 
     // Squeeze to 2d: [OL, OC, 1] -> [OL, OC]
