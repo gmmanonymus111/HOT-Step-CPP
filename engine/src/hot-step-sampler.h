@@ -275,9 +275,15 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     std::vector<float> vt_cond;
     std::vector<float> vt_uncond;
+    std::vector<float> full_output;   // pre-allocated readback buffer for batched CFG
+    APGWorkspace apg_ws;               // pre-allocated APG workspace (~1.5MB reused per step)
     if (do_cfg) {
         vt_cond.resize(n_total);
         vt_uncond.resize(n_total);
+        if (batch_cfg) {
+            full_output.resize(n_per * N_graph);
+        }
+        apg_ws.resize(n_per);  // one batch element at a time
     }
 
     // input_buf: [in_ch, T, N_graph]
@@ -467,14 +473,13 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // Read output and apply CFG/APG
         if (batch_cfg) {
-            std::vector<float> full_output(n_per * N_graph);
             ggml_backend_tensor_get(t_output, full_output.data(), 0, n_per * N_graph * sizeof(float));
             memcpy(vt_cond.data(), full_output.data(), n_total * sizeof(float));
             memcpy(vt_uncond.data(), full_output.data() + n_total, n_total * sizeof(float));
             for (int b = 0; b < N; b++) {
                 if (use_apg_native) {
                     apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
-                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold);
+                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold, apg_ws);
                 } else {
                     lua_call_guidance(*guidance_plugin,
                                      vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
@@ -503,7 +508,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             for (int b = 0; b < N; b++) {
                 if (use_apg_native) {
                     apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale,
-                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold);
+                                apg_mbufs[b], vt.data() + b * n_per, Oc, T, apg_norm_threshold, apg_ws);
                 } else {
                     lua_call_guidance(*guidance_plugin,
                                      vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
