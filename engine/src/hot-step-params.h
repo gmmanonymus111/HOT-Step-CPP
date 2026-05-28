@@ -87,6 +87,12 @@ struct HotStepParams {
     float       latent_shift     = 0.0f;
     float       latent_rescale   = 1.0f;
 
+    // CFG step scheduling: ratio of steps that use full CFG (2×compute).
+    // 1.0 = all steps use CFG (default, current behavior).
+    // 0.5 = CFG for first 50% of steps, cond-only for the rest (~25% speedup).
+    // 0.0 = no CFG at all (fastest, but ignores guidance_scale).
+    float       cfg_cutoff_ratio = 1.0f;
+
     // Custom timestep schedule — CSV of descending floats.
     // When non-empty, completely overrides both upstream schedule AND sideband scheduler.
     // N values = N-1 steps (trailing 0/endpoint is dropped by sampler).

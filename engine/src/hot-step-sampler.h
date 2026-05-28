@@ -689,6 +689,85 @@ static int dit_ggml_generate(DiTGGML *           model,
         g_ctx.t_curr     = t_curr;
         g_ctx.dt         = t_curr - t_next_for_ctx;
 
+        // ── CFG cutoff: switch from 2N batched graph to N cond-only graph ──
+        // Rebuilds the graph at half size, eliminating the unconditional forward
+        // pass for remaining steps. One-time cost (~1ms) saves ~50% compute/step.
+        int cfg_cutoff_step = (int) ceilf(g_hotstep_params.cfg_cutoff_ratio * num_steps);
+        if (do_cfg && step == cfg_cutoff_step && cfg_cutoff_step < num_steps) {
+            fprintf(stderr, "[DiT] CFG cutoff at step %d/%d — switching to cond-only (N_graph %d -> %d)\n",
+                    step, num_steps, N_graph, N);
+
+            // Disable CFG for remaining steps
+            do_cfg    = false;
+            batch_cfg = false;
+            N_graph   = N;
+
+            // Rebuild graph with smaller N_graph
+            ggml_free(ctx);
+            ctx_buf.assign(ctx_size, 0);
+            struct ggml_init_params gp2 = { ctx_size, ctx_buf.data(), true };
+            ctx = ggml_init(gp2);
+            gf  = dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output);
+
+            // Re-allocate scheduler for new graph
+            ggml_backend_sched_reset(model->sched);
+            if (model->backend != model->cpu_backend) {
+                const char * input_names[] = { "enc_hidden", "input_latents", "t", "t_r",
+                                               "positions", "sa_mask_sw", "sa_mask_pad", "ca_mask" };
+                for (const char * iname : input_names) {
+                    struct ggml_tensor * ti = ggml_graph_get_tensor(gf, iname);
+                    if (ti) ggml_backend_sched_set_tensor_backend(model->sched, ti, model->backend);
+                }
+            }
+            if (!ggml_backend_sched_alloc_graph(model->sched, gf)) {
+                fprintf(stderr, "[DiT] FATAL: failed to re-allocate graph after CFG cutoff\n");
+                ggml_free(ctx);
+                return -1;
+            }
+
+            // Update tensor references (lambda captures by [&])
+            t_enc        = ggml_graph_get_tensor(gf, "enc_hidden");
+            t_t          = ggml_graph_get_tensor(gf, "t");
+            t_tr         = ggml_graph_get_tensor(gf, "t_r");
+            t_pos        = ggml_graph_get_tensor(gf, "positions");
+            t_sa_mask_sw = ggml_graph_get_tensor(gf, "sa_mask_sw");
+            t_sa_mask_pad= ggml_graph_get_tensor(gf, "sa_mask_pad");
+            t_ca_mask    = ggml_graph_get_tensor(gf, "ca_mask");
+
+            // Resize host buffers for N_graph=N (drop uncond slots)
+            input_buf.resize(in_ch * T * N);
+            for (int b = 0; b < N; b++) {
+                for (int t = 0; t < T; t++) {
+                    memcpy(&input_buf[b * T * in_ch + t * in_ch],
+                           &context_latents[b * T * ctx_ch + t * ctx_ch],
+                           ctx_ch * sizeof(float));
+                }
+            }
+
+            enc_buf.resize(H_enc * enc_S * N);
+            memcpy(enc_buf.data(), enc_hidden_data, H_enc * enc_S * N * sizeof(float));
+
+            pos_data.resize(S * N);
+            for (int b = 0; b < N; b++)
+                for (int i = 0; i < S; i++)
+                    pos_data[b * S + i] = i;
+
+            sa_sw_data.resize(S * S * N);
+            sa_pad_data.resize(S * S * N);
+            ca_data.resize(enc_S * S * N);
+            // Masks for N samples are already in the first N slots — just truncate
+
+            // Upload constants to new tensors
+            ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
+            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
+
+            fprintf(stderr, "[DiT] Graph rebuilt: %d nodes (was 2N, now N=%d)\n",
+                    ggml_graph_n_nodes(gf), N);
+        }
+
         // Evaluate velocity at (xt, t_curr) — first evaluation (k1 for RK4, only eval for Euler)
         evaluate_velocity(xt.data(), t_curr);
 
