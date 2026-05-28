@@ -149,6 +149,7 @@ export const GlobalParamBar: React.FC = () => {
         // Global engine params → context
         if (p.inferenceSteps !== undefined) gp.setInferenceSteps(p.inferenceSteps);
         if (p.guidanceScale !== undefined) gp.setGuidanceScale(p.guidanceScale);
+        if (p.cfgCutoffRatio !== undefined) gp.setCfgCutoffRatio(p.cfgCutoffRatio);
         if (p.shift !== undefined) gp.setShift(p.shift);
         if (p.inferMethod !== undefined) gp.setInferMethod(p.inferMethod);
         if (p.scheduler !== undefined) gp.setScheduler(p.scheduler);

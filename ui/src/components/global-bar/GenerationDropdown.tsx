@@ -74,6 +74,15 @@ export const GenerationDropdown: React.FC = () => {
       <Slider label="Guidance Scale" value={gp.guidanceScale}
         onChange={gp.setGuidanceScale} min={0} max={20} step={0.1} showInput />
 
+      {/* CFG Cutoff — ratio of steps using full guidance */}
+      <div>
+        <Slider label="CFG Cutoff" value={gp.cfgCutoffRatio}
+          onChange={gp.setCfgCutoffRatio} min={0} max={1} step={0.05} showInput />
+        <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+          Ratio of steps using full guidance. Lower = faster but may reduce prompt adherence. 0.5 ≈ 20% speedup.
+        </p>
+      </div>
+
       {/* Shift with Auto toggle */}
       <div>
         <div className="flex items-center justify-between mb-1.5">

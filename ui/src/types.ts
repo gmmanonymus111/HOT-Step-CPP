@@ -103,6 +103,7 @@ export interface GenerationParams {
   // DiT settings
   inferenceSteps: number;
   guidanceScale: number;
+  cfgCutoffRatio?: number;
   shift: number;
   inferMethod: string;
   scheduler: string;

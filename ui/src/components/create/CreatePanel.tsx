@@ -74,6 +74,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, activeJobC
     // Engine params — full reproducibility
     if (gpData.inferenceSteps) gp.setInferenceSteps(gpData.inferenceSteps);
     if (gpData.guidanceScale !== undefined) gp.setGuidanceScale(gpData.guidanceScale);
+    if (gpData.cfgCutoffRatio !== undefined) gp.setCfgCutoffRatio(gpData.cfgCutoffRatio);
     if (gpData.seed !== undefined) gp.setSeed(gpData.seed);
     if (gpData.randomSeed !== undefined) gp.setRandomSeed(gpData.randomSeed);
     if (gpData.shift !== undefined) gp.setShift(gpData.shift);
