@@ -559,6 +559,10 @@ static struct ggml_tensor * vae_conv1d(struct ggml_context * ctx,
 // w: [K, OC, IC] standard ConvTranspose1d weight layout
 // x: [T_in, IC]
 // Returns: [T_out_cropped, OC]
+//
+// NOTE: vanilla ggml_conv_transpose_1d asserts p0==0 (no built-in padding).
+// ConvTranspose1d "padding" is really output cropping: remove `padding` samples
+// from each end. We compute with p0=0 (full output) then crop via ggml_view.
 static struct ggml_tensor * vae_conv_t1d(struct ggml_context * ctx,
                                          struct ggml_tensor *  w,  // [K, OC, IC] standard layout
                                          struct ggml_tensor *  b,  // [OC] or NULL
@@ -567,8 +571,24 @@ static struct ggml_tensor * vae_conv_t1d(struct ggml_context * ctx,
                                          int                   padding,
                                          int                   oc) {
     (void) oc;  // inferred from weight shape
-    struct ggml_tensor * y = ggml_conv_transpose_1d(ctx, w, x, stride, padding, 1 /*dilation*/);
-    // ggml_conv_transpose_1d returns [OL, OC, 1], squeeze to 2d
+    // Compute full (unpadded) conv_transpose_1d
+    struct ggml_tensor * y = ggml_conv_transpose_1d(ctx, w, x, stride, 0 /*p0*/, 1 /*dilation*/);
+    // y shape: [OL_full, OC, 1]
+
+    if (padding > 0) {
+        // Crop: remove `padding` samples from each end of dim0
+        // OL_full = (T_in - 1)*stride + K, cropped = OL_full - 2*padding
+        int64_t OL_full  = y->ne[0];
+        int64_t OL_crop  = OL_full - 2 * padding;
+        int64_t OC_dim   = y->ne[1];
+        // ggml_view_3d(ctx, src, ne0, ne1, ne2, nb1, nb2, offset)
+        y = ggml_view_3d(ctx, y,
+                         OL_crop, OC_dim, 1,
+                         y->nb[1], y->nb[2],
+                         padding * y->nb[0]);
+    }
+
+    // Squeeze to 2d: [OL, OC, 1] -> [OL, OC]
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
 
     if (b) {
