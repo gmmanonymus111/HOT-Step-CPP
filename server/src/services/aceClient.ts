@@ -1,4 +1,4 @@
-﻿// aceClient.ts — HTTP client for acestep.cpp's ace-server API
+// aceClient.ts — HTTP client for acestep.cpp's ace-server API
 //
 // Wraps all ace-server endpoints with typed methods.
 // Used by the generation orchestrator and model routes.
@@ -99,6 +99,7 @@ export interface AceRequest {
   latent_shift?: number;       // 0.0 = no bias
   latent_rescale?: number;     // 1.0 = no scaling
   custom_timesteps?: string;   // CSV of descending floats, overrides scheduler
+  cfg_cutoff_ratio?: number;   // CFG step scheduling: 1.0 = full CFG, 0.5 = 50% CFG then cond-only
   // Post-VAE spectral denoiser (HOT-Step)
   denoise_strength?: number;   // 0.0 = off, 1.0 = max suppression
   denoise_smoothing?: number;  // 0.0 = sharp gate, 1.0 = very smooth

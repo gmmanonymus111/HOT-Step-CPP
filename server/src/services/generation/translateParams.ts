@@ -1,4 +1,4 @@
-﻿// generation/translateParams.ts — Translate frontend params to AceRequest format
+// generation/translateParams.ts — Translate frontend params to AceRequest format
 //
 // Pure function with zero side effects. Maps UI-facing parameter names
 // to the AceRequest schema expected by the ace-server engine.
@@ -110,6 +110,7 @@ export function translateParams(params: any): AceRequest {
   if (params.latentShift !== undefined) req.latent_shift = params.latentShift;
   if (params.latentRescale !== undefined) req.latent_rescale = params.latentRescale;
   if (params.customTimesteps) req.custom_timesteps = params.customTimesteps;
+  if (params.cfgCutoffRatio !== undefined) req.cfg_cutoff_ratio = params.cfgCutoffRatio;
 
   // Post-VAE spectral denoiser
   if (params.denoiseStrength !== undefined) req.denoise_strength = params.denoiseStrength;
