@@ -82,6 +82,9 @@ export interface GenerateCoverArtOpts extends CoverArtPromptOpts {
   songId: string;
 }
 
+/** Options for the image-only phase (no songId needed) */
+export interface GenerateCoverImageOpts extends CoverArtPromptOpts {}
+
 export interface CoverArtResult {
   coverUrl: string;
   prompt: string;
@@ -89,16 +92,16 @@ export interface CoverArtResult {
 }
 
 /**
- * Generate cover art for a song.
+ * Phase 1: Generate the cover art image (GPU-heavy, no DB writes).
  *
  * 1. Builds a prompt from song metadata
  * 2. Spawns sd-cli.exe with FLUX.2-klein-4B
  * 3. Saves the output as PNG in the audio directory
- * 4. Updates the song's cover_url in the database
  *
- * Throws if sd-cli is not installed or generation fails.
+ * Returns the coverUrl and prompt. Does NOT touch the database.
+ * Use linkCoverToSong() afterwards to associate with a song.
  */
-export async function generateCoverArt(opts: GenerateCoverArtOpts): Promise<CoverArtResult> {
+export async function generateCoverImage(opts: GenerateCoverImageOpts): Promise<CoverArtResult> {
   const startTime = Date.now();
 
   // Verify readiness
@@ -174,19 +177,35 @@ export async function generateCoverArt(opts: GenerateCoverArtOpts): Promise<Cove
   const coverUrl = `/audio/${outputFilename}`;
   const durationMs = Date.now() - startTime;
 
-  // Update song's cover_url in database
-  try {
-    getDb().prepare('UPDATE songs SET cover_url = ? WHERE id = ?')
-      .run(coverUrl, opts.songId);
-    console.log(`[CoverArt] Saved cover for song ${opts.songId}: ${outputFilename} (${(durationMs / 1000).toFixed(1)}s)`);
-  } catch (dbErr: any) {
-    console.error(`[CoverArt] DB update failed: ${dbErr.message}`);
-    // Don't throw — the image was generated successfully
-  }
+  console.log(`[CoverArt] Image generated: ${outputFilename} (${(durationMs / 1000).toFixed(1)}s)`);
 
   return {
     coverUrl,
     prompt,
     durationMs,
   };
+}
+
+/**
+ * Phase 2: Link a generated cover image to a song in the database.
+ * This is a lightweight DB UPDATE — no GPU work.
+ */
+export function linkCoverToSong(coverUrl: string, songId: string): void {
+  try {
+    getDb().prepare('UPDATE songs SET cover_url = ? WHERE id = ?')
+      .run(coverUrl, songId);
+    console.log(`[CoverArt] Linked cover to song ${songId}: ${coverUrl}`);
+  } catch (dbErr: any) {
+    console.error(`[CoverArt] DB update failed for ${songId}: ${dbErr.message}`);
+  }
+}
+
+/**
+ * Convenience wrapper: generate image + link to song in one call.
+ * Used by the sequential (non-parallel) path and the cover art API endpoint.
+ */
+export async function generateCoverArt(opts: GenerateCoverArtOpts): Promise<CoverArtResult> {
+  const result = await generateCoverImage(opts);
+  linkCoverToSong(result.coverUrl, opts.songId);
+  return result;
 }

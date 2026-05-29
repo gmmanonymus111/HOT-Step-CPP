@@ -464,6 +464,47 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     // Per-track latent URLs (parallel array to audioUrls)
     const latentUrls: string[] = [];
 
+    // ── Parallel Cover Art: launch right after LM (earliest possible) ──
+    // At this point we have title/style/lyrics/subject from LM results.
+    // Image generation (GPU) starts now and overlaps with the entire synth phase.
+    // The cheap DB link happens after DB insert provides songIds.
+    let coverArtResults: Array<{ coverUrl: string }> = [];
+    if (job.params.parallelCoverArt && job.params.coverArtEnabled) {
+      const coverArtTask = async () => {
+        const coverArtStart = performance.now();
+        try {
+          const { generateCoverImage, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
+          const readiness = getCoverArtReadiness();
+          if (!readiness.installed) {
+            logGeneration(job.id, 'DEBUG', `[CoverArt] Skipped — not installed (missing: ${readiness.missingFiles.join(', ')})`);
+            return;
+          }
+          // Generate one cover per track
+          for (let i = 0; i < totalTracks; i++) {
+            const trackResult = lmResults[i] || lmResults[0];
+            try {
+              const result = await generateCoverImage({
+                title: job.params.title || trackResult.caption?.substring(0, 60) || 'Untitled',
+                style: job.params.caption || job.params.style || '',
+                lyrics: trackResult.lyrics || '',
+                subject: job.params.coverArtSubject || job.params.subject || '',
+              });
+              coverArtResults.push({ coverUrl: result.coverUrl });
+              logGeneration(job.id, 'INFO', `[CoverArt] Image generated (${(result.durationMs / 1000).toFixed(1)}s)`);
+            } catch (coverTrackErr: any) {
+              logGeneration(job.id, 'WARNING', `[CoverArt] Image generation failed (non-fatal): ${coverTrackErr.message}`);
+            }
+          }
+        } catch (coverErr: any) {
+          logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
+        }
+        const coverArtMs = Math.round(performance.now() - coverArtStart);
+        if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
+      };
+      deferredTasks.push(coverArtTask());
+      logGeneration(job.id, 'INFO', '[CoverArt] Launched in parallel (overlapping with synth)');
+    }
+
     // ── Per-track synth loop ──────────────────────────────────
     // Each lmResult becomes a separate /synth call → separate audio file.
     // Progress: each track gets an equal share of the 45→88% range.
@@ -773,58 +814,6 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     const autoTrimMs = Math.round(performance.now() - autoTrimStart);
     if (autoTrimMs > 50) timing.push({ name: 'Auto-Trim', ms: autoTrimMs });
 
-    // ── AI Cover Art (fire before PP chain for true parallelism) ─
-    // Cover Art only needs title/style/lyrics (available now from LM results).
-    // It writes to DB using songIds, so we capture them into an array that
-    // the DB insert loop below will populate. The cover art promise awaits
-    // songIds being ready via a resolve callback.
-    let coverArtSongIds: string[] = [];
-    let resolveSongIds: (() => void) | undefined;
-    const songIdsReady = new Promise<void>(r => { resolveSongIds = r; });
-
-    const runCoverArtTask = async () => {
-      if (!job.params.coverArtEnabled) return;
-      const coverArtStart = performance.now();
-      try {
-        const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
-        const readiness = getCoverArtReadiness();
-        if (readiness.installed) {
-          if (!job.params.parallelCoverArt) {
-            job.stage = 'Generating cover art...';
-            job.progress = 95;
-          }
-          // Wait for DB insert to provide songIds
-          await songIdsReady;
-          for (let i = 0; i < coverArtSongIds.length; i++) {
-            const trackResult = lmResults[i] || firstResult;
-            try {
-              await generateCoverArt({
-                songId: coverArtSongIds[i],
-                title,
-                style,
-                lyrics: trackResult.lyrics || '',
-                subject: job.params.coverArtSubject || job.params.subject || '',
-              });
-              logGeneration(job.id, 'INFO', `[CoverArt] Generated cover for song ${coverArtSongIds[i]}`);
-            } catch (coverTrackErr: any) {
-              logGeneration(job.id, 'WARNING', `[CoverArt] Failed for song ${coverArtSongIds[i]} (non-fatal): ${coverTrackErr.message}`);
-            }
-          }
-        } else {
-          logGeneration(job.id, 'DEBUG', `[CoverArt] Skipped — not installed (missing: ${readiness.missingFiles.join(', ')})`);
-        }
-      } catch (coverErr: any) {
-        logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
-      }
-      const coverArtMs = Math.round(performance.now() - coverArtStart);
-      if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
-    };
-
-    // Launch cover art BEFORE PP chain for actual parallel execution
-    if (job.params.parallelCoverArt && job.params.coverArtEnabled) {
-      deferredTasks.push(runCoverArtTask());
-      logGeneration(job.id, 'INFO', '[CoverArt] Launched in parallel with post-processing');
-    }
 
     // ── Post-processing chain ─────────────────────────────────
     // Raw WAV (audio_url) is NEVER modified. Post-processing runs on a copy.
@@ -889,13 +878,49 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
     }
 
-    // Unblock cover art task now that songIds are populated
-    coverArtSongIds = songIds;
-    resolveSongIds?.();
-
-    // Launch cover art sequentially if not already launched in parallel
-    if (!job.params.parallelCoverArt) {
-      await runCoverArtTask();
+    // ── Cover Art: link parallel results or run sequential ────
+    if (job.params.parallelCoverArt && coverArtResults.length > 0) {
+      // Parallel path: image was generated during synth. Link to DB now.
+      const { linkCoverToSong } = await import('../services/coverArt/coverArtService.js');
+      for (let i = 0; i < songIds.length; i++) {
+        const cover = coverArtResults[i];
+        if (cover) {
+          linkCoverToSong(cover.coverUrl, songIds[i]);
+          logGeneration(job.id, 'INFO', `[CoverArt] Linked cover to song ${songIds[i]}`);
+        }
+      }
+    } else if (!job.params.parallelCoverArt && job.params.coverArtEnabled) {
+      // Sequential path: generate + link in one call (original behavior)
+      const coverArtStart = performance.now();
+      try {
+        const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
+        const readiness = getCoverArtReadiness();
+        if (readiness.installed) {
+          job.stage = 'Generating cover art...';
+          job.progress = 95;
+          for (let i = 0; i < songIds.length; i++) {
+            const trackResult = lmResults[i] || firstResult;
+            try {
+              await generateCoverArt({
+                songId: songIds[i],
+                title,
+                style,
+                lyrics: trackResult.lyrics || '',
+                subject: job.params.coverArtSubject || job.params.subject || '',
+              });
+              logGeneration(job.id, 'INFO', `[CoverArt] Generated cover for song ${songIds[i]}`);
+            } catch (coverTrackErr: any) {
+              logGeneration(job.id, 'WARNING', `[CoverArt] Failed for song ${songIds[i]} (non-fatal): ${coverTrackErr.message}`);
+            }
+          }
+        } else {
+          logGeneration(job.id, 'DEBUG', `[CoverArt] Skipped — not installed (missing: ${readiness.missingFiles.join(', ')})`);
+        }
+      } catch (coverErr: any) {
+        logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
+      }
+      const coverArtMs = Math.round(performance.now() - coverArtStart);
+      if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
     }
 
     // ── Await all deferred parallel tasks (with timeout) ─────
