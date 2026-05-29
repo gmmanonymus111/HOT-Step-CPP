@@ -191,10 +191,14 @@ function startAceServer(): ChildProcess | null {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  // Filter repetitive GGML noise from console output (still written to ace_engine.log via logEngine)
+  const isNoise = (line: string) =>
+    line.includes('CUDA graph warmup') || line.includes('CUDA Graph id') || line.includes('ggml_backend_cuda_graph_compute');
+
   child.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      console.log(`[ace-server] ${line}`);
+      if (!isNoise(line)) console.log(`[ace-server] ${line}`);
       logEngine(line);
       pushLog(line, 'engine');
     }
@@ -203,7 +207,7 @@ function startAceServer(): ChildProcess | null {
   child.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      console.log(`[ace-server] ${line}`);
+      if (!isNoise(line)) console.log(`[ace-server] ${line}`);
       logEngine(line);
       pushLog(line, 'engine');
     }

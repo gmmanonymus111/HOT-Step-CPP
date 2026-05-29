@@ -23,8 +23,18 @@ const lines: LogLine[] = [];
 let nextId = 0;
 const subscribers: Set<(line: LogLine) => void> = new Set();
 
+/** Noisy GGML/CUDA patterns that flood logs with no actionable info. */
+const ENGINE_NOISE = [
+  'CUDA graph warmup',
+  'CUDA Graph id',
+  'ggml_backend_cuda_graph_compute',
+];
+
 /** Push a log line into the buffer and notify SSE subscribers */
 export function pushLog(text: string, source: 'engine' | 'server' = 'server'): void {
+  // Suppress repetitive engine noise
+  if (source === 'engine' && ENGINE_NOISE.some(p => text.includes(p))) return;
+
   const line: LogLine = { id: nextId++, ts: Date.now(), text, source };
   lines.push(line);
   if (lines.length > MAX_LINES) {
