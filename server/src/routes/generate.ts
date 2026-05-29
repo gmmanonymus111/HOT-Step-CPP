@@ -488,11 +488,21 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       job.progress = Math.round(trackProgressBase);
 
 
+      // Sub-phase timing: capture when each engine phase starts/ends
+      let ditFirstStepAt = 0;
+      let ditLastStepAt = 0;
+      let vaeStartAt = 0;
+      let adapterMergeAt = 0;
+      let fsqStartAt = 0;
+
       // Subscribe to engine logs for this track's DiT progress
       const unsubSynth = subscribeLines((line) => {
         if (line.source !== 'engine') return;
+        const now = performance.now();
         const dit = line.text.match(/\[DiT\] Step (\d+)\/(\d+)\s+t=[\d.]+\s+\[(.+?)\]/);
         if (dit) {
+          if (!ditFirstStepAt) ditFirstStepAt = now;
+          ditLastStepAt = now;
           const step = parseInt(dit[1], 10);
           const total = parseInt(dit[2], 10);
           job.stage = `DiT${trackLabel}: Step ${step}/${total} (${dit[3]})`;
@@ -501,6 +511,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         }
         const ditSimple = line.text.match(/\[DiT\] Step (\d+)\/(\d+)/);
         if (ditSimple) {
+          if (!ditFirstStepAt) ditFirstStepAt = now;
+          ditLastStepAt = now;
           const step = parseInt(ditSimple[1], 10);
           const total = parseInt(ditSimple[2], 10);
           job.stage = `DiT${trackLabel}: Step ${step}/${total}`;
@@ -508,13 +520,16 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           return;
         }
         if (line.text.includes('[VAE]') || line.text.includes('vae_decode')) {
+          if (!vaeStartAt) vaeStartAt = now;
           job.stage = `Decoding audio (VAE)${trackLabel}...`;
           job.progress = Math.round(trackProgressBase + progressPerTrack * 0.9);
         } else if (line.text.includes('[Adapter]') && line.text.includes('Merge')) {
+          if (!adapterMergeAt) adapterMergeAt = now;
           job.stage = `Loading adapter${trackLabel}...`;
         } else if (line.text.includes('Loading synth') || line.text.includes('ensure_synth')) {
           job.stage = `Loading DiT model${trackLabel}...`;
         } else if (line.text.includes('[FSQ]') || line.text.includes('fsq_detokenize')) {
+          if (!fsqStartAt) fsqStartAt = now;
           job.stage = `Decoding audio tokens (FSQ)${trackLabel}...`;
         } else if (line.text.includes('[DiT]') && line.text.includes('batch')) {
           job.stage = `Preparing DiT${trackLabel}...`;
@@ -553,8 +568,34 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       fs.writeFileSync(filepath, audioBuffer);
       audioUrls.push(`/audio/${filename}`);
 
-      const synthTrackMs = Math.round(performance.now() - synthTrackStart);
-      timing.push({ name: totalTracks > 1 ? `Synth Track ${trackIdx + 1}` : 'Synth (DiT+VAE)', ms: synthTrackMs });
+      // Record sub-phase timing for this track
+      const synthEndAt = performance.now();
+      const synthTrackMs = Math.round(synthEndAt - synthTrackStart);
+      const trackSuffix = totalTracks > 1 ? ` Track ${trackIdx + 1}` : '';
+
+      // Sub-phase breakdown (indented with leading spaces for visual hierarchy)
+      if (fsqStartAt && ditFirstStepAt) {
+        const fsqMs = Math.round(ditFirstStepAt - fsqStartAt);
+        if (fsqMs > 50) timing.push({ name: `  FSQ Detokenize${trackSuffix}`, ms: fsqMs });
+      }
+      if (adapterMergeAt && ditFirstStepAt) {
+        const adapterMs = Math.round(ditFirstStepAt - adapterMergeAt);
+        if (adapterMs > 50) timing.push({ name: `  Adapter Merge${trackSuffix}`, ms: adapterMs });
+      }
+      if (ditFirstStepAt && ditLastStepAt) {
+        timing.push({ name: `  DiT Denoising${trackSuffix}`, ms: Math.round(ditLastStepAt - ditFirstStepAt) });
+      }
+      if (vaeStartAt) {
+        timing.push({ name: `  VAE Decode${trackSuffix}`, ms: Math.round(synthEndAt - vaeStartAt) });
+      }
+      // Overhead = total synth - (DiT + VAE + FSQ + Adapter + polling)
+      const accountedMs = (ditFirstStepAt && ditLastStepAt ? ditLastStepAt - ditFirstStepAt : 0)
+        + (vaeStartAt ? synthEndAt - vaeStartAt : 0);
+      const overheadMs = synthTrackMs - Math.round(accountedMs);
+      if (overheadMs > 500) timing.push({ name: `  Synth Overhead${trackSuffix}`, ms: overheadMs });
+
+      // Parent total
+      timing.push({ name: `Synth Total${trackSuffix}`, ms: synthTrackMs });
       logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: saved ${filename} (${(audioBuffer.length / 1024).toFixed(0)} KB, ${(synthTrackMs / 1000).toFixed(1)}s)`);
 
       // Save companion LRC file if engine returned alignment data
