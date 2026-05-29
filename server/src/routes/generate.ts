@@ -67,7 +67,7 @@ const jobs = new Map<string, GenerationJob>();
 
 /** Poll ace-server job until completion */
 async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal): Promise<void> {
-  const POLL_INTERVAL = 500; // ms
+  const POLL_INTERVAL = 100; // ms — fast polling for tight phase-transition detection
   const MAX_POLLS = 3600; // 30 minutes max
 
   for (let i = 0; i < MAX_POLLS; i++) {
@@ -537,6 +537,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       let vaeStartAt = 0;
       let adapterMergeAt = 0;
       let fsqStartAt = 0;
+      let textEncStartAt = 0;
+      let textEncEndAt = 0;
 
       // Subscribe to engine logs for this track's DiT progress
       const unsubSynth = subscribeLines((line) => {
@@ -569,6 +571,12 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         } else if (line.text.includes('[Adapter]') && line.text.includes('Merge')) {
           if (!adapterMergeAt) adapterMergeAt = now;
           job.stage = `Loading adapter${trackLabel}...`;
+        } else if (line.text.includes('[Encode-Text') && !line.text.includes('Batch')) {
+          // First [Encode-Text] log that isn't a per-batch sub-line
+          if (!textEncStartAt) textEncStartAt = now;
+        } else if (line.text.includes('[Encode-Text') && line.text.includes('enc_S=')) {
+          // Last text encoder output line
+          textEncEndAt = now;
         } else if (line.text.includes('Loading synth') || line.text.includes('ensure_synth')) {
           job.stage = `Loading DiT model${trackLabel}...`;
         } else if (line.text.includes('[FSQ]') || line.text.includes('fsq_detokenize')) {
@@ -631,9 +639,16 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       if (vaeStartAt) {
         timing.push({ name: `  VAE Decode${trackSuffix}`, ms: Math.round(synthEndAt - vaeStartAt) });
       }
-      // Overhead = total synth - (DiT + VAE + FSQ + Adapter + polling)
-      const accountedMs = (ditFirstStepAt && ditLastStepAt ? ditLastStepAt - ditFirstStepAt : 0)
-        + (vaeStartAt ? synthEndAt - vaeStartAt : 0);
+      if (textEncStartAt && textEncEndAt) {
+        const textEncMs = Math.round(textEncEndAt - textEncStartAt);
+        if (textEncMs > 50) timing.push({ name: `  Text Encoding${trackSuffix}`, ms: textEncMs });
+      }
+      // Overhead = total synth - all accounted sub-phases
+      const accountedMs = (adapterMergeAt && ditFirstStepAt ? ditFirstStepAt - adapterMergeAt : 0)
+        + (ditFirstStepAt && ditLastStepAt ? ditLastStepAt - ditFirstStepAt : 0)
+        + (vaeStartAt ? synthEndAt - vaeStartAt : 0)
+        + (textEncStartAt && textEncEndAt ? textEncEndAt - textEncStartAt : 0)
+        + (fsqStartAt && ditFirstStepAt ? ditFirstStepAt - fsqStartAt : 0);
       const overheadMs = synthTrackMs - Math.round(accountedMs);
       if (overheadMs > 500) timing.push({ name: `  Synth Overhead${trackSuffix}`, ms: overheadMs });
 
