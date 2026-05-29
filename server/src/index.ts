@@ -175,6 +175,12 @@ function startAceServer(): ChildProcess | null {
     console.log(`[Server] Noise profile: ${config.aceServer.noiseProfile}`);
   }
 
+  // Add draft LM for speculative decoding (if available)
+  if (config.aceServer.draftLm && fs.existsSync(config.aceServer.draftLm)) {
+    args.push('--draft-lm', config.aceServer.draftLm);
+    console.log(`[Server] Draft LM: ${path.basename(config.aceServer.draftLm)}`);
+  }
+
   // VAE tiling parameters (resolves Vulkan pinned memory allocation failures)
   if (config.aceServer.vaeChunk) {
     args.push('--vae-chunk', String(config.aceServer.vaeChunk));

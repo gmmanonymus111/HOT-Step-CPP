@@ -224,6 +224,9 @@ static int  g_max_batch   = 1;
 static int  g_mp3_kbps    = 128;
 static bool g_keep_loaded = false;
 
+// speculative decoding: path to 0.6B draft model (auto-discovered or --draft-lm)
+static std::string g_draft_lm_path;
+
 // HOT-Step: pre-computed noise profile for spectral denoiser.
 // Loaded once at startup from a reference noise sample WAV.
 static NoiseProfile g_noise_profile;
@@ -1845,6 +1848,10 @@ static void usage(const char * prog) {
             "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
+            "Speculative decoding:\n"
+            "  --draft-lm <path>        Path to 0.6B draft LM (auto-discovers if omitted)\n"
+            "  --no-draft               Disable draft model auto-discovery\n"
+            "\n"
             "Output:\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: %d)\n"
             "\n"
@@ -1920,6 +1927,12 @@ int main(int argc, char ** argv) {
             g_lm_params.clamp_fp16    = true;
             g_synth_params.clamp_fp16 = true;
 
+            // speculative decoding
+        } else if (!strcmp(argv[i], "--draft-lm") && i + 1 < argc) {
+            g_draft_lm_path = argv[++i];
+        } else if (!strcmp(argv[i], "--no-draft")) {
+            g_draft_lm_path = "none";
+
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
@@ -1945,6 +1958,27 @@ int main(int argc, char ** argv) {
     if (!registry_scan(&g_registry, models_dir)) {
         fprintf(stderr, "[Server] ERROR: no GGUF models found in %s\n", models_dir);
         return 1;
+    }
+
+    // speculative decoding: auto-discover draft model from registry
+    if (g_draft_lm_path.empty()) {
+        // Auto-discover: look for a 0.6B LM in the registry
+        for (const auto & entry : g_registry.lm) {
+            if (entry.name.find("-0.6B-") != std::string::npos ||
+                entry.name.find("_0.6B_") != std::string::npos) {
+                g_draft_lm_path = entry.path;
+                fprintf(stderr, "[Server] Auto-discovered draft LM: %s\n", entry.name.c_str());
+                break;
+            }
+        }
+        if (g_draft_lm_path.empty()) {
+            fprintf(stderr, "[Server] No 0.6B draft LM found (speculative decode disabled)\n");
+        }
+    } else if (g_draft_lm_path == "none") {
+        fprintf(stderr, "[Server] Draft LM disabled (--no-draft)\n");
+        g_draft_lm_path.clear();
+    } else {
+        fprintf(stderr, "[Server] Draft LM (explicit): %s\n", g_draft_lm_path.c_str());
     }
 
     // scan adapters directory (optional)
@@ -2014,6 +2048,9 @@ int main(int argc, char ** argv) {
         g_max_batch = 9;
     }
     g_lm_params.max_batch = g_max_batch;
+    if (!g_draft_lm_path.empty()) {
+        g_lm_params.draft_model_path = g_draft_lm_path.c_str();
+    }
 
     // init understand params (vae for audio encoding, dit resolved per-request)
     ace_understand_default_params(&g_und_params);

@@ -155,6 +155,8 @@
     "settings.general.coResidentDesc": "Keep both the DiT diffusion model and VAE decoder in VRAM simultaneously instead of swapping them. Eliminates ~13s of model load/unload per generation. Uses more VRAM (~8.2GB for XL).",
     "settings.general.cacheLm": "Cache LM audio codes",
     "settings.general.cacheLmDesc": "When generating with the same seed and parameters, reuse previously computed audio codes instead of re-running the LM. Saves ~12s on repeat generations.",
+    "settings.general.specDecode": "Speculative Decoding (Draft LM)",
+    "settings.general.specDecodeDesc": "Use a lightweight 0.6B draft model to propose tokens that the main LM verifies in batch. Speeds up audio code generation by ~30% with minimal quality impact. Requires a 0.6B model in your models folder.",
     "settings.general.downloads": "Downloads",
     "settings.general.defaultFormat": "Default format",
     "settings.general.defaultFormatDesc": "Preferred audio format when downloading tracks.",

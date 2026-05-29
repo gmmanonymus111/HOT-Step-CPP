@@ -25,6 +25,7 @@ import './SettingsPanel.css';
 export interface AppSettings {
   coResident: boolean;
   cacheLmCodes: boolean;
+  speculativeDecoding: boolean;
   // Download defaults
   downloadFormat: 'wav' | 'flac' | 'opus' | 'mp3';
   downloadMp3Bitrate: number;
@@ -42,6 +43,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   coResident: false,
   cacheLmCodes: true,
+  speculativeDecoding: true,
   downloadFormat: 'flac',
   downloadMp3Bitrate: 192,
   downloadOpusBitrate: 192,
@@ -527,6 +529,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           onChange={(v) => update('cacheLmCodes', v)}
           badges={[
             { text: '−12s', type: 'speed' as const },
+          ]}
+        />
+
+        <SettingRow
+          id="setting-speculative-decode-perf"
+          label={t('settings.general.specDecode')}
+          description={t('settings.general.specDecodeDesc')}
+          checked={settings.speculativeDecoding}
+          onChange={(v) => update('speculativeDecoding', v)}
+          badges={[
+            { text: '−30%', type: 'speed' as const },
+            { text: '+1GB VRAM', type: 'vram' as const },
           ]}
         />
       </div>
