@@ -48,6 +48,7 @@ export interface AceRequest {
   synth_batch_size?: number;
   lm_temperature?: number;
   lm_cfg_scale?: number;
+  lm_cfg_cutoff_ratio?: number; // LM CFG step scheduling: 1.0 = full CFG, 0.5 = CFG for first 50% of tokens
   lm_top_p?: number;
   lm_top_k?: number;
   lm_negative_prompt?: string;

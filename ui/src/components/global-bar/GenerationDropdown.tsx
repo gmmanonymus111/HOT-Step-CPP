@@ -77,7 +77,7 @@ export const GenerationDropdown: React.FC = () => {
 
       {/* ── Performance / Speed Boosts (Accordion, closed by default) ── */}
       <div className={`rounded-xl border transition-all overflow-hidden ${
-        (gp.cfgCutoffRatio < 1 || gp.cacheRatio > 0)
+        (gp.cfgCutoffRatio < 1 || gp.lmCfgCutoffRatio < 1 || gp.cacheRatio > 0)
           ? 'border-amber-500/20 bg-amber-500/5'
           : 'border-zinc-200 dark:border-white/10 bg-zinc-100/30 dark:bg-zinc-800/30'
       }`}>
@@ -88,13 +88,15 @@ export const GenerationDropdown: React.FC = () => {
         >
           <div className="flex items-center gap-2">
             <ChevronDown size={12} className={`text-amber-400 transition-transform duration-200 ${perfOpen ? 'rotate-180' : ''}`} />
-            <Zap size={14} className={(gp.cfgCutoffRatio < 1 || gp.cacheRatio > 0) ? 'text-amber-400' : 'text-zinc-500'} />
+            <Zap size={14} className={(gp.cfgCutoffRatio < 1 || gp.lmCfgCutoffRatio < 1 || gp.cacheRatio > 0) ? 'text-amber-400' : 'text-zinc-500'} />
             <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">Performance</span>
           </div>
-          {(gp.cfgCutoffRatio < 1 || gp.cacheRatio > 0) && (
+          {(gp.cfgCutoffRatio < 1 || gp.lmCfgCutoffRatio < 1 || gp.cacheRatio > 0) && (
             <span className="text-[10px] text-amber-400/60 font-mono">
               {gp.cfgCutoffRatio < 1 ? `CFG ${Math.round(gp.cfgCutoffRatio * 100)}%` : ''}
-              {gp.cfgCutoffRatio < 1 && gp.cacheRatio > 0 ? ' · ' : ''}
+              {gp.cfgCutoffRatio < 1 && gp.lmCfgCutoffRatio < 1 ? ' · ' : ''}
+              {gp.lmCfgCutoffRatio < 1 ? `LM ${Math.round(gp.lmCfgCutoffRatio * 100)}%` : ''}
+              {(gp.cfgCutoffRatio < 1 || gp.lmCfgCutoffRatio < 1) && gp.cacheRatio > 0 ? ' · ' : ''}
               {gp.cacheRatio > 0 ? `Cache ${Math.round(gp.cacheRatio * 100)}%` : ''}
             </span>
           )}
@@ -104,14 +106,19 @@ export const GenerationDropdown: React.FC = () => {
             <Slider label="CFG Cutoff" value={gp.cfgCutoffRatio}
               onChange={gp.setCfgCutoffRatio} min={0} max={1} step={0.05} showInput />
             <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
-              Ratio of steps using full guidance. Lower = faster but may reduce prompt adherence. 0.5 ≈ 20% speedup.
+              Ratio of DiT steps using full guidance. Lower = faster but may reduce prompt adherence. 0.5 ≈ 20% speedup.
+            </p>
+            <Slider label="LM CFG Cutoff" value={gp.lmCfgCutoffRatio}
+              onChange={gp.setLmCfgCutoffRatio} min={0.3} max={1} step={0.05} showInput />
+            <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+              Fraction of LM audio code tokens using guidance. Lower = faster but may reduce prompt adherence. 0.7 = ~15% LM speedup.
             </p>
             <Slider label="Step Cache" value={gp.cacheRatio}
               onChange={gp.setCacheRatio} min={0} max={0.7} step={0.05} showInput />
             <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
               Skip redundant forward passes by reusing velocity. Higher = faster but may reduce quality. Try 0.3–0.5.
             </p>
-            <button type="button" onClick={() => { gp.setCfgCutoffRatio(1); gp.setCacheRatio(0); }}
+            <button type="button" onClick={() => { gp.setCfgCutoffRatio(1); gp.setLmCfgCutoffRatio(1); gp.setCacheRatio(0); }}
               className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 transition-colors">
               <RotateCcw size={10} /> Reset to defaults
             </button>

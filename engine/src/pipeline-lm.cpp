@@ -271,6 +271,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                                                  uint32_t                       base_seed,
                                                  int                            N,
                                                  float                          cfg_scale,
+                                                 float                          cfg_cutoff_ratio,
                                                  const char *                   negative_prompt,
                                                  bool                           use_batch_cfg,
                                                  bool (*cancel)(void *),
@@ -299,6 +300,10 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     }
     fprintf(stderr, "[LM-Phase2] max_tokens: %d, CFG: %.2f, seeds: %u..%u\n", max_tokens, cfg_scale, base_seed,
             base_seed + N - 1);
+    if (cfg_cutoff_ratio < 1.0f) {
+        fprintf(stderr, "[LM-Phase2] CFG cutoff: ratio=%.2f (CFG for first %d/%d tokens)\n",
+                cfg_cutoff_ratio, (int)(max_tokens * cfg_cutoff_ratio), max_tokens);
+    }
 
     // Reset all KV sets: cond [0..N-1], uncond [N..2N-1]
     for (int i = 0; i < N; i++) {
@@ -431,12 +436,15 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
         }
         int current_active = 0;
 
+        // CFG cutoff: stop doing CFG after this ratio of steps
+        bool do_cfg_this_step = use_cfg && (cfg_cutoff_ratio >= 1.0f || step < (int)(max_tokens * cfg_cutoff_ratio));
+
         // 1. DYNAMIC COMPACTION: Loop through all N sequences, but only gather the active ones!
         for (int i = 0; i < N; i++) {
             if (!seqs[i].done) {
                 active_to_orig[current_active] = i;  // Remember that this slot belongs to sequence 'i'
 
-                if (use_cfg) {
+                if (do_cfg_this_step) {
                     // Place the Cond token/set in the first half
                     batch_tokens[current_active] = seqs[i].last_token;
                     batch_sets[current_active]   = cond_sets[i];
@@ -453,7 +461,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
         }
 
         // 2. FORWARD PASS: GPU only computes attention for n_active sequences
-        if (use_cfg && !use_batch_cfg) {
+        if (do_cfg_this_step && !use_batch_cfg) {
             // Two separate N=1 forwards (cond, then uncond).
             // Workaround for backends where batched multi-sequence attention
             // produces wrong results (e.g. ROCm/gfx1201). Same logit layout.
@@ -462,7 +470,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             qw3lm_forward_batch(m, batch_tokens.data() + n_active, batch_sets.data() + n_active, n_active,
                                 batch_logits.data() + (size_t) n_active * out_V, lm_offset, lm_count);
         } else {
-            int actual_batch_size = use_cfg ? (2 * n_active) : n_active;
+            int actual_batch_size = do_cfg_this_step ? (2 * n_active) : n_active;
             qw3lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), actual_batch_size, batch_logits.data(),
                                 lm_offset, lm_count);
         }
@@ -474,7 +482,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             // Pointer to the conditional logits for THIS active sequence
             float * lc = batch_logits.data() + (size_t) a * out_V;
 
-            if (use_cfg) {
+            if (do_cfg_this_step) {
                 // Pointer to the unconditional logits (offset by n_active)
                 float * lu = batch_logits.data() + (size_t) (n_active + a) * out_V;
 
@@ -842,6 +850,7 @@ int ace_lm_generate(AceLm *            ctx,
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
         batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
+                                       req->lm_cfg_cutoff_ratio,
                                        neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
         if (batch_codes.empty()) {
             return -1;

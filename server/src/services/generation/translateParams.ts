@@ -111,6 +111,7 @@ export function translateParams(params: any): AceRequest {
   if (params.latentRescale !== undefined) req.latent_rescale = params.latentRescale;
   if (params.customTimesteps) req.custom_timesteps = params.customTimesteps;
   if (params.cfgCutoffRatio !== undefined) req.cfg_cutoff_ratio = params.cfgCutoffRatio;
+  if (params.lmCfgCutoffRatio !== undefined) req.lm_cfg_cutoff_ratio = params.lmCfgCutoffRatio;
   if (params.cacheRatio !== undefined) req.cache_ratio = params.cacheRatio;
 
   // Post-VAE spectral denoiser

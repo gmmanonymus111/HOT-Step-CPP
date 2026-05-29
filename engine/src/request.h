@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // request.h: AceStep generation request (JSON serialization)
 //
 // Pure data container + JSON read/write. Zero business logic.
@@ -32,6 +32,7 @@ struct AceRequest {
     // LM control
     float       lm_temperature;      // 0.85
     float       lm_cfg_scale;        // 2.0
+    float       lm_cfg_cutoff_ratio; // 1.0 (1.0 = full CFG, 0.5 = CFG for first 50% of tokens)
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
     std::string lm_negative_prompt;  // ""

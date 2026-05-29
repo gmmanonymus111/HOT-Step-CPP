@@ -1,4 +1,4 @@
-﻿// request.cpp: AceStep request JSON read/write (yyjson)
+// request.cpp: AceStep request JSON read/write (yyjson)
 
 #include "request.h"
 
@@ -30,6 +30,7 @@ void request_init(AceRequest * r) {
     r->seed                 = -1;
     r->lm_temperature       = 0.85f;
     r->lm_cfg_scale         = 2.0f;
+    r->lm_cfg_cutoff_ratio  = 1.0f;
     r->lm_top_p             = 0.9f;
     r->lm_top_k             = 0;
     r->lm_negative_prompt   = "";
@@ -167,6 +168,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "lm_cfg_scale")) && yyjson_is_num(v)) {
         r->lm_cfg_scale = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_cfg_cutoff_ratio")) && yyjson_is_num(v)) {
+        r->lm_cfg_cutoff_ratio = (float) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "lm_top_p")) && yyjson_is_num(v)) {
         r->lm_top_p = (float) yyjson_get_num(v);
@@ -394,6 +398,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->lm_cfg_scale != def.lm_cfg_scale) {
         yyjson_mut_obj_add_real(doc, root, "lm_cfg_scale", r->lm_cfg_scale);
     }
+    if (all || r->lm_cfg_cutoff_ratio != def.lm_cfg_cutoff_ratio) {
+        yyjson_mut_obj_add_real(doc, root, "lm_cfg_cutoff_ratio", r->lm_cfg_cutoff_ratio);
+    }
     if (all || r->lm_top_p != def.lm_top_p) {
         yyjson_mut_obj_add_real(doc, root, "lm_top_p", r->lm_top_p);
     }
@@ -550,6 +557,9 @@ void request_dump(const AceRequest * r, FILE * f) {
             r->timesignature.c_str(), r->vocal_language.c_str());
     fprintf(f, "[Request] lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n", r->lm_temperature, r->lm_cfg_scale,
             r->lm_top_p, r->lm_top_k);
+    if (r->lm_cfg_cutoff_ratio != 1.0f) {
+        fprintf(f, "[Request] lm_cfg_cutoff_ratio: %.2f\n", r->lm_cfg_cutoff_ratio);
+    }
     fprintf(f, "[Request] dit: steps=%d guidance=%.1f shift=%.1f\n", r->inference_steps, r->guidance_scale, r->shift);
     if (r->dcw_scaler > 0.0f || r->dcw_high_scaler > 0.0f) {
         fprintf(f, "[Request] dit: dcw_mode=%s scaler=%.3f high_scaler=%.3f\n", r->dcw_mode.c_str(), r->dcw_scaler,
