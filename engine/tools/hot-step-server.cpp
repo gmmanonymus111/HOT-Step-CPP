@@ -1960,24 +1960,14 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // speculative decoding: auto-discover draft model from registry
-    if (g_draft_lm_path.empty()) {
-        // Auto-discover: look for a 0.6B LM in the registry
-        for (const auto & entry : g_registry.lm) {
-            if (entry.name.find("-0.6B-") != std::string::npos ||
-                entry.name.find("_0.6B_") != std::string::npos) {
-                g_draft_lm_path = entry.path;
-                fprintf(stderr, "[Server] Auto-discovered draft LM: %s\n", entry.name.c_str());
-                break;
-            }
-        }
-        if (g_draft_lm_path.empty()) {
-            fprintf(stderr, "[Server] No 0.6B draft LM found (speculative decode disabled)\n");
-        }
-    } else if (g_draft_lm_path == "none") {
+    // speculative decoding: only via explicit --draft-lm flag
+    // Auto-discovery DISABLED — GGML per-call overhead (~10ms) makes the 0.6B
+    // draft nearly as expensive as the 4B target. Re-enable when persistent
+    // graphs or CUDA graph capture reduce overhead below ~2ms.
+    if (g_draft_lm_path == "none") {
         fprintf(stderr, "[Server] Draft LM disabled (--no-draft)\n");
         g_draft_lm_path.clear();
-    } else {
+    } else if (!g_draft_lm_path.empty()) {
         fprintf(stderr, "[Server] Draft LM (explicit): %s\n", g_draft_lm_path.c_str());
     }
 
