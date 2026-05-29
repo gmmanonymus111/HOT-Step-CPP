@@ -539,11 +539,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       let fsqStartAt = 0;
       let textEncStartAt = 0;
       let textEncEndAt = 0;
+      let firstEngineLogAt = 0;  // first log line from engine = job started
+      let ditLastStepEndAt = 0;  // timestamp of last DiT step log (not vae)
+      let resolveParamsAt = 0;   // [Resolve-T] or [Resolve-Params] marks job setup
 
-      // Subscribe to engine logs for this track's DiT progress
       const unsubSynth = subscribeLines((line) => {
         if (line.source !== 'engine') return;
         const now = performance.now();
+        if (!firstEngineLogAt) firstEngineLogAt = now;
         const dit = line.text.match(/\[DiT\] Step (\d+)\/(\d+)\s+t=[\d.]+\s+\[(.+?)\]/);
         if (dit) {
           if (!ditFirstStepAt) ditFirstStepAt = now;
@@ -584,6 +587,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           job.stage = `Decoding audio tokens (FSQ)${trackLabel}...`;
         } else if (line.text.includes('[DiT]') && line.text.includes('batch')) {
           job.stage = `Preparing DiT${trackLabel}...`;
+        } else if (line.text.includes('[Resolve-T]') || line.text.includes('[Resolve-Params]')) {
+          if (!resolveParamsAt) resolveParamsAt = now;
         }
       });
 
@@ -643,14 +648,40 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         const textEncMs = Math.round(textEncEndAt - textEncStartAt);
         if (textEncMs > 50) timing.push({ name: `  Text Encoding${trackSuffix}`, ms: textEncMs });
       }
-      // Overhead = total synth - all accounted sub-phases
-      const accountedMs = (adapterMergeAt && ditFirstStepAt ? ditFirstStepAt - adapterMergeAt : 0)
+      // Gap analysis: break 'overhead' into specific gaps
+      const gaps: Array<{ name: string; ms: number }> = [];
+      // Gap 1: HTTP submit → first engine log (request latency + job queue)
+      if (firstEngineLogAt) {
+        gaps.push({ name: 'HTTP→Engine', ms: Math.round(firstEngineLogAt - synthTrackStart) });
+      }
+      // Gap 2: Text encoding end → adapter merge / DiT start (model loading: cond_enc → DiT)
+      if (textEncEndAt && adapterMergeAt) {
+        gaps.push({ name: 'TextEnc→Adapter', ms: Math.round(adapterMergeAt - textEncEndAt) });
+      } else if (textEncEndAt && ditFirstStepAt) {
+        gaps.push({ name: 'TextEnc→DiT', ms: Math.round(ditFirstStepAt - textEncEndAt) });
+      }
+      // Gap 3: DiT last step → VAE start (VAE model loading)
+      if (ditLastStepAt && vaeStartAt) {
+        gaps.push({ name: 'DiT→VAE', ms: Math.round(vaeStartAt - ditLastStepAt) });
+      }
+      // Gap 4: VAE/synth done → result fetched + file written (HTTP response + I/O)
+      // vaeStartAt→synthEndAt includes VAE decode + result fetch; VAE decode itself
+      // is fast (~2s) but synthEndAt includes getJobResult HTTP call + writeFileSync.
+      // We can't separate these without another marker, so we show total overhead.
+      const totalAccountedMs =
+        (firstEngineLogAt ? firstEngineLogAt - synthTrackStart : 0)
+        + (textEncStartAt && textEncEndAt ? textEncEndAt - (resolveParamsAt || firstEngineLogAt || textEncStartAt) : 0)
+        + (adapterMergeAt && ditFirstStepAt ? ditFirstStepAt - adapterMergeAt : 0)
+        + (textEncEndAt && adapterMergeAt ? adapterMergeAt - textEncEndAt : 0)
         + (ditFirstStepAt && ditLastStepAt ? ditLastStepAt - ditFirstStepAt : 0)
-        + (vaeStartAt ? synthEndAt - vaeStartAt : 0)
-        + (textEncStartAt && textEncEndAt ? textEncEndAt - textEncStartAt : 0)
-        + (fsqStartAt && ditFirstStepAt ? ditFirstStepAt - fsqStartAt : 0);
-      const overheadMs = synthTrackMs - Math.round(accountedMs);
-      if (overheadMs > 500) timing.push({ name: `  Synth Overhead${trackSuffix}`, ms: overheadMs });
+        + (ditLastStepAt && vaeStartAt ? vaeStartAt - ditLastStepAt : 0)
+        + (vaeStartAt ? synthEndAt - vaeStartAt : 0);
+      const unmeasuredMs = synthTrackMs - Math.round(totalAccountedMs);
+      // Show individual gaps that are significant
+      for (const g of gaps) {
+        if (g.ms > 200) timing.push({ name: `  ⏳ ${g.name}${trackSuffix}`, ms: g.ms });
+      }
+      if (unmeasuredMs > 500) timing.push({ name: `  Synth Overhead${trackSuffix}`, ms: unmeasuredMs });
 
       // Parent total
       timing.push({ name: `Synth Total${trackSuffix}`, ms: synthTrackMs });
