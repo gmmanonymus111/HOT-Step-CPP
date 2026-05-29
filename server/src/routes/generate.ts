@@ -11,6 +11,7 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { performance } from 'perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { aceClient, type AceRequest } from '../services/aceClient.js';
 import { getDb } from '../db/database.js';
@@ -30,6 +31,12 @@ import { getCachedLatent, saveCachedLatent } from '../services/generation/source
 const router = Router();
 
 /** Internal job state */
+/** Timing data for a single pipeline stage. */
+interface StageTiming {
+  name: string;
+  ms: number;
+}
+
 interface GenerationJob {
   id: string;
   userId: string;
@@ -46,6 +53,8 @@ interface GenerationJob {
     keyScale?: string;
     timeSignature?: string;
     masteredAudioUrl?: string;
+    timing?: StageTiming[];
+    totalMs?: number;
   };
   error?: string;
   params: any;
@@ -81,6 +90,17 @@ async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: Abort
 
 /** Run the full generation pipeline */
 async function runGeneration(job: GenerationJob): Promise<void> {
+  const pipelineStart = performance.now();
+  const timing: StageTiming[] = [];
+
+  /** Time a synchronous or async block and record its duration. */
+  async function timed<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+    const t0 = performance.now();
+    const result = await fn();
+    timing.push({ name, ms: Math.round(performance.now() - t0) });
+    return result;
+  }
+
   // Bail out if cancelled while waiting in the queue
   if (job.status === 'cancelled') return;
 
@@ -151,6 +171,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         job.status = 'lm_running';
         job.stage = 'Generating lyrics & audio codes...';
         job.progress = 10;
+
+        const lmStart = performance.now();
 
         // Subscribe to engine logs for LM progress
         const unsubLm = subscribeLines((line) => {
@@ -243,6 +265,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
         // Unsubscribe LM progress watcher
         unsubLm();
+        timing.push({ name: 'LM Phase', ms: Math.round(performance.now() - lmStart) });
       }
 
       // Re-inject trigger word into LM results — CoT caption replaces the
@@ -310,6 +333,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
     // ── Source audio (for cover/repaint/lego/extract tasks) ──
     const log = (level: 'INFO' | 'DEBUG' | 'WARNING' | 'ERROR', msg: string) => logGeneration(job.id, level, msg);
+    const srcPrepStart = performance.now();
     let srcAudioBuf: Buffer | undefined;
     let srcAudioPath: string | undefined;  // filesystem path for cache key
     if (isCoverTask && job.params.sourceAudioUrl) {
@@ -393,6 +417,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         }
       }
     }
+    const srcPrepMs = Math.round(performance.now() - srcPrepStart);
+    if (srcPrepMs > 50) timing.push({ name: 'Source/Timbre Prep', ms: srcPrepMs });
 
     // When any post-processing is enabled, request wav32 (float) from the engine.
     // wav16 applies peak normalization to 0 dBFS + hard clip — any downstream gain
@@ -496,6 +522,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       });
 
       // Submit single request to /synth
+      const synthTrackStart = performance.now();
       let synthJobId: string;
       if (srcAudioBuf || refAudioBuf || srcLatentBuf || refLatentBuf) {
         const parts = [
@@ -526,7 +553,9 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       fs.writeFileSync(filepath, audioBuffer);
       audioUrls.push(`/audio/${filename}`);
 
-      logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: saved ${filename} (${(audioBuffer.length / 1024).toFixed(0)} KB)`);
+      const synthTrackMs = Math.round(performance.now() - synthTrackStart);
+      timing.push({ name: totalTracks > 1 ? `Synth Track ${trackIdx + 1}` : 'Synth (DiT+VAE)', ms: synthTrackMs });
+      logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: saved ${filename} (${(audioBuffer.length / 1024).toFixed(0)} KB, ${(synthTrackMs / 1000).toFixed(1)}s)`);
 
       // Save companion LRC file if engine returned alignment data
       const lrcHeader = audioRes.headers.get('x-lrc-text');
@@ -544,6 +573,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
       // ── Whisper Lyrics Transcription (optional) ──
       if (job.params.whisperLyricsEnabled) {
+        const whisperTimingStart = performance.now();
         try {
           const { ensureWhisperCli, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
           const { reconcileLyrics } = await import('../services/lyricsReconcile.js');
@@ -585,6 +615,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         } catch (err: any) {
           logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackIdx + 1}: failed: ${err.message}`);
         }
+        const whisperMs = Math.round(performance.now() - whisperTimingStart);
+        if (whisperMs > 50) timing.push({ name: `Whisper Track ${trackIdx + 1}`, ms: whisperMs });
       }
 
       // Fetch and save companion latent file (post-DiT neural representation)
@@ -651,6 +683,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       ? job.params.duration
       : 0;
 
+    const autoTrimStart = performance.now();
     if (autoTrimOn && originalDuration > 0) {
       for (const audioUrl of audioUrls) {
         const audioFilename = path.basename(audioUrl);
@@ -678,6 +711,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         }
       }
     }
+    const autoTrimMs = Math.round(performance.now() - autoTrimStart);
+    if (autoTrimMs > 50) timing.push({ name: 'Auto-Trim', ms: autoTrimMs });
 
     // ── Post-processing chain ─────────────────────────────────
     // Raw WAV (audio_url) is NEVER modified. Post-processing runs on a copy.
@@ -691,6 +726,9 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         log, (stage) => { job.stage = stage; }
       );
       masteredUrls.push(...ppResult.masteredUrls);
+      if (ppResult.timing && ppResult.timing.length > 0) {
+        timing.push(...ppResult.timing);
+      }
       ppQualityScores = ppResult.qualityScores;
     } catch (err: any) {
       logGeneration(job.id, 'WARNING', `[Post-Processing] Chain failed: ${err.message}`);
@@ -735,6 +773,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
     // ── AI Cover Art (post-generation, non-fatal) ─────────────
     if (job.params.coverArtEnabled) {
+      const coverArtStart = performance.now();
       try {
         const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
         const readiness = getCoverArtReadiness();
@@ -762,7 +801,12 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       } catch (coverErr: any) {
         logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
       }
+      const coverArtMs = Math.round(performance.now() - coverArtStart);
+      if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
     }
+
+    const totalMs = Math.round(performance.now() - pipelineStart);
+    timing.push({ name: 'TOTAL', ms: totalMs });
 
     job.status = 'succeeded';
     job.progress = 100;
@@ -775,10 +819,27 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       keyScale,
       timeSignature,
       masteredAudioUrl: masteredUrls.find(u => !!u) || undefined,
+      timing,
+      totalMs,
     };
 
     logGeneration(job.id, 'INFO', `[Result] ${audioUrls.length} audio file(s) saved, ${songIds.length} song(s) created`);
     logGeneration(job.id, 'INFO', `[Result] Duration: ${duration}s, BPM: ${bpm}, Key: ${keyScale}`);
+
+    // ── Timing summary table ──
+    const maxName = Math.max(...timing.map(t => t.name.length), 6);
+    logGeneration(job.id, 'INFO', `[Timing] ── Pipeline Breakdown ──`);
+    for (const t of timing) {
+      const pct = totalMs > 0 ? ((t.ms / totalMs) * 100).toFixed(1) : '0.0';
+      const secs = (t.ms / 1000).toFixed(2);
+      const bar = '█'.repeat(Math.round((t.ms / totalMs) * 30));
+      if (t.name === 'TOTAL') {
+        logGeneration(job.id, 'INFO', `[Timing] ${'─'.repeat(maxName + 30)}`);
+      }
+      logGeneration(job.id, 'INFO', `[Timing] ${t.name.padEnd(maxName)}  ${secs.padStart(7)}s  ${pct.padStart(5)}%  ${bar}`);
+    }
+    console.log(`[Generate] Job ${job.id} completed in ${(totalMs / 1000).toFixed(1)}s`);
+
     finishGenerationLog(job.id, aceReq.task_type || 'text2music');
 
   } catch (err: any) {
