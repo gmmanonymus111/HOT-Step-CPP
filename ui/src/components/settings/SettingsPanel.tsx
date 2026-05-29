@@ -531,18 +531,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             { text: '−12s', type: 'speed' as const },
           ]}
         />
-
-        <SettingRow
-          id="setting-speculative-decode-perf"
-          label={t('settings.general.specDecode')}
-          description={t('settings.general.specDecodeDesc')}
-          checked={settings.speculativeDecoding}
-          onChange={(v) => update('speculativeDecoding', v)}
-          badges={[
-            { text: '−30%', type: 'speed' as const },
-            { text: '+1GB VRAM', type: 'vram' as const },
-          ]}
-        />
       </div>
       </>
       )}

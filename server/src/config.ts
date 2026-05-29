@@ -111,22 +111,26 @@ export const config = {
       }
       return '';
     })(),
-    draftLm: process.env.ACESTEPCPP_DRAFT_LM || (() => {
-      // Auto-detect: find first *-0.6B-*.gguf in models directory
-      const dir = process.env.ACESTEPCPP_MODELS || DEFAULT_MODELS;
-      if (fs.existsSync(dir)) {
-        const drafts = fs.readdirSync(dir)
-          .filter(f => f.endsWith('.gguf') && (f.includes('-0.6B-') || f.includes('_0.6B_')))
-          .sort((a, b) => {
-            // Prefer BF16 over quantized
-            const aBF = a.includes('BF16') ? 1 : 0;
-            const bBF = b.includes('BF16') ? 1 : 0;
-            return bBF - aBF;
-          });
-        if (drafts.length > 0) return path.join(dir, drafts[0]);
-      }
-      return '';
-    })(),
+    // Draft LM for speculative decoding — DISABLED
+    // GGML per-call overhead (~10ms) makes sequential 0.6B forwards nearly as
+    // expensive as the 4B target, negating the speedup. Left for future use if
+    // persistent graphs or CUDA graphs reduce per-call overhead.
+    // To re-enable: set ACESTEPCPP_DRAFT_LM env var or uncomment auto-detect.
+    draftLm: process.env.ACESTEPCPP_DRAFT_LM || '',
+    // draftLm: process.env.ACESTEPCPP_DRAFT_LM || (() => {
+    //   const dir = process.env.ACESTEPCPP_MODELS || DEFAULT_MODELS;
+    //   if (fs.existsSync(dir)) {
+    //     const drafts = fs.readdirSync(dir)
+    //       .filter(f => f.endsWith('.gguf') && (f.includes('-0.6B-') || f.includes('_0.6B_')))
+    //       .sort((a, b) => {
+    //         const aBF = a.includes('BF16') ? 1 : 0;
+    //         const bBF = b.includes('BF16') ? 1 : 0;
+    //         return bBF - aBF;
+    //       });
+    //     if (drafts.length > 0) return path.join(dir, drafts[0]);
+    //   }
+    //   return '';
+    // })(),
     get url() {
       return `http://${this.host}:${this.port}`;
     },
