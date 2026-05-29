@@ -43,6 +43,8 @@ interface PostProcessParams {
   // Audio Quality Evaluator
   qualityEvalEnabled?: boolean;
   qualityEvalTarget?: 'unmastered' | 'mastered' | 'both';
+  // Pipeline parallelism
+  parallelQualityEval?: boolean;
 }
 
 /** Quality scores for a single track (unmastered, mastered, or both). */
@@ -95,10 +97,16 @@ export async function runPostProcessingChain(
     const trackQuality: TrackQualityScores = {};
 
     // ── Quality Evaluation: Unmastered (before any PP) ──
-    if (qeOn && (qeTarget === 'unmastered' || qeTarget === 'both')) {
+    // When parallelQualityEval is enabled, fire QE concurrently with PP-VAE
+    // (they operate on different files: QE reads rawWavPath, PP-VAE reads processedPath)
+    let qePrePromise: Promise<void> | undefined;
+    const runQePre = async () => {
+      if (!(qeOn && (qeTarget === 'unmastered' || qeTarget === 'both'))) return;
       const qeStart = performance.now();
       try {
-        setStage(`Quality check (unmastered)${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+        if (!params.parallelQualityEval) {
+          setStage(`Quality check (unmastered)${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+        }
         const result = evaluateAudioQuality(rawWavPath);
         trackQuality.unmastered = result;
         log('INFO', formatQualityLog(result, `Unmastered ${audioFilename}`));
@@ -107,6 +115,13 @@ export async function runPostProcessingChain(
       }
       const qeMs = Math.round(performance.now() - qeStart);
       if (qeMs > 50) timing.push({ name: 'Quality Eval (pre)', ms: qeMs });
+    };
+
+    if (params.parallelQualityEval) {
+      // Fire and continue — will be awaited before mastered QE
+      qePrePromise = runQePre();
+    } else {
+      await runQePre();
     }
 
     if (ppVaeOn) {
@@ -211,6 +226,8 @@ export async function runPostProcessingChain(
     }
 
     // ── Quality Evaluation: Mastered (after all PP stages) ──
+    // Ensure pre-QE (if deferred) has completed before we proceed
+    if (qePrePromise) await qePrePromise;
     if (qeOn && (qeTarget === 'mastered' || qeTarget === 'both') && anyStageRan) {
       const qePostStart = performance.now();
       try {

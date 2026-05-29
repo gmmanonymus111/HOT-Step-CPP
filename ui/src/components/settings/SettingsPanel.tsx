@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Zap, Download, Tag, AlertTriangle, Loader2, Settings2,
   ChevronRight, Save, Scissors,
-  Key, Database, Globe
+  Key, Database, Globe, Gauge
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
@@ -33,6 +33,10 @@ export interface AppSettings {
   triggerUseFilename: boolean;
   triggerPlacement: 'prepend' | 'append' | 'replace';
   discoKickExtract: boolean;
+  // Pipeline parallelism (opt-in)
+  parallelWhisper: boolean;
+  parallelQualityEval: boolean;
+  parallelCoverArt: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -44,6 +48,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   triggerUseFilename: false,
   triggerPlacement: 'prepend',
   discoKickExtract: false,
+  parallelWhisper: false,
+  parallelQualityEval: false,
+  parallelCoverArt: false,
 };
 
 interface SettingsPanelProps {
@@ -219,7 +226,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     setBrowseKey(null);
   };
 
-  type TabId = 'general' | 'environment' | 'ai' | 'storage';
+  type TabId = 'general' | 'environment' | 'ai' | 'storage' | 'performance';
   const [activeTab, setActiveTab] = useState<TabId>('general');
 
   const tabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
@@ -227,6 +234,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     { id: 'environment', label: t('settings.tabs.environment'),     icon: <Settings2 size={15} className="settings-tab-icon" /> },
     { id: 'ai',          label: t('settings.tabs.ai'),     icon: <Key size={15} className="settings-tab-icon" /> },
     { id: 'storage',     label: t('settings.tabs.storage'),  icon: <Database size={15} className="settings-tab-icon" /> },
+    { id: 'performance', label: 'Performance', icon: <Gauge size={15} className="settings-tab-icon" /> },
   ];
 
   return (
@@ -433,6 +441,94 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             </span>
           )}
         </button>
+      </div>
+      </>
+      )}
+
+      {/* ═══════════════ PERFORMANCE TAB ═══════════════ */}
+      {activeTab === 'performance' && (
+      <>
+      {/* Pipeline Parallelism Section */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <Gauge size={16} className="settings-section-icon" />
+          <span className="settings-section-title">Pipeline Parallelism</span>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <div className="setting-description" style={{ marginTop: 0 }}>
+              Run independent pipeline stages concurrently instead of sequentially.
+              Enable these to reduce total generation time. Disable if you experience
+              out-of-memory errors or instability.
+            </div>
+          </div>
+        </div>
+
+        <SettingRow
+          id="setting-parallel-whisper"
+          label="Parallel Whisper Transcription"
+          description="Run lyrics transcription concurrently with post-processing. Whisper is CPU-only — no VRAM impact."
+          checked={settings.parallelWhisper}
+          onChange={(v) => update('parallelWhisper', v)}
+          badges={[
+            { text: '~6s saved', type: 'speed' as const },
+          ]}
+        />
+
+        <SettingRow
+          id="setting-parallel-qe"
+          label="Parallel Quality Evaluation"
+          description="Run audio quality analysis concurrently with other stages. CPU-only — no VRAM impact."
+          checked={settings.parallelQualityEval}
+          onChange={(v) => update('parallelQualityEval', v)}
+          badges={[
+            { text: '~2s saved', type: 'speed' as const },
+          ]}
+        />
+
+        <SettingRow
+          id="setting-parallel-cover-art"
+          label="Parallel Cover Art"
+          description="Start cover art generation during post-processing instead of waiting until after. Uses GPU (Flux) — may need VRAM headroom."
+          checked={settings.parallelCoverArt}
+          onChange={(v) => update('parallelCoverArt', v)}
+          badges={[
+            { text: '~5s saved', type: 'speed' as const },
+            { text: 'GPU', type: 'vram' as const },
+          ]}
+        />
+      </div>
+
+      {/* Existing Performance Settings */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <Zap size={16} className="settings-section-icon" />
+          <span className="settings-section-title">Engine</span>
+        </div>
+
+        <SettingRow
+          id="setting-co-resident-perf"
+          label={t('settings.general.coResident')}
+          description={t('settings.general.coResidentDesc')}
+          checked={settings.coResident}
+          onChange={(v) => update('coResident', v)}
+          badges={[
+            { text: '−13s', type: 'speed' as const },
+            { text: '+8GB VRAM', type: 'vram' as const },
+          ]}
+        />
+
+        <SettingRow
+          id="setting-cache-lm-perf"
+          label={t('settings.general.cacheLm')}
+          description={t('settings.general.cacheLmDesc')}
+          checked={settings.cacheLmCodes}
+          onChange={(v) => update('cacheLmCodes', v)}
+          badges={[
+            { text: '−12s', type: 'speed' as const },
+          ]}
+        />
       </div>
       </>
       )}

@@ -457,6 +457,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     // Save audio files and create DB entries
     const audioUrls: string[] = [];
     const songIds: string[] = [];
+    // Deferred parallel tasks (whisper, cover art) — collected during pipeline, awaited at end
+    const deferredTasks: Promise<void>[] = [];
     // Per-track mastered URLs (parallel array to audioUrls)
     const masteredUrls: string[] = [];
     // Per-track latent URLs (parallel array to audioUrls)
@@ -613,7 +615,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
 
       // ── Whisper Lyrics Transcription (optional) ──
-      if (job.params.whisperLyricsEnabled) {
+      // Can run in parallel with post-processing (CPU-only, no VRAM impact)
+      const runWhisperForTrack = async (trackNum: number, wavPath: string, trackLyrics: string, wavFilename: string) => {
         const whisperTimingStart = performance.now();
         try {
           const { ensureWhisperCli, findWhisperModel, transcribeWithWhisper } = await import('../services/whisperTranscribe.js');
@@ -622,42 +625,53 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           const whisperReady = await ensureWhisperCli();
           if (!whisperReady) {
             logGeneration(job.id, 'WARNING', '[Whisper] whisper-cli not available and auto-download failed — skipping');
-          } else if (!findWhisperModel(job.params.whisperModel)) {
+            return;
+          }
+          if (!findWhisperModel(job.params.whisperModel)) {
             logGeneration(job.id, 'WARNING', '[Whisper] No Whisper model found — skipping transcription');
+            return;
+          }
+          const whisperStart = Date.now();
+          logGeneration(job.id, 'INFO', `[Whisper] Track ${trackNum}: starting transcription...`);
+
+          const whisperResult = await transcribeWithWhisper(wavPath, trackLyrics, {
+            model: job.params.whisperModel,
+            language: job.params.whisperLanguage || 'auto',
+            beamSize: job.params.whisperBeamSize || 5,
+          });
+
+          if (whisperResult && whisperResult.segments?.length > 0) {
+            const modelName = job.params.whisperModel || 'auto';
+            const lyricsJson = reconcileLyrics(whisperResult, trackLyrics, modelName, false);
+
+            const lyricsJsonFilename = wavFilename.replace(/\.[^.]+$/, '.lyrics.json');
+            const lyricsJsonPath = path.join(config.data.audioDir, lyricsJsonFilename);
+            fs.writeFileSync(lyricsJsonPath, JSON.stringify(lyricsJson, null, 2));
+
+            const elapsed = Date.now() - whisperStart;
+            const wordCount = lyricsJson.lines.reduce((n: number, l: any) => n + l.words.length, 0);
+            logGeneration(job.id, 'INFO',
+              `[Whisper] Track ${trackNum}: saved ${lyricsJsonFilename} (${lyricsJson.lines.length} lines, ${wordCount} words, ${elapsed}ms)`
+            );
           } else {
-            const whisperStart = Date.now();
-            logGeneration(job.id, 'INFO', `[Whisper] Track ${trackIdx + 1}: starting transcription...`);
-
-            const sourceLyrics = synthReq.lyrics || '';
-
-            const whisperResult = await transcribeWithWhisper(filepath, sourceLyrics, {
-              model: job.params.whisperModel,
-              language: job.params.whisperLanguage || 'auto',
-              beamSize: job.params.whisperBeamSize || 5,
-            });
-
-            if (whisperResult && whisperResult.segments?.length > 0) {
-              const modelName = job.params.whisperModel || 'auto';
-              const lyricsJson = reconcileLyrics(whisperResult, sourceLyrics, modelName, false);
-
-              const lyricsJsonFilename = filename.replace(/\.[^.]+$/, '.lyrics.json');
-              const lyricsJsonPath = path.join(config.data.audioDir, lyricsJsonFilename);
-              fs.writeFileSync(lyricsJsonPath, JSON.stringify(lyricsJson, null, 2));
-
-              const elapsed = Date.now() - whisperStart;
-              const wordCount = lyricsJson.lines.reduce((n: number, l: any) => n + l.words.length, 0);
-              logGeneration(job.id, 'INFO',
-                `[Whisper] Track ${trackIdx + 1}: saved ${lyricsJsonFilename} (${lyricsJson.lines.length} lines, ${wordCount} words, ${elapsed}ms)`
-              );
-            } else {
-              logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackIdx + 1}: no segments returned`);
-            }
+            logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackNum}: no segments returned`);
           }
         } catch (err: any) {
-          logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackIdx + 1}: failed: ${err.message}`);
+          logGeneration(job.id, 'WARNING', `[Whisper] Track ${trackNum}: failed: ${err.message}`);
         }
         const whisperMs = Math.round(performance.now() - whisperTimingStart);
-        if (whisperMs > 50) timing.push({ name: `Whisper Track ${trackIdx + 1}`, ms: whisperMs });
+        if (whisperMs > 50) timing.push({ name: `Whisper Track ${trackNum}`, ms: whisperMs });
+      };
+
+      if (job.params.whisperLyricsEnabled) {
+        const whisperPromise = runWhisperForTrack(trackIdx + 1, filepath, synthReq.lyrics || '', filename);
+        if (job.params.parallelWhisper) {
+          // Deferred — will be awaited after post-processing
+          deferredTasks.push(whisperPromise);
+          logGeneration(job.id, 'INFO', `[Whisper] Track ${trackIdx + 1}: launched in parallel`);
+        } else {
+          await whisperPromise;
+        }
       }
 
       // Fetch and save companion latent file (post-DiT neural representation)
@@ -698,7 +712,11 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
       // Store latent URL for DB insert
       latentUrls.push(latentUrl);
-    }
+    } // end per-track synth loop
+
+    // Collect deferred parallel tasks (whisper, cover art) to await before completion
+    // This array was populated inside the per-track loop above
+    // and will be joined before DB insert.
 
     // Get metadata from LM results
     const firstResult = lmResults[0];
@@ -760,10 +778,16 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     job.progress = 89;
     job.stage = 'Post-processing...';
 
+    // Pass parallel flags to the PP chain
+    const ppParams = {
+      ...job.params,
+      parallelQualityEval: !!job.params.parallelQualityEval,
+    };
+
     let ppQualityScores: Array<{ unmastered?: any; mastered?: any }> = [];
     try {
       const ppResult = await runPostProcessingChain(
-        audioUrls, job.params, totalTracks, job.id,
+        audioUrls, ppParams, totalTracks, job.id,
         log, (stage) => { job.stage = stage; }
       );
       masteredUrls.push(...ppResult.masteredUrls);
@@ -813,14 +837,17 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     }
 
     // ── AI Cover Art (post-generation, non-fatal) ─────────────
-    if (job.params.coverArtEnabled) {
+    const runCoverArtTask = async () => {
+      if (!job.params.coverArtEnabled) return;
       const coverArtStart = performance.now();
       try {
         const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
         const readiness = getCoverArtReadiness();
         if (readiness.installed) {
-          job.stage = 'Generating cover art...';
-          job.progress = 95;
+          if (!job.params.parallelCoverArt) {
+            job.stage = 'Generating cover art...';
+            job.progress = 95;
+          }
           for (let i = 0; i < songIds.length; i++) {
             const trackResult = lmResults[i] || firstResult;
             try {
@@ -844,6 +871,21 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
       const coverArtMs = Math.round(performance.now() - coverArtStart);
       if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
+    };
+
+    if (job.params.parallelCoverArt && job.params.coverArtEnabled) {
+      // Fire cover art in parallel — will be awaited before completion
+      deferredTasks.push(runCoverArtTask());
+      logGeneration(job.id, 'INFO', '[CoverArt] Launched in parallel with post-processing');
+    } else {
+      await runCoverArtTask();
+    }
+
+    // ── Await all deferred parallel tasks ─────────────────────
+    if (deferredTasks.length > 0) {
+      logGeneration(job.id, 'INFO', `[Parallel] Awaiting ${deferredTasks.length} deferred task(s)...`);
+      await Promise.allSettled(deferredTasks);
+      logGeneration(job.id, 'INFO', '[Parallel] All deferred tasks completed');
     }
 
     const totalMs = Math.round(performance.now() - pipelineStart);

@@ -681,6 +681,9 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
       const appSettings = JSON.parse(settingsRaw);
       params.coResident = appSettings.coResident;
       params.cacheLmCodes = appSettings.cacheLmCodes;
+      params.parallelWhisper = appSettings.parallelWhisper;
+      params.parallelQualityEval = appSettings.parallelQualityEval;
+      params.parallelCoverArt = appSettings.parallelCoverArt;
     }
   } catch { /* ignore parse errors */ }
 

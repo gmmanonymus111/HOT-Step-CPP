@@ -496,6 +496,9 @@ const AppContent: React.FC = () => {
       source: 'create',
       coResident: settings.coResident,
       cacheLmCodes: settings.cacheLmCodes,
+      parallelWhisper: settings.parallelWhisper,
+      parallelQualityEval: settings.parallelQualityEval,
+      parallelCoverArt: settings.parallelCoverArt,
     };
     enqueueSimpleGen(enrichedParams, token, handleSongCreated);
   }, [token, settings, globalParams, handleSongCreated]);
