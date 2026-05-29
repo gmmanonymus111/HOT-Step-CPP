@@ -642,15 +642,17 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
 
     // Adaptive K parameters
     int   K     = 8;
-    int   K_MIN = 2;
-    int   K_MAX = 12;
-    float alpha = 0.7f;  // rolling acceptance rate
+    int   K_MAX = 12;     // K_MIN effectively 6 via initial value; K only increases
+    float alpha = 0.7f;   // rolling draft-match rate (not including correction tokens)
 
     // Statistics
-    int total_accepted    = 0;
+    int total_matched     = 0;  // draft tokens that agreed with target
+    int total_committed   = 0;  // tokens committed (matched + corrections)
     int total_drafted     = 0;
     int total_iterations  = 0;
     int total_target_fwd  = 0;
+    double total_draft_ms = 0;
+    double total_verify_ms = 0;
 
     Timer t_decode;
 
@@ -665,9 +667,11 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
         int draft_saved_pos   = draft->kv_pos[0];
 
         // ── 1. DRAFT: generate K tokens with 0.6B (no CFG) ──
+        Timer t_draft_phase;
         int draft_last = last_token;
         std::vector<int>   draft_tokens(K);
         std::vector<float> draft_logits_buf(V);  // full vocab (qw3lm_forward always returns V)
+        int actual_K = K;
 
         for (int k = 0; k < K; k++) {
             qw3lm_forward(draft, &draft_last, 1, 0, draft_logits_buf.data());
@@ -689,17 +693,18 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
             draft_last = tok;
 
             if (tok == TOKEN_IM_END) {
-                // Draft predicted EOS — truncate K to k+1
-                K = k + 1;
+                // Draft predicted EOS — truncate to k+1
+                actual_K = k + 1;
                 break;
             }
         }
-        total_drafted += K;
+        total_drafted += actual_K;
+        total_draft_ms += t_draft_phase.ms();
 
         // ── 2. VERIFY: forward all K draft tokens through target (single pass) ──
-        // Target conditional forward
-        std::vector<float> target_cond_logits((size_t) t_out_V * K);
-        qw3lm_forward_verify(target, draft_tokens.data(), K, 0, target_cond_logits.data(),
+        Timer t_verify_phase;
+        std::vector<float> target_cond_logits((size_t) t_out_V * actual_K);
+        qw3lm_forward_verify(target, draft_tokens.data(), actual_K, 0, target_cond_logits.data(),
                              t_lm_offset, t_lm_count);
 
         // Target unconditional forward (for CFG)
@@ -707,17 +712,21 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
         bool do_cfg = use_cfg && (cfg_cutoff_ratio >= 1.0f ||
                       (int) audio_codes.size() < (int)(max_tokens * cfg_cutoff_ratio));
         if (do_cfg) {
-            target_uncond_logits.resize((size_t) t_out_V * K);
-            qw3lm_forward_verify(target, draft_tokens.data(), K, 1, target_uncond_logits.data(),
+            target_uncond_logits.resize((size_t) t_out_V * actual_K);
+            qw3lm_forward_verify(target, draft_tokens.data(), actual_K, 1, target_uncond_logits.data(),
                                  t_lm_offset, t_lm_count);
             total_target_fwd += 2;
         } else {
             total_target_fwd += 1;
         }
+        total_verify_ms += t_verify_phase.ms();
 
         // ── 3. ACCEPT/REJECT: compare draft vs target ──
-        int n_accepted = 0;
-        for (int k = 0; k < K; k++) {
+        int n_matched   = 0;  // draft tokens that agreed with target
+        int n_committed = 0;  // total tokens to commit (matched + 1 correction)
+        bool hit_eos = false;
+
+        for (int k = 0; k < actual_K; k++) {
             float * lc = target_cond_logits.data() + (size_t) k * t_out_V;
 
             // CFG combine for this position
@@ -742,16 +751,19 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
 
             if (target_tok == draft_tokens[k]) {
                 // ACCEPT: draft and target agree
-                n_accepted++;
+                n_matched++;
+                n_committed++;
                 if (target_tok == TOKEN_IM_END) {
-                    break;  // EOS accepted
+                    hit_eos = true;
+                    break;
                 }
                 audio_codes.push_back(target_tok - AUDIO_CODE_BASE);
                 if ((int) audio_codes.size() >= max_tokens) break;
             } else {
-                // REJECT: use target's token (the correction), stop
-                n_accepted++;
+                // REJECT: use target's correction token, stop
+                n_committed++;  // correction token counts for KV advance, NOT for alpha
                 if (target_tok == TOKEN_IM_END) {
+                    hit_eos = true;
                     break;
                 }
                 audio_codes.push_back(target_tok - AUDIO_CODE_BASE);
@@ -759,7 +771,8 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
             }
         }
 
-        total_accepted += n_accepted;
+        total_matched += n_matched;
+        total_committed += n_committed;
         total_iterations++;
 
         // Update last_token for next iteration
@@ -770,45 +783,49 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
         }
 
         // ── 4. KV CACHE ROLLBACK ──
-        // Target processed K tokens but only n_accepted are valid
-        target->kv_pos[0] = target_saved_pos + n_accepted;
+        // Target processed actual_K tokens but only n_committed are valid
+        target->kv_pos[0] = target_saved_pos + n_committed;
         if (use_cfg) {
-            target->kv_pos[1] = target_saved_pos + n_accepted;
+            target->kv_pos[1] = target_saved_pos + n_committed;
         }
         // Draft: rollback to match
-        draft->kv_pos[0] = draft_saved_pos + n_accepted;
+        draft->kv_pos[0] = draft_saved_pos + n_committed;
 
         // ── 5. ADAPTIVE K ──
-        float batch_rate = (float) n_accepted / K;
-        alpha = 0.9f * alpha + 0.1f * batch_rate;
+        // Track match rate (not including correction tokens)
+        float match_rate = (float) n_matched / actual_K;
+        alpha = 0.9f * alpha + 0.1f * match_rate;
         if (alpha > 0.85f) {
             K = std::min(K + 1, K_MAX);
-        } else if (alpha < 0.5f) {
-            K = std::max(K - 1, K_MIN);
         }
+        // Don't decrease K below K_MIN — better to waste some draft than degenerate
 
         // Check for EOS
-        if (last_token == TOKEN_IM_END) break;
+        if (hit_eos) break;
 
         // Progress logging
         if (total_iterations % 20 == 0) {
             double elapsed = t_decode.ms() / 1000.0;
-            float avg_accept = total_drafted > 0 ? (float) total_accepted / total_drafted : 0;
-            fprintf(stderr, "[LM-Phase2] %d codes, K=%d, α=%.2f, avg_accept=%.0f%%, %.1f tok/s\n",
-                    (int) audio_codes.size(), K, alpha, avg_accept * 100,
-                    (double) audio_codes.size() / elapsed);
+            float avg_match = total_drafted > 0 ? (float) total_matched / total_drafted : 0;
+            fprintf(stderr, "[LM-Phase2] %d codes, K=%d, α=%.2f, match=%.0f%%, %.1f tok/s, draft=%.0f/verify=%.0fms\n",
+                    (int) audio_codes.size(), K, alpha, avg_match * 100,
+                    (double) audio_codes.size() / elapsed,
+                    total_draft_ms / total_iterations, total_verify_ms / total_iterations);
         }
     }
 
     double decode_ms = t_decode.ms();
-    float avg_accept = total_drafted > 0 ? (float) total_accepted / total_drafted : 0;
-    float speedup    = total_iterations > 0 ? (float) audio_codes.size() / total_iterations : 0;
+    float avg_match = total_drafted > 0 ? (float) total_matched / total_drafted : 0;
+    float tokens_per_iter = total_iterations > 0 ? (float) audio_codes.size() / total_iterations : 0;
     fprintf(stderr, "[LM-Phase2] Speculative decode: %zu codes in %.0fms (%.1f tok/s)\n",
             audio_codes.size(), decode_ms, (double) audio_codes.size() / (decode_ms / 1000.0));
-    fprintf(stderr, "[LM-Phase2]   iterations=%d, drafted=%d, accepted=%d, rate=%.0f%%, avg_per_iter=%.1f\n",
-            total_iterations, total_drafted, total_accepted, avg_accept * 100, speedup);
-    fprintf(stderr, "[LM-Phase2]   target_fwd=%d (vs %zu non-spec), adaptive K=%d\n",
+    fprintf(stderr, "[LM-Phase2]   iterations=%d, drafted=%d, matched=%d (%.0f%%), per_iter=%.1f\n",
+            total_iterations, total_drafted, total_matched, avg_match * 100, tokens_per_iter);
+    fprintf(stderr, "[LM-Phase2]   target_fwd=%d (vs %zu non-spec), final K=%d\n",
             total_target_fwd, audio_codes.size(), K);
+    fprintf(stderr, "[LM-Phase2]   avg draft=%.1fms, avg verify=%.1fms per iteration\n",
+            total_draft_ms / std::max(1, total_iterations),
+            total_verify_ms / std::max(1, total_iterations));
 
     return { codes_to_string(audio_codes) };
 }
