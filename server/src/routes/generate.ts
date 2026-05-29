@@ -773,6 +773,59 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     const autoTrimMs = Math.round(performance.now() - autoTrimStart);
     if (autoTrimMs > 50) timing.push({ name: 'Auto-Trim', ms: autoTrimMs });
 
+    // ── AI Cover Art (fire before PP chain for true parallelism) ─
+    // Cover Art only needs title/style/lyrics (available now from LM results).
+    // It writes to DB using songIds, so we capture them into an array that
+    // the DB insert loop below will populate. The cover art promise awaits
+    // songIds being ready via a resolve callback.
+    let coverArtSongIds: string[] = [];
+    let resolveSongIds: (() => void) | undefined;
+    const songIdsReady = new Promise<void>(r => { resolveSongIds = r; });
+
+    const runCoverArtTask = async () => {
+      if (!job.params.coverArtEnabled) return;
+      const coverArtStart = performance.now();
+      try {
+        const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
+        const readiness = getCoverArtReadiness();
+        if (readiness.installed) {
+          if (!job.params.parallelCoverArt) {
+            job.stage = 'Generating cover art...';
+            job.progress = 95;
+          }
+          // Wait for DB insert to provide songIds
+          await songIdsReady;
+          for (let i = 0; i < coverArtSongIds.length; i++) {
+            const trackResult = lmResults[i] || firstResult;
+            try {
+              await generateCoverArt({
+                songId: coverArtSongIds[i],
+                title,
+                style,
+                lyrics: trackResult.lyrics || '',
+                subject: job.params.coverArtSubject || job.params.subject || '',
+              });
+              logGeneration(job.id, 'INFO', `[CoverArt] Generated cover for song ${coverArtSongIds[i]}`);
+            } catch (coverTrackErr: any) {
+              logGeneration(job.id, 'WARNING', `[CoverArt] Failed for song ${coverArtSongIds[i]} (non-fatal): ${coverTrackErr.message}`);
+            }
+          }
+        } else {
+          logGeneration(job.id, 'DEBUG', `[CoverArt] Skipped — not installed (missing: ${readiness.missingFiles.join(', ')})`);
+        }
+      } catch (coverErr: any) {
+        logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
+      }
+      const coverArtMs = Math.round(performance.now() - coverArtStart);
+      if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
+    };
+
+    // Launch cover art BEFORE PP chain for actual parallel execution
+    if (job.params.parallelCoverArt && job.params.coverArtEnabled) {
+      deferredTasks.push(runCoverArtTask());
+      logGeneration(job.id, 'INFO', '[CoverArt] Launched in parallel with post-processing');
+    }
+
     // ── Post-processing chain ─────────────────────────────────
     // Raw WAV (audio_url) is NEVER modified. Post-processing runs on a copy.
     job.progress = 89;
@@ -836,55 +889,30 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
     }
 
-    // ── AI Cover Art (post-generation, non-fatal) ─────────────
-    const runCoverArtTask = async () => {
-      if (!job.params.coverArtEnabled) return;
-      const coverArtStart = performance.now();
-      try {
-        const { generateCoverArt, getCoverArtReadiness } = await import('../services/coverArt/coverArtService.js');
-        const readiness = getCoverArtReadiness();
-        if (readiness.installed) {
-          if (!job.params.parallelCoverArt) {
-            job.stage = 'Generating cover art...';
-            job.progress = 95;
-          }
-          for (let i = 0; i < songIds.length; i++) {
-            const trackResult = lmResults[i] || firstResult;
-            try {
-              await generateCoverArt({
-                songId: songIds[i],
-                title,
-                style,
-                lyrics: trackResult.lyrics || '',
-                subject: job.params.coverArtSubject || job.params.subject || '',
-              });
-              logGeneration(job.id, 'INFO', `[CoverArt] Generated cover for song ${songIds[i]}`);
-            } catch (coverTrackErr: any) {
-              logGeneration(job.id, 'WARNING', `[CoverArt] Failed for song ${songIds[i]} (non-fatal): ${coverTrackErr.message}`);
-            }
-          }
-        } else {
-          logGeneration(job.id, 'DEBUG', `[CoverArt] Skipped — not installed (missing: ${readiness.missingFiles.join(', ')})`);
-        }
-      } catch (coverErr: any) {
-        logGeneration(job.id, 'WARNING', `[CoverArt] Failed (non-fatal): ${coverErr.message}`);
-      }
-      const coverArtMs = Math.round(performance.now() - coverArtStart);
-      if (coverArtMs > 50) timing.push({ name: 'Cover Art', ms: coverArtMs });
-    };
+    // Unblock cover art task now that songIds are populated
+    coverArtSongIds = songIds;
+    resolveSongIds?.();
 
-    if (job.params.parallelCoverArt && job.params.coverArtEnabled) {
-      // Fire cover art in parallel — will be awaited before completion
-      deferredTasks.push(runCoverArtTask());
-      logGeneration(job.id, 'INFO', '[CoverArt] Launched in parallel with post-processing');
-    } else {
+    // Launch cover art sequentially if not already launched in parallel
+    if (!job.params.parallelCoverArt) {
       await runCoverArtTask();
     }
 
-    // ── Await all deferred parallel tasks ─────────────────────
+    // ── Await all deferred parallel tasks (with timeout) ─────
     if (deferredTasks.length > 0) {
       logGeneration(job.id, 'INFO', `[Parallel] Awaiting ${deferredTasks.length} deferred task(s)...`);
-      await Promise.allSettled(deferredTasks);
+      const TIMEOUT_MS = 60_000; // 60s safety timeout
+      const withTimeout = deferredTasks.map(p =>
+        Promise.race([
+          p,
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error('Deferred task timed out after 60s')), TIMEOUT_MS)
+          ),
+        ]).catch(err => {
+          logGeneration(job.id, 'WARNING', `[Parallel] Task failed/timed out: ${err.message}`);
+        })
+      );
+      await Promise.allSettled(withTimeout);
       logGeneration(job.id, 'INFO', '[Parallel] All deferred tasks completed');
     }
 
