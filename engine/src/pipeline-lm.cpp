@@ -26,6 +26,11 @@ struct AceLm {
     ModelStore * store;
     AceLmParams  params;
     ModelKey     lm_key;
+
+    // Speculative decoding: lightweight draft model (0.6B)
+    // Loaded once, kept resident, bypasses ModelStore.
+    Qwen3LM    draft;
+    bool       draft_loaded;
 };
 
 // Batched Phase 1: N text generations with shared prompt, different seeds.
@@ -546,16 +551,279 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     return results;
 }
 
+// Speculative decoding: Phase 2 audio code generation with draft model.
+// draft = 0.6B model (fast, no CFG), target = 4B model (verifies with CFG).
+// N=1 only (no batched spec decode). Returns 1-element vector.
+static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
+                                                        Qwen3LM *      draft,
+                                                        BPETokenizer & bpe,
+                                                        const AcePrompt & ace,
+                                                        float          temperature,
+                                                        float          top_p,
+                                                        int            top_k,
+                                                        uint32_t       seed,
+                                                        float          cfg_scale,
+                                                        float          cfg_cutoff_ratio,
+                                                        const char *   negative_prompt,
+                                                        bool (*cancel)(void *),
+                                                        void * cancel_data) {
+    int  V             = target->cfg.vocab_size;
+    bool use_cfg       = cfg_scale > 1.0f;
+
+    // Build prompts
+    std::string       cot    = build_cot_yaml(ace);
+    std::vector<int>  prompt = build_lm_prompt_with_cot(bpe, ace, cot);
+    int max_tokens = (int)(ace.duration * 5) + 100;
+
+    fprintf(stderr, "[LM-Phase2] Speculative decode: draft=%dL/%d, target=%dL/%d, max_tokens=%d, CFG=%.2f\n",
+            draft->cfg.n_layers, draft->cfg.hidden_size,
+            target->cfg.n_layers, target->cfg.hidden_size,
+            max_tokens, cfg_scale);
+
+    // Reset KV caches: target cond=0, uncond=1; draft cond=0
+    qw3lm_reset_kv(target, 0);
+    if (use_cfg) qw3lm_reset_kv(target, 1);
+    qw3lm_reset_kv(draft, 0);
+
+    // Prefill target (cond)
+    Timer t_prefill;
+    std::vector<float> prefill_logits(V);
+    qw3lm_forward(target, prompt.data(), (int) prompt.size(), 0, prefill_logits.data());
+
+    // Prefill target (uncond)
+    std::vector<float> prefill_logits_uncond(V);
+    if (use_cfg) {
+        std::vector<int> uncond = build_lm_prompt_uncond_with_cot(bpe, ace, negative_prompt);
+        qw3lm_forward(target, uncond.data(), (int) uncond.size(), 1, prefill_logits_uncond.data());
+    }
+
+    // Prefill draft (cond only, no CFG)
+    std::vector<float> draft_prefill_logits(V);
+    qw3lm_forward(draft, prompt.data(), (int) prompt.size(), 0, draft_prefill_logits.data());
+
+    fprintf(stderr, "[LM-Phase2] Prefill %.0fms (target cond+uncond + draft)\n", t_prefill.ms());
+
+    // Sample first token from target's CFG-combined prefill logits
+    std::mt19937 rng(seed);
+    std::vector<int> audio_codes;
+    int last_token;
+
+    {
+        std::vector<float> lg(prefill_logits);
+        if (use_cfg) {
+            for (int v = 0; v < V; v++) {
+                lg[v] = prefill_logits_uncond[v] + cfg_scale * (lg[v] - prefill_logits_uncond[v]);
+            }
+        }
+        for (int v = 0; v < AUDIO_CODE_BASE; v++) {
+            if (v != TOKEN_IM_END) lg[v] = -1e9f;
+        }
+        int tok = sample_top_k_p(lg.data(), V, temperature, top_p, top_k, rng);
+        last_token = tok;
+        if (tok >= AUDIO_CODE_BASE && tok < AUDIO_CODE_BASE + AUDIO_CODE_COUNT) {
+            audio_codes.push_back(tok - AUDIO_CODE_BASE);
+        }
+    }
+
+    if (last_token == TOKEN_IM_END) {
+        fprintf(stderr, "[LM-Phase2] EOS on first token\n");
+        return { codes_to_string(audio_codes) };
+    }
+
+    // Partial LM head setup (same for both models)
+    bool  t_partial   = (target->lm_head_phase2 != NULL);
+    int   t_out_V     = t_partial ? (V - TOKEN_IM_END) : V;
+    int   t_lm_offset = t_partial ? TOKEN_IM_END : 0;
+    int   t_lm_count  = t_partial ? (V - TOKEN_IM_END) : 0;
+    int   t_eos_idx     = t_partial ? 0 : TOKEN_IM_END;
+    int   t_code_offset = t_partial ? (AUDIO_CODE_BASE - TOKEN_IM_END) : AUDIO_CODE_BASE;
+
+    int compact_V = AUDIO_CODE_COUNT + 1;
+
+    // Adaptive K parameters
+    int   K     = 8;
+    int   K_MIN = 2;
+    int   K_MAX = 12;
+    float alpha = 0.7f;  // rolling acceptance rate
+
+    // Statistics
+    int total_accepted    = 0;
+    int total_drafted     = 0;
+    int total_iterations  = 0;
+    int total_target_fwd  = 0;
+
+    Timer t_decode;
+
+    while ((int) audio_codes.size() < max_tokens) {
+        if (cancel && cancel(cancel_data)) {
+            fprintf(stderr, "[LM-Phase2] Cancelled\n");
+            return {};
+        }
+
+        // Save KV positions for rollback
+        int target_saved_pos  = target->kv_pos[0];
+        int draft_saved_pos   = draft->kv_pos[0];
+
+        // ── 1. DRAFT: generate K tokens with 0.6B (no CFG) ──
+        int draft_last = last_token;
+        std::vector<int>   draft_tokens(K);
+        std::vector<float> draft_logits_buf(V);  // full vocab (qw3lm_forward always returns V)
+
+        for (int k = 0; k < K; k++) {
+            qw3lm_forward(draft, &draft_last, 1, 0, draft_logits_buf.data());
+
+            // Extract compact logits (EOS + audio codes) from full vocab
+            std::vector<float> compact(compact_V);
+            compact[0] = draft_logits_buf[TOKEN_IM_END];
+            for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
+                compact[c + 1] = draft_logits_buf[AUDIO_CODE_BASE + c];
+            }
+
+            // Use a copy of rng state that we DON'T advance — draft sampling
+            // uses a throwaway rng. Target verification uses the real rng.
+            std::mt19937 draft_rng(rng() + k);
+            int compact_tok = sample_top_k_p(compact.data(), compact_V, temperature, top_p, top_k, draft_rng);
+            int tok = (compact_tok == 0) ? TOKEN_IM_END : (AUDIO_CODE_BASE + compact_tok - 1);
+
+            draft_tokens[k] = tok;
+            draft_last = tok;
+
+            if (tok == TOKEN_IM_END) {
+                // Draft predicted EOS — truncate K to k+1
+                K = k + 1;
+                break;
+            }
+        }
+        total_drafted += K;
+
+        // ── 2. VERIFY: forward all K draft tokens through target (single pass) ──
+        // Target conditional forward
+        std::vector<float> target_cond_logits((size_t) t_out_V * K);
+        qw3lm_forward_verify(target, draft_tokens.data(), K, 0, target_cond_logits.data(),
+                             t_lm_offset, t_lm_count);
+
+        // Target unconditional forward (for CFG)
+        std::vector<float> target_uncond_logits;
+        bool do_cfg = use_cfg && (cfg_cutoff_ratio >= 1.0f ||
+                      (int) audio_codes.size() < (int)(max_tokens * cfg_cutoff_ratio));
+        if (do_cfg) {
+            target_uncond_logits.resize((size_t) t_out_V * K);
+            qw3lm_forward_verify(target, draft_tokens.data(), K, 1, target_uncond_logits.data(),
+                                 t_lm_offset, t_lm_count);
+            total_target_fwd += 2;
+        } else {
+            total_target_fwd += 1;
+        }
+
+        // ── 3. ACCEPT/REJECT: compare draft vs target ──
+        int n_accepted = 0;
+        for (int k = 0; k < K; k++) {
+            float * lc = target_cond_logits.data() + (size_t) k * t_out_V;
+
+            // CFG combine for this position
+            if (do_cfg) {
+                float * lu = target_uncond_logits.data() + (size_t) k * t_out_V;
+                lc[t_eos_idx] = lu[t_eos_idx] + cfg_scale * (lc[t_eos_idx] - lu[t_eos_idx]);
+                for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
+                    int idx = t_code_offset + c;
+                    lc[idx] = lu[idx] + cfg_scale * (lc[idx] - lu[idx]);
+                }
+            }
+
+            // Compact sampling (EOS + audio codes)
+            std::vector<float> compact(compact_V);
+            compact[0] = lc[t_eos_idx];
+            for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
+                compact[c + 1] = lc[t_code_offset + c];
+            }
+
+            int compact_tok = sample_top_k_p(compact.data(), compact_V, temperature, top_p, top_k, rng);
+            int target_tok  = (compact_tok == 0) ? TOKEN_IM_END : (AUDIO_CODE_BASE + compact_tok - 1);
+
+            if (target_tok == draft_tokens[k]) {
+                // ACCEPT: draft and target agree
+                n_accepted++;
+                if (target_tok == TOKEN_IM_END) {
+                    break;  // EOS accepted
+                }
+                audio_codes.push_back(target_tok - AUDIO_CODE_BASE);
+                if ((int) audio_codes.size() >= max_tokens) break;
+            } else {
+                // REJECT: use target's token (the correction), stop
+                n_accepted++;
+                if (target_tok == TOKEN_IM_END) {
+                    break;
+                }
+                audio_codes.push_back(target_tok - AUDIO_CODE_BASE);
+                break;
+            }
+        }
+
+        total_accepted += n_accepted;
+        total_iterations++;
+
+        // Update last_token for next iteration
+        if (!audio_codes.empty()) {
+            last_token = AUDIO_CODE_BASE + audio_codes.back();
+        } else {
+            last_token = TOKEN_IM_END;
+        }
+
+        // ── 4. KV CACHE ROLLBACK ──
+        // Target processed K tokens but only n_accepted are valid
+        target->kv_pos[0] = target_saved_pos + n_accepted;
+        if (use_cfg) {
+            target->kv_pos[1] = target_saved_pos + n_accepted;
+        }
+        // Draft: rollback to match
+        draft->kv_pos[0] = draft_saved_pos + n_accepted;
+
+        // ── 5. ADAPTIVE K ──
+        float batch_rate = (float) n_accepted / K;
+        alpha = 0.9f * alpha + 0.1f * batch_rate;
+        if (alpha > 0.85f) {
+            K = std::min(K + 1, K_MAX);
+        } else if (alpha < 0.5f) {
+            K = std::max(K - 1, K_MIN);
+        }
+
+        // Check for EOS
+        if (last_token == TOKEN_IM_END) break;
+
+        // Progress logging
+        if (total_iterations % 20 == 0) {
+            double elapsed = t_decode.ms() / 1000.0;
+            float avg_accept = total_drafted > 0 ? (float) total_accepted / total_drafted : 0;
+            fprintf(stderr, "[LM-Phase2] %d codes, K=%d, α=%.2f, avg_accept=%.0f%%, %.1f tok/s\n",
+                    (int) audio_codes.size(), K, alpha, avg_accept * 100,
+                    (double) audio_codes.size() / elapsed);
+        }
+    }
+
+    double decode_ms = t_decode.ms();
+    float avg_accept = total_drafted > 0 ? (float) total_accepted / total_drafted : 0;
+    float speedup    = total_iterations > 0 ? (float) audio_codes.size() / total_iterations : 0;
+    fprintf(stderr, "[LM-Phase2] Speculative decode: %zu codes in %.0fms (%.1f tok/s)\n",
+            audio_codes.size(), decode_ms, (double) audio_codes.size() / (decode_ms / 1000.0));
+    fprintf(stderr, "[LM-Phase2]   iterations=%d, drafted=%d, accepted=%d, rate=%.0f%%, avg_per_iter=%.1f\n",
+            total_iterations, total_drafted, total_accepted, avg_accept * 100, speedup);
+    fprintf(stderr, "[LM-Phase2]   target_fwd=%d (vs %zu non-spec), adaptive K=%d\n",
+            total_target_fwd, audio_codes.size(), K);
+
+    return { codes_to_string(audio_codes) };
+}
+
 // Public API
 
 void ace_lm_default_params(AceLmParams * p) {
-    p->model_path    = NULL;
-    p->max_seq       = 8192;
-    p->max_batch     = 1;
-    p->use_fsm       = true;
-    p->use_fa        = true;
-    p->use_batch_cfg = true;
-    p->clamp_fp16    = false;
+    p->model_path       = NULL;
+    p->max_seq          = 8192;
+    p->max_batch        = 1;
+    p->use_fsm          = true;
+    p->use_fa           = true;
+    p->use_batch_cfg    = true;
+    p->clamp_fp16       = false;
+    p->draft_model_path = NULL;
 }
 
 AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
@@ -583,6 +851,25 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
     }
     if (params->clamp_fp16) {
         fprintf(stderr, "[Ace-LM] FP16 clamp enabled\n");
+    }
+
+    // Speculative decoding: load draft model if path provided
+    ctx->draft_loaded = false;
+    if (params->draft_model_path && params->draft_model_path[0]) {
+        fprintf(stderr, "[Ace-LM] Loading draft model for speculative decode: %s\n", params->draft_model_path);
+        Timer t_draft;
+        // Draft model: small KV cache (2048 max), 1 set (no CFG on draft)
+        if (qw3lm_load(&ctx->draft, params->draft_model_path, 2048, 1)) {
+            ctx->draft.use_flash_attn = params->use_fa;
+            ctx->draft.clamp_fp16     = params->clamp_fp16;
+            // Build partial LM head for Phase 2 audio codes
+            qw3lm_build_partial_head(&ctx->draft, TOKEN_IM_END);
+            ctx->draft_loaded = true;
+            fprintf(stderr, "[Ace-LM] Draft model loaded: %dL H=%d, %.0fms\n",
+                    ctx->draft.cfg.n_layers, ctx->draft.cfg.hidden_size, t_draft.ms());
+        } else {
+            fprintf(stderr, "[Ace-LM] WARNING: failed to load draft model, speculative decode disabled\n");
+        }
     }
 
     return ctx;
@@ -849,9 +1136,17 @@ int ace_lm_generate(AceLm *            ctx,
         fprintf(stderr, "[LM-Generate] %s mode, no audio code generation\n",
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
-        batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
-                                       req->lm_cfg_cutoff_ratio,
-                                       neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
+        // Speculative decode: draft model available + batch_size=1
+        if (ctx->draft_loaded && lm_batch_size == 1) {
+            const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
+            batch_codes = run_phase2_speculative(model, &ctx->draft, *bpe, aces[0],
+                                                  temperature, top_p, top_k, seed, cfg_scale,
+                                                  req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data);
+        } else {
+            batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
+                                           req->lm_cfg_cutoff_ratio,
+                                           neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
+        }
         if (batch_codes.empty()) {
             return -1;
         }
@@ -893,6 +1188,11 @@ int ace_lm_generate(AceLm *            ctx,
 void ace_lm_free(AceLm * ctx) {
     if (!ctx) {
         return;
+    }
+    if (ctx->draft_loaded) {
+        qw3lm_free(&ctx->draft);
+        ctx->draft_loaded = false;
+        fprintf(stderr, "[Ace-LM] Draft model freed\n");
     }
     delete ctx;
 }

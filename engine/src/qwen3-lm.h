@@ -568,6 +568,120 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens, int 
     ggml_free(ctx);
 }
 
+// Verify forward: token_ids[n_tokens] -> logits[out_V * n_tokens] (ALL positions)
+// Used by speculative decoding: target model verifies K draft tokens in one pass.
+// Returns one logit vector per input position (not just last).
+// lm_offset/lm_count: partial LM head (0 = full vocab).
+static void qw3lm_forward_verify(Qwen3LM * m, const int * token_ids, int n_tokens, int kv_set, float * logits,
+                                  int lm_offset = 0, int lm_count = 0) {
+    const Qwen3LMConfig & c      = m->cfg;
+    int                   kv_pos = m->kv_pos[kv_set];
+    int                   kv_len = kv_pos + n_tokens;
+
+    if (kv_len > c.max_seq_len) {
+        fprintf(stderr, "[LM-Verify] FATAL: kv_len %d > max_seq %d\n", kv_len, c.max_seq_len);
+        return;
+    }
+
+    size_t                  ctx_size = (size_t) 16384 * ggml_tensor_overhead() + ggml_graph_overhead();
+    struct ggml_init_params gp       = { ctx_size, NULL, true };
+    struct ggml_context *   ctx      = ggml_init(gp);
+    struct ggml_cgraph *    gf       = ggml_new_graph_custom(ctx, 16384, false);
+
+    // Inputs
+    struct ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    struct ggml_tensor * mask = NULL;
+    if (n_tokens > 1) {
+        mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, kv_len, n_tokens);
+        ggml_set_name(mask, "causal_mask");
+        ggml_set_input(mask);
+    }
+
+    struct ggml_tensor * token_ids_t = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(token_ids_t, "token_ids");
+    ggml_set_input(token_ids_t);
+
+    struct ggml_tensor * hidden = ggml_get_rows(ctx, m->embed_tokens, token_ids_t);
+
+    // Transformer layers
+    for (int l = 0; l < c.n_layers; l++) {
+        Qwen3Layer * ly = &m->layers[l];
+
+        struct ggml_tensor * norm = qwen3_rms_norm(ctx, hidden, ly->input_layernorm, c.rms_norm_eps);
+        struct ggml_tensor * attn =
+            qw3lm_build_attn(ctx, gf, c, ly, norm, positions, mask, m->kv_k[kv_set][l], m->kv_v[kv_set][l], kv_pos,
+                             kv_len, n_tokens, m->use_flash_attn, m->clamp_fp16);
+        hidden = ggml_add(ctx, hidden, attn);
+        if (m->clamp_fp16) {
+            hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);
+        }
+
+        norm                     = qwen3_rms_norm(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
+        struct ggml_tensor * mlp = qwen3_build_mlp(ctx, ly, norm, n_tokens);
+        hidden                   = ggml_add(ctx, hidden, mlp);
+        if (m->clamp_fp16) {
+            hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);
+        }
+    }
+
+    // Final norm — keep ALL positions: hidden is [H, n_tokens]
+    hidden = qwen3_rms_norm(ctx, hidden, m->final_norm, c.rms_norm_eps);
+
+    // LM head: project ALL hidden states -> [out_V, n_tokens]
+    int                  out_V     = (lm_count > 0) ? lm_count : c.vocab_size;
+    struct ggml_tensor * lm_weight = m->embed_tokens;
+    if (lm_count > 0 && m->lm_head_phase2) {
+        lm_weight = m->lm_head_phase2;
+    } else if (lm_count > 0) {
+        out_V = c.vocab_size;
+    }
+    struct ggml_tensor * lgt = ggml_mul_mat(ctx, lm_weight, hidden);  // [out_V, n_tokens]
+    ggml_set_name(lgt, "logits");
+    ggml_set_output(lgt);
+    ggml_build_forward_expand(gf, lgt);
+
+    // Allocate
+    if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
+        fprintf(stderr, "[LM] FATAL: failed to allocate graph (verify, %d tokens)\n", n_tokens);
+        exit(1);
+    }
+
+    ggml_backend_tensor_set(token_ids_t, token_ids, 0, n_tokens * sizeof(int));
+
+    {
+        std::vector<int> pos_data(n_tokens);
+        for (int i = 0; i < n_tokens; i++) {
+            pos_data[i] = kv_pos + i;
+        }
+        ggml_backend_tensor_set(positions, pos_data.data(), 0, n_tokens * sizeof(int));
+    }
+
+    if (mask) {
+        std::vector<uint16_t> mask_data((size_t) kv_len * n_tokens);
+        for (int i = 0; i < n_tokens; i++) {
+            int query_abs_pos = kv_pos + i;
+            for (int j = 0; j < kv_len; j++) {
+                float v                            = (j <= query_abs_pos) ? 0.0f : -INFINITY;
+                mask_data[(size_t) i * kv_len + j] = ggml_fp32_to_fp16(v);
+            }
+        }
+        ggml_backend_tensor_set(mask, mask_data.data(), 0, (size_t) kv_len * n_tokens * sizeof(uint16_t));
+    }
+
+    ggml_backend_sched_graph_compute(m->sched, gf);
+
+    // Read ALL logits [out_V, n_tokens]
+    ggml_backend_tensor_get(lgt, logits, 0, (size_t) out_V * n_tokens * sizeof(float));
+
+    m->kv_pos[kv_set] += n_tokens;
+
+    ggml_backend_sched_reset(m->sched);
+    ggml_free(ctx);
+}
+
 // Batched decode forward: N tokens (1 per sequence), batched weight matmuls.
 // kv_pos per element from m->kv_pos[kv_sets[i]], supports different prompt lengths.
 // kv_sets[N]: which KV set each token uses.

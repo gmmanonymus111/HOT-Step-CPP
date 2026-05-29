@@ -19,6 +19,7 @@ struct AceLmParams {
     bool         use_fa;         // flash attention
     bool         use_batch_cfg;  // batch cond+uncond in one forward
     bool         clamp_fp16;     // clamp hidden states to FP16 range
+    const char * draft_model_path;  // draft LM for speculative decode (NULL = disabled)
 };
 
 void ace_lm_default_params(AceLmParams * p);
