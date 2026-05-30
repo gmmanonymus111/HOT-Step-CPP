@@ -108,6 +108,7 @@ struct DiTMeta {
 ModelStore * store_create(EvictPolicy policy);
 void         store_free(ModelStore * s);
 void         store_set_policy(ModelStore * s, EvictPolicy policy);
+EvictPolicy  store_get_policy(ModelStore * s);
 
 // Typed GPU module accessors. Each returns a pointer owned by the store;
 // never free it yourself. Returns NULL on load failure.

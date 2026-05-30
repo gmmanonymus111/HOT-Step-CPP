@@ -195,6 +195,11 @@ void store_set_policy(ModelStore * s, EvictPolicy policy) {
     s->policy = policy;
 }
 
+EvictPolicy store_get_policy(ModelStore * s) {
+    if (!s) return EVICT_STRICT;
+    return s->policy;
+}
+
 void store_free(ModelStore * s) {
     if (!s) {
         return;
