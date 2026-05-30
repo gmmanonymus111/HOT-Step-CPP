@@ -548,7 +548,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         if (line.source !== 'engine') return;
         const now = performance.now();
         if (!firstEngineLogAt) firstEngineLogAt = now;
-        const dit = line.text.match(/\[DiT\] Step (\d+)\/(\d+)\s+t=[\d.]+\s+\[(.+?)\]/);
+        const dit = line.text.match(/\[DiT(?:-TRT)?\] Step (\d+)\/(\d+)\s+t=[\d.]+\s+\[(.+?)\]/);
         if (dit) {
           if (!ditFirstStepAt) ditFirstStepAt = now;
           ditLastStepAt = now;
@@ -558,7 +558,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           job.progress = Math.round(trackProgressBase + (step / total) * progressPerTrack * 0.8);
           return;
         }
-        const ditSimple = line.text.match(/\[DiT\] Step (\d+)\/(\d+)/);
+        const ditSimple = line.text.match(/\[DiT(?:-TRT)?\] Step (\d+)\/(\d+)/);
         if (ditSimple) {
           if (!ditFirstStepAt) ditFirstStepAt = now;
           ditLastStepAt = now;
@@ -568,7 +568,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           job.progress = Math.round(trackProgressBase + (step / total) * progressPerTrack * 0.8);
           return;
         }
-        if (line.text.includes('[VAE]') || line.text.includes('vae_decode')) {
+        if (line.text.includes('[VAE]') || line.text.includes('[VAE-ORT]') || line.text.includes('vae_decode')) {
           if (!vaeStartAt) vaeStartAt = now;
           job.stage = `Decoding audio (VAE)${trackLabel}...`;
           job.progress = Math.round(trackProgressBase + progressPerTrack * 0.9);
@@ -586,7 +586,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         } else if (line.text.includes('[FSQ]') || line.text.includes('fsq_detokenize')) {
           if (!fsqStartAt) fsqStartAt = now;
           job.stage = `Decoding audio tokens (FSQ)${trackLabel}...`;
-        } else if (line.text.includes('[DiT]') && line.text.includes('batch')) {
+        } else if (line.text.includes('[DiT]') && line.text.includes('batch') || line.text.includes('[DiT-TRT]') && line.text.includes('Batch')) {
           job.stage = `Preparing DiT${trackLabel}...`;
         } else if (line.text.includes('[Resolve-T]') || line.text.includes('[Resolve-Params]')) {
           if (!resolveParamsAt) resolveParamsAt = now;
