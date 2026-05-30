@@ -1255,6 +1255,13 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
         }
         fprintf(stderr, "[DiT-Generate] TRT Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
 
+        // Release TRT engine from VRAM (matches GGML path's store_release behavior).
+        // The .engine file is cached on disk so re-load is ~8s, not a full rebuild.
+        dit_trt_free(&s_trt);
+        s_trt_ready = false;
+        s_trt_onnx_path.clear();
+        fprintf(stderr, "[DiT-TRT] Engine unloaded from VRAM\n");
+
         // (fall through to latent post-processing below)
         goto post_dit;
     }
