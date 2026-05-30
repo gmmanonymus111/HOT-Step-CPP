@@ -342,10 +342,24 @@ inline bool dit_trt_load(
         return false;
     }
 
-    // Resolve I/O tensor indices
+    // Resolve I/O tensor indices and log dtypes
     int num_io = ctx->engine->getNbIOTensors();
     for (int i = 0; i < num_io; i++) {
         const char* name = ctx->engine->getIOTensorName(i);
+        auto dtype = ctx->engine->getTensorDataType(name);
+        auto mode = ctx->engine->getTensorIOMode(name);
+        const char* dtype_str = "unknown";
+        switch (dtype) {
+            case nvinfer1::DataType::kFLOAT:  dtype_str = "fp32"; break;
+            case nvinfer1::DataType::kHALF:   dtype_str = "fp16"; break;
+            case nvinfer1::DataType::kINT32:  dtype_str = "int32"; break;
+            case nvinfer1::DataType::kINT8:   dtype_str = "int8"; break;
+            case nvinfer1::DataType::kBOOL:   dtype_str = "bool"; break;
+            default: break;
+        }
+        const char* io_str = (mode == nvinfer1::TensorIOMode::kINPUT) ? "INPUT" : "OUTPUT";
+        fprintf(stderr, "[DiT-TRT] IO[%d] %-20s %s  %s\n", i, name, io_str, dtype_str);
+        
         if (std::string(name) == "input_latents") ctx->idx_input_latents = i;
         else if (std::string(name) == "enc_hidden") ctx->idx_enc_hidden = i;
         else if (std::string(name) == "t")          ctx->idx_t = i;
