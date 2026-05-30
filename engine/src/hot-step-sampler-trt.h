@@ -261,8 +261,8 @@ static int dit_trt_generate(DitTrt *              trt,
     cudaMalloc(&d_input, input_fp16_elems * sizeof(uint16_t));
     cudaMalloc(&d_enc,   enc_fp16_elems * sizeof(uint16_t));
     cudaMalloc(&d_vel,   vel_fp16_elems * sizeof(uint16_t));
-    cudaMalloc(&d_t,     N_graph * sizeof(float));
-    cudaMalloc(&d_t_r,   N_graph * sizeof(float));
+    cudaMalloc((void**)&d_t,     N_graph * sizeof(float));
+    cudaMalloc((void**)&d_t_r,   N_graph * sizeof(float));
 
     if (!d_input || !d_enc || !d_vel || !d_t || !d_t_r) {
         fprintf(stderr, "[DiT-TRT] FATAL: cudaMalloc failed\n");
@@ -525,8 +525,10 @@ static int dit_trt_generate(DitTrt *              trt,
             }
 
             // Apply solver step
-            lua_call_solver_step(*solver_plugin, xt.data(), vt.data(),
-                t_curr, t_next, n_total, N, T, Oc, step, num_steps,
+            const float * vt_readonly = vt.data();
+            solver_state.step_index = step;
+            lua_call_solver_step(*solver_plugin, xt.data(), vt_readonly,
+                t_curr, t_next, n_total,
                 solver_state, evaluate_velocity, vt.data(),
                 g_hotstep_params.plugin_params);
 

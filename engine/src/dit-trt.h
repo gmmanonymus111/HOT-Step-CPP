@@ -129,7 +129,7 @@ inline bool dit_trt_build(
     auto network = builder->createNetworkV2(flags);
     if (!network) {
         fprintf(stderr, "[DiT-TRT] Failed to create network\n");
-        builder->destroy();
+        delete builder;
         return false;
     }
 
@@ -138,9 +138,9 @@ inline bool dit_trt_build(
     if (!parser->parseFromFile(onnx_path,
             static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
         fprintf(stderr, "[DiT-TRT] ONNX parse failed\n");
-        parser->destroy();
-        network->destroy();
-        builder->destroy();
+        delete parser;
+        delete network;
+        delete builder;
         return false;
     }
 
@@ -205,10 +205,10 @@ inline bool dit_trt_build(
     auto serialized = builder->buildSerializedNetwork(*network, *config);
     if (!serialized) {
         fprintf(stderr, "[DiT-TRT] Engine build failed\n");
-        config->destroy();
-        parser->destroy();
-        network->destroy();
-        builder->destroy();
+        delete config;
+        delete parser;
+        delete network;
+        delete builder;
         return false;
     }
 
@@ -216,11 +216,11 @@ inline bool dit_trt_build(
     FILE* f = fopen(engine_path, "wb");
     if (!f) {
         fprintf(stderr, "[DiT-TRT] Cannot write to %s\n", engine_path);
-        serialized->destroy();
-        config->destroy();
-        parser->destroy();
-        network->destroy();
-        builder->destroy();
+        delete serialized;
+        delete config;
+        delete parser;
+        delete network;
+        delete builder;
         return false;
     }
     fwrite(serialized->data(), 1, serialized->size(), f);
@@ -232,11 +232,11 @@ inline bool dit_trt_build(
     fprintf(stderr, "[DiT-TRT] Engine saved to %s (%zu bytes, %.1f min)\n",
             engine_path, serialized->size(), ms / 60000.0);
 
-    serialized->destroy();
-    config->destroy();
-    parser->destroy();
-    network->destroy();
-    builder->destroy();
+    delete serialized;
+    delete config;
+    delete parser;
+    delete network;
+    delete builder;
 
     return true;
 }
@@ -292,29 +292,28 @@ inline bool dit_trt_load(
     }
 
     // Use parser refitter to auto-load weights from ONNX
+    // TRT 10: refitFromFile takes only the path (no severity arg)
     auto parser_refitter = nvonnxparser::createParserRefitter(*refitter, ctx->logger);
-    if (!parser_refitter->refitFromFile(onnx_path,
-            static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+    if (!parser_refitter->refitFromFile(onnx_path)) {
         fprintf(stderr, "[DiT-TRT] Parser refit from ONNX failed\n");
-        parser_refitter->destroy();
-        refitter->destroy();
+        delete parser_refitter;
+        delete refitter;
         return false;
     }
 
     if (!refitter->refitCudaEngine()) {
         fprintf(stderr, "[DiT-TRT] Engine refit failed\n");
-        parser_refitter->destroy();
-        refitter->destroy();
+        delete parser_refitter;
+        delete refitter;
         return false;
     }
 
     // Cache base weights for later adapter revert
-    // Get all refittable weight names
-    int32_t num_weights = refitter->getAll(0, nullptr, nullptr);
+    // TRT 10: use getAllWeights (not getAll with LayerRole)
+    int32_t num_weights = refitter->getAllWeights(0, nullptr);
     if (num_weights > 0) {
         std::vector<const char*> names(num_weights);
-        std::vector<nvinfer1::LayerRole> roles(num_weights);
-        refitter->getAll(num_weights, names.data(), roles.data());
+        refitter->getAllWeights(num_weights, names.data());
 
         for (int32_t i = 0; i < num_weights; i++) {
             auto w = refitter->getNamedWeights(names[i]);
@@ -328,8 +327,8 @@ inline bool dit_trt_load(
                 ctx->base_weights.size());
     }
 
-    parser_refitter->destroy();
-    refitter->destroy();
+    delete parser_refitter;
+    delete refitter;
 
     // Create execution context
     ctx->context = ctx->engine->createExecutionContext();
@@ -410,11 +409,11 @@ inline int64_t dit_trt_refit_adapter(
 
     if (!refitter->refitCudaEngine()) {
         fprintf(stderr, "[DiT-TRT] Adapter refit failed\n");
-        refitter->destroy();
+        delete refitter;
         return -1;
     }
 
-    refitter->destroy();
+    delete refitter;
     ctx->current_adapter = adapter_name;
 
     auto t1 = std::chrono::steady_clock::now();
@@ -443,7 +442,7 @@ inline int64_t dit_trt_refit_base(DitTrt* ctx) {
     }
 
     bool ok = refitter->refitCudaEngine();
-    refitter->destroy();
+    delete refitter;
 
     if (!ok) {
         fprintf(stderr, "[DiT-TRT] Base refit failed!\n");
@@ -493,11 +492,11 @@ inline bool dit_trt_forward(
     context->setInputShape(t_name,             nvinfer1::Dims{1, {N}});
     context->setInputShape(t_r_name,           nvinfer1::Dims{1, {N}});
 
-    // Set tensor addresses
-    context->setTensorAddress(input_latents_name, input_latents);
-    context->setTensorAddress(enc_hidden_name,    enc_hidden);
-    context->setTensorAddress(t_name,             t);
-    context->setTensorAddress(t_r_name,           t_r);
+    // Set tensor addresses (TRT 10: setTensorAddress takes void*, cast away const)
+    context->setTensorAddress(input_latents_name, const_cast<void*>(input_latents));
+    context->setTensorAddress(enc_hidden_name,    const_cast<void*>(enc_hidden));
+    context->setTensorAddress(t_name,             const_cast<void*>(static_cast<const void*>(t)));
+    context->setTensorAddress(t_r_name,           const_cast<void*>(static_cast<const void*>(t_r)));
     context->setTensorAddress(velocity_name,      velocity_out);
 
     // Enqueue on stream
@@ -516,9 +515,10 @@ inline void dit_trt_free(DitTrt* ctx) {
     if (ctx->d_t)             { cudaFree(ctx->d_t);             ctx->d_t = nullptr; }
     if (ctx->d_t_r)           { cudaFree(ctx->d_t_r);           ctx->d_t_r = nullptr; }
     if (ctx->d_velocity)      { cudaFree(ctx->d_velocity);      ctx->d_velocity = nullptr; }
-    if (ctx->context)         { ctx->context->destroy();         ctx->context = nullptr; }
-    if (ctx->engine)          { ctx->engine->destroy();          ctx->engine = nullptr; }
-    if (ctx->runtime)         { ctx->runtime->destroy();         ctx->runtime = nullptr; }
+    // TRT 10: use delete instead of destroy()
+    if (ctx->context)         { delete ctx->context;            ctx->context = nullptr; }
+    if (ctx->engine)          { delete ctx->engine;             ctx->engine = nullptr; }
+    if (ctx->runtime)         { delete ctx->runtime;            ctx->runtime = nullptr; }
     ctx->base_weights.clear();
 }
 

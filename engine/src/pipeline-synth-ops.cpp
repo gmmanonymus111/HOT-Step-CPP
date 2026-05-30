@@ -966,7 +966,8 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             // Need to build or load the TRT engine
             if (s_trt_ready) {
                 dit_trt_free(&s_trt);
-                s_trt = DitTrt{};
+                // dit_trt_free already nulls pointers and clears base_weights
+                s_trt.current_adapter.clear();
                 s_trt_ready = false;
             }
 
@@ -1044,6 +1045,11 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             return -1;
         }
         fprintf(stderr, "[DiT-Generate] Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
+
+        // LRC alignment: run while the DiT is still held (dit_guard in scope).
+        if (s.get_lrc) {
+            ops_lrc_extract(ctx, dit, batch_n, s);
+        }
     }
 
 #ifdef HOT_STEP_TRT
@@ -1093,9 +1099,15 @@ post_dit:
     // LRC alignment: run while the DiT is still held (dit_guard in scope).
     // This avoids a full DiT eviction + reload + adapter merge that would
     // happen if we ran LRC as a separate phase under EVICT_STRICT.
-    if (s.get_lrc) {
-        ops_lrc_extract(ctx, dit, batch_n, s);
+    // NOTE: LRC requires the GGML DiT model for cross-attention maps.
+    //       Not supported in TRT path yet.
+#ifdef HOT_STEP_TRT
+    if (s.get_lrc && ctx->dit_key.path.size() > 5 &&
+        ctx->dit_key.path.compare(ctx->dit_key.path.size() - 5, 5, ".onnx") == 0) {
+        fprintf(stderr, "[DiT-Generate] LRC not yet supported with TRT DiT, skipping\n");
+        s.get_lrc = false;
     }
+#endif
 
     return 0;
 }
