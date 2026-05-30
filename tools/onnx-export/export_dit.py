@@ -156,18 +156,12 @@ class DiTForwardWrapper(nn.Module):
         context_latents = input_latents[:, :, :128]
         hidden_states = input_latents[:, :, 128:]
         
-        # autocast(bf16) is needed during ONNX trace to handle RoPE's complex
-        # number computation (torch.view_as_complex → ComplexDouble).
-        # The model weights are already in the right dtypes (bf16 bulk + fp32
-        # islands); autocast just ensures the tracer resolves complex→real.
-        if self.precision == "bf16_mixed":
-            autocast_dtype = torch.bfloat16
-        elif self.precision == "fp32":
-            autocast_dtype = torch.float32
-        else:
-            autocast_dtype = torch.float32
-        
-        with torch.amp.autocast('cuda', dtype=autocast_dtype):
+        # Trace with fp32 autocast regardless of precision recipe.
+        # The model WEIGHTS are bf16 (for memory savings in the ONNX), but the
+        # compute graph must be fp32 to avoid the TorchScript exporter generating
+        # Cast(to=COMPLEX128) from SDPA's internal decomposition with bf16 inputs.
+        # TRT's FP16 builder flag then auto-selects fp16 matmuls at build time.
+        with torch.amp.autocast('cuda', dtype=torch.float32):
             outputs = self.dit(
                 hidden_states=hidden_states,
                 timestep=t,
@@ -393,13 +387,9 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
     """Export the DiT forward pass to ONNX."""
     device = next(dit_model.parameters()).device
     
-    # Determine the tensor dtype for dummy inputs based on precision
-    if precision == "bf16_mixed":
-        tensor_dtype = torch.bfloat16
-    elif precision == "fp32":
-        tensor_dtype = torch.float32
-    else:
-        tensor_dtype = torch.float32
+    # Dummy inputs are fp32 for tracing (bf16 trace hits ComplexDouble in SDPA)
+    # The model weights stay bf16 in the ONNX — TRT's FP16 flag handles the rest
+    tensor_dtype = torch.float32
     
     wrapper = DiTForwardWrapper(dit_model, precision=precision)
     wrapper.eval()
@@ -448,7 +438,7 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
             "t_r":           {0: "batch"},
             "velocity":      {0: "batch", 1: "seq_len"},
         },
-        do_constant_folding=False,  # bf16 graph hits ComplexDouble in folding
+        do_constant_folding=True,  # fp32 trace — no ComplexDouble issue
         export_params=True,
         # Force legacy TorchScript exporter — the dynamo/ExportedProgram path
         # has a type promotion bug with mixed bf16/fp32 graphs (assertion in
