@@ -147,12 +147,17 @@ else()
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ONNX Runtime (SuperSep stem separation)
+# ONNX Runtime (SuperSep stem separation + VAE-ORT TensorRT acceleration)
 # ─────────────────────────────────────────────────────────────────────────────
 # Pre-built ORT GPU package. Resolution order:
 #   1. ORT_ROOT cmake variable
 #   2. ONNXRUNTIME_ROOT environment variable
 #   3. Auto-detect from engine/deps/onnxruntime/ (populated by buildall.cmd)
+#
+# CUDAToolkit detection: the find_package at L73 is conditional on
+# CMAKE_CUDA_ARCHITECTURES, so on cached re-configures CUDAToolkit_FOUND
+# may be unset. Ensure it's always available for CUDA EP support.
+find_package(CUDAToolkit QUIET)
 option(HOT_STEP_SUPERSEP "Enable SuperSep stem separation (requires ONNX Runtime)" ON)
 
 set(ORT_ROOT "" CACHE PATH "Path to ONNX Runtime pre-built package")
