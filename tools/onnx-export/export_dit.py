@@ -8,12 +8,13 @@ into a single ONNX graph with 4 simplified inputs.
 
 Precision recipes (--precision):
   fp32       — Full FP32. Correct but slow. Baseline for validation.
-  fp16_mixed — (default for XL) bf16 bulk + fp32 ConvTranspose1d island.
+  bf16_mixed — (default for XL) bf16 bulk + fp32 ConvTranspose1d island.
                Used with TRT STRONGLY_TYPED mode. Demon-proven recipe.
+               bf16 has same exponent range as fp32 — no activation overflow.
 
 Usage:
     python export_dit.py --model-dir <path-to-safetensors-model> --output <output.onnx>
-    python export_dit.py --model-dir <path> --output <path> --precision fp16_mixed
+    python export_dit.py --model-dir <path> --output <path> --precision bf16_mixed
 
 The diffusion loop, guidance (APG/CFG), and solvers stay in C++.
 TRT compiles the ONNX graph once; LoRA adapters use IRefitter weight swapping.
@@ -36,7 +37,7 @@ import torch.nn.functional as F
 class _Fp32CastWrapper(nn.Module):
     """Run an inner module in fp32, casting around it.
 
-    Used when TRT has no kernel for a specific op shape.
+    Used when TRT has no kernel for a specific op shape in bf16.
     The wrapper casts input to fp32, runs the inner module, then casts
     output back to the caller's dtype.
     """
@@ -47,8 +48,8 @@ class _Fp32CastWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out_dtype = x.dtype
-        # Disable autocast — without this, the outer autocast(fp16) overrides
-        # our explicit fp32 computation and TRT sees fp16 Conv weights.
+        # Disable autocast — without this, the outer autocast(bf16) overrides
+        # our explicit fp32 computation and TRT sees bf16 weights.
         with torch.amp.autocast('cuda', enabled=False):
             return self.inner(x.float()).to(out_dtype)
 
@@ -57,7 +58,7 @@ class PatchEmbedLinear(nn.Module):
     """Replace Conv1d(C_in, C_out, K, stride=K) with reshape + Linear.
     
     TRT 10.16 has NO kernels for 1D convolutions with patch_size shapes
-    in any precision mode (fp16 or fp32). This is mathematically equivalent:
+    in any precision mode (fp16, bf16, or fp32). This is mathematically equivalent:
       Conv1d: input[B, C_in, T] → output[B, C_out, T//K]
       Linear: input[B, C_in, T] → unfold[B, T//K, C_in*K] → Linear → [B, C_out, T//K]
     """
@@ -132,7 +133,7 @@ class DiTForwardWrapper(nn.Module):
     Masks and position IDs are computed internally from T and S.
     """
     
-    def __init__(self, dit_model, precision="fp16_mixed"):
+    def __init__(self, dit_model, precision="bf16_mixed"):
         super().__init__()
         self.dit = dit_model
         self.config = dit_model.config
@@ -159,7 +160,13 @@ class DiTForwardWrapper(nn.Module):
         # number computation (torch.view_as_complex → ComplexDouble).
         # The model weights are already in the right dtypes (bf16 bulk + fp32
         # islands); autocast just ensures the tracer resolves complex→real.
-        autocast_dtype = torch.float16 if self.precision == "fp16_mixed" else torch.float32
+        if self.precision == "bf16_mixed":
+            autocast_dtype = torch.bfloat16
+        elif self.precision == "fp32":
+            autocast_dtype = torch.float32
+        else:
+            autocast_dtype = torch.float32
+        
         with torch.amp.autocast('cuda', dtype=autocast_dtype):
             outputs = self.dit(
                 hidden_states=hidden_states,
@@ -179,63 +186,36 @@ class DiTForwardWrapper(nn.Module):
         return velocity
 
 
-def apply_fp16_mixed(dit_model):
-    """Apply the fp16_mixed precision recipe (XL models).
+def apply_bf16_mixed(dit_model):
+    """Apply the bf16_mixed precision recipe (XL models).
     
-    fp16 bulk + fp32 islands for:
-      - time_embed / time_embed_r (timestep is always fp32 input)
-      - scale_shift_table (AdaLN — reduction ops need fp32 stability)  
-      - norm_out (output normalization)
-      - per-layer RMSNorms + AdaLN tables (prevent residual overflow)
-      - proj_out ConvTranspose1d (TRT has no fp16 deconv kernel for this shape)
+    bf16 bulk + fp32 island for proj_out ConvTranspose1d.
     
-    NOTE: TRT 10.16 does not support bf16. This recipe uses fp16 matmuls
-    with fp32 norms/residual-touching ops. The fp32 islands prevent the NaN
-    overflow that occurred when everything was fp16 (the norms accumulated
-    values exceeding fp16 range ±65504 over 32 layers).
+    bf16 has the SAME exponent range as fp32 (8 bits vs fp16's 5 bits),
+    so intermediate activations never overflow. This is the key difference
+    from fp16_mixed which NaN'd because the XL residual stream accumulated
+    values exceeding fp16's ±65504 range over 32 layers.
     
-    Uses STRONGLY_TYPED mode so TRT honors the fp16/fp32 split from the
-    ONNX graph instead of applying blanket FP16 quantization.
+    The entire model runs in bf16 EXCEPT:
+      - proj_out ConvTranspose1d → wrapped in _Fp32CastWrapper because
+        TRT 10.16 has no bf16 deconv kernel for this shape.
+    
+    Uses STRONGLY_TYPED mode so TRT honors the bf16/fp32 split from the
+    ONNX graph. TRT's bf16 tensor cores provide the same throughput as fp16.
     """
-    dit_model.to(torch.float16)
+    dit_model.to(torch.bfloat16)
+    print("[export_dit] Applied bf16 bulk conversion")
     
-    # FP32 islands: timestep embeddings (t is always fp32 input)
-    if hasattr(dit_model, 'time_embed'):
-        dit_model.time_embed.float()
-        print("[export_dit] FP32 island: time_embed")
-    if hasattr(dit_model, 'time_embed_r'):
-        dit_model.time_embed_r.float()
-        print("[export_dit] FP32 island: time_embed_r")
-    
-    # FP32 island: output norm
-    if hasattr(dit_model, 'norm_out'):
-        dit_model.norm_out.float()
-        print("[export_dit] FP32 island: norm_out")
-    
-    # FP32 island: top-level AdaLN scale-shift table
-    if hasattr(dit_model, 'scale_shift_table'):
-        dit_model.scale_shift_table = nn.Parameter(
-            dit_model.scale_shift_table.data.float())
-        print("[export_dit] FP32 island: scale_shift_table")
-    
-    # FP32 islands: per-layer AdaLN tables + RMSNorms
-    # These are CRITICAL — the norms touch the residual stream and
-    # accumulated values exceed fp16 range over 32 layers. Keeping
-    # norms in fp32 prevents the overflow while matmuls stay fp16.
-    n_layers = 0
-    for layer in dit_model.layers:
-        if hasattr(layer, 'scale_shift_table'):
-            layer.scale_shift_table = nn.Parameter(
-                layer.scale_shift_table.data.float())
-        if hasattr(layer, 'self_attn_norm'):
-            layer.self_attn_norm.float()
-        if hasattr(layer, 'mlp_norm'):
-            layer.mlp_norm.float()
-        if hasattr(layer, 'cross_attn_norm'):
-            layer.cross_attn_norm.float()
-        n_layers += 1
-    if n_layers:
-        print(f"[export_dit] FP32 islands: {n_layers} layers (scale_shift + norms)")
+    # FP32 island: proj_out ConvTranspose1d (TRT has no bf16 deconv kernel)
+    # NOTE: This gets replaced by UnPatchLinear AFTER this function runs
+    # (replace_conv_with_linear handles it). But we still wrap it in
+    # _Fp32CastWrapper in case the Conv→Linear replacement changes.
+    if hasattr(dit_model, 'proj_out') and isinstance(dit_model.proj_out, nn.Sequential):
+        for i, mod in enumerate(dit_model.proj_out):
+            if isinstance(mod, nn.ConvTranspose1d):
+                dit_model.proj_out[i] = _Fp32CastWrapper(mod)
+                print(f"[export_dit] FP32 island: proj_out[{i}] ConvTranspose1d → _Fp32CastWrapper")
+                break
     
     return dit_model
 
@@ -244,10 +224,14 @@ def replace_conv_with_linear(dit_model):
     """Replace Conv1d/ConvTranspose1d with equivalent Linear ops.
     
     TRT 10.16 has NO kernels for 1D convolutions with patch_size=2 in ANY
-    precision mode (fp16, fp32, or mixed). PatchEmbedLinear/UnPatchLinear
+    precision mode (fp16, bf16, fp32, or mixed). PatchEmbedLinear/UnPatchLinear
     reformulate these as reshape+matmul which TRT handles perfectly.
     
     Must be called for ALL precision recipes, not just mixed precision.
+    
+    Handles _Fp32CastWrapper: if a ConvTranspose1d is already wrapped in
+    _Fp32CastWrapper (from bf16_mixed recipe), we unwrap it, convert to
+    UnPatchLinear, and re-wrap in _Fp32CastWrapper.
     """
     if hasattr(dit_model, 'proj_in') and isinstance(dit_model.proj_in, nn.Sequential):
         for i, mod in enumerate(dit_model.proj_in):
@@ -260,11 +244,16 @@ def replace_conv_with_linear(dit_model):
             if isinstance(mod, nn.ConvTranspose1d):
                 dit_model.proj_out[i] = UnPatchLinear(mod)
                 print(f"[export_dit] Conv→Linear: proj_out[{i}] ConvTranspose1d → UnPatchLinear")
+            elif isinstance(mod, _Fp32CastWrapper) and isinstance(mod.inner, nn.ConvTranspose1d):
+                # Unwrap, convert, re-wrap
+                linear_mod = UnPatchLinear(mod.inner)
+                dit_model.proj_out[i] = _Fp32CastWrapper(linear_mod)
+                print(f"[export_dit] Conv→Linear: proj_out[{i}] Fp32Cast(ConvTranspose1d) → Fp32Cast(UnPatchLinear)")
     
     return dit_model
 
 
-def load_dit_model(model_dir: str, device: str = "cuda", precision: str = "fp16_mixed"):
+def load_dit_model(model_dir: str, device: str = "cuda", precision: str = "bf16_mixed"):
     """Load the AceStepDiTModel from a safetensors checkpoint."""
     model_dir = Path(model_dir)
     
@@ -371,13 +360,13 @@ def load_dit_model(model_dir: str, device: str = "cuda", precision: str = "fp16_
         print(f"[export_dit] Warning: {len(unexpected)} unexpected keys")
     
     # Apply precision recipe AFTER loading weights (so weights are converted correctly)
-    if precision == "fp16_mixed":
+    if precision == "bf16_mixed":
         dit_model = dit_model.to(device=device)  # move to GPU first
-        dit_model = apply_fp16_mixed(dit_model)
+        dit_model = apply_bf16_mixed(dit_model)
     elif precision == "fp32":
         dit_model = dit_model.to(device=device, dtype=torch.float32)
     else:
-        raise ValueError(f"Unknown precision: {precision}. Use 'fp16_mixed' or 'fp32'.")
+        raise ValueError(f"Unknown precision: {precision}. Use 'bf16_mixed' or 'fp32'.")
     
     # Replace Conv1d/ConvTranspose1d with Linear equivalents for ALL precision modes.
     # TRT 10.16 has no kernels for 1D convolutions with patch_size=2.
@@ -400,13 +389,13 @@ def load_dit_model(model_dir: str, device: str = "cuda", precision: str = "fp16_
     return dit_model, config
 
 
-def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision: str = "fp16_mixed"):
+def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision: str = "bf16_mixed"):
     """Export the DiT forward pass to ONNX."""
     device = next(dit_model.parameters()).device
     
     # Determine the tensor dtype for dummy inputs based on precision
-    if precision == "fp16_mixed":
-        tensor_dtype = torch.float16
+    if precision == "bf16_mixed":
+        tensor_dtype = torch.bfloat16
     elif precision == "fp32":
         tensor_dtype = torch.float32
     else:
@@ -459,7 +448,7 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
             "t_r":           {0: "batch"},
             "velocity":      {0: "batch", 1: "seq_len"},
         },
-        do_constant_folding=(precision != "fp16_mixed"),  # bf16 graph hits ComplexDouble in folding
+        do_constant_folding=False,  # bf16 graph hits ComplexDouble in folding
         export_params=True,
         # Force legacy TorchScript exporter — the dynamo/ExportedProgram path
         # has a type promotion bug with mixed bf16/fp32 graphs (assertion in
@@ -509,7 +498,7 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
     return output_path
 
 
-def verify_onnx(onnx_path: str, dit_model, config, precision: str = "fp16_mixed"):
+def verify_onnx(onnx_path: str, dit_model, config, precision: str = "bf16_mixed"):
     """Verify the ONNX model produces matching output."""
     try:
         import onnxruntime as ort
@@ -519,8 +508,8 @@ def verify_onnx(onnx_path: str, dit_model, config, precision: str = "fp16_mixed"
     
     device = next(dit_model.parameters()).device
     
-    if precision == "fp16_mixed":
-        tensor_dtype = torch.float16
+    if precision == "bf16_mixed":
+        tensor_dtype = torch.bfloat16
     else:
         tensor_dtype = torch.float32
     
@@ -570,9 +559,9 @@ def main():
                         help="Output ONNX file path (default: models/onnx/dit_<model_name>.onnx)")
     parser.add_argument("--opset", type=int, default=18,
                         help="ONNX opset version (default: 18)")
-    parser.add_argument("--precision", default="fp16_mixed",
-                        choices=["fp16_mixed", "fp32"],
-                        help="Precision recipe (default: fp16_mixed)")
+    parser.add_argument("--precision", default="bf16_mixed",
+                        choices=["bf16_mixed", "fp32"],
+                        help="Precision recipe (default: bf16_mixed)")
     parser.add_argument("--verify", action="store_true",
                         help="Verify ONNX output matches PyTorch")
     parser.add_argument("--device", default="cuda",
