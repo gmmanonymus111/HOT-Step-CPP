@@ -220,8 +220,8 @@ static inline int cond_enc_ort_forward(CondEncOrt *          ctx,
     try {
         outputs = ctx->session->Run(
             Ort::RunOptions{nullptr},
-            in_names.data(), inputs, n_inputs,
-            out_names.data(), n_outputs);
+            in_names, inputs, n_inputs,
+            out_names, n_outputs);
     } catch (const std::exception & e) {
         fprintf(stderr, "[CondEnc-ORT] Inference failed: %s\n", e.what());
         return -1;
