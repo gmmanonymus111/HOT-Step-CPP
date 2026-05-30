@@ -428,6 +428,19 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
     print(f"[export_dit] Exporting to ONNX (opset {opset})...")
     t0 = time.time()
     
+    # Dynamo requires dynamic_shapes (not dynamic_axes)
+    # Each input gets a dict mapping dim index → Dim object
+    batch = torch.export.Dim("batch", min=1, max=4)
+    seq_len = torch.export.Dim("seq_len", min=64, max=8192)
+    enc_seq_len = torch.export.Dim("enc_seq_len", min=64, max=2048)
+    
+    dynamic_shapes = {
+        "input_latents": {0: batch, 1: seq_len},
+        "enc_hidden":    {0: batch, 1: enc_seq_len},
+        "t":             {0: batch},
+        "t_r":           {0: batch},
+    }
+    
     torch.onnx.export(
         wrapper,
         (dummy_input_latents, dummy_enc_hidden, dummy_t, dummy_t_r),
@@ -435,53 +448,39 @@ def export_onnx(dit_model, config, output_path: str, opset: int = 18, precision:
         opset_version=opset,
         input_names=["input_latents", "enc_hidden", "t", "t_r"],
         output_names=["velocity"],
-        dynamic_axes={
-            "input_latents": {0: "batch", 1: "seq_len"},
-            "enc_hidden":    {0: "batch", 1: "enc_seq_len"},
-            "t":             {0: "batch"},
-            "t_r":           {0: "batch"},
-            "velocity":      {0: "batch", 1: "seq_len"},
-        },
+        dynamic_shapes=dynamic_shapes,
         export_params=True,
-        # Dynamo exporter decomposes complex ops into real equivalents,
-        # avoiding Cast(to=COMPLEX128) that TRT rejects. Required for bf16.
+        external_data=True,
         dynamo=True,
     )
     
     t1 = time.time()
     print(f"[export_dit] ONNX trace completed in {t1-t0:.1f}s")
     
-    # Large models (>2GB) need external data storage.
-    # PyTorch's ONNX exporter marks tensors as external but may not write
-    # the .data file properly. Re-save with onnx library to fix this.
-    print("[export_dit] Re-saving with external data...")
-    import onnx
-    from onnx.external_data_helper import convert_model_to_external_data
-    
-    model_proto = onnx.load(output_path, load_external_data=False)
-    
-    # Load raw_data from the proto (PyTorch embeds it inline even when >2GB)
-    # Then convert to proper external data format
-    data_filename = os.path.basename(output_path) + ".data"
+    # Verify files exist
     data_path = output_path + ".data"
-    
-    # Remove old data file if exists
-    if os.path.exists(data_path):
-        os.remove(data_path)
-    
-    # Reload with external data resolved (from the just-exported file)
-    model_proto = onnx.load(output_path)
-    convert_model_to_external_data(
-        model_proto,
-        all_tensors_to_one_file=True,
-        location=data_filename,
-        size_threshold=1024,  # externalize anything >1KB
-        convert_attribute=False,
-    )
-    onnx.save(model_proto, output_path)
-    
     onnx_size = os.path.getsize(output_path)
     data_size = os.path.getsize(data_path) if os.path.exists(data_path) else 0
+    
+    if data_size == 0:
+        # Dynamo didn't write external data — re-save manually
+        print("[export_dit] External data missing, re-saving with onnx library...")
+        import onnx
+        from onnx.external_data_helper import convert_model_to_external_data
+        
+        model_proto = onnx.load(output_path, load_external_data=False)
+        data_filename = os.path.basename(output_path) + ".data"
+        convert_model_to_external_data(
+            model_proto,
+            all_tensors_to_one_file=True,
+            location=data_filename,
+            size_threshold=1024,
+            convert_attribute=False,
+        )
+        onnx.save(model_proto, output_path)
+        onnx_size = os.path.getsize(output_path)
+        data_size = os.path.getsize(data_path) if os.path.exists(data_path) else 0
+    
     print(f"[export_dit] Exported to {output_path}")
     print(f"[export_dit] ONNX graph: {onnx_size/1e6:.1f} MB")
     print(f"[export_dit] Weight data: {data_size/1e9:.2f} GB")
