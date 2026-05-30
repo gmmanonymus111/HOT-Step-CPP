@@ -147,11 +147,13 @@ inline bool dit_trt_build(
     // Builder config
     auto config = builder->createBuilderConfig();
 
-    // Enable FP16
-    if (builder->platformHasFastFp16()) {
-        config->setFlag(nvinfer1::BuilderFlag::kFP16);
-        fprintf(stderr, "[DiT-TRT] FP16 enabled\n");
-    }
+    // FP16 disabled: layernorm overflow causes NaN on sm_120 (Blackwell).
+    // TODO: re-enable with per-layer precision (FP16 matmul, FP32 layernorm)
+    // if (builder->platformHasFastFp16()) {
+    //     config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    //     fprintf(stderr, "[DiT-TRT] FP16 enabled\n");
+    // }
+    fprintf(stderr, "[DiT-TRT] FP32 mode (FP16 disabled to avoid layernorm overflow)\n");
 
     // Enable refittable engine (zero perf penalty with IDENTICAL)
     config->setFlag(nvinfer1::BuilderFlag::kREFIT_IDENTICAL);
