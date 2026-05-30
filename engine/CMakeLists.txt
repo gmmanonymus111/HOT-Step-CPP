@@ -213,6 +213,18 @@ endif()
 if(APPLE AND SUPERSEP_ENABLED)
     target_link_libraries(supersep PUBLIC "-framework CoreML" "-framework Foundation")
 endif()
+# TensorRT Native SDK (DiT TRT acceleration + LoRA refitting)
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-built TRT SDK (headers + import libs). Auto-detect from engine/deps/tensorrt/.
+# The runtime DLLs (nvinfer_10.dll, nvonnxparser_10.dll) come from engine/deps/tensorrt_libs/.
+set(TRT_ENABLED FALSE)
+set(_TRT_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/tensorrt")
+if(WIN32 AND EXISTS "${_TRT_DEPS_DIR}/include/NvInfer.h" AND EXISTS "${_TRT_DEPS_DIR}/lib/nvinfer_10.lib")
+    set(TRT_ENABLED TRUE)
+    message(STATUS "[TRT] Found at ${_TRT_DEPS_DIR}")
+else()
+    message(STATUS "[TRT] Not found (set engine/deps/tensorrt/ to enable DiT TRT)")
+endif()
 
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
@@ -225,6 +237,15 @@ add_library(acestep-core STATIC
 )
 target_link_libraries(acestep-core PUBLIC yyjson lua54 supersep)
 link_ggml_backends(acestep-core)
+
+# TRT native linkage for DiT acceleration
+if(TRT_ENABLED)
+    target_compile_definitions(acestep-core PUBLIC HOT_STEP_TRT)
+    target_include_directories(acestep-core PUBLIC "${_TRT_DEPS_DIR}/include")
+    target_link_directories(acestep-core PUBLIC "${_TRT_DEPS_DIR}/lib")
+    target_link_libraries(acestep-core PUBLIC nvinfer_10 nvonnxparser_10)
+    message(STATUS "[TRT] DiT TRT acceleration: ENABLED")
+endif()
 
 # ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
 add_executable(ace-synth tools/ace-synth.cpp)
