@@ -75,27 +75,34 @@ static inline bool vae_ort_load(VaeOrt * ctx, const char * onnx_path, int device
         trt_cache_dir = (slash != std::string::npos) ? p.substr(0, slash) : ".";
     }
 
-    // Try TensorRT RTX EP first (ORT 1.21+ uses NvTensorRTRTXExecutionProvider)
-    try {
-        std::unordered_map<std::string, std::string> trt_opts;
-        trt_opts["device_id"]                = std::to_string(device_id);
-        trt_opts["nv_max_workspace_size"]    = std::to_string((size_t)2 << 30);  // 2 GiB
-        trt_opts["nv_runtime_cache_path"]    = trt_cache_dir;
-        trt_opts["nv_detailed_build_log"]    = "1";
+    // Try legacy TensorRT EP (V1 struct API — uses onnxruntime_providers_tensorrt.dll
+    // which loads nvinfer_10.dll at runtime from PATH).
+    // NOTE: The newer NvTensorRTRTXExecutionProvider requires a separate
+    // onnxruntime_providers_nv_tensorrt_rtx.dll that we don't ship.
+    // The legacy EP works with full TensorRT SDK and supports all NVIDIA GPUs.
+    // The C++ wrapper doesn't expose AppendExecutionProvider_TensorRT, so we
+    // call through the C API directly.
+    {
+        OrtTensorRTProviderOptions trt_opts{};
+        trt_opts.device_id                  = device_id;
+        trt_opts.trt_max_workspace_size     = (size_t)2 << 30;  // 2 GiB
+        trt_opts.trt_fp16_enable            = 1;
+        trt_opts.trt_engine_cache_enable    = 1;
+        trt_opts.trt_engine_cache_path      = trt_cache_dir.c_str();
 
-        // Dynamic shape profiles for VAE: input "latents" is [1, 64, T]
-        // T varies per generation length. Profile: min=64, opt=2048, max=8192 latent frames.
-        trt_opts["nv_profile_min_shapes"]    = "latents:1x64x64";
-        trt_opts["nv_profile_opt_shapes"]    = "latents:1x64x2048";
-        trt_opts["nv_profile_max_shapes"]    = "latents:1x64x8192";
-
-        ctx->session_opts.AppendExecutionProvider("NvTensorRTRTXExecutionProvider", trt_opts);
-        ctx->using_trt = true;
-        fprintf(stderr, "[VAE-ORT] TensorRT RTX EP appended (device %d, cache=%s)\n",
-                device_id, trt_cache_dir.c_str());
-    } catch (const std::exception & e) {
-        fprintf(stderr, "[VAE-ORT] TensorRT RTX EP unavailable: %s — trying CUDA EP\n", e.what());
-        ctx->using_trt = false;
+        const OrtApi & api = Ort::GetApi();
+        OrtStatus * status = api.SessionOptionsAppendExecutionProvider_TensorRT(
+            ctx->session_opts, &trt_opts);
+        if (status) {
+            std::string msg = api.GetErrorMessage(status);
+            api.ReleaseStatus(status);
+            fprintf(stderr, "[VAE-ORT] TensorRT EP unavailable: %s — trying CUDA EP\n", msg.c_str());
+            ctx->using_trt = false;
+        } else {
+            ctx->using_trt = true;
+            fprintf(stderr, "[VAE-ORT] TensorRT EP appended (device %d, fp16=on, cache=%s)\n",
+                    device_id, trt_cache_dir.c_str());
+        }
     }
 
     // CUDA EP fallback (or as backup after TRT — ORT falls through automatically)
