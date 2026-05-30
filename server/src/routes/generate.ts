@@ -68,7 +68,7 @@ const jobs = new Map<string, GenerationJob>();
 /** Poll ace-server job until completion */
 async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal): Promise<void> {
   const POLL_INTERVAL = 100; // ms — fast polling for tight phase-transition detection
-  const MAX_POLLS = 3600; // 30 minutes max
+  const MAX_POLLS = 27000; // 45 minutes max (TRT engine build can take 12-30 min on first run)
 
   for (let i = 0; i < MAX_POLLS; i++) {
     if (signal.aborted || job.status === 'cancelled') {
