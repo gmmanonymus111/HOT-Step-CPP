@@ -422,6 +422,236 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
     std::vector<TextEncForward> main_fwd(batch_n);
     std::vector<TextEncForward> nc_fwd(s.need_enc_switch ? batch_n : 0);
     int                         H_text = 0;
+    int                         H_cond = 0;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ORT PATH: text encoder + condition encoder via ONNX Runtime
+    // ═══════════════════════════════════════════════════════════════════
+    if (ctx->is_onnx_pipeline) {
+        fprintf(stderr, "[Encode-Text] Using ONNX pipeline (TextEnc-ORT + CondEnc-ORT)\n");
+
+        // Phase A(ORT): text encoder
+        {
+            TextEncOrt * te = store_require_text_enc_ort(ctx->store, ctx->text_enc_ort_key);
+            if (!te) {
+                fprintf(stderr, "[Encode-Text] FATAL: store_require_text_enc_ort failed\n");
+                return -1;
+            }
+            ModelHandle te_guard(ctx->store, te);
+            H_text = te->hidden_size;
+
+            for (int b = 0; b < batch_n; b++) {
+                std::string text_str;
+                std::string lyric_str;
+                build_prompt_strings(reqs[b], s.instruction_str, s.duration, text_str, lyric_str);
+
+                // Determinism diagnostic
+                {
+                    auto str_hash = [](const std::string & s) -> uint64_t {
+                        uint64_t h = 14695981039346656037ULL;
+                        for (char c : s) { h ^= (uint8_t)c; h *= 1099511628211ULL; }
+                        return h;
+                    };
+                    fprintf(stderr, "[DIAG] enc_input_b%d: instr=\"%s\" caption_hash=%016llx lyrics_hash=%016llx text_len=%zu lyric_len=%zu\n",
+                            b, s.instruction_str.c_str(),
+                            (unsigned long long)str_hash(reqs[b].caption),
+                            (unsigned long long)str_hash(reqs[b].lyrics),
+                            text_str.size(), lyric_str.size());
+                }
+
+                auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
+                auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
+                int  S_text    = (int) text_ids.size();
+                int  S_lyric   = (int) lyric_ids.size();
+
+                // LRC capture (batch 0 only)
+                if (b == 0 && reqs[0].get_lrc) {
+                    s.get_lrc         = true;
+                    s.lyric_token_ids = lyric_ids;
+                    s.vocal_language  = reqs[0].vocal_language.empty() ? "en" : reqs[0].vocal_language;
+
+                    const char * lang_b = s.vocal_language.c_str();
+                    std::string  hdr    = std::string("# Languages\n") + lang_b + "\n\n# Lyric\n";
+                    auto         hdr_ids = bpe_encode(bpe, hdr.c_str(), false);
+                    s.lyric_start_idx = (int) hdr_ids.size();
+
+                    s.lyric_end_idx = (int) lyric_ids.size();
+                    for (int ti = 0; ti < (int) lyric_ids.size(); ti++) {
+                        if (lyric_ids[ti] == 151643) { s.lyric_end_idx = ti; break; }
+                    }
+
+                    int pure_n = s.lyric_end_idx - s.lyric_start_idx;
+                    s.lyric_token_texts.resize(pure_n);
+                    if (pure_n > 0) {
+                        std::string prev_full;
+                        for (int ti = s.lyric_start_idx; ti < s.lyric_end_idx; ti++) {
+                            std::vector<int> prefix(lyric_ids.begin() + s.lyric_start_idx,
+                                                    lyric_ids.begin() + ti + 1);
+                            std::string full;
+                            for (int pid : prefix) {
+                                if (pid >= 0 && pid < bpe->n_vocab) {
+                                    const std::string & bpe_str = bpe->id_to_str[pid];
+                                    for (size_t ci = 0; ci < bpe_str.size(); ) {
+                                        int adv;
+                                        int cp = utf8_codepoint(bpe_str.c_str() + ci, &adv);
+                                        bool found = false;
+                                        for (int by = 0; by < 256; by++) {
+                                            int a2;
+                                            int cp2 = utf8_codepoint(bpe->byte2str[by].c_str(), &a2);
+                                            if (cp2 == cp && (int) bpe->byte2str[by].size() == adv) {
+                                                full += (char)(unsigned char) by;
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!found) full += '?';
+                                        ci += adv;
+                                    }
+                                }
+                            }
+                            int idx = ti - s.lyric_start_idx;
+                            if (full.size() > prev_full.size()) {
+                                s.lyric_token_texts[idx] = full.substr(prev_full.size());
+                            } else {
+                                s.lyric_token_texts[idx] = "";
+                            }
+                            prev_full = full;
+                        }
+                    }
+
+                    fprintf(stderr, "[Encode-Text] LRC: captured %d lyric tokens [%d..%d) of %d total\n",
+                            pure_n, s.lyric_start_idx, s.lyric_end_idx, (int) lyric_ids.size());
+                }
+
+                main_fwd[b].S_text  = S_text;
+                main_fwd[b].S_lyric = S_lyric;
+
+                // ORT text encoder forward
+                std::vector<float> text_hidden_ort;
+                if (text_enc_ort_forward(te, text_ids.data(), S_text, text_hidden_ort) != 0) {
+                    fprintf(stderr, "[Encode-Text] FATAL: text_enc_ort_forward failed\n");
+                    return -1;
+                }
+                main_fwd[b].text_hidden = std::move(text_hidden_ort);
+
+                diag_stats_f32("text_hidden_b0", main_fwd[b].text_hidden.data(),
+                               main_fwd[b].text_hidden.size());
+
+                // ORT embed lookup for lyrics
+                std::vector<float> lyric_embed_ort;
+                if (text_enc_ort_embed_lookup(te, lyric_ids.data(), S_lyric, lyric_embed_ort) != 0) {
+                    fprintf(stderr, "[Encode-Text] FATAL: text_enc_ort_embed_lookup failed\n");
+                    return -1;
+                }
+                main_fwd[b].lyric_embed = std::move(lyric_embed_ort);
+            }
+
+            if (s.need_enc_switch) {
+                for (int b = 0; b < batch_n; b++) {
+                    std::string text_str;
+                    std::string lyric_str;
+                    build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, s.duration, text_str, lyric_str);
+
+                    auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
+                    auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
+                    int  S_text    = (int) text_ids.size();
+                    int  S_lyric   = (int) lyric_ids.size();
+
+                    nc_fwd[b].S_text  = S_text;
+                    nc_fwd[b].S_lyric = S_lyric;
+                    std::vector<float> tmp_text;
+                    text_enc_ort_forward(te, text_ids.data(), S_text, tmp_text);
+                    nc_fwd[b].text_hidden = std::move(tmp_text);
+                    std::vector<float> tmp_lyric;
+                    text_enc_ort_embed_lookup(te, lyric_ids.data(), S_lyric, tmp_lyric);
+                    nc_fwd[b].lyric_embed = std::move(tmp_lyric);
+                }
+            }
+
+            // Negative prompt encoding
+            if (!reqs[0].negative_prompt.empty()) {
+                std::string neg_text_str, neg_lyric_str;
+                {
+                    AceRequest neg_req = reqs[0];
+                    neg_req.caption    = reqs[0].negative_prompt;
+                    neg_req.lyrics     = "";
+                    build_prompt_strings(neg_req, s.instruction_str, s.duration, neg_text_str, neg_lyric_str);
+                }
+                auto neg_text_ids = bpe_encode(bpe, neg_text_str.c_str(), true);
+                s.neg_S_text = (int) neg_text_ids.size();
+                text_enc_ort_forward(te, neg_text_ids.data(), s.neg_S_text, s.neg_text_hidden);
+                fprintf(stderr, "[Encode-Text] negative_prompt text encoded (ORT): %d tokens\n", s.neg_S_text);
+            }
+
+            debug_dump_2d(&s.dbg, "text_hidden", main_fwd[0].text_hidden.data(), main_fwd[0].S_text, H_text);
+            debug_dump_2d(&s.dbg, "lyric_embed", main_fwd[0].lyric_embed.data(), main_fwd[0].S_lyric, H_text);
+        }
+
+        // Phase B(ORT): condition encoder
+        s.per_enc.resize(batch_n);
+        s.per_enc_S.resize(batch_n);
+        s.per_enc_nc.resize(batch_n);
+        s.per_enc_S_nc.assign(batch_n, 0);
+        {
+            CondEncOrt * ce = store_require_cond_enc_ort(ctx->store, ctx->cond_enc_ort_key);
+            if (!ce) {
+                fprintf(stderr, "[Encode-Text] FATAL: store_require_cond_enc_ort failed\n");
+                return -1;
+            }
+            ModelHandle ce_guard(ctx->store, ce);
+            H_cond = ce->hidden_size;
+
+            // null_condition_emb from the ORT model
+            s.null_cond_vec.resize(H_cond);
+            if (!ce->null_cond_emb.empty()) {
+                memcpy(s.null_cond_vec.data(), ce->null_cond_emb.data(), H_cond * sizeof(float));
+            }
+
+            // Negative prompt encoding through cond encoder
+            if (!s.neg_text_hidden.empty() && s.neg_S_text > 0) {
+                std::vector<float> neg_enc;
+                int                neg_enc_S = 0;
+                cond_enc_ort_forward(ce, s.neg_text_hidden.data(), s.neg_S_text,
+                                     nullptr, 0,
+                                     s.timbre_feats.data(), s.S_ref_timbre, neg_enc, &neg_enc_S);
+                if (neg_enc_S > 0 && !neg_enc.empty()) {
+                    s.null_cond_vec.assign(H_cond, 0.0f);
+                    for (int si = 0; si < neg_enc_S; si++)
+                        for (int h = 0; h < H_cond; h++)
+                            s.null_cond_vec[h] += neg_enc[(size_t)si * H_cond + h];
+                    float inv = 1.0f / (float)neg_enc_S;
+                    for (int h = 0; h < H_cond; h++) s.null_cond_vec[h] *= inv;
+                    fprintf(stderr, "[Encode-Text] negative_prompt encoded (ORT): enc_S=%d\n", neg_enc_S);
+                }
+            }
+
+            for (int b = 0; b < batch_n; b++) {
+                s.timer.reset();
+                cond_enc_ort_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text,
+                                     main_fwd[b].lyric_embed.data(), main_fwd[b].S_lyric,
+                                     s.timbre_feats.data(), s.S_ref_timbre,
+                                     s.per_enc[b], &s.per_enc_S[b]);
+                fprintf(stderr, "[Encode-Text(ORT) Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n",
+                        b, main_fwd[b].S_text, main_fwd[b].S_lyric, s.per_enc_S[b], s.timer.ms());
+            }
+            debug_dump_2d(&s.dbg, "enc_hidden", s.per_enc[0].data(), s.per_enc_S[0], H_cond);
+
+            if (s.need_enc_switch) {
+                for (int b = 0; b < batch_n; b++) {
+                    cond_enc_ort_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text,
+                                         nc_fwd[b].lyric_embed.data(), nc_fwd[b].S_lyric,
+                                         s.timbre_feats.data(), s.S_ref_timbre,
+                                         s.per_enc_nc[b], &s.per_enc_S_nc[b]);
+                    fprintf(stderr, "[Encode-Text(ORT) Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n",
+                            b, nc_fwd[b].S_text, nc_fwd[b].S_lyric, s.per_enc_S_nc[b]);
+                }
+            }
+        }
+
+    } else {
+    // ═══════════════════════════════════════════════════════════════════
+    // GGML PATH: existing text encoder + condition encoder via GGML
+    // ═══════════════════════════════════════════════════════════════════
 
     // Phase A: text encoder.
     {
@@ -586,7 +816,6 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
     }
 
     // Phase B: condition encoder.
-    int H_cond = 0;
     s.per_enc.resize(batch_n);
     s.per_enc_S.resize(batch_n);
     s.per_enc_nc.resize(batch_n);
@@ -648,6 +877,7 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             }
         }
     }
+    } // end GGML else-branch
 
     // find max s.enc_S across both encodings (cover + text2music),
     // pad shorter encodings with null_cond, stack into [H, s.max_enc_S, N]
