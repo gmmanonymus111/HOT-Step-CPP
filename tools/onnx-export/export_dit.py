@@ -237,10 +237,18 @@ def apply_fp16_mixed(dit_model):
     if n_layers:
         print(f"[export_dit] FP32 islands: {n_layers} layers (scale_shift + norms)")
     
-    # Replace Conv1d/ConvTranspose1d with equivalent Linear ops.
-    # TRT 10.16 has NO kernels for 1D convolutions with patch_size=2 in ANY
-    # precision mode. PatchEmbedLinear/UnPatchLinear reformulate these as
-    # reshape+matmul which TRT handles perfectly with fp16 tensor cores.
+    return dit_model
+
+
+def replace_conv_with_linear(dit_model):
+    """Replace Conv1d/ConvTranspose1d with equivalent Linear ops.
+    
+    TRT 10.16 has NO kernels for 1D convolutions with patch_size=2 in ANY
+    precision mode (fp16, fp32, or mixed). PatchEmbedLinear/UnPatchLinear
+    reformulate these as reshape+matmul which TRT handles perfectly.
+    
+    Must be called for ALL precision recipes, not just mixed precision.
+    """
     if hasattr(dit_model, 'proj_in') and isinstance(dit_model.proj_in, nn.Sequential):
         for i, mod in enumerate(dit_model.proj_in):
             if isinstance(mod, nn.Conv1d):
@@ -370,6 +378,10 @@ def load_dit_model(model_dir: str, device: str = "cuda", precision: str = "fp16_
         dit_model = dit_model.to(device=device, dtype=torch.float32)
     else:
         raise ValueError(f"Unknown precision: {precision}. Use 'fp16_mixed' or 'fp32'.")
+    
+    # Replace Conv1d/ConvTranspose1d with Linear equivalents for ALL precision modes.
+    # TRT 10.16 has no kernels for 1D convolutions with patch_size=2.
+    dit_model = replace_conv_with_linear(dit_model)
     
     dit_model.eval()
     
