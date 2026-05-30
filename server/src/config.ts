@@ -119,6 +119,16 @@ export const config = {
     // To re-enable: set ACESTEPCPP_DRAFT_LM env var or uncomment auto-detect.
     draftLm: process.env.ACESTEPCPP_DRAFT_LM || '',
     onnxDir: process.env.ACESTEPCPP_ONNX_DIR || DEFAULT_ONNX_DIR,
+    /** TensorRT runtime DLL directory — auto-detected or TENSORRT_LIBS env override */
+    trtLibs: process.env.TENSORRT_LIBS || (() => {
+      // Auto-detect from engine/deps/tensorrt_libs/ (downloaded by Model Manager)
+      const depsDir = path.join(ENGINE_DIR, 'deps', 'tensorrt_libs');
+      if (fs.existsSync(path.join(depsDir, 'nvinfer_10.dll')) ||
+          fs.existsSync(path.join(depsDir, 'libnvinfer.so.10'))) {
+        return depsDir;
+      }
+      return '';
+    })(),
     // draftLm: process.env.ACESTEPCPP_DRAFT_LM || (() => {
     //   const dir = process.env.ACESTEPCPP_MODELS || DEFAULT_MODELS;
     //   if (fs.existsSync(dir)) {

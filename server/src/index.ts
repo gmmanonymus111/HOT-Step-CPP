@@ -202,8 +202,16 @@ function startAceServer(): ChildProcess | null {
   console.log(`[Server] Models: ${config.aceServer.models}`);
   console.log(`[Server] Port: ${config.aceServer.port}`);
 
+  // Inject TensorRT libs into PATH if available (so ORT can load nvinfer_10.dll)
+  const spawnEnv = { ...process.env };
+  if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
+    spawnEnv.PATH = config.aceServer.trtLibs + ';' + (spawnEnv.PATH || '');
+    console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
+  }
+
   const child = spawn(exe, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: spawnEnv,
   });
 
   // Filter repetitive GGML noise from console output (still written to ace_engine.log via logEngine)
