@@ -55,8 +55,8 @@ struct DitTrt {
     nvinfer1::IExecutionContext*   context  = nullptr;
 
     // I/O tensor indices (resolved once at load time)
-    // Inputs:  input_latents[B,192,T], enc_hidden[B,S,2048], t[B], t_r[B]
-    // Outputs: velocity[B,64,T]
+    // Inputs:  input_latents[B,T,192], enc_hidden[B,S,2048], t[B], t_r[B]
+    // Outputs: velocity[B,T,64]
     int idx_input_latents = -1;
     int idx_enc_hidden    = -1;
     int idx_t             = -1;
@@ -165,14 +165,14 @@ inline bool dit_trt_build(
     // Optimization profile with dynamic shapes
     auto profile = builder->createOptimizationProfile();
 
-    // input_latents: [B, 192, T]
+    // input_latents: [B, T, 192]
     //   T ranges: min=64, opt=2048, max=8192
     profile->setDimensions("input_latents",
-        nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims3(1, 192, 64));
+        nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims3(1, 64, 192));
     profile->setDimensions("input_latents",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(1, 192, 2048));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(1, 2048, 192));
     profile->setDimensions("input_latents",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(2, 192, 8192));
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(2, 8192, 192));
 
     // enc_hidden: [B, S, 2048]
     //   S ranges: min=64, opt=512, max=2048
@@ -464,19 +464,19 @@ inline int64_t dit_trt_refit_base(DitTrt* ctx) {
 // Run one DiT forward pass (one diffusion timestep).
 // All pointers are GPU device memory.
 //
-// input_latents: [N, 192, T] fp16
+// input_latents: [N, T, 192] fp16
 // enc_hidden:    [N, S, 2048] fp16
 // t:             [N] fp32
 // t_r:           [N] fp32
-// velocity_out:  [N, 64, T] fp16 (output)
+// velocity_out:  [N, T, 64] fp16 (output)
 inline bool dit_trt_forward(
     DitTrt*     ctx,
-    const void* input_latents,  // GPU, fp16 [N, 192, T]
+    const void* input_latents,  // GPU, fp16 [N, T, 192]
     const void* enc_hidden,     // GPU, fp16 [N, S, 2048]
     const float* t,             // GPU, fp32 [N]
     const float* t_r,           // GPU, fp32 [N]
     int N, int T, int S,
-    void* velocity_out,         // GPU, fp16 [N, 64, T]
+    void* velocity_out,         // GPU, fp16 [N, T, 64]
     cudaStream_t stream = nullptr
 ) {
     auto* context = ctx->context;
@@ -488,7 +488,7 @@ inline bool dit_trt_forward(
     const char* t_r_name           = ctx->engine->getIOTensorName(ctx->idx_t_r);
     const char* velocity_name      = ctx->engine->getIOTensorName(ctx->idx_velocity);
 
-    context->setInputShape(input_latents_name, nvinfer1::Dims3(N, 192, T));
+    context->setInputShape(input_latents_name, nvinfer1::Dims3(N, T, 192));
     context->setInputShape(enc_hidden_name,    nvinfer1::Dims3(N, S, 2048));
     context->setInputShape(t_name,             nvinfer1::Dims{1, {N}});
     context->setInputShape(t_r_name,           nvinfer1::Dims{1, {N}});

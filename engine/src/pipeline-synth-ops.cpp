@@ -7,6 +7,7 @@
 #include "pipeline-synth-ops.h"
 
 #include "hot-step-sampler.h"
+#include "hot-step-sampler-trt.h"
 #include "philox.h"
 #include "pipeline-synth-impl.h"
 #include "task-types.h"
@@ -949,29 +950,105 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 }
 
 int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
-    DiTGGML * dit = store_require_dit(ctx->store, ctx->dit_key);
-    if (!dit) {
-        fprintf(stderr, "[DiT-Generate] FATAL: store_require_dit failed\n");
-        return -1;
+#ifdef HOT_STEP_TRT
+    // TRT path: if DiT model is an ONNX file, use TensorRT acceleration
+    if (ctx->dit_key.path.size() > 5 &&
+        ctx->dit_key.path.compare(ctx->dit_key.path.size() - 5, 5, ".onnx") == 0) {
+
+        fprintf(stderr, "[DiT-Generate] Using TRT path: %s\n", ctx->dit_key.path.c_str());
+
+        // Static TRT context — built once, reused across requests
+        static DitTrt s_trt;
+        static bool   s_trt_ready = false;
+        static std::string s_trt_onnx_path;
+
+        if (!s_trt_ready || s_trt_onnx_path != ctx->dit_key.path) {
+            // Need to build or load the TRT engine
+            if (s_trt_ready) {
+                dit_trt_free(&s_trt);
+                s_trt = DitTrt{};
+                s_trt_ready = false;
+            }
+
+            const std::string & onnx_path = ctx->dit_key.path;
+
+            // Engine path: same directory, same name but .engine extension
+            std::string engine_path = onnx_path.substr(0, onnx_path.size() - 5) + ".engine";
+
+            // Check if engine exists
+            FILE * ef = fopen(engine_path.c_str(), "rb");
+            if (ef) {
+                fclose(ef);
+                fprintf(stderr, "[DiT-Generate] Loading cached TRT engine: %s\n", engine_path.c_str());
+            } else {
+                // Build engine from ONNX (slow, first run only)
+                fprintf(stderr, "[DiT-Generate] Building TRT engine from ONNX...\n");
+                if (!dit_trt_build(onnx_path.c_str(), engine_path.c_str())) {
+                    fprintf(stderr, "[DiT-Generate] FATAL: TRT engine build failed\n");
+                    return -1;
+                }
+            }
+
+            // Load engine + refit with base weights
+            if (!dit_trt_load(&s_trt, engine_path.c_str(), onnx_path.c_str())) {
+                fprintf(stderr, "[DiT-Generate] FATAL: TRT engine load failed\n");
+                return -1;
+            }
+            s_trt_onnx_path = onnx_path;
+            s_trt_ready = true;
+        }
+
+        // TODO: LoRA adapter refitting here (check ctx->dit_key.adapter_path)
+
+        s.timer.reset();
+        int dit_rc = dit_trt_generate(
+            &s_trt, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
+            s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
+            s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
+            s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
+            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
+            ctx->params.use_batch_cfg,
+            s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
+        if (dit_rc != 0) {
+            return -1;
+        }
+        fprintf(stderr, "[DiT-Generate] TRT Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
+
+        // (fall through to latent post-processing below)
+        goto post_dit;
     }
-    ModelHandle dit_guard(ctx->store, dit);
-    if (!ctx->params.use_fa) {
-        dit->use_flash_attn = false;
+#endif // HOT_STEP_TRT
+
+    // GGML path (default)
+    {
+        DiTGGML * dit = store_require_dit(ctx->store, ctx->dit_key);
+        if (!dit) {
+            fprintf(stderr, "[DiT-Generate] FATAL: store_require_dit failed\n");
+            return -1;
+        }
+        ModelHandle dit_guard(ctx->store, dit);
+        if (!ctx->params.use_fa) {
+            dit->use_flash_attn = false;
+        }
+
+        s.timer.reset();
+        int dit_rc = dit_ggml_generate(
+            dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
+            s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
+            s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
+            s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
+            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
+            ctx->params.use_batch_cfg,
+            s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
+        if (dit_rc != 0) {
+            return -1;
+        }
+        fprintf(stderr, "[DiT-Generate] Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
     }
 
-    s.timer.reset();
-    int dit_rc = dit_ggml_generate(
-        dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
-        s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
-        s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
-        s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
-        s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
-        ctx->params.use_batch_cfg,
-        s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
-    if (dit_rc != 0) {
-        return -1;
-    }
-    fprintf(stderr, "[DiT-Generate] Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
+#ifdef HOT_STEP_TRT
+post_dit:
+#endif
 
     // Latent post-processing before VAE decode: pred = pred * rescale + shift.
     // Skipped at defaults (1.0 / 0.0).
