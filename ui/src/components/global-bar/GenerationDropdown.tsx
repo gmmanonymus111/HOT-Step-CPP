@@ -122,6 +122,18 @@ export const GenerationDropdown: React.FC = () => {
               className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 transition-colors">
               <RotateCcw size={10} /> Reset to defaults
             </button>
+            {/* VAE Backend toggle */}
+            <div className="pt-2 border-t border-white/5">
+              <label className="block text-[10px] text-amber-400 mb-1">VAE Backend</label>
+              <select className={selectClasses} value={gp.useOrtVae ? 'onnx' : 'ggml'}
+                onChange={e => gp.setUseOrtVae(e.target.value === 'onnx')}>
+                <option value="ggml">GGML (Default)</option>
+                <option value="onnx">ONNX Runtime</option>
+              </select>
+              <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                ONNX Runtime uses TensorRT for VAE decode. Requires an exported ONNX model.
+              </p>
+            </div>
           </div>
         )}
       </div>

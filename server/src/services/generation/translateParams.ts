@@ -129,5 +129,8 @@ export function translateParams(params: any): AceRequest {
     req.postprocess_plugin = params.postprocessPlugin;
   }
 
+  // VAE backend selection (ONNX Runtime / TensorRT)
+  if (params.useOrtVae) req.use_ort_vae = true;
+
   return req;
 }

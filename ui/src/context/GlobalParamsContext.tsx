@@ -119,6 +119,8 @@ export interface GlobalParams {
   // Postprocess plugin
   postprocessEnabled: boolean; setPostprocessEnabled: (v: boolean) => void;
   postprocessPlugin: string; setPostprocessPlugin: (v: string) => void;
+  // VAE backend
+  useOrtVae: boolean; setUseOrtVae: (v: boolean) => void;
   // Whisper Lyrics
   whisperLyricsEnabled: boolean; setWhisperLyricsEnabled: (v: boolean) => void;
   whisperModel: string; setWhisperModel: (v: string) => void;

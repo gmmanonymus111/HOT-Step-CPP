@@ -130,6 +130,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   postprocessEnabled: readKey('hs-postprocessEnabled', false),
   postprocessPlugin: readKey('hs-postprocessPlugin', ''),
 
+  // VAE backend selection (ONNX Runtime / TensorRT)
+  useOrtVae: readKey('hs-useOrtVae', false),
+
   // -- Actions --
   setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
   setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
@@ -220,6 +223,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setWhisperIsolateVocals: (v: any) => { set({ whisperIsolateVocals: v }); writeKey("hs-whisperIsolate", v); },
   setPostprocessEnabled: (v: any) => { set({ postprocessEnabled: v }); writeKey("hs-postprocessEnabled", v); },
   setPostprocessPlugin: (v: any) => { set({ postprocessPlugin: v }); writeKey("hs-postprocessPlugin", v); },
+  setUseOrtVae: (v: any) => { set({ useOrtVae: v }); writeKey('hs-useOrtVae', v); },
 
   // Plugin param helpers
   setPluginParam: (key: string, value: string) => {
@@ -314,6 +318,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,
       qualityEvalTarget: (s.postProcessingEnabled && s.qualityEvalEnabled) ? s.qualityEvalTarget : undefined,
       postprocessPlugin: (s.postProcessingEnabled && s.postprocessEnabled && s.postprocessPlugin) ? s.postprocessPlugin : undefined,
+      useOrtVae: s.useOrtVae || undefined,
       whisperLyricsEnabled: s.whisperLyricsEnabled,
       whisperModel: s.whisperLyricsEnabled ? s.whisperModel : undefined,
       whisperLanguage: s.whisperLyricsEnabled ? s.whisperLanguage : undefined,
