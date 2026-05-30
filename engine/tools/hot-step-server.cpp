@@ -1965,8 +1965,14 @@ int main(int argc, char ** argv) {
     // scan models directory (reads GGUF metadata only)
     fprintf(stderr, "[Server] Scanning models in %s\n", models_dir);
     if (!registry_scan(&g_registry, models_dir)) {
-        fprintf(stderr, "[Server] ERROR: no GGUF models found in %s\n", models_dir);
+        fprintf(stderr, "[Server] ERROR: no models found in %s\n", models_dir);
         return 1;
+    }
+
+    // Also scan the onnx/ subdirectory for ONNX models (TRT acceleration)
+    {
+        std::string onnx_subdir = std::string(models_dir) + REGISTRY_SEP + "onnx";
+        registry_scan(&g_registry, onnx_subdir.c_str());
     }
 
     // speculative decoding: only via explicit --draft-lm flag

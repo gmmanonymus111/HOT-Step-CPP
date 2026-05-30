@@ -66,21 +66,20 @@ class DiTForwardWrapper(nn.Module):
         context_latents = input_latents[:, :, :128]
         hidden_states = input_latents[:, :, 128:]
         
-        # Call the DiT forward pass
-        # We pass None for masks — the model computes them internally
-        # We disable cache, output_attentions, etc.
-        outputs = self.dit(
-            hidden_states=hidden_states,
-            timestep=t,
-            timestep_r=t_r,
-            attention_mask=None,
-            encoder_hidden_states=enc_hidden,
-            encoder_attention_mask=None,
-            context_latents=context_latents,
-            use_cache=False,
-            past_key_values=None,
-            output_attentions=False,
-        )
+        # Use autocast to handle mixed precision (t is fp32, weights are fp16)
+        with torch.amp.autocast('cuda', dtype=torch.float16):
+            outputs = self.dit(
+                hidden_states=hidden_states,
+                timestep=t,
+                timestep_r=t_r,
+                attention_mask=None,
+                encoder_hidden_states=enc_hidden,
+                encoder_attention_mask=None,
+                context_latents=context_latents,
+                use_cache=False,
+                past_key_values=None,
+                output_attentions=False,
+            )
         
         # outputs[0] is the velocity prediction [B, T, 64]
         velocity = outputs[0]
@@ -91,11 +90,26 @@ def load_dit_model(model_dir: str, device: str = "cuda", dtype=torch.float16):
     """Load the AceStepDiTModel from a safetensors checkpoint."""
     model_dir = Path(model_dir)
     
+    # Fix Windows encoding issues with transformers emoji output
+    if sys.platform == "win32":
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    
+    # Monkey-patch transformers auto_docstring to avoid lookup failure
+    # for custom model types not registered in HF model registry
+    try:
+        import transformers.utils.auto_docstring as _ad
+        _orig = _ad.auto_docstring
+        _ad.auto_docstring = lambda *a, **kw: (lambda cls: cls)  # no-op decorator
+    except Exception:
+        pass
+    
     # Add model dir to sys.path so we can import the model code
     sys.path.insert(0, str(model_dir))
     
     # Import the model class
-    from modeling_acestep_v15_xl_base import AceStepConditionGenerationModel
+    from modeling_acestep_v15_xl_base import AceStepDiTModel
     from configuration_acestep_v15 import AceStepConfig
     
     # Load config
@@ -110,16 +124,25 @@ def load_dit_model(model_dir: str, device: str = "cuda", dtype=torch.float16):
     print(f"[export_dit] Loading model from {model_dir}...")
     t0 = time.time()
     
-    # Load the full model, then extract just the decoder (DiT)
+    # Create just the DiT model (decoder) — no need for full model
+    dit_model = AceStepDiTModel(config)
+    
+    # Load weights — filter to decoder.* prefix
     from safetensors.torch import load_file
     state_dict = load_file(str(model_dir / "model.safetensors"))
     
-    # Create the full model to get proper initialization
-    full_model = AceStepConditionGenerationModel(config)
-    full_model.load_state_dict(state_dict, strict=False)
+    # Filter and remap: "decoder.X" -> "X" for the DiT model
+    dit_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("decoder."):
+            dit_state_dict[k[len("decoder."):]] = v
     
-    # Extract just the decoder (DiT model)
-    dit_model = full_model.decoder
+    missing, unexpected = dit_model.load_state_dict(dit_state_dict, strict=False)
+    if missing:
+        print(f"[export_dit] Warning: {len(missing)} missing keys (first 5: {missing[:5]})")
+    if unexpected:
+        print(f"[export_dit] Warning: {len(unexpected)} unexpected keys")
+    
     dit_model = dit_model.to(device=device, dtype=dtype)
     dit_model.eval()
     

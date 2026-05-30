@@ -1,8 +1,8 @@
 #pragma once
-// model-registry.h: scan directories for GGUF models and adapters.
+// model-registry.h: scan directories for GGUF, SafeTensors, and ONNX models.
 //
-// Reads only GGUF headers (no weight data) to classify each file by its
-// general.architecture KV into lm/dit/text-enc/vae buckets.
+// Reads GGUF headers, SafeTensors config.json, and ONNX filenames to classify
+// each model into lm/dit/text-enc/vae buckets.
 // Adapter entries are .safetensors files or PEFT directories.
 //
 // Usage:
@@ -262,6 +262,40 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
             reg->vae.push_back(entry);
             fprintf(stderr, "[Registry] %s -> VAE (safetensors)\n", fname.c_str());
             count++;
+        }
+    }
+
+    // Scan for ONNX files (pre-exported models for TRT acceleration)
+    // Classified by filename prefix: dit_* -> DiT, vae_* -> VAE, etc.
+    for (const auto & fname : files) {
+        if (!str_ends_with(fname, ".onnx")) {
+            continue;
+        }
+
+        std::string lower = fname;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        std::string full = std::string(models_dir) + REGISTRY_SEP + fname;
+        ModelEntry  entry = { fname, full };
+
+        if (lower.find("dit_") == 0 || lower.find("dit-") == 0) {
+            reg->dit.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> DiT (ONNX)\n", fname.c_str());
+            count++;
+        } else if (lower.find("vae_") == 0 || lower.find("vae-") == 0) {
+            reg->vae.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> VAE (ONNX)\n", fname.c_str());
+            count++;
+        } else if (lower.find("lm_") == 0 || lower.find("lm-") == 0) {
+            reg->lm.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> LM (ONNX)\n", fname.c_str());
+            count++;
+        } else if (lower.find("text_enc") == 0 || lower.find("text-enc") == 0) {
+            reg->text_enc.push_back(entry);
+            fprintf(stderr, "[Registry] %s -> Text-Enc (ONNX)\n", fname.c_str());
+            count++;
+        } else {
+            fprintf(stderr, "[Registry] WARNING: skipping %s (unrecognized ONNX prefix)\n", fname.c_str());
         }
     }
 
