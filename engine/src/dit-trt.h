@@ -151,12 +151,12 @@ inline bool dit_trt_build(
     // Builder config
     auto config = builder->createBuilderConfig();
 
-    // FP16 flag: TRT auto-selects fp16 tensor cores for matmuls/convolutions
-    // while keeping fp32 for precision-sensitive ops (norms, reductions).
-    // TF32 accelerates any remaining fp32 ops on Ampere+.
-    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    // NO FP16 flag — Demon's XL model overflows fp16 intermediate activations.
+    // Their production XL recipe uses bf16/fp8 (strongly_typed), neither of
+    // which TRT 10.16 supports in our C++ path. Pure fp32 + TF32 is correct
+    // and TF32 still gives ~2x speedup on Ampere+ tensor cores.
     config->setFlag(nvinfer1::BuilderFlag::kTF32);
-    fprintf(stderr, "[DiT-TRT] FP16 + TF32 (TRT auto-selects mixed precision)\n");
+    fprintf(stderr, "[DiT-TRT] TF32 only (pure fp32 — XL activations overflow fp16)\n");
 
     // Enable refittable engine (zero perf penalty with IDENTICAL)
     config->setFlag(nvinfer1::BuilderFlag::kREFIT_IDENTICAL);
