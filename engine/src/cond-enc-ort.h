@@ -207,22 +207,12 @@ static inline int cond_enc_ort_forward(CondEncOrt *          ctx,
         mem, const_cast<float *>(timbre_feats), (size_t)S_ref * 64,
         timbre_shape.data(), timbre_shape.size());
 
-    // I/O names
-    size_t n_inputs = ctx->session->GetInputCount();
-    std::vector<Ort::AllocatedStringPtr> in_name_ptrs(n_inputs);
-    std::vector<const char *> in_names(n_inputs);
-    for (size_t i = 0; i < n_inputs; i++) {
-        in_name_ptrs[i] = ctx->session->GetInputNameAllocated(i, alloc);
-        in_names[i] = in_name_ptrs[i].get();
-    }
-
-    size_t n_outputs = ctx->session->GetOutputCount();
-    std::vector<Ort::AllocatedStringPtr> out_name_ptrs(n_outputs);
-    std::vector<const char *> out_names(n_outputs);
-    for (size_t i = 0; i < n_outputs; i++) {
-        out_name_ptrs[i] = ctx->session->GetOutputNameAllocated(i, alloc);
-        out_names[i] = out_name_ptrs[i].get();
-    }
+    // I/O names — the exported ONNX has exactly 3 inputs and 1 output
+    // with known names from the export script. Use fixed arrays.
+    const char * in_names[]  = { "text_hidden", "lyric_embed", "timbre_feats" };
+    const char * out_names[] = { "enc_hidden" };
+    size_t n_inputs = 3;
+    size_t n_outputs = 1;
 
     Ort::Value inputs[] = { std::move(text_tensor), std::move(lyric_tensor), std::move(timbre_tensor) };
 
