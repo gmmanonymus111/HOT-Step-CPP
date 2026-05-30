@@ -85,6 +85,8 @@ static inline bool vae_ort_load(VaeOrt * ctx, const char * onnx_path, int device
     {
         OrtTensorRTProviderOptions trt_opts{};
         trt_opts.device_id                  = device_id;
+        trt_opts.trt_max_partition_iterations = 1000;
+        trt_opts.trt_min_subgraph_size      = 1;
         trt_opts.trt_max_workspace_size     = (size_t)2 << 30;  // 2 GiB
         trt_opts.trt_fp16_enable            = 1;
         trt_opts.trt_engine_cache_enable    = 1;
