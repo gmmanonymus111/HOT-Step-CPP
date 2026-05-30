@@ -718,52 +718,64 @@ const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
         }
         gf_close(&gf);
     } else {
-        // Safetensors directory path: read from sidecar files
-        std::string cfg_path = std::string(dit_path) + WS_SEP + "config.json";
+        // Safetensors directory or ONNX file path: read from sidecar files
+        // For ONNX: sidecars are in the parent directory
+        // For safetensors: sidecars are in the model directory itself
+        std::string sidecar_dir = dit_sidecar_dir(dit_path);
+        bool is_onnx = dit_ends_with_onnx(dit_path);
+
+        std::string cfg_path = sidecar_dir + WS_SEP + "config.json";
         meta->is_turbo = config_json_get_is_turbo(cfg_path.c_str());
         meta->is_merge = config_json_get_is_merge(cfg_path.c_str());
 
-        // Also detect merge from directory name
+        // Also detect merge from directory/file name
         {
             std::string basename = dit_path;
             auto slash = basename.find_last_of("/\\");
             if (slash != std::string::npos) basename = basename.substr(slash + 1);
             for (auto & c : basename) c = (char)tolower((unsigned char)c);
             if (basename.find("merge") != std::string::npos ||
-                basename.find("sftturbo") != std::string::npos) {
+                basename.find("sftturbo") != std::string::npos ||
+                basename.find("turbo") != std::string::npos) {
                 meta->is_merge = true;
             }
         }
 
         // silence_latent from silence_latent.pt
-        std::string pt_path = std::string(dit_path) + WS_SEP + "silence_latent.pt";
+        std::string pt_path = sidecar_dir + WS_SEP + "silence_latent.pt";
         if (!sl_read_silence_latent(pt_path.c_str(), meta->silence_full)) {
             fprintf(stderr, "[Store] FATAL: cannot read %s\n", pt_path.c_str());
             delete meta;
             return nullptr;
         }
 
-        // null_condition_emb: read from safetensors model file
-        STMulti sm = {};
-        if (st_multi_open(&sm, dit_path)) {
-            auto [shard_idx, e] = sm.find("null_condition_emb");
-            if (e) {
-                ggml_type nce_type = st_ggml_type(*e);
-                size_t    n = 1;
-                for (int d = 0; d < e->n_dims; d++) n *= (size_t) e->shape[d];
-                const void * raw = sm.data(shard_idx, *e);
-                meta->null_cond_cpu.resize(n);
-                if (nce_type == GGML_TYPE_BF16) {
-                    const uint16_t * src = (const uint16_t *) raw;
-                    for (size_t i = 0; i < n; i++) {
-                        uint32_t w = (uint32_t) src[i] << 16;
-                        memcpy(&meta->null_cond_cpu[i], &w, 4);
+        // null_condition_emb: read from safetensors model file (not available for ONNX)
+        if (!is_onnx) {
+            STMulti sm = {};
+            if (st_multi_open(&sm, dit_path)) {
+                auto [shard_idx, e] = sm.find("null_condition_emb");
+                if (e) {
+                    ggml_type nce_type = st_ggml_type(*e);
+                    size_t    n = 1;
+                    for (int d = 0; d < e->n_dims; d++) n *= (size_t) e->shape[d];
+                    const void * raw = sm.data(shard_idx, *e);
+                    meta->null_cond_cpu.resize(n);
+                    if (nce_type == GGML_TYPE_BF16) {
+                        const uint16_t * src = (const uint16_t *) raw;
+                        for (size_t i = 0; i < n; i++) {
+                            uint32_t w = (uint32_t) src[i] << 16;
+                            memcpy(&meta->null_cond_cpu[i], &w, 4);
+                        }
+                    } else if (nce_type == GGML_TYPE_F32) {
+                        memcpy(meta->null_cond_cpu.data(), raw, n * sizeof(float));
                     }
-                } else if (nce_type == GGML_TYPE_F32) {
-                    memcpy(meta->null_cond_cpu.data(), raw, n * sizeof(float));
                 }
+                st_multi_close(&sm);
             }
-            st_multi_close(&sm);
+        } else {
+            // ONNX path: null_condition_emb is baked into the ONNX graph
+            // Leave null_cond_cpu empty — the TRT sampler handles CFG internally
+            fprintf(stderr, "[Store] ONNX DiT: null_condition_emb handled by TRT graph\n");
         }
     }
 

@@ -286,7 +286,7 @@ static std::string ws_dir_from_path(const std::string & path) {
         std::string ext = path.substr(dot);
         // Lowercase compare
         for (auto & c : ext) c = (char) tolower(c);
-        if (ext == ".safetensors" || ext == ".gguf" || ext == ".json" || ext == ".pt") {
+        if (ext == ".safetensors" || ext == ".gguf" || ext == ".json" || ext == ".pt" || ext == ".onnx") {
             size_t sep = path.find_last_of("/\\");
             if (sep != std::string::npos) {
                 return path.substr(0, sep);

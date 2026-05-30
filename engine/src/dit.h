@@ -124,6 +124,24 @@ static bool dit_ends_with_gguf(const char * path) {
     return len >= 5 && strcmp(path + len - 5, ".gguf") == 0;
 }
 
+// Helper: check if path ends with .onnx
+static bool dit_ends_with_onnx(const char * path) {
+    size_t len = strlen(path);
+    return len >= 5 && strcmp(path + len - 5, ".onnx") == 0;
+}
+
+// Helper: get sidecar directory for a model path
+// For .onnx files: parent directory (sidecars live alongside the ONNX file)
+// For directories (safetensors): the directory itself
+static std::string dit_sidecar_dir(const char * path) {
+    if (dit_ends_with_onnx(path)) {
+        std::string p(path);
+        auto sep = p.find_last_of("/\\");
+        return (sep != std::string::npos) ? p.substr(0, sep) : ".";
+    }
+    return std::string(path);
+}
+
 // Load timestep embedding weights
 static void dit_ggml_load_temb(DiTGGMLTembWeights * w,
                                WeightCtx *          wctx,
@@ -520,7 +538,10 @@ static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * path) {
     bool is_st = !dit_ends_with_gguf(path);
 
     if (is_st) {
-        std::string cfg_path = std::string(path) + WS_SEP + "config.json";
+        // For ONNX files: config.json is in the parent directory
+        // For safetensors dirs: config.json is inside the directory
+        std::string sidecar_dir = dit_sidecar_dir(path);
+        std::string cfg_path = sidecar_dir + WS_SEP + "config.json";
         if (!config_json_load_dit(cfg, cfg_path.c_str())) {
             fprintf(stderr, "[Load] FATAL: cannot read config from %s\n", cfg_path.c_str());
             return false;
