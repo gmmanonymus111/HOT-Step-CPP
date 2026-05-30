@@ -287,7 +287,7 @@ endif()
 # Copy ONNX Runtime DLLs next to ace-server at build time
 if(SUPERSEP_ENABLED AND WIN32)
     set(_ORT_DLL_DIR "${ORT_ROOT}/lib")
-    foreach(_dll onnxruntime.dll onnxruntime_providers_shared.dll onnxruntime_providers_cuda.dll)
+    foreach(_dll onnxruntime.dll onnxruntime_providers_shared.dll onnxruntime_providers_cuda.dll onnxruntime_providers_tensorrt.dll)
         if(EXISTS "${_ORT_DLL_DIR}/${_dll}")
             add_custom_command(TARGET ace-server POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
