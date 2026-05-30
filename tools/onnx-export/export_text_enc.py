@@ -53,7 +53,7 @@ class TextEncoderWrapper(nn.Module):
         return outputs.last_hidden_state
 
 
-def load_model(model_dir: str, device: str = "cuda", dtype=torch.float16):
+def load_model(model_dir: str, device: str = "cuda", dtype=torch.float32):
     """Load Qwen3-Embedding model from safetensors."""
     model_dir = Path(model_dir)
     

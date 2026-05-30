@@ -94,11 +94,52 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     ctx->cond_enc_key.kind = MODEL_COND_ENC;
     ctx->cond_enc_key.path = submodel_path;
 
+    // FSQ tok/detok: when ONNX DiT, FSQ weights aren't in the ONNX dir — they
+    // live in the safetensors DiT directory. Fall back to the first available
+    // safetensors DiT dir. TODO: export FSQ to ONNX to make fully self-contained.
+    std::string fsq_path = submodel_path;
+    if (is_onnx_dit) {
+        // Scan models dir for a safetensors DiT that has model.safetensors
+        std::string onnx_dir = dit_sidecar_dir(params->dit_path);
+        std::string models_dir = onnx_dir;
+        auto slash = models_dir.find_last_of("/\\");
+        if (slash != std::string::npos) models_dir = models_dir.substr(0, slash);
+
+        // Look for XL model dirs with safetensors (matching the ONNX config)
+        // Prefer dirs with "xl" in the name (matching our ONNX export source)
+        std::vector<std::string> candidates;
+        const char * xl_dirs[] = {
+            "acestep-v15-merge-sft-turbo-xl-ta-0.7",
+            "acestep-v15-merge-sft-turbo-xl-ta-0.5",
+            "acestep-v15-merge-sft-turbo-xl-ta-0.3",
+            "acestep-v15-merge-base-turbo-xl-ta-0.5",
+            "acestep-v15-merge-base-sft-xl-ta-0.5",
+            "acestep-v15-xl-turbo",
+            "acestep-v15-xl-base",
+            "acestep-v15-xl-sft",
+            nullptr
+        };
+        for (int i = 0; xl_dirs[i]; i++) {
+            std::string candidate = models_dir + WS_SEP + xl_dirs[i];
+            std::string st_check = candidate + WS_SEP + "model.safetensors";
+            FILE * fc = fopen(st_check.c_str(), "rb");
+            if (fc) {
+                fclose(fc);
+                fsq_path = candidate;
+                fprintf(stderr, "[Synth-Load] FSQ fallback: %s\n", fsq_path.c_str());
+                break;
+            }
+        }
+        if (fsq_path == submodel_path) {
+            fprintf(stderr, "[Synth-Load] WARNING: no safetensors DiT found for FSQ — covers/passthrough may fail\n");
+        }
+    }
+
     ctx->fsq_tok_key.kind = MODEL_FSQ_TOK;
-    ctx->fsq_tok_key.path = submodel_path;
+    ctx->fsq_tok_key.path = fsq_path;
 
     ctx->fsq_detok_key.kind = MODEL_FSQ_DETOK;
-    ctx->fsq_detok_key.path = submodel_path;
+    ctx->fsq_detok_key.path = fsq_path;
 
     ctx->dit_key.kind                 = MODEL_DIT;
     ctx->dit_key.path                 = params->dit_path;

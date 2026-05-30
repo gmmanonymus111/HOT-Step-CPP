@@ -206,7 +206,7 @@ class CondEncoderWrapperFixed(nn.Module):
         return enc_hidden
 
 
-def load_model(model_dir: str, device: str = "cuda", dtype=torch.float16):
+def load_model(model_dir: str, device: str = "cuda", dtype=torch.float32):
     """Load the AceStep model and extract the condition encoder."""
     model_dir = Path(model_dir)
     
