@@ -8,30 +8,37 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 
 /** Detect model format from the raw model name/path */
-export function getModelFormat(name: string): 'gguf' | 'safetensors' {
+export function getModelFormat(name: string): 'gguf' | 'safetensors' | 'onnx' {
+  if (/\.onnx$/i.test(name)) return 'onnx';
   return /\.gguf$/i.test(name) ? 'gguf' : 'safetensors';
 }
 
 interface FormatBadgeProps {
-  format: 'gguf' | 'safetensors';
+  format: 'gguf' | 'safetensors' | 'onnx';
   compact?: boolean;
 }
 
-/** Tiny pill showing GGUF or ST format */
+/** Tiny pill showing GGUF, ST, or ONNX format */
 export const FormatBadge: React.FC<FormatBadgeProps> = ({ format, compact }) => {
-  const isGguf = format === 'gguf';
+  const colorClass = format === 'gguf'
+    ? 'bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/20'
+    : format === 'onnx'
+    ? 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/20'
+    : 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/20';
+  const icon = format === 'gguf' ? '◆' : format === 'onnx' ? '⬡' : '◈';
+  const label = format === 'gguf' ? (compact ? 'GG' : 'GGUF')
+    : format === 'onnx' ? (compact ? 'OX' : 'ONNX')
+    : (compact ? 'ST' : 'ST');
+  const title = format === 'gguf' ? 'GGUF quantized format'
+    : format === 'onnx' ? 'ONNX TensorRT-accelerated format'
+    : 'SafeTensors native format';
   return (
     <span
-      className={`inline-flex items-center gap-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none tracking-wide uppercase ${
-        isGguf
-          ? 'bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/20'
-          : 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/20'
-      }`}
-      title={isGguf ? 'GGUF quantized format' : 'SafeTensors native format'}
+      className={`inline-flex items-center gap-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none tracking-wide uppercase ${colorClass}`}
+      title={title}
     >
-      {/* tiny icon */}
-      <span className="text-[9px]">{isGguf ? '◆' : '◈'}</span>
-      {compact ? (isGguf ? 'GG' : 'ST') : (isGguf ? 'GGUF' : 'ST')}
+      <span className="text-[9px]">{icon}</span>
+      {label}
     </span>
   );
 };

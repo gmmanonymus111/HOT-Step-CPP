@@ -136,7 +136,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // -- Actions --
   setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
   setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
-  setVaeModel: (v: any) => { set({ vaeModel: v }); writeKey("hs-vaeModel", v); },
+  setVaeModel: (v: any) => {
+    set({ vaeModel: v });
+    writeKey("hs-vaeModel", v);
+    // Auto-detect ORT backend from file extension
+    const isOnnx = /\.onnx$/i.test(v || '');
+    set({ useOrtVae: isOnnx });
+    writeKey('hs-useOrtVae', isOnnx);
+  },
   setEmbeddingModel: (v: any) => { set({ embeddingModel: v }); writeKey("hs-embeddingModel", v); },
   setAdapter: (v: any) => { set({ adapter: v }); writeKey("hs-adapter", v); },
   setAdapterScale: (v: any) => { set({ adapterScale: v }); writeKey("hs-adapterScale", v); },
