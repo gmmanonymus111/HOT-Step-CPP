@@ -11,14 +11,17 @@
 // via the IRefitter API — enabling adapter switching without engine reload.
 //
 // Supports both LoRA (A/B factorized) and LoKr (Kronecker product) adapters.
-// LoKr delta is computed as kron(w1, w2) or kron(w1, w2_a @ w2_b) for factored.
+// Delta computation uses the GGML GPU backend (adapter_compute_delta from
+// adapter-runtime.h) for GPU-accelerated Kronecker products and matmuls.
 
 #ifdef HOT_STEP_TRT
 
-#include "adapter-merge.h"   // lora_base_name(), adapter_read_alpha(), adapter_detect_lokr(), etc.
-#include "dit-trt.h"         // DitTrt, dit_trt_refit_adapter/base
-#include "hot-step-params.h" // adapter_group_scales
-#include "safetensors.h"     // STFile, st_open, st_data
+#include "adapter-merge.h"    // lora_base_name(), adapter_read_alpha(), adapter_detect_lokr(), etc.
+#include "adapter-runtime.h"  // adapter_compute_delta() — GPU delta computation
+#include "backend.h"          // g_backend_cache — shared GGML CUDA backend
+#include "dit-trt.h"          // DitTrt, dit_trt_refit_adapter/base
+#include "hot-step-params.h"  // adapter_group_scales
+#include "safetensors.h"      // STFile, st_open, st_data
 
 #include <cmath>
 #include <cstdio>
@@ -44,21 +47,6 @@ static inline float trt_bf16_to_fp32(uint16_t h) {
     float result;
     memcpy(&result, &u, 4);
     return result;
-}
-
-// CPU matrix multiply: C[M,N] = B[M,K] @ A[K,N] (row-major)
-// Small enough for adapter LoRA factors (rank is typically 4-64).
-static void matmul_f32(const float* B, const float* A, float* C,
-                       int M, int K, int N) {
-    for (int m = 0; m < M; m++) {
-        for (int n = 0; n < N; n++) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; k++) {
-                sum += B[m * K + k] * A[k * N + n];
-            }
-            C[m * N + n] = sum;
-        }
-    }
 }
 
 // Map an adapter base name to a TRT weight name.
@@ -87,81 +75,69 @@ static std::string find_trt_weight_name(
 }
 
 // ── Shared merge helper ─────────────────────────────────────────────────────
-// Merge a computed delta into a base bf16 weight and store the result.
+// Merge a precomputed f32 delta into a base bf16 weight and store the result.
 // Handles transposed-layout weights from the refit manifest.
 //
-// delta:      [out_feat, in_feat] in torch orientation (row-major)
-// base_data:  bf16 weight from TRT base cache
-// out_feat, in_feat: delta dimensions in torch orientation
+// delta_f32:    precomputed delta, [ne0, ne1] in GGML column-major = [in, out]
+// base_data:    bf16 weight from TRT base cache
+// nel:          total elements (in_feat * out_feat)
+// trt_name:     TRT weight name for transpose lookup
 //
-// If the engine weight is transposed [in_feat, out_feat], the delta is
-// transposed before merging.
+// The delta from adapter_compute_delta is GGML [ne0, ne1] = [in, out] column-major,
+// which in row-major terms is [out, in] — matching the transpose orientation already.
+// If the engine weight is transposed [in, out] (refit manifest), the base is already
+// in [in, out] order, so the delta needs transposing.
 static void trt_merge_delta(
     const DitTrt& ctx,
     const std::string& trt_name,
     const std::vector<uint16_t>& base_data,
-    const float* delta,       // [out_feat, in_feat] torch layout
-    int64_t out_feat,
-    int64_t in_feat,
-    float scaling,
+    const float* delta_f32,   // [ne0 * ne1] from adapter_compute_delta
+    int64_t ne0,              // GGML dim0 (in_feat for linear weights)
+    int64_t ne1,              // GGML dim1 (out_feat for linear weights)
+    float scaling,            // already includes alpha/rank * adapter_scale * group_scale
     std::unordered_map<std::string, std::vector<uint16_t>>& merged_storage,
     std::unordered_map<std::string, const void*>& merged_ptrs
 ) {
-    int64_t nel = out_feat * in_feat;
+    int64_t nel = ne0 * ne1;
 
-    // If the engine stores this weight transposed [in_feat, out_feat],
-    // transpose the delta to match before merging with base.
+    // adapter_compute_delta returns delta in GGML layout [ne0, ne1]
+    // = column-major [in, out], which is row-major [out, in].
+    //
+    // TRT engine weight orientation depends on refit manifest:
+    // - transposed: stored as [in, out] (dynamo MatMul layout)
+    // - normal:     stored as [out, in] (torch Linear layout)
+    //
+    // The GGML delta in memory order is [out_row * ne0 + in_col] = [out, in] row-major.
+    // If the engine is NOT transposed, this matches directly.
+    // If the engine IS transposed, we need to iterate in transposed order.
     bool is_transposed = ctx.weights_transposed.count(trt_name) > 0;
 
     std::vector<uint16_t> merged_bf16((size_t)nel);
 
     if (is_transposed) {
-        // Base is [in_feat, out_feat], delta is [out_feat, in_feat]
-        // Iterate in base order
-        for (int64_t c = 0; c < in_feat; c++) {
-            for (int64_t r = 0; r < out_feat; r++) {
-                int64_t base_idx = c * out_feat + r;
-                int64_t delta_idx = r * in_feat + c;
+        // Base is [in, out] row-major = [ne0, ne1] row-major
+        // Delta is [out, in] row-major = [ne1, ne0] row-major
+        // Need to transpose delta while merging
+        for (int64_t in_idx = 0; in_idx < ne0; in_idx++) {
+            for (int64_t out_idx = 0; out_idx < ne1; out_idx++) {
+                int64_t base_idx  = in_idx * ne1 + out_idx;  // [in, out] row-major
+                int64_t delta_idx = out_idx * ne0 + in_idx;  // [out, in] row-major
                 float base_val = trt_bf16_to_fp32(base_data[base_idx]);
-                float merged_val = base_val + scaling * delta[delta_idx];
+                float merged_val = base_val + scaling * delta_f32[delta_idx];
                 merged_bf16[base_idx] = trt_fp32_to_bf16(merged_val);
             }
         }
     } else {
-        // Both in [out_feat, in_feat] — direct element-wise
+        // Both [out, in] — element-wise
         for (int64_t j = 0; j < nel; j++) {
             float base_val = trt_bf16_to_fp32(base_data[j]);
-            float merged_val = base_val + scaling * delta[j];
+            float merged_val = base_val + scaling * delta_f32[j];
             merged_bf16[j] = trt_fp32_to_bf16(merged_val);
         }
     }
 
     merged_storage[trt_name] = std::move(merged_bf16);
     merged_ptrs[trt_name] = merged_storage[trt_name].data();
-}
-
-// ── CPU Kronecker product ───────────────────────────────────────────────────
-// Computes kron(w1, w2) where w1 is [a, b] and w2 is [c, d].
-// Result is [a*c, b*d] in row-major order.
-static void kron_f32(const float* w1, int a, int b,
-                     const float* w2, int c, int d,
-                     float* out) {
-    // kron(A, B)[i*c + ci][j*d + dj] = A[i][j] * B[ci][dj]
-    int rows = a * c;
-    int cols = b * d;
-    for (int i = 0; i < a; i++) {
-        for (int ci = 0; ci < c; ci++) {
-            int row = i * c + ci;
-            for (int j = 0; j < b; j++) {
-                float w1_val = w1[i * b + j];
-                for (int dj = 0; dj < d; dj++) {
-                    int col = j * d + dj;
-                    out[row * cols + col] = w1_val * w2[ci * d + dj];
-                }
-            }
-        }
-    }
-    (void)rows;
 }
 
 // ── Build TRT reverse map for LoKr ──────────────────────────────────────────
@@ -185,12 +161,25 @@ static std::unordered_map<std::string, std::string> lokr_build_trt_reverse_map(
     return out;
 }
 
+// ── Get GGML backend for GPU delta computation ──────────────────────────────
+// Reuses the shared backend from g_backend_cache (initialized by other GGML
+// modules like VAE/LM). Falls back to CPU if no GPU available.
+static ggml_backend_t adapter_trt_get_backend() {
+    if (g_backend_refs > 0 && g_backend_cache.backend) {
+        return g_backend_cache.backend;
+    }
+    // Shouldn't happen — VAE/LM should have initialized the backend
+    fprintf(stderr, "[Adapter-TRT] WARNING: no shared GGML backend, falling back to CPU\n");
+    return g_backend_cache.cpu_backend;
+}
+
 // ── LoRA merge path ─────────────────────────────────────────────────────────
 static int adapter_trt_apply_lora(
     DitTrt* ctx,
     const STFile& st,
     const std::string& cfg_dir,
     float adapter_scale,
+    ggml_backend_t backend,
     std::unordered_map<std::string, std::vector<uint16_t>>& merged_storage,
     std::unordered_map<std::string, const void*>& merged_ptrs
 ) {
@@ -223,6 +212,9 @@ static int adapter_trt_apply_lora(
 
     fprintf(stderr, "[Adapter-TRT] LoRA: found %zu A/B pairs\n", a_map.size());
     int merged = 0, skipped = 0;
+
+    // Use BF16 precision rounding (same as adapter-runtime.h)
+    ggml_type round_type = GGML_TYPE_BF16;
 
     for (const auto& [gguf_name, ea] : a_map) {
         auto it = b_map.find(gguf_name);
@@ -272,13 +264,31 @@ static int adapter_trt_apply_lora(
         if (!adapter_to_f32(st_data(st, *ea), a_f32.data(), a_nel, ea->dtype)) { skipped++; continue; }
         if (!adapter_to_f32(st_data(st, *eb), b_f32.data(), b_nel, eb->dtype)) { skipped++; continue; }
 
-        // Compute delta = B @ A  [out_feat, in_feat] (torch orientation)
-        std::vector<float> delta((size_t)nel);
-        matmul_f32(b_f32.data(), a_f32.data(), delta.data(),
-                   (int)out_feat, (int)rank, (int)in_feat);
+        // GPU-accelerated delta computation (same graph as adapter-runtime.h)
+        auto build = [&](struct ggml_context* gctx) {
+            struct ggml_tensor* ta    = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, in_feat, rank);
+            struct ggml_tensor* tb    = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, rank, out_feat);
+            struct ggml_tensor* ta_br = ggml_cast(gctx, ggml_cast(gctx, ta, round_type), GGML_TYPE_F32);
+            struct ggml_tensor* tb_br = ggml_cast(gctx, ggml_cast(gctx, tb, round_type), GGML_TYPE_F32);
+            struct ggml_tensor* ta_t  = ggml_cont(gctx, ggml_transpose(gctx, ta_br));
+            struct ggml_tensor* tdelta = ggml_scale(gctx, ggml_mul_mat(gctx, ta_t, tb_br), scaling);
+            adapter_delta_build db;
+            db.tdelta = tdelta;
+            db.upload = [=]() {
+                ggml_backend_tensor_set(ta, a_f32.data(), 0, (size_t)a_nel * sizeof(float));
+                ggml_backend_tensor_set(tb, b_f32.data(), 0, (size_t)b_nel * sizeof(float));
+            };
+            return db;
+        };
 
-        trt_merge_delta(*ctx, trt_name, base_data, delta.data(),
-                        out_feat, in_feat, scaling,
+        std::vector<float> delta_f32;
+        if (!adapter_compute_delta(build, in_feat, out_feat, backend, delta_f32)) {
+            fprintf(stderr, "[Adapter-TRT] WARNING: GPU delta compute failed for %s\n", gguf_name.c_str());
+            skipped++; continue;
+        }
+
+        trt_merge_delta(*ctx, trt_name, base_data, delta_f32.data(),
+                        in_feat, out_feat, 1.0f,  // scaling already baked into delta
                         merged_storage, merged_ptrs);
         merged++;
     }
@@ -292,6 +302,7 @@ static int adapter_trt_apply_lokr(
     DitTrt* ctx,
     const STFile& st,
     float adapter_scale,
+    ggml_backend_t backend,
     std::unordered_map<std::string, std::vector<uint16_t>>& merged_storage,
     std::unordered_map<std::string, const void*>& merged_ptrs
 ) {
@@ -365,7 +376,7 @@ static int adapter_trt_apply_lokr(
             r = lokr_dim;
         }
 
-        int64_t out_feat = a * c;  // torch orientation [out, in]
+        int64_t out_feat = a * c;  // [out, in] in torch orientation
         int64_t in_feat  = b * d;
         int64_t nel = out_feat * in_feat;
         if (nel != (int64_t)base_data.size()) {
@@ -383,8 +394,7 @@ static int adapter_trt_apply_lokr(
 
         float scaling = (alpha_val / (float)r) * adapter_scale;
 
-        // Also find the gguf-style name for group scaling
-        // trt_name is "dit.layers.X.module.weight" → make "decoder.layers.X.module.weight"
+        // Group scaling
         std::string gguf_name = trt_name;
         if (gguf_name.compare(0, 4, "dit.") == 0) {
             gguf_name = "decoder." + gguf_name.substr(4);
@@ -401,33 +411,70 @@ static int adapter_trt_apply_lokr(
             skipped++; continue;
         }
 
-        // Load or compute w2
-        std::vector<float> w2_f32((size_t)(c * d));
+        // Load w2 factors
+        int64_t w2a_nel = 0, w2b_nel = 0, w2_nel = 0;
+        std::vector<float> w2a_f32, w2b_f32, w2_f32;
         if (has_factor) {
-            // w2 = w2_a @ w2_b  [c, r] @ [r, d] = [c, d]
-            int64_t w2a_nel = c * r, w2b_nel = r * d;
-            std::vector<float> w2a_f32((size_t)w2a_nel), w2b_f32((size_t)w2b_nel);
+            w2a_nel = c * r; w2b_nel = r * d;
+            w2a_f32.resize((size_t)w2a_nel); w2b_f32.resize((size_t)w2b_nel);
             if (!adapter_to_f32(st_data(st, *m.w2_a), w2a_f32.data(), w2a_nel, m.w2_a->dtype) ||
                 !adapter_to_f32(st_data(st, *m.w2_b), w2b_f32.data(), w2b_nel, m.w2_b->dtype)) {
                 skipped++; continue;
             }
-            matmul_f32(w2a_f32.data(), w2b_f32.data(), w2_f32.data(),
-                       (int)c, (int)r, (int)d);
         } else {
-            int64_t w2_nel = c * d;
+            w2_nel = c * d; w2_f32.resize((size_t)w2_nel);
             if (!adapter_to_f32(st_data(st, *m.w2), w2_f32.data(), w2_nel, m.w2->dtype)) {
                 skipped++; continue;
             }
         }
 
-        // Compute delta = kron(w1, w2)  [a*c, b*d] = [out_feat, in_feat]
-        std::vector<float> delta((size_t)nel);
-        kron_f32(w1_f32.data(), (int)a, (int)b,
-                 w2_f32.data(), (int)c, (int)d,
-                 delta.data());
+        // GPU-accelerated Kronecker product (same graph as adapter-runtime.h)
+        auto build = [&](struct ggml_context* gctx) {
+            struct ggml_tensor* tw1 = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, b, a);
+            struct ggml_tensor* tw2;
+            struct ggml_tensor* tw2_src = nullptr;
+            struct ggml_tensor* tw2a = nullptr;
+            struct ggml_tensor* tw2b = nullptr;
+            if (has_factor) {
+                tw2a = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, r, c);
+                tw2b = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d, r);
+                tw2  = ggml_mul_mat(gctx, ggml_cont(gctx, ggml_transpose(gctx, tw2b)), tw2a);
+            } else {
+                tw2_src = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d, c);
+                tw2     = tw2_src;
+            }
 
-        trt_merge_delta(*ctx, trt_name, base_data, delta.data(),
-                        out_feat, in_feat, scaling,
+            struct ggml_tensor* tw1_s    = ggml_scale(gctx, tw1, scaling);
+            struct ggml_tensor* tw1_flat = ggml_reshape_2d(gctx, tw1_s, 1, a * b);
+            struct ggml_tensor* tw2_flat = ggml_reshape_2d(gctx, tw2, 1, c * d);
+            struct ggml_tensor* touter   = ggml_mul_mat(gctx, tw1_flat, tw2_flat);
+            struct ggml_tensor* t4d      = ggml_reshape_4d(gctx, touter, b, a, d, c);
+            struct ggml_tensor* tperm    = ggml_permute(gctx, t4d, 1, 3, 0, 2);
+            struct ggml_tensor* tdelta   = ggml_reshape_2d(gctx, ggml_cont(gctx, tperm), b * d, a * c);
+
+            adapter_delta_build db;
+            db.tdelta = tdelta;
+            db.upload = [=]() {
+                ggml_backend_tensor_set(tw1, w1_f32.data(), 0, (size_t)w1_nel * sizeof(float));
+                if (has_factor) {
+                    ggml_backend_tensor_set(tw2a, w2a_f32.data(), 0, (size_t)w2a_nel * sizeof(float));
+                    ggml_backend_tensor_set(tw2b, w2b_f32.data(), 0, (size_t)w2b_nel * sizeof(float));
+                } else {
+                    ggml_backend_tensor_set(tw2_src, w2_f32.data(), 0, (size_t)w2_nel * sizeof(float));
+                }
+            };
+            return db;
+        };
+
+        // ne0 = in_feat (b*d), ne1 = out_feat (a*c) in GGML convention
+        std::vector<float> delta_f32;
+        if (!adapter_compute_delta(build, in_feat, out_feat, backend, delta_f32)) {
+            fprintf(stderr, "[Adapter-TRT] WARNING: GPU delta compute failed for %s\n", lyc_prefix.c_str());
+            skipped++; continue;
+        }
+
+        trt_merge_delta(*ctx, trt_name, base_data, delta_f32.data(),
+                        in_feat, out_feat, 1.0f,  // scaling already baked into delta
                         merged_storage, merged_ptrs);
         merged++;
     }
@@ -474,16 +521,26 @@ static int64_t adapter_trt_apply(
     }
     fprintf(stderr, "[Adapter-TRT] Loading adapter: %s\n", st_path.c_str());
 
+    // Get GGML GPU backend for delta computation
+    ggml_backend_t backend = adapter_trt_get_backend();
+    if (!backend) {
+        fprintf(stderr, "[Adapter-TRT] FATAL: no compute backend available\n");
+        st_close(&st);
+        return -1;
+    }
+    fprintf(stderr, "[Adapter-TRT] Using %s backend for delta computation\n",
+            ggml_backend_name(backend));
+
     // Compute merged weights
     std::unordered_map<std::string, std::vector<uint16_t>> merged_storage;
     std::unordered_map<std::string, const void*> merged_ptrs;
     int merged = 0;
 
     if (adapter_detect_lokr(st)) {
-        merged = adapter_trt_apply_lokr(ctx, st, adapter_scale,
+        merged = adapter_trt_apply_lokr(ctx, st, adapter_scale, backend,
                                         merged_storage, merged_ptrs);
     } else {
-        merged = adapter_trt_apply_lora(ctx, st, cfg_dir, adapter_scale,
+        merged = adapter_trt_apply_lora(ctx, st, cfg_dir, adapter_scale, backend,
                                         merged_storage, merged_ptrs);
     }
 
