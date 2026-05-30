@@ -413,9 +413,19 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
     s.need_enc_switch = s.use_source_context && !s.is_repaint && !s.is_lego_region && s.rr.audio_cover_strength < 1.0f;
 
-    BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
+    // BPE tokenizer: when text_encoder_path points at an .onnx file,
+    // vocab.json + merges.txt live in the same directory, not inside the file.
+    std::string bpe_dir;
+    const char * bpe_path = ctx->params.text_encoder_path;
+    if (ctx->is_onnx_pipeline) {
+        bpe_dir = ctx->text_enc_ort_key.path;
+        auto slash = bpe_dir.find_last_of("/\\");
+        if (slash != std::string::npos) bpe_dir = bpe_dir.substr(0, slash);
+        bpe_path = bpe_dir.c_str();
+    }
+    BPETokenizer * bpe = store_bpe(ctx->store, bpe_path);
     if (!bpe) {
-        fprintf(stderr, "[Encode-Text] FATAL: store_bpe failed\n");
+        fprintf(stderr, "[Encode-Text] FATAL: store_bpe failed (path=%s)\n", bpe_path);
         return -1;
     }
 
