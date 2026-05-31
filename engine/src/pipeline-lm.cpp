@@ -54,6 +54,22 @@ static bool s_use_trt = false;  // set during ace_lm_load, read during generate
 static LmTrt * s_trt_ctx = nullptr;
 #endif
 
+// Safe vocab_size accessor: works with either GGML (m != null) or TRT (m == null)
+static inline int lm_vocab_size(Qwen3LM * m) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) return LM_TRT_VOCAB;
+#endif
+    return m->cfg.vocab_size;
+}
+
+// Safe partial head check: TRT never has a partial GPU head (slicing is in C++)
+static inline bool lm_has_partial_head(Qwen3LM * m) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) return false;
+#endif
+    return m && m->lm_head_phase2 != NULL;
+}
+
 static inline void lm_reset_kv(Qwen3LM * m, int kv_set) {
 #ifdef HOT_STEP_TRT
     if (s_use_trt) { lm_trt_reset_kv(s_trt_ctx, kv_set); return; }
@@ -106,7 +122,7 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
                                                       bool                     stop_at_reasoning = false,
                                                       bool (*cancel)(void *)                     = nullptr,
                                                       void * cancel_data                         = nullptr) {
-    int  V       = m->cfg.vocab_size;
+    int  V       = lm_vocab_size(m);
     bool use_cfg = cfg_scale > 1.0f && uncond_tokens && !uncond_tokens->empty();
 
     // KV sets: cond [0..N-1], uncond [N..2N-1] if CFG
@@ -335,7 +351,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                                                  bool                           use_batch_cfg,
                                                  bool (*cancel)(void *),
                                                  void * cancel_data) {
-    int  V             = m->cfg.vocab_size;
+    int  V             = lm_vocab_size(m);
     bool use_cfg       = cfg_scale > 1.0f;
     bool shared_prompt = ((int) aces.size() == 1);
 
@@ -461,7 +477,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     // partial head: pre-extracted contiguous tensor for [TOKEN_IM_END..V) rows.
     // When unavailable (alloc failed): full vocab, slightly more compute, same result.
     Timer t_decode;
-    bool  partial     = (m->lm_head_phase2 != NULL);
+    bool  partial     = lm_has_partial_head(m);
     int   out_V       = partial ? (V - TOKEN_IM_END) : V;
     int   lm_offset   = partial ? TOKEN_IM_END : 0;
     int   lm_count    = partial ? (V - TOKEN_IM_END) : 0;
@@ -621,7 +637,7 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
                                                         const char *   negative_prompt,
                                                         bool (*cancel)(void *),
                                                         void * cancel_data) {
-    int  V             = target->cfg.vocab_size;
+    int  V             = lm_vocab_size(target);
     bool use_cfg       = cfg_scale > 1.0f;
 
     // Build prompts
@@ -685,7 +701,7 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
     }
 
     // Partial LM head setup (same for both models)
-    bool  t_partial   = (target->lm_head_phase2 != NULL);
+    bool  t_partial   = lm_has_partial_head(target);
     int   t_out_V     = t_partial ? (V - TOKEN_IM_END) : V;
     int   t_lm_offset = t_partial ? TOKEN_IM_END : 0;
     int   t_lm_count  = t_partial ? (V - TOKEN_IM_END) : 0;
