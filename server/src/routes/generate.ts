@@ -570,10 +570,15 @@ async function runGeneration(job: GenerationJob): Promise<void> {
           job.progress = Math.round(trackProgressBase + (step / total) * progressPerTrack * 0.8);
           return;
         }
-        if (line.text.includes('[VAE]') || line.text.includes('[VAE-ORT]') || line.text.includes('vae_decode')) {
+        if (line.text.includes('[VAE-Decode]') || line.text.includes('[VAE-ORT] Tiled decode')) {
+          // Only trigger on actual decode start, not VAE model loading
+          // [VAE] alone fires during model load (e.g. "[VAE] Loaded: 5 blocks")
           if (!vaeStartAt) vaeStartAt = now;
           job.stage = `Decoding audio (VAE)${trackLabel}...`;
           job.progress = Math.round(trackProgressBase + progressPerTrack * 0.9);
+        } else if (line.text.includes('[VAE]') && (line.text.includes('Loaded') || line.text.includes('Backend'))) {
+          // VAE model loading — update stage but don't set vaeStartAt
+          job.stage = `Loading VAE model${trackLabel}...`;
         } else if (
           (line.text.includes('[Adapter]') && line.text.includes('Merge')) ||
           (line.text.includes('[Adapter-TRT]') && (line.text.includes('Applying') || line.text.includes('Loading')))
