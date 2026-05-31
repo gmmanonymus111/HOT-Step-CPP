@@ -95,6 +95,9 @@ struct DitTrt {
     // Logger
     DitTrtLogger logger;
 
+    // Dedicated CUDA stream (avoids default-stream synchronisation penalties)
+    cudaStream_t stream = nullptr;
+
     // Stats
     int64_t build_time_ms = 0;
     int64_t load_time_ms  = 0;
@@ -426,7 +429,13 @@ inline bool dit_trt_load(
         t1 - t0).count();
     fprintf(stderr, "[DiT-TRT] Load + refit complete (%lld ms)\n",
             (long long)ctx->load_time_ms);
+    fflush(stderr);
     ctx->current_adapter.clear();
+
+    // Create dedicated CUDA stream for inference
+    if (!ctx->stream) {
+        cudaStreamCreate(&ctx->stream);
+    }
 
     return true;
 }
@@ -582,6 +591,7 @@ inline void dit_trt_free(DitTrt* ctx) {
     if (ctx->d_t)             { cudaFree(ctx->d_t);             ctx->d_t = nullptr; }
     if (ctx->d_t_r)           { cudaFree(ctx->d_t_r);           ctx->d_t_r = nullptr; }
     if (ctx->d_velocity)      { cudaFree(ctx->d_velocity);      ctx->d_velocity = nullptr; }
+    if (ctx->stream)          { cudaStreamDestroy(ctx->stream); ctx->stream = nullptr; }
     // TRT 10: use delete instead of destroy()
     if (ctx->context)         { delete ctx->context;            ctx->context = nullptr; }
     if (ctx->engine)          { delete ctx->engine;             ctx->engine = nullptr; }

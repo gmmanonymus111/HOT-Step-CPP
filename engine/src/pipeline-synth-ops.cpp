@@ -15,6 +15,7 @@
 #include "vae-enc.h"
 
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1242,6 +1243,7 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
 
         // LoRA adapter refitting: apply/revert/switch as needed
         {
+            auto t_adapter_wall = std::chrono::steady_clock::now();
             const std::string& want_adapter = ctx->dit_key.adapter_path;
             const std::string& have_adapter = s_trt.current_adapter;
 
@@ -1249,20 +1251,24 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
                 // Revert to base model
                 fprintf(stderr, "[Adapter-TRT] Reverting adapter '%s' → base\n",
                         have_adapter.c_str());
+                fflush(stderr);
                 int64_t ms = adapter_trt_revert(&s_trt);
                 if (ms >= 0) {
                     fprintf(stderr, "[Adapter-TRT] Reverted in %lld ms\n", (long long)ms);
+                    fflush(stderr);
                 }
             } else if (!want_adapter.empty() && want_adapter != have_adapter) {
                 // Apply new adapter (or switch from one to another)
                 if (!have_adapter.empty()) {
                     fprintf(stderr, "[Adapter-TRT] Switching adapter '%s' → '%s'\n",
                             have_adapter.c_str(), want_adapter.c_str());
+                    fflush(stderr);
                     // Revert to base first, then apply new
                     adapter_trt_revert(&s_trt);
                 }
                 fprintf(stderr, "[Adapter-TRT] Applying adapter: %s (scale=%.2f)\n",
                         want_adapter.c_str(), ctx->dit_key.adapter_scale);
+                fflush(stderr);
                 int64_t ms = adapter_trt_apply(&s_trt, want_adapter.c_str(),
                                                ctx->dit_key.adapter_scale);
                 if (ms < 0) {
@@ -1270,8 +1276,17 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
                 } else {
                     fprintf(stderr, "[Adapter-TRT] Applied in %lld ms\n", (long long)ms);
                 }
+                fflush(stderr);
             }
             // else: want == have, no change needed
+
+            auto t_adapter_end = std::chrono::steady_clock::now();
+            auto adapter_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                t_adapter_end - t_adapter_wall).count();
+            if (adapter_wall_ms > 50) {
+                fprintf(stderr, "[Adapter-TRT] Wall clock total: %lld ms\n", (long long)adapter_wall_ms);
+                fflush(stderr);
+            }
         }
 
         s.timer.reset();
@@ -1287,6 +1302,7 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             return -1;
         }
         fprintf(stderr, "[DiT-Generate] TRT Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
+        fflush(stderr);
 
         // Release TRT engine from VRAM if eviction policy says so.
         // EVICT_STRICT (default) = unload after use, like GGML's store_release.

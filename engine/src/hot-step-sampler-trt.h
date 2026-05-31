@@ -257,8 +257,9 @@ static int dit_trt_generate(DitTrt *              trt,
 
     // Pre-upload encoder hidden states (fp32 → bf16)
     convert_fp32_to_bf16(enc_buf.data(), h_enc_bf16.data(), enc_bf16_elems);
-    cudaMemcpy(d_enc, h_enc_bf16.data(), enc_bf16_elems * sizeof(uint16_t),
-               cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_enc, h_enc_bf16.data(), enc_bf16_elems * sizeof(uint16_t),
+               cudaMemcpyHostToDevice, trt->stream);
+    cudaStreamSynchronize(trt->stream);
 
     GuidanceCtx g_ctx = {0, num_steps, 0.0f, 0.0f};
 
@@ -285,27 +286,30 @@ static int dit_trt_generate(DitTrt *              trt,
         // Convert input to BF16 and upload
         size_t input_n = (size_t)n_batch * T * in_ch;
         convert_fp32_to_bf16(input_buf.data(), h_input_bf16.data(), input_n);
-        cudaMemcpy(d_input, h_input_bf16.data(), input_n * sizeof(uint16_t),
-                   cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_input, h_input_bf16.data(), input_n * sizeof(uint16_t),
+                   cudaMemcpyHostToDevice, trt->stream);
 
         // Set timestep (FP32, broadcast to all batch slots)
         std::vector<float> t_host(n_batch, t_val);
-        cudaMemcpy(d_t, t_host.data(), n_batch * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_t_r, t_host.data(), n_batch * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_t, t_host.data(), n_batch * sizeof(float), cudaMemcpyHostToDevice, trt->stream);
+        cudaMemcpyAsync(d_t_r, t_host.data(), n_batch * sizeof(float), cudaMemcpyHostToDevice, trt->stream);
 
         // Re-upload encoder states (fp32 → bf16)
         size_t enc_n = (size_t)n_batch * enc_S * H_enc;
         convert_fp32_to_bf16(enc_buf.data(), h_enc_bf16.data(), enc_n);
-        cudaMemcpy(d_enc, h_enc_bf16.data(), enc_n * sizeof(uint16_t),
-                   cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_enc, h_enc_bf16.data(), enc_n * sizeof(uint16_t),
+                   cudaMemcpyHostToDevice, trt->stream);
 
-        // Run TRT forward
+        // Run TRT forward on dedicated stream
         bool ok = dit_trt_forward(trt, d_input, d_enc, d_t, d_t_r,
-                                   n_batch, T, enc_S, d_vel, nullptr);
+                                   n_batch, T, enc_S, d_vel, trt->stream);
         if (!ok) {
             fprintf(stderr, "[DiT-TRT] Forward pass failed!\n");
             return false;
         }
+
+        // Sync stream before reading back results
+        cudaStreamSynchronize(trt->stream);
 
         // Read back velocity (BF16 → FP32)
         size_t vel_n = (size_t)n_batch * T * Oc;
@@ -459,6 +463,8 @@ static int dit_trt_generate(DitTrt *              trt,
                     cache_ratio, cached_count, num_steps);
         }
 
+        auto t_gen_start = std::chrono::steady_clock::now();
+
         for (int step = 0; step < num_steps; step++) {
             if (cancel && cancel(cancel_data)) {
                 fprintf(stderr, "[DiT-TRT] Cancelled at step %d/%d\n", step, num_steps);
@@ -520,8 +526,16 @@ static int dit_trt_generate(DitTrt *              trt,
             sampler_repaint_inject(xt.data(), noise, nullptr, N, T, Oc,
                                    0, 0, 0.5f, step, num_steps, t_next);
 
-            fprintf(stderr, "[DiT-TRT] Step %d/%d t=%.3f [%s]\n",
+            fprintf(stderr, "[DiT-TRT] Step %d/%d t=%.3f [%s]", 
                     step + 1, num_steps, t_curr, solver_plugin->display_name.c_str());
+            if (step == 0) {
+                auto t_first = std::chrono::steady_clock::now();
+                auto first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    t_first - t_gen_start).count();
+                fprintf(stderr, " (first step: %lld ms)", (long long)first_ms);
+            }
+            fprintf(stderr, "\n");
+            fflush(stderr);
         }
 
         memcpy(output, xt.data(), n_total * sizeof(float));
