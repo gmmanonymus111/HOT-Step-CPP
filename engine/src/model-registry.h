@@ -348,6 +348,86 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
         count++;
     }
 
+    // Scan subdirectories for ONNX model directories (TRT acceleration).
+    // Each subdirectory should contain at least one .onnx file.
+    // Classification by .onnx filename prefix (lm_* -> LM, dit_* -> DiT, etc.)
+    // or by directory name prefix if ONNX filename is ambiguous.
+    for (const auto & dname : subdirs) {
+        std::string dir_path = std::string(models_dir) + REGISTRY_SEP + dname;
+
+        // Skip directories already registered (safetensors path above)
+        // by checking for model.safetensors — if it has that, it was already handled
+        std::string st_check = dir_path + REGISTRY_SEP + "model.safetensors";
+        std::string st_idx   = dir_path + REGISTRY_SEP + "model.safetensors.index.json";
+        if (registry_is_file(st_check.c_str()) || registry_is_file(st_idx.c_str())) {
+            continue;
+        }
+
+        // Look for .onnx files in this subdirectory
+        std::vector<std::string> sub_files;
+        registry_list_dir(dir_path.c_str(), &sub_files);
+        std::string onnx_name;
+        for (const auto & f : sub_files) {
+            if (str_ends_with(f, ".onnx")) {
+                onnx_name = f;
+                break;
+            }
+        }
+        if (onnx_name.empty()) {
+            continue;
+        }
+
+        // Classify: try ONNX filename first, then directory name
+        std::string lower_onnx = onnx_name;
+        std::transform(lower_onnx.begin(), lower_onnx.end(), lower_onnx.begin(), ::tolower);
+        std::string lower_dir = dname;
+        std::transform(lower_dir.begin(), lower_dir.end(), lower_dir.begin(), ::tolower);
+
+        std::string type;
+        // Check ONNX filename prefix
+        if (lower_onnx.find("lm_") == 0 || lower_onnx.find("lm-") == 0) {
+            type = "LM";
+        } else if (lower_onnx.find("dit_") == 0 || lower_onnx.find("dit-") == 0) {
+            type = "DiT";
+        } else if (lower_onnx.find("vae_") == 0 || lower_onnx.find("vae-") == 0) {
+            type = "VAE";
+        } else if (lower_onnx.find("text_enc") == 0 || lower_onnx.find("text-enc") == 0) {
+            type = "Text-Enc";
+        }
+        // Fallback: check directory name prefix
+        if (type.empty()) {
+            if (lower_dir.find("lm") == 0) {
+                type = "LM";
+            } else if (lower_dir.find("dit") == 0) {
+                type = "DiT";
+            } else if (lower_dir.find("vae") == 0) {
+                type = "VAE";
+            } else if (lower_dir.find("text") == 0 || lower_dir.find("enc") == 0) {
+                type = "Text-Enc";
+            }
+        }
+
+        if (type.empty()) {
+            fprintf(stderr, "[Registry] WARNING: skipping %s/ (unrecognized ONNX directory)\n", dname.c_str());
+            continue;
+        }
+
+        // ModelEntry.path is the directory path. The TRT runtime finds the .onnx inside.
+        ModelEntry entry = { dname, dir_path };
+        if (type == "LM") {
+            reg->lm.push_back(entry);
+        } else if (type == "DiT") {
+            reg->dit.push_back(entry);
+        } else if (type == "Text-Enc") {
+            reg->text_enc.push_back(entry);
+        } else if (type == "VAE") {
+            reg->vae.push_back(entry);
+        }
+
+        fprintf(stderr, "[Registry] %s/ -> %s (ONNX: %s)\n", dname.c_str(), type.c_str(), onnx_name.c_str());
+        count++;
+    }
+
     return count > 0;
 }
 

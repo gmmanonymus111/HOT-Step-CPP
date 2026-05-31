@@ -53,6 +53,10 @@ export function formatLmModel(filename: string): string {
   const lmStMatch = name.match(/^acestep-5Hz-lm-([\d.]+B)$/);
   if (lmStMatch) return `LM ${lmStMatch[1]}`;
 
+  // ONNX LM directory: lm-{size} (e.g. "lm-4B", "lm-0.6B", "lm-1.7B")
+  const lmOnnxMatch = name.match(/^lm-([\d.]+B)$/i);
+  if (lmOnnxMatch) return `LM ${lmOnnxMatch[1]}`;
+
   // Qwen embedding
   const qwenMatch = name.match(/^Qwen3-Embedding-([\d.]+B)-([\w_]+)$/);
   if (qwenMatch) return `Qwen ${qwenMatch[1]}-${qwenMatch[2]}`;

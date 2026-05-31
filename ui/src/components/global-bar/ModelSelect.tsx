@@ -7,10 +7,21 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 
-/** Detect model format from the raw model name/path */
+/** Detect model format from the raw model name/path.
+ *  ONNX detection: .onnx extension OR known ONNX directory name patterns
+ *  (the C++ registry registers ONNX subdirectories by directory name). */
 export function getModelFormat(name: string): 'gguf' | 'safetensors' | 'onnx' {
   if (/\.onnx$/i.test(name)) return 'onnx';
-  return /\.gguf$/i.test(name) ? 'gguf' : 'safetensors';
+  if (/\.gguf$/i.test(name)) return 'gguf';
+  // ONNX model directories: names like 'lm-4B', 'dit-xl', etc.
+  // that don't have .gguf or .safetensors extensions
+  // and don't match safetensors naming patterns (acestep-*, Qwen3-*, vae*, scragvae*)
+  const lower = name.toLowerCase();
+  if (/^lm-\d/i.test(name)) return 'onnx';
+  if (/^dit-/i.test(name) && !lower.includes('acestep')) return 'onnx';
+  if (/^vae-/i.test(name) && !lower.endsWith('.safetensors')) return 'onnx';
+  if (/^text[_-]enc/i.test(name)) return 'onnx';
+  return 'safetensors';
 }
 
 interface FormatBadgeProps {
