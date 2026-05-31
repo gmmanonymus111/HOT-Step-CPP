@@ -653,38 +653,9 @@ inline bool lm_trt_forward_batch(
     }
 
     // Batched path: all kv_pos equal, N <= 2
-    int kv_pos = kp0;
-    int kv_len = kv_pos + 1;
-    int past_len = std::max(kv_pos, 1);
-
-    auto* context = ctx->context;
-
-    // Prepare batched inputs
-    {
-        std::vector<int64_t> ids(N);
-        for (int i = 0; i < N; i++) ids[i] = token_ids[i];
-        cudaMemcpyAsync(ctx->d_input_ids, ids.data(),
-                        N * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
-    }
-    {
-        std::vector<int64_t> pos(N, kv_pos);
-        cudaMemcpyAsync(ctx->d_position_ids, pos.data(),
-                        N * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
-    }
-    {
-        std::vector<int64_t> mask(N * kv_len, 1);
-        cudaMemcpyAsync(ctx->d_attn_mask, mask.data(),
-                        N * kv_len * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
-    }
-
-    // TODO: Batched KV binding requires interleaved KV from different kv_sets
-    // This is complex — for now, fall back to per-element forwards
-    // The batched path will be optimized in a future iteration
-
-    // Fallback for now
+    // TODO: True batched KV binding requires interleaved KV from different
+    // kv_sets. This is complex — for now, fall back to per-element forwards.
+    // The batched path will be optimized in a future iteration.
     for (int i = 0; i < N; i++) {
         if (!lm_trt_forward(ctx, &token_ids[i], 1, kv_sets[i],
                             logits_out + i * out_vocab,

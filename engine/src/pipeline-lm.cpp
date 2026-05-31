@@ -1,6 +1,7 @@
 // pipeline-lm.cpp: ACE-Step LM pipeline implementation
 //
 // Wraps Qwen3 LM for caption enrichment and audio code generation.
+// Supports both GGML and TRT backends.
 
 #include "pipeline-lm.h"
 
@@ -12,11 +13,16 @@
 #include "sampling.h"
 #include "timer.h"
 
+#ifdef HOT_STEP_TRT
+#include "lm-trt.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -31,7 +37,55 @@ struct AceLm {
     // Loaded once, kept resident, bypasses ModelStore.
     Qwen3LM    draft;
     bool       draft_loaded;
+
+#ifdef HOT_STEP_TRT
+    // TRT LM (alternative to GGML path)
+    LmTrt      lm_trt;
+    bool       use_trt = false;
+#endif
 };
+
+// ── Dispatch wrappers: GGML vs TRT ─────────────────────────────────────────
+// These allow the pipeline to call a single API regardless of backend.
+// When TRT is active, the GGML model pointer is unused (nullptr).
+
+#ifdef HOT_STEP_TRT
+static bool s_use_trt = false;  // set during ace_lm_load, read during generate
+static LmTrt * s_trt_ctx = nullptr;
+#endif
+
+static inline void lm_reset_kv(Qwen3LM * m, int kv_set) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) { lm_trt_reset_kv(s_trt_ctx, kv_set); return; }
+#endif
+    qw3lm_reset_kv(m, kv_set);
+}
+
+static inline void lm_copy_kv(Qwen3LM * m, int src, int dst) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) { lm_trt_copy_kv(s_trt_ctx, src, dst); return; }
+#endif
+    qw3lm_copy_kv(m, src, dst);
+}
+
+static inline void lm_forward(Qwen3LM * m, const int * tokens, int n, int kv_set, float * logits) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) { lm_trt_forward(s_trt_ctx, tokens, n, kv_set, logits, 0); return; }
+#endif
+    qw3lm_forward(m, tokens, n, kv_set, logits);
+}
+
+static inline void lm_forward_batch(Qwen3LM * m, const int * tokens, const int * sets,
+                                     int N, float * logits, int lm_offset = 0, int lm_count = 0) {
+#ifdef HOT_STEP_TRT
+    if (s_use_trt) {
+        // TRT: partial_offset maps to lm_offset
+        lm_trt_forward_batch(s_trt_ctx, tokens, sets, N, logits, lm_offset);
+        return;
+    }
+#endif
+    qw3lm_forward_batch(m, tokens, sets, N, logits, lm_offset, lm_count);
+}
 
 // Batched Phase 1: N text generations with shared prompt, different seeds.
 // No CFG. Each element gets its own FSM state and RNG.
@@ -57,28 +111,28 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
 
     // KV sets: cond [0..N-1], uncond [N..2N-1] if CFG
     for (int i = 0; i < N; i++) {
-        qw3lm_reset_kv(m, i);
+        lm_reset_kv(m, i);
     }
     if (use_cfg) {
         for (int i = 0; i < N; i++) {
-            qw3lm_reset_kv(m, N + i);
+            lm_reset_kv(m, N + i);
         }
     }
 
     // Prefill cond once, set 0, copy to 1..N-1
     Timer              t_prefill;
     std::vector<float> prefill_logits(V);
-    qw3lm_forward(m, prompt_tokens.data(), (int) prompt_tokens.size(), 0, prefill_logits.data());
+    lm_forward(m, prompt_tokens.data(), (int) prompt_tokens.size(), 0, prefill_logits.data());
     for (int i = 1; i < N; i++) {
-        qw3lm_copy_kv(m, 0, i);
+        lm_copy_kv(m, 0, i);
     }
 
     // Prefill uncond once, set N, copy to N+1..2N-1
     std::vector<float> prefill_logits_uncond(V);
     if (use_cfg) {
-        qw3lm_forward(m, uncond_tokens->data(), (int) uncond_tokens->size(), N, prefill_logits_uncond.data());
+        lm_forward(m, uncond_tokens->data(), (int) uncond_tokens->size(), N, prefill_logits_uncond.data());
         for (int i = 1; i < N; i++) {
-            qw3lm_copy_kv(m, N, N + i);
+            lm_copy_kv(m, N, N + i);
         }
     }
 
@@ -181,11 +235,11 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
                 tokens_2n[i]     = tokens[i];
                 tokens_2n[N + i] = tokens[i];
             }
-            qw3lm_forward_batch(m, tokens_2n.data(), sets_2n.data(), N2, logits_2n.data());
+            lm_forward_batch(m, tokens_2n.data(), sets_2n.data(), N2, logits_2n.data());
             memcpy(logits_cond.data(), logits_2n.data(), (size_t) V * N * sizeof(float));
             memcpy(logits_uncond.data(), logits_2n.data() + (size_t) V * N, (size_t) V * N * sizeof(float));
         } else {
-            qw3lm_forward_batch(m, tokens.data(), cond_sets.data(), N, logits_cond.data());
+            lm_forward_batch(m, tokens.data(), cond_sets.data(), N, logits_cond.data());
         }
 
         for (int i = 0; i < N; i++) {
@@ -312,11 +366,11 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
 
     // Reset all KV sets: cond [0..N-1], uncond [N..2N-1]
     for (int i = 0; i < N; i++) {
-        qw3lm_reset_kv(m, i);
+        lm_reset_kv(m, i);
     }
     if (use_cfg) {
         for (int i = 0; i < N; i++) {
-            qw3lm_reset_kv(m, N + i);
+            lm_reset_kv(m, N + i);
         }
     }
 
@@ -325,14 +379,14 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     std::vector<std::vector<float>> prefill_logits_vec(N, std::vector<float>(V));
 
     if (shared_prompt) {
-        qw3lm_forward(m, prompts[0].data(), (int) prompts[0].size(), 0, prefill_logits_vec[0].data());
+        lm_forward(m, prompts[0].data(), (int) prompts[0].size(), 0, prefill_logits_vec[0].data());
         for (int i = 1; i < N; i++) {
-            qw3lm_copy_kv(m, 0, i);
+            lm_copy_kv(m, 0, i);
             prefill_logits_vec[i] = prefill_logits_vec[0];
         }
     } else {
         for (int i = 0; i < N; i++) {
-            qw3lm_forward(m, prompts[i].data(), (int) prompts[i].size(), i, prefill_logits_vec[i].data());
+            lm_forward(m, prompts[i].data(), (int) prompts[i].size(), i, prefill_logits_vec[i].data());
         }
     }
 
@@ -340,14 +394,14 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     std::vector<std::vector<float>> prefill_logits_uncond_vec(N, std::vector<float>(V));
     if (use_cfg) {
         if (shared_prompt) {
-            qw3lm_forward(m, unconds[0].data(), (int) unconds[0].size(), N, prefill_logits_uncond_vec[0].data());
+            lm_forward(m, unconds[0].data(), (int) unconds[0].size(), N, prefill_logits_uncond_vec[0].data());
             for (int i = 1; i < N; i++) {
-                qw3lm_copy_kv(m, N, N + i);
+                lm_copy_kv(m, N, N + i);
                 prefill_logits_uncond_vec[i] = prefill_logits_uncond_vec[0];
             }
         } else {
             for (int i = 0; i < N; i++) {
-                qw3lm_forward(m, unconds[i].data(), (int) unconds[i].size(), N + i,
+                lm_forward(m, unconds[i].data(), (int) unconds[i].size(), N + i,
                               prefill_logits_uncond_vec[i].data());
             }
         }
@@ -470,13 +524,13 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             // Two separate N=1 forwards (cond, then uncond).
             // Workaround for backends where batched multi-sequence attention
             // produces wrong results (e.g. ROCm/gfx1201). Same logit layout.
-            qw3lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), n_active, batch_logits.data(), lm_offset,
+            lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), n_active, batch_logits.data(), lm_offset,
                                 lm_count);
-            qw3lm_forward_batch(m, batch_tokens.data() + n_active, batch_sets.data() + n_active, n_active,
+            lm_forward_batch(m, batch_tokens.data() + n_active, batch_sets.data() + n_active, n_active,
                                 batch_logits.data() + (size_t) n_active * out_V, lm_offset, lm_count);
         } else {
             int actual_batch_size = do_cfg_this_step ? (2 * n_active) : n_active;
-            qw3lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), actual_batch_size, batch_logits.data(),
+            lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), actual_batch_size, batch_logits.data(),
                                 lm_offset, lm_count);
         }
 
@@ -581,20 +635,20 @@ static std::vector<std::string> run_phase2_speculative(Qwen3LM *      target,
             max_tokens, cfg_scale);
 
     // Reset KV caches: target cond=0, uncond=1; draft cond=0
-    qw3lm_reset_kv(target, 0);
-    if (use_cfg) qw3lm_reset_kv(target, 1);
-    qw3lm_reset_kv(draft, 0);
+    lm_reset_kv(target, 0);
+    if (use_cfg) lm_reset_kv(target, 1);
+    qw3lm_reset_kv(draft, 0);  // draft stays on GGML always
 
     // Prefill target (cond)
     Timer t_prefill;
     std::vector<float> prefill_logits(V);
-    qw3lm_forward(target, prompt.data(), (int) prompt.size(), 0, prefill_logits.data());
+    lm_forward(target, prompt.data(), (int) prompt.size(), 0, prefill_logits.data());
 
     // Prefill target (uncond)
     std::vector<float> prefill_logits_uncond(V);
     if (use_cfg) {
         std::vector<int> uncond = build_lm_prompt_uncond_with_cot(bpe, ace, negative_prompt);
-        qw3lm_forward(target, uncond.data(), (int) uncond.size(), 1, prefill_logits_uncond.data());
+        lm_forward(target, uncond.data(), (int) uncond.size(), 1, prefill_logits_uncond.data());
     }
 
     // Prefill draft (cond only, no CFG)
@@ -870,6 +924,51 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
         fprintf(stderr, "[Ace-LM] FP16 clamp enabled\n");
     }
 
+    // ── TRT LM detection ────────────────────────────────────────────────────
+    // If model_path points to an ONNX export directory (e.g. models/onnx/lm-4B/),
+    // use TRT inference instead of GGML.
+#ifdef HOT_STEP_TRT
+    {
+        std::string model_dir(params->model_path);
+        std::string onnx_path = model_dir + "/lm_full.onnx";
+        std::string engine_path = model_dir + "/lm_full.engine";
+
+        FILE* probe = fopen(onnx_path.c_str(), "rb");
+        if (probe) {
+            fclose(probe);
+            fprintf(stderr, "[Ace-LM] ONNX model found at %s — using TRT backend\n", onnx_path.c_str());
+
+            // Build engine if it doesn't exist
+            FILE* engine_probe = fopen(engine_path.c_str(), "rb");
+            if (engine_probe) {
+                fclose(engine_probe);
+                fprintf(stderr, "[Ace-LM] TRT engine found, skipping build\n");
+            } else {
+                fprintf(stderr, "[Ace-LM] TRT engine not found, building...\n");
+                if (!lm_trt_build(onnx_path.c_str(), engine_path.c_str(),
+                                  params->max_seq)) {
+                    fprintf(stderr, "[Ace-LM] ERROR: TRT engine build failed\n");
+                    delete ctx;
+                    return NULL;
+                }
+            }
+
+            // Load engine + refit weights from ONNX
+            int n_kv = 2 * params->max_batch;
+            if (!lm_trt_load(&ctx->lm_trt, engine_path.c_str(), onnx_path.c_str(),
+                             params->max_seq, n_kv)) {
+                fprintf(stderr, "[Ace-LM] ERROR: TRT engine load failed\n");
+                delete ctx;
+                return NULL;
+            }
+
+            ctx->use_trt = true;
+            fprintf(stderr, "[Ace-LM] TRT LM ready: %d KV sets, max_seq=%d\n",
+                    n_kv, params->max_seq);
+        }
+    }
+#endif
+
     // Speculative decoding: load draft model if path provided
     ctx->draft_loaded = false;
     if (params->draft_model_path && params->draft_model_path[0]) {
@@ -913,26 +1012,51 @@ int ace_lm_generate(AceLm *            ctx,
         return -1;
     }
 
-    // Acquire GPU LM from the store. RAII releases it on scope exit.
-    Qwen3LM * model = store_require_lm(ctx->store, ctx->lm_key);
-    if (!model) {
-        fprintf(stderr, "[Ace-LM] ERROR: store_require_lm failed\n");
-        return -1;
+    // Set TRT dispatch state for this generate call
+#ifdef HOT_STEP_TRT
+    s_use_trt = ctx->use_trt;
+    s_trt_ctx = ctx->use_trt ? &ctx->lm_trt : nullptr;
+#endif
+
+    // Acquire GPU LM from the store (GGML path). Skip when using TRT.
+    Qwen3LM * model = nullptr;
+    std::unique_ptr<ModelHandle> lm_guard;
+
+#ifdef HOT_STEP_TRT
+    if (!ctx->use_trt) {
+#endif
+        model = store_require_lm(ctx->store, ctx->lm_key);
+        if (!model) {
+            fprintf(stderr, "[Ace-LM] ERROR: store_require_lm failed\n");
+            return -1;
+        }
+        lm_guard = std::make_unique<ModelHandle>(ctx->store, model);
+#ifdef HOT_STEP_TRT
     }
-    ModelHandle lm_guard(ctx->store, model);
+#endif
 
     // Runtime flags: safe to set on every require (cache-hit or fresh load).
-    if (!ctx->params.use_fa) {
-        model->use_flash_attn = false;
-    }
-    model->clamp_fp16 = ctx->params.clamp_fp16;
+    // These are GGML-specific; skip when TRT is active.
+    if (model) {
+        if (!ctx->params.use_fa) {
+            model->use_flash_attn = false;
+        }
+        model->clamp_fp16 = ctx->params.clamp_fp16;
 
-    // Fresh load only: allocate the partial LM head for phase2 audio codes.
-    // Contiguous GPU tensor instead of ggml_view_2d on quantized weights.
-    // Cached on the model itself, freed by qw3lm_free when the store evicts.
-    if (!model->lm_head_buf) {
-        qw3lm_build_partial_head(model, TOKEN_IM_END);
+        // Fresh load only: allocate the partial LM head for phase2 audio codes.
+        // Contiguous GPU tensor instead of ggml_view_2d on quantized weights.
+        // Cached on the model itself, freed by qw3lm_free when the store evicts.
+        if (!model->lm_head_buf) {
+            qw3lm_build_partial_head(model, TOKEN_IM_END);
+        }
     }
+
+    // Vocab size: from GGML model or TRT constant
+#ifdef HOT_STEP_TRT
+    int vocab_size = model ? model->cfg.vocab_size : LM_TRT_VOCAB;
+#else
+    int vocab_size = model->cfg.vocab_size;
+#endif
 
     // CPU-resident tokenizer and FSM template. Owned by the store, never
     // evicted. FSM must be copied before mutation since the template is shared.
@@ -944,7 +1068,7 @@ int ace_lm_generate(AceLm *            ctx,
 
     MetadataFSM * fsm_template = nullptr;
     if (ctx->params.use_fsm) {
-        fsm_template = store_fsm(ctx->store, ctx->params.model_path, model->cfg.vocab_size);
+        fsm_template = store_fsm(ctx->store, ctx->params.model_path, vocab_size);
         if (!fsm_template) {
             fprintf(stderr, "[Ace-LM] ERROR: store_fsm failed\n");
             return -1;
@@ -1109,7 +1233,7 @@ int ace_lm_generate(AceLm *            ctx,
 
         int n_kv_reset = (fill_cfg > 1.0f) ? 2 * lm_batch_size : lm_batch_size;
         for (int i = 0; i < n_kv_reset; i++) {
-            qw3lm_reset_kv(model, i);
+            lm_reset_kv(model, i);
         }
     }
 
@@ -1134,16 +1258,16 @@ int ace_lm_generate(AceLm *            ctx,
             }
         }
         if (dump_logits) {
-            std::vector<float> dbg_logits(model->cfg.vocab_size);
-            qw3lm_forward(model, dbg_prompt.data(), (int) dbg_prompt.size(), 0, dbg_logits.data());
+            std::vector<float> dbg_logits(vocab_size);
+            lm_forward(model, dbg_prompt.data(), (int) dbg_prompt.size(), 0, dbg_logits.data());
             FILE * f = fopen(dump_logits, "wb");
             if (f) {
-                fwrite(dbg_logits.data(), sizeof(float), model->cfg.vocab_size, f);
+                fwrite(dbg_logits.data(), sizeof(float), vocab_size, f);
                 fclose(f);
-                fprintf(stderr, "[LM-Debug] Logits -> %s (%d floats, argmax=%d)\n", dump_logits, model->cfg.vocab_size,
+                fprintf(stderr, "[LM-Debug] Logits -> %s (%d floats, argmax=%d)\n", dump_logits, vocab_size,
                         (int) (std::max_element(dbg_logits.begin(), dbg_logits.end()) - dbg_logits.begin()));
             }
-            qw3lm_reset_kv(model, 0);
+            lm_reset_kv(model, 0);
         }
     }
 
@@ -1206,6 +1330,15 @@ void ace_lm_free(AceLm * ctx) {
     if (!ctx) {
         return;
     }
+#ifdef HOT_STEP_TRT
+    if (ctx->use_trt) {
+        lm_trt_free(&ctx->lm_trt);
+        ctx->use_trt = false;
+        s_use_trt = false;
+        s_trt_ctx = nullptr;
+        fprintf(stderr, "[Ace-LM] TRT LM freed\n");
+    }
+#endif
     if (ctx->draft_loaded) {
         qw3lm_free(&ctx->draft);
         ctx->draft_loaded = false;

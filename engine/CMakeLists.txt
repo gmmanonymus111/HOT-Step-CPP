@@ -264,6 +264,14 @@ endif()
 add_executable(ace-lm tools/ace-lm.cpp)
 target_link_libraries(ace-lm PRIVATE acestep-core)
 link_ggml_backends(ace-lm)
+# CUDA runtime for TRT LM path (cudaMalloc, cudaMemcpy, etc.)
+if(CUDAToolkit_FOUND)
+    if(GGML_STATIC)
+        target_link_libraries(ace-lm PRIVATE CUDA::cudart_static)
+    else()
+        target_link_libraries(ace-lm PRIVATE CUDA::cudart)
+    endif()
+endif()
 
 # webui: convert tools/webui/public/index.html.gz to a C header for embedding.
 # the .gz is committed to git so the C++ build works without npm.
