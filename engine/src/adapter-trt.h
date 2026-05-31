@@ -480,99 +480,104 @@ static int adapter_trt_apply_lokr(
         return 0;
     }
 
-    fprintf(stderr, "[Adapter-TRT] LoKr: %zu valid entries, building batched graph...\n", batch.size());
+    fprintf(stderr, "[Adapter-TRT] LoKr: %zu valid entries, computing in micro-batches...\n", batch.size());
 
-    // ── Phase 2: Build unified GGML graph ────────────────────────────────
-    // Each subgraph uses ~14 tensors and ~11 compute nodes
-    size_t n = batch.size();
-    size_t max_tensors = n * 14 + 32;
-    size_t max_nodes   = n * 12 + 32;
-    size_t meta = ggml_tensor_overhead() * max_tensors +
-                  ggml_graph_overhead_custom(max_nodes, false) +
-                  64 * 1024;
+    // ── Phase 2-4: Process in micro-batches ─────────────────────────────
+    // Each chunk builds/allocates/computes/frees its own graph to keep peak
+    // VRAM usage bounded (~1GB vs ~5-10GB for all 359 at once).
+    // Chunk size 32 → ~12 alloc/free cycles instead of 718.
+    const size_t CHUNK_SIZE = 32;
+    auto t_total = std::chrono::steady_clock::now();
+    int merged = 0;
 
-    struct ggml_init_params gparams = { meta, NULL, true };
-    struct ggml_context* gctx = ggml_init(gparams);
-    if (!gctx) {
-        fprintf(stderr, "[Adapter-TRT] FATAL: failed to init batched graph context\n");
-        return 0;
-    }
+    for (size_t chunk_start = 0; chunk_start < batch.size(); chunk_start += CHUNK_SIZE) {
+        size_t chunk_end = std::min(chunk_start + CHUNK_SIZE, batch.size());
+        size_t chunk_n   = chunk_end - chunk_start;
 
-    struct ggml_cgraph* graph = ggml_new_graph_custom(gctx, max_nodes, false);
+        // Build graph for this chunk
+        size_t max_tensors = chunk_n * 14 + 32;
+        size_t max_nodes   = chunk_n * 12 + 32;
+        size_t meta = ggml_tensor_overhead() * max_tensors +
+                      ggml_graph_overhead_custom(max_nodes, false) +
+                      64 * 1024;
 
-    for (auto& e : batch) {
-        e.tw1 = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.b, e.a);
-
-        struct ggml_tensor* tw2;
-        if (e.has_factor) {
-            e.tw2a = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.r, e.c);
-            e.tw2b = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.d, e.r);
-            tw2 = ggml_mul_mat(gctx, ggml_cont(gctx, ggml_transpose(gctx, e.tw2b)), e.tw2a);
-        } else {
-            e.tw2_src = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.d, e.c);
-            tw2 = e.tw2_src;
+        struct ggml_init_params gparams = { meta, NULL, true };
+        struct ggml_context* gctx = ggml_init(gparams);
+        if (!gctx) {
+            fprintf(stderr, "[Adapter-TRT] FATAL: failed to init chunk graph context\n");
+            break;
         }
 
-        struct ggml_tensor* tw1_s    = ggml_scale(gctx, e.tw1, e.scaling);
-        struct ggml_tensor* tw1_flat = ggml_reshape_2d(gctx, tw1_s, 1, e.a * e.b);
-        struct ggml_tensor* tw2_flat = ggml_reshape_2d(gctx, tw2, 1, e.c * e.d);
-        struct ggml_tensor* touter   = ggml_mul_mat(gctx, tw1_flat, tw2_flat);
-        struct ggml_tensor* t4d      = ggml_reshape_4d(gctx, touter, e.b, e.a, e.d, e.c);
-        struct ggml_tensor* tperm    = ggml_permute(gctx, t4d, 1, 3, 0, 2);
-        e.tdelta = ggml_reshape_2d(gctx, ggml_cont(gctx, tperm), e.b * e.d, e.a * e.c);
+        struct ggml_cgraph* graph = ggml_new_graph_custom(gctx, max_nodes, false);
 
-        ggml_build_forward_expand(graph, e.tdelta);
-    }
+        for (size_t i = chunk_start; i < chunk_end; i++) {
+            auto& e = batch[i];
+            e.tw1 = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.b, e.a);
 
-    // ── Phase 3: Allocate, upload, compute ───────────────────────────────
-    auto t_gpu = std::chrono::steady_clock::now();
+            struct ggml_tensor* tw2;
+            if (e.has_factor) {
+                e.tw2a = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.r, e.c);
+                e.tw2b = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.d, e.r);
+                tw2 = ggml_mul_mat(gctx, ggml_cont(gctx, ggml_transpose(gctx, e.tw2b)), e.tw2a);
+            } else {
+                e.tw2_src = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, e.d, e.c);
+                tw2 = e.tw2_src;
+            }
 
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(gctx, backend);
-    if (!buf) {
-        fprintf(stderr, "[Adapter-TRT] FATAL: failed to allocate batched GPU buffer\n");
+            struct ggml_tensor* tw1_s    = ggml_scale(gctx, e.tw1, e.scaling);
+            struct ggml_tensor* tw1_flat = ggml_reshape_2d(gctx, tw1_s, 1, e.a * e.b);
+            struct ggml_tensor* tw2_flat = ggml_reshape_2d(gctx, tw2, 1, e.c * e.d);
+            struct ggml_tensor* touter   = ggml_mul_mat(gctx, tw1_flat, tw2_flat);
+            struct ggml_tensor* t4d      = ggml_reshape_4d(gctx, touter, e.b, e.a, e.d, e.c);
+            struct ggml_tensor* tperm    = ggml_permute(gctx, t4d, 1, 3, 0, 2);
+            e.tdelta = ggml_reshape_2d(gctx, ggml_cont(gctx, tperm), e.b * e.d, e.a * e.c);
+
+            ggml_build_forward_expand(graph, e.tdelta);
+        }
+
+        // Allocate, upload, compute
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(gctx, backend);
+        if (!buf) {
+            fprintf(stderr, "[Adapter-TRT] FATAL: failed to allocate chunk GPU buffer\n");
+            ggml_free(gctx);
+            break;
+        }
+
+        for (size_t i = chunk_start; i < chunk_end; i++) {
+            auto& e = batch[i];
+            ggml_backend_tensor_set(e.tw1, e.w1_f32.data(), 0, (size_t)e.w1_nel * sizeof(float));
+            if (e.has_factor) {
+                ggml_backend_tensor_set(e.tw2a, e.w2a_f32.data(), 0, (size_t)e.w2a_nel * sizeof(float));
+                ggml_backend_tensor_set(e.tw2b, e.w2b_f32.data(), 0, (size_t)e.w2b_nel * sizeof(float));
+            } else {
+                ggml_backend_tensor_set(e.tw2_src, e.w2_f32.data(), 0, (size_t)e.w2_nel * sizeof(float));
+            }
+        }
+
+        ggml_backend_graph_compute(backend, graph);
+
+        // Download results and merge
+        for (size_t i = chunk_start; i < chunk_end; i++) {
+            auto& e = batch[i];
+            int64_t nel = e.in_feat * e.out_feat;
+            std::vector<float> delta_f32((size_t)nel);
+            ggml_backend_tensor_get(e.tdelta, delta_f32.data(), 0, (size_t)nel * sizeof(float));
+
+            trt_merge_delta(*ctx, e.trt_name, ctx->base_weights.at(e.trt_name),
+                            delta_f32.data(), e.in_feat, e.out_feat, 1.0f,
+                            merged_storage, merged_ptrs);
+            merged++;
+        }
+
+        // Free this chunk's GPU buffer
+        ggml_backend_buffer_free(buf);
         ggml_free(gctx);
-        return 0;
     }
 
-    for (auto& e : batch) {
-        ggml_backend_tensor_set(e.tw1, e.w1_f32.data(), 0, (size_t)e.w1_nel * sizeof(float));
-        if (e.has_factor) {
-            ggml_backend_tensor_set(e.tw2a, e.w2a_f32.data(), 0, (size_t)e.w2a_nel * sizeof(float));
-            ggml_backend_tensor_set(e.tw2b, e.w2b_f32.data(), 0, (size_t)e.w2b_nel * sizeof(float));
-        } else {
-            ggml_backend_tensor_set(e.tw2_src, e.w2_f32.data(), 0, (size_t)e.w2_nel * sizeof(float));
-        }
-    }
-
-    ggml_backend_graph_compute(backend, graph);
-
-    auto gpu_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t_gpu).count();
-    fprintf(stderr, "[Adapter-TRT] Batched GPU compute: %lld ms (%zu subgraphs)\n",
-            (long long)gpu_ms, n);
-
-    // ── Phase 4: Download results and merge ─────────────────────────────
-    auto t_merge = std::chrono::steady_clock::now();
-
-    for (auto& e : batch) {
-        int64_t nel = e.in_feat * e.out_feat;
-        std::vector<float> delta_f32((size_t)nel);
-        ggml_backend_tensor_get(e.tdelta, delta_f32.data(), 0, (size_t)nel * sizeof(float));
-
-        trt_merge_delta(*ctx, e.trt_name, ctx->base_weights.at(e.trt_name),
-                        delta_f32.data(), e.in_feat, e.out_feat, 1.0f,
-                        merged_storage, merged_ptrs);
-    }
-
-    auto merge_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t_merge).count();
-    fprintf(stderr, "[Adapter-TRT] CPU merge + download: %lld ms\n", (long long)merge_ms);
-
-    int merged = (int)batch.size();
-
-    // ── Phase 5: Cleanup ────────────────────────────────────────────────
-    ggml_backend_buffer_free(buf);
-    ggml_free(gctx);
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_total).count();
+    fprintf(stderr, "[Adapter-TRT] Batched compute: %lld ms (%d weights, %zu-entry chunks)\n",
+            (long long)total_ms, merged, CHUNK_SIZE);
 
     fprintf(stderr, "[Adapter-TRT] LoKr: %d merged, %d skipped\n", merged, skipped);
     return merged;
