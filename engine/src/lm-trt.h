@@ -407,9 +407,27 @@ inline bool lm_trt_load(
         return false;
     }
 
-    // Log I/O tensors
+    // Log I/O tensors with names, modes, and shapes
     int num_io = ctx->engine->getNbIOTensors();
-    fprintf(stderr, "[LM-TRT] Engine has %d I/O tensors\n", num_io);
+    fprintf(stderr, "[LM-TRT] Engine has %d I/O tensors:\n", num_io);
+    for (int i = 0; i < num_io; i++) {
+        const char* name = ctx->engine->getIOTensorName(i);
+        auto mode = ctx->engine->getTensorIOMode(name);
+        const char* modeStr = (mode == nvinfer1::TensorIOMode::kINPUT) ? "INPUT" : "OUTPUT";
+        auto dims = ctx->engine->getTensorShape(name);
+        char dimStr[256] = {};
+        int off = 0;
+        for (int d = 0; d < dims.nbDims; d++) {
+            off += snprintf(dimStr + off, sizeof(dimStr) - off, "%s%lld",
+                           d > 0 ? "×" : "", (long long)dims.d[d]);
+        }
+        // Only print first 5 and last 5 for brevity (skip middle if >10)
+        if (num_io <= 20 || i < 5 || i >= num_io - 5) {
+            fprintf(stderr, "  [%d] %-6s %-30s  [%s]\n", i, modeStr, name, dimStr);
+        } else if (i == 5) {
+            fprintf(stderr, "  ... (%d more tensors) ...\n", num_io - 10);
+        }
+    }
 
     // Allocate KV cache buffers
     size_t kv_bytes = lm_trt_kv_buf_bytes(ctx);
@@ -588,6 +606,28 @@ inline bool lm_trt_forward(
 
     // Logits output
     context->setTensorAddress("logits", ctx->d_logits);
+
+    // Validate all bindings before execute
+    if (!context->allInputDimensionsSpecified()) {
+        fprintf(stderr, "[LM-TRT] ERROR: not all input dimensions specified!\n");
+        // Enumerate to find which
+        int nio = ctx->engine->getNbIOTensors();
+        for (int i = 0; i < nio; i++) {
+            const char* tname = ctx->engine->getIOTensorName(i);
+            auto mode = ctx->engine->getTensorIOMode(tname);
+            if (mode == nvinfer1::TensorIOMode::kINPUT) {
+                auto shape = context->getTensorShape(tname);
+                bool ok_shape = true;
+                for (int d = 0; d < shape.nbDims; d++) {
+                    if (shape.d[d] < 0) { ok_shape = false; break; }
+                }
+                if (!ok_shape) {
+                    fprintf(stderr, "  MISSING SHAPE: %s\n", tname);
+                }
+            }
+        }
+        return false;
+    }
 
     // Execute on dedicated stream
     cudaStream_t exec_stream = stream ? stream : ctx->stream;
