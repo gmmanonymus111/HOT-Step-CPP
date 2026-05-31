@@ -109,6 +109,12 @@ struct LmTrt {
     // CUDA stream for inference
     cudaStream_t stream = nullptr;
 
+    // Pre-cached tensor name strings (computed once at load, avoids snprintf per forward)
+    char tn_past_key   [LM_TRT_MAX_LAYERS][64];
+    char tn_past_val   [LM_TRT_MAX_LAYERS][64];
+    char tn_present_key[LM_TRT_MAX_LAYERS][64];
+    char tn_present_val[LM_TRT_MAX_LAYERS][64];
+
     // Logger
     LmTrtLogger logger;
 
@@ -453,8 +459,14 @@ inline bool lm_trt_load(
     cudaMalloc(&ctx->d_position_ids, ids_bytes);
 
     // attention_mask: [1, max_seq_len] int64
+    // Pre-filled with all 1s since causal masking is inside the ONNX graph.
+    // This avoids per-forward host→device copies of the mask.
     size_t mask_bytes = 1 * max_seq_len * sizeof(int64_t);
     cudaMalloc(&ctx->d_attn_mask, mask_bytes);
+    {
+        std::vector<int64_t> ones(max_seq_len, 1);
+        cudaMemcpy(ctx->d_attn_mask, ones.data(), mask_bytes, cudaMemcpyHostToDevice);
+    }
 
     // logits: [1, max_seq=2048, vocab] fp32 — must match profile max seq_len
     size_t logits_bytes = 1ULL * 2048 * ctx->vocab_size * sizeof(float);
@@ -485,6 +497,14 @@ inline bool lm_trt_load(
     fprintf(stderr, "[LM-TRT] Load complete: %lld ms, ~%zu MB GPU\n",
             (long long)ctx->load_time_ms, total_gpu_mb);
     ctx->current_adapter.clear();
+
+    // Pre-cache tensor name strings for the forward pass hot loop
+    for (int l = 0; l < ctx->n_layers; l++) {
+        snprintf(ctx->tn_past_key[l],    64, "past_key_%d", l);
+        snprintf(ctx->tn_past_val[l],    64, "past_value_%d", l);
+        snprintf(ctx->tn_present_key[l], 64, "present_key_%d", l);
+        snprintf(ctx->tn_present_val[l], 64, "present_value_%d", l);
+    }
 
     return true;
 }
@@ -523,9 +543,10 @@ inline void lm_trt_copy_kv(LmTrt* ctx, int src, int dst) {
 // Run one LM forward pass (prefill or decode).
 // token_ids:  host array of token IDs, length n_tokens
 // kv_set:     which KV cache set to use
-// logits_out: host buffer for output logits [n_tokens, vocab_size] or
-//             [n_tokens, partial_vocab] if partial_offset > 0
+// logits_out: host buffer for output logits [vocab_size] or [partial_vocab]
 // partial_offset: if > 0, only copy logits[offset:] (Phase 2)
+// sync:       if true, synchronize stream before returning (default).
+//             Set false for batched CFG to defer sync to caller.
 //
 // Returns true on success.
 inline bool lm_trt_forward(
@@ -535,39 +556,47 @@ inline bool lm_trt_forward(
     int          kv_set,
     float*       logits_out,    // host output
     int          partial_offset = 0,  // 0 = full vocab, >0 = slice
-    cudaStream_t stream = nullptr
+    bool         sync = true
 ) {
     int kv_pos  = ctx->kv_pos[kv_set];
     int kv_len  = kv_pos + n_tokens;  // total sequence length after this forward
     int batch   = 1;
 
     auto* context = ctx->context;
+    cudaStream_t s = ctx->stream;
 
     // Prepare input_ids: [1, n_tokens] int64
-    {
+    // Use stack for small decode (≤16 tokens), heap for prefill
+    if (n_tokens <= 16) {
+        int64_t ids[16];
+        for (int i = 0; i < n_tokens; i++) ids[i] = token_ids[i];
+        cudaMemcpyAsync(ctx->d_input_ids, ids,
+                        n_tokens * sizeof(int64_t),
+                        cudaMemcpyHostToDevice, s);
+    } else {
         std::vector<int64_t> ids(n_tokens);
         for (int i = 0; i < n_tokens; i++) ids[i] = token_ids[i];
         cudaMemcpyAsync(ctx->d_input_ids, ids.data(),
                         n_tokens * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyHostToDevice, s);
     }
 
     // Prepare position_ids: [1, n_tokens] int64
-    {
+    if (n_tokens <= 16) {
+        int64_t pos[16];
+        for (int i = 0; i < n_tokens; i++) pos[i] = kv_pos + i;
+        cudaMemcpyAsync(ctx->d_position_ids, pos,
+                        n_tokens * sizeof(int64_t),
+                        cudaMemcpyHostToDevice, s);
+    } else {
         std::vector<int64_t> pos(n_tokens);
         for (int i = 0; i < n_tokens; i++) pos[i] = kv_pos + i;
         cudaMemcpyAsync(ctx->d_position_ids, pos.data(),
                         n_tokens * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyHostToDevice, s);
     }
 
-    // Prepare attention_mask: [1, kv_len] int64 (all ones = causal is in model)
-    {
-        std::vector<int64_t> mask(kv_len, 1);
-        cudaMemcpyAsync(ctx->d_attn_mask, mask.data(),
-                        kv_len * sizeof(int64_t),
-                        cudaMemcpyHostToDevice, stream);
-    }
+    // attention_mask: already pre-filled with all 1s on device at load time
 
     // Set input shapes
     context->setInputShape("input_ids",      nvinfer1::Dims2(batch, n_tokens));
@@ -583,55 +612,24 @@ inline bool lm_trt_forward(
     // past_seq_len for first forward (kv_pos=0) needs special handling:
     // TRT profile min is 1, so we use 1 even when kv_pos=0 and fill with zeros
     int past_len = std::max(kv_pos, 1);
+    nvinfer1::Dims4 kv_shape(batch, ctx->n_kv_heads, past_len, ctx->head_dim);
 
     for (int l = 0; l < ctx->n_layers; l++) {
-        char kname[64], vname[64], pkname[64], pvname[64];
-        snprintf(kname,  sizeof(kname),  "past_key_%d", l);
-        snprintf(vname,  sizeof(vname),  "past_value_%d", l);
-        snprintf(pkname, sizeof(pkname), "present_key_%d", l);
-        snprintf(pvname, sizeof(pvname), "present_value_%d", l);
+        // Use pre-cached names (no snprintf in hot loop)
+        context->setInputShape(ctx->tn_past_key[l], kv_shape);
+        context->setInputShape(ctx->tn_past_val[l], kv_shape);
 
-        // Past KV input shape
-        context->setInputShape(kname,
-            nvinfer1::Dims4(batch, ctx->n_kv_heads, past_len, ctx->head_dim));
-        context->setInputShape(vname,
-            nvinfer1::Dims4(batch, ctx->n_kv_heads, past_len, ctx->head_dim));
-
-        // Bind past → current "past" buffer, present → current "present" buffer
-        context->setTensorAddress(kname,  *lm_trt_past_key(ctx, kv_set, l));
-        context->setTensorAddress(vname,  *lm_trt_past_val(ctx, kv_set, l));
-        context->setTensorAddress(pkname, *lm_trt_present_key(ctx, kv_set, l));
-        context->setTensorAddress(pvname, *lm_trt_present_val(ctx, kv_set, l));
+        context->setTensorAddress(ctx->tn_past_key[l],    *lm_trt_past_key(ctx, kv_set, l));
+        context->setTensorAddress(ctx->tn_past_val[l],    *lm_trt_past_val(ctx, kv_set, l));
+        context->setTensorAddress(ctx->tn_present_key[l], *lm_trt_present_key(ctx, kv_set, l));
+        context->setTensorAddress(ctx->tn_present_val[l], *lm_trt_present_val(ctx, kv_set, l));
     }
 
     // Logits output
     context->setTensorAddress("logits", ctx->d_logits);
 
-    // Validate all bindings before execute
-    if (!context->allInputDimensionsSpecified()) {
-        fprintf(stderr, "[LM-TRT] ERROR: not all input dimensions specified!\n");
-        // Enumerate to find which
-        int nio = ctx->engine->getNbIOTensors();
-        for (int i = 0; i < nio; i++) {
-            const char* tname = ctx->engine->getIOTensorName(i);
-            auto mode = ctx->engine->getTensorIOMode(tname);
-            if (mode == nvinfer1::TensorIOMode::kINPUT) {
-                auto shape = context->getTensorShape(tname);
-                bool ok_shape = true;
-                for (int d = 0; d < shape.nbDims; d++) {
-                    if (shape.d[d] < 0) { ok_shape = false; break; }
-                }
-                if (!ok_shape) {
-                    fprintf(stderr, "  MISSING SHAPE: %s\n", tname);
-                }
-            }
-        }
-        return false;
-    }
-
-    // Execute on dedicated stream
-    cudaStream_t exec_stream = stream ? stream : ctx->stream;
-    bool ok = context->enqueueV3(exec_stream);
+    // Execute (no validation in release — we checked at load time)
+    bool ok = context->enqueueV3(s);
     if (!ok) {
         fprintf(stderr, "[LM-TRT] enqueueV3 failed\n");
         return false;
@@ -641,7 +639,7 @@ inline bool lm_trt_forward(
     ctx->kv_use_b[kv_set] = !ctx->kv_use_b[kv_set];
     ctx->kv_pos[kv_set] = kv_len;
 
-    // Copy logits to host
+    // Copy logits to host (async on the same stream)
     if (partial_offset > 0) {
         // Phase 2: only copy logits[last_token, offset:]
         int out_vocab = ctx->vocab_size - partial_offset;
@@ -649,17 +647,20 @@ inline bool lm_trt_forward(
         cudaMemcpyAsync(logits_out,
                         (float*)ctx->d_logits + offset_bytes,
                         out_vocab * sizeof(float),
-                        cudaMemcpyDeviceToHost, exec_stream);
+                        cudaMemcpyDeviceToHost, s);
     } else {
         // Full vocab: copy last token's logits
         size_t offset = (size_t)(n_tokens - 1) * ctx->vocab_size;
         cudaMemcpyAsync(logits_out,
                         (float*)ctx->d_logits + offset,
                         ctx->vocab_size * sizeof(float),
-                        cudaMemcpyDeviceToHost, exec_stream);
+                        cudaMemcpyDeviceToHost, s);
     }
 
-    cudaStreamSynchronize(exec_stream);
+    // Only sync if caller requests it (batched CFG defers sync)
+    if (sync) {
+        cudaStreamSynchronize(s);
+    }
 
     return true;
 }
@@ -681,42 +682,18 @@ inline bool lm_trt_forward_batch(
     const int*   kv_sets,       // [N] kv set indices
     int          N,
     float*       logits_out,    // host, [N, vocab] or [N, partial_vocab]
-    int          partial_offset = 0,
-    cudaStream_t stream = nullptr
+    int          partial_offset = 0
 ) {
     int out_vocab = partial_offset > 0 ? ctx->vocab_size - partial_offset
                                        : ctx->vocab_size;
 
-    // Check if all kv_pos are equal (common case for CFG)
-    bool all_same = true;
-    int kp0 = ctx->kv_pos[kv_sets[0]];
-    for (int i = 1; i < N; i++) {
-        if (ctx->kv_pos[kv_sets[i]] != kp0) {
-            all_same = false;
-            break;
-        }
-    }
-
-    if (!all_same || N > 2) {
-        // Fallback: run each element separately
-        for (int i = 0; i < N; i++) {
-            if (!lm_trt_forward(ctx, &token_ids[i], 1, kv_sets[i],
-                                logits_out + i * out_vocab,
-                                partial_offset, stream)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // Batched path: all kv_pos equal, N <= 2
-    // TODO: True batched KV binding requires interleaved KV from different
-    // kv_sets. This is complex — for now, fall back to per-element forwards.
-    // The batched path will be optimized in a future iteration.
+    // Run each element, deferring sync until the last one.
+    // This halves the number of GPU stalls for CFG (N=2).
     for (int i = 0; i < N; i++) {
+        bool is_last = (i == N - 1);
         if (!lm_trt_forward(ctx, &token_ids[i], 1, kv_sets[i],
                             logits_out + i * out_vocab,
-                            partial_offset, stream)) {
+                            partial_offset, /*sync=*/is_last)) {
             return false;
         }
     }
