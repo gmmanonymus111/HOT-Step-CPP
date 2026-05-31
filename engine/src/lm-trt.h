@@ -229,10 +229,12 @@ inline bool lm_trt_build(
     const int hd  = LM_TRT_HEAD_DIM;
 
     // input_ids: [1, S]  (batch is fixed at 1 in the ONNX export)
+    // opt=1: autoregressive decode (1 token at a time) is the hot path.
+    // Prefill (S=300-700) uses the same profile but at non-optimal dimensions.
     profile->setDimensions("input_ids",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2(1, 1));
     profile->setDimensions("input_ids",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 256));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 1));
     profile->setDimensions("input_ids",
         nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 2048));
 
@@ -240,7 +242,7 @@ inline bool lm_trt_build(
     profile->setDimensions("position_ids",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2(1, 1));
     profile->setDimensions("position_ids",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 256));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 1));
     profile->setDimensions("position_ids",
         nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 2048));
 
@@ -262,14 +264,14 @@ inline bool lm_trt_build(
         profile->setDimensions(kname,
             nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4(1, nkv, 1, hd));
         profile->setDimensions(kname,
-            nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4(1, nkv, 256, hd));
+            nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4(1, nkv, 512, hd));
         profile->setDimensions(kname,
             nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4(1, nkv, max_seq_len, hd));
 
         profile->setDimensions(vname,
             nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4(1, nkv, 1, hd));
         profile->setDimensions(vname,
-            nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4(1, nkv, 256, hd));
+            nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4(1, nkv, 512, hd));
         profile->setDimensions(vname,
             nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4(1, nkv, max_seq_len, hd));
     }
