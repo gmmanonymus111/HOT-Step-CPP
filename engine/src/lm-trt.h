@@ -226,17 +226,17 @@ inline bool lm_trt_build(
     profile->setDimensions("input_ids",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2(1, 1));
     profile->setDimensions("input_ids",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 1));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 256));
     profile->setDimensions("input_ids",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 512));
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 2048));
 
     // position_ids: [1, S]
     profile->setDimensions("position_ids",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2(1, 1));
     profile->setDimensions("position_ids",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 1));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2(1, 256));
     profile->setDimensions("position_ids",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 512));
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2(1, 2048));
 
     // attention_mask: [1, total_len]  (total = past + seq)
     profile->setDimensions("attention_mask",
@@ -447,8 +447,8 @@ inline bool lm_trt_load(
     }
 
     // Allocate scratch buffers for inputs/outputs
-    // input_ids, position_ids: [1, max_seq=512] int64
-    size_t ids_bytes = 1 * 512 * sizeof(int64_t);
+    // input_ids, position_ids: [1, max_seq=2048] int64 — matches profile max
+    size_t ids_bytes = 1 * 2048 * sizeof(int64_t);
     cudaMalloc(&ctx->d_input_ids,    ids_bytes);
     cudaMalloc(&ctx->d_position_ids, ids_bytes);
 
@@ -456,8 +456,8 @@ inline bool lm_trt_load(
     size_t mask_bytes = 1 * max_seq_len * sizeof(int64_t);
     cudaMalloc(&ctx->d_attn_mask, mask_bytes);
 
-    // logits: [1, max_seq=512, vocab] fp32
-    size_t logits_bytes = 1ULL * 512 * ctx->vocab_size * sizeof(float);
+    // logits: [1, max_seq=2048, vocab] fp32 — must match profile max seq_len
+    size_t logits_bytes = 1ULL * 2048 * ctx->vocab_size * sizeof(float);
     cudaMalloc(&ctx->d_logits, logits_bytes);
 
     // Zero all KV cache buffers — first forward reads past_len=1 of
@@ -726,6 +726,14 @@ inline bool lm_trt_forward_batch(
 // ── Cleanup ─────────────────────────────────────────────────────────────────
 
 inline void lm_trt_free(LmTrt* ctx) {
+    // Sync all pending work before tearing down TRT resources.
+    // Without this, GGML's CUDA backend may crash after TRT cleanup
+    // because TRT's stream/context destruction can corrupt shared CUDA state.
+    if (ctx->stream) {
+        cudaStreamSynchronize(ctx->stream);
+    }
+    cudaDeviceSynchronize();
+
     // Free KV cache
     for (int s = 0; s < LM_TRT_MAX_KV_SETS; s++) {
         for (int l = 0; l < LM_TRT_MAX_LAYERS; l++) {
