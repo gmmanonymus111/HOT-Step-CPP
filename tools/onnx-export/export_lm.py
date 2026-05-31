@@ -57,10 +57,20 @@ class Qwen3LMFullWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.transformer = model.model  # Qwen3Model
-        self.lm_head_weight = model.model.embed_tokens.weight  # Tied
+        # Trim to actual vocab (151,936) — removes 65K padding rows (43% less compute)
+        actual_vocab = 151936
+        full_weight = model.model.embed_tokens.weight
+        if full_weight.shape[0] > actual_vocab:
+            self.lm_head_weight = nn.Parameter(
+                full_weight[:actual_vocab].clone().contiguous(),
+                requires_grad=False
+            )
+            print(f"[Export] Full LM head: trimmed {full_weight.shape[0]} → {actual_vocab} tokens")
+        else:
+            self.lm_head_weight = full_weight
+            print(f"[Export] Full LM head: {full_weight.shape[0]} tokens (no trim needed)")
         self.n_layers = model.config.num_hidden_layers
-        self.out_vocab = model.config.vocab_size
-        print(f"[Export] Full LM head: {self.out_vocab} tokens")
+        self.out_vocab = min(model.config.vocab_size, actual_vocab)
 
     def forward(self, input_ids, position_ids, attention_mask, *past_kvs):
         from transformers.cache_utils import DynamicCache
@@ -79,11 +89,16 @@ class Qwen3LMFullWrapper(nn.Module):
 
         logits = F.linear(outputs.last_hidden_state, self.lm_head_weight).float()
 
+        # Output only the NEW KV tokens (not full history).
+        # During decode (seq_len=1): present is [1, nkv, 1, hd]
+        # During prefill (seq_len=S): present is [1, nkv, S, hd]
+        # This eliminates O(past_len) copy inside TRT — C++ appends to single buffer.
+        seq_len = input_ids.shape[1]
         pkv = outputs.past_key_values
         result = [logits]
         for layer in pkv.layers:
-            result.append(layer.keys)
-            result.append(layer.values)
+            result.append(layer.keys[:, :, -seq_len:, :].contiguous())
+            result.append(layer.values[:, :, -seq_len:, :].contiguous())
         return tuple(result)
 
 
@@ -125,11 +140,13 @@ class Qwen3LMPartialWrapper(nn.Module):
 
         logits = F.linear(outputs.last_hidden_state, self.partial_lm_head).float()
 
+        # Output only the NEW KV tokens (same as full wrapper)
+        seq_len = input_ids.shape[1]
         pkv = outputs.past_key_values
         result = [logits]
         for layer in pkv.layers:
-            result.append(layer.keys)
-            result.append(layer.values)
+            result.append(layer.keys[:, :, -seq_len:, :].contiguous())
+            result.append(layer.values[:, :, -seq_len:, :].contiguous())
         return tuple(result)
 
 
@@ -538,7 +555,7 @@ def main():
         _, renamed, transposed = export_onnx(
             wrapper_full, config, full_path, args.device,
             opset=args.opset, do_rename=do_rename, torch_model=wrapper_full)
-        write_config(config, args.output, config.vocab_size, "full")
+        write_config(config, args.output, wrapper_full.out_vocab, "full")
         if do_rename:
             write_refit_manifest(args.output, "full", "lm_full.onnx",
                                  renamed, transposed)

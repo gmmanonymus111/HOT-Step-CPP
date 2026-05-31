@@ -39,7 +39,7 @@
 #define LM_TRT_N_KV_HEADS    8
 #define LM_TRT_HEAD_DIM    128
 #define LM_TRT_HIDDEN     2560
-#define LM_TRT_VOCAB    217204
+#define LM_TRT_VOCAB    151936
 
 // Phase 2 partial vocab: logits[offset:] = audio codes
 #define LM_TRT_PARTIAL_OFFSET 151645
@@ -79,14 +79,18 @@ struct LmTrt {
     int vocab_size  = LM_TRT_VOCAB;
     int max_seq_len = 8192;
 
-    // KV cache: double-buffered GPU memory per kv_set per layer
+    // KV cache: single-buffer GPU memory per kv_set per layer
     // Each buffer: [1, n_kv_heads, max_seq_len, head_dim] in bf16
-    // A/B are swapped each forward step to avoid copies
-    void*  d_kv_key_a[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
-    void*  d_kv_val_a[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
-    void*  d_kv_key_b[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
-    void*  d_kv_val_b[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
-    bool   kv_use_b[LM_TRT_MAX_KV_SETS] = {};  // false = A is "past", B is "present"
+    // After each forward, new KV tokens are appended at kv_pos offset.
+    void*  d_kv_key[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
+    void*  d_kv_val[LM_TRT_MAX_KV_SETS][LM_TRT_MAX_LAYERS] = {};
+
+    // Scratch buffers for present KV output (new tokens only)
+    // Size: [1, n_kv_heads, max_profile_seq, head_dim] bf16
+    // These receive the TRT present_key/value outputs, then get
+    // cudaMemcpy'd into the main KV buffer at kv_pos.
+    void*  d_present_key_scratch[LM_TRT_MAX_LAYERS] = {};
+    void*  d_present_val_scratch[LM_TRT_MAX_LAYERS] = {};
 
     int    kv_pos[LM_TRT_MAX_KV_SETS] = {};
     int    n_kv_sets = 0;
@@ -130,24 +134,11 @@ static inline size_t lm_trt_kv_buf_bytes(const LmTrt* ctx) {
     return (size_t)1 * ctx->n_kv_heads * ctx->max_seq_len * ctx->head_dim * 2;
 }
 
-// Get "past" KV pointers for a given kv_set and layer
-static inline void** lm_trt_past_key(LmTrt* ctx, int set, int layer) {
-    return ctx->kv_use_b[set] ? &ctx->d_kv_key_b[set][layer]
-                              : &ctx->d_kv_key_a[set][layer];
+// Size of present KV scratch buffer (max profile seq_len = 2048)
+static inline size_t lm_trt_present_scratch_bytes(const LmTrt* ctx) {
+    return (size_t)1 * ctx->n_kv_heads * 2048 * ctx->head_dim * 2;
 }
-static inline void** lm_trt_past_val(LmTrt* ctx, int set, int layer) {
-    return ctx->kv_use_b[set] ? &ctx->d_kv_val_b[set][layer]
-                              : &ctx->d_kv_val_a[set][layer];
-}
-// Get "present" KV pointers (the other buffer)
-static inline void** lm_trt_present_key(LmTrt* ctx, int set, int layer) {
-    return ctx->kv_use_b[set] ? &ctx->d_kv_key_a[set][layer]
-                              : &ctx->d_kv_key_b[set][layer];
-}
-static inline void** lm_trt_present_val(LmTrt* ctx, int set, int layer) {
-    return ctx->kv_use_b[set] ? &ctx->d_kv_val_a[set][layer]
-                              : &ctx->d_kv_val_b[set][layer];
-}
+
 
 // ── Engine build ───────────────────────────────────────────────────────────
 
@@ -201,6 +192,10 @@ inline bool lm_trt_build(
     // TF32 for fp32 island acceleration; no FP16/BF16 flags (STRONGLY_TYPED)
     config->setFlag(nvinfer1::BuilderFlag::kTF32);
     fprintf(stderr, "[LM-TRT] STRONGLY_TYPED + TF32\n");
+
+    // Builder optimization level 5 (TRT-LLM default) — exhaustive kernel search
+    config->setBuilderOptimizationLevel(5);
+    fprintf(stderr, "[LM-TRT] Optimization level 5\n");
 
     // Refittable engine (for adapter/LoRA support)
     config->setFlag(nvinfer1::BuilderFlag::kREFIT_IDENTICAL);
@@ -437,21 +432,26 @@ inline bool lm_trt_load(
         }
     }
 
-    // Allocate KV cache buffers
+    // Allocate KV cache buffers (single-buffer per set/layer)
     size_t kv_bytes = lm_trt_kv_buf_bytes(ctx);
-    fprintf(stderr, "[LM-TRT] Allocating KV cache: %d sets × %d layers × 2 buffers × %.1f MB\n",
+    fprintf(stderr, "[LM-TRT] Allocating KV cache: %d sets × %d layers × 1 buffer × %.1f MB\n",
             ctx->n_kv_sets, ctx->n_layers,
             kv_bytes / (1024.0 * 1024.0));
 
     for (int s = 0; s < ctx->n_kv_sets; s++) {
         for (int l = 0; l < ctx->n_layers; l++) {
-            cudaMalloc(&ctx->d_kv_key_a[s][l], kv_bytes);
-            cudaMalloc(&ctx->d_kv_val_a[s][l], kv_bytes);
-            cudaMalloc(&ctx->d_kv_key_b[s][l], kv_bytes);
-            cudaMalloc(&ctx->d_kv_val_b[s][l], kv_bytes);
+            cudaMalloc(&ctx->d_kv_key[s][l], kv_bytes);
+            cudaMalloc(&ctx->d_kv_val[s][l], kv_bytes);
         }
-        ctx->kv_pos[s]  = 0;
-        ctx->kv_use_b[s] = false;
+        ctx->kv_pos[s] = 0;
+    }
+
+    // Present KV scratch buffers (shared across all KV sets, one per layer)
+    // Size: [1, n_kv_heads, 2048, head_dim] bf16 — matches max profile seq_len
+    size_t present_bytes = lm_trt_present_scratch_bytes(ctx);
+    for (int l = 0; l < ctx->n_layers; l++) {
+        cudaMalloc(&ctx->d_present_key_scratch[l], present_bytes);
+        cudaMalloc(&ctx->d_present_val_scratch[l], present_bytes);
     }
 
     // Allocate scratch buffers for inputs/outputs
@@ -478,10 +478,8 @@ inline bool lm_trt_load(
     // uninitialized memory if kv_pos=0 (profile min=1 workaround)
     for (int s = 0; s < ctx->n_kv_sets; s++) {
         for (int l = 0; l < ctx->n_layers; l++) {
-            cudaMemset(ctx->d_kv_key_a[s][l], 0, kv_bytes);
-            cudaMemset(ctx->d_kv_val_a[s][l], 0, kv_bytes);
-            cudaMemset(ctx->d_kv_key_b[s][l], 0, kv_bytes);
-            cudaMemset(ctx->d_kv_val_b[s][l], 0, kv_bytes);
+            cudaMemset(ctx->d_kv_key[s][l], 0, kv_bytes);
+            cudaMemset(ctx->d_kv_val[s][l], 0, kv_bytes);
         }
     }
 
@@ -489,7 +487,8 @@ inline bool lm_trt_load(
     cudaStreamCreate(&ctx->stream);
 
     size_t total_gpu_mb = (
-        ctx->n_kv_sets * ctx->n_layers * 4 * kv_bytes +  // 4 buffers
+        ctx->n_kv_sets * ctx->n_layers * 2 * kv_bytes +  // 2 buffers (K+V) per set/layer
+        ctx->n_layers * 2 * present_bytes +               // present scratch
         ids_bytes * 2 + mask_bytes + logits_bytes
     ) / (1024 * 1024);
 
@@ -515,7 +514,6 @@ inline bool lm_trt_load(
 
 inline void lm_trt_reset_kv(LmTrt* ctx, int kv_set) {
     ctx->kv_pos[kv_set] = 0;
-    ctx->kv_use_b[kv_set] = false;
     // No need to zero: kv_pos tracks valid range
 }
 
@@ -526,18 +524,17 @@ inline void lm_trt_reset_all_kv(LmTrt* ctx) {
 }
 
 inline void lm_trt_copy_kv(LmTrt* ctx, int src, int dst) {
-    size_t bytes = lm_trt_kv_buf_bytes(ctx);
+    // Only copy the valid portion (kv_pos tokens, not entire max_seq_len)
+    int pos = ctx->kv_pos[src];
+    if (pos <= 0) { ctx->kv_pos[dst] = 0; return; }
+    size_t valid_bytes = (size_t)ctx->n_kv_heads * pos * ctx->head_dim * 2;
     for (int l = 0; l < ctx->n_layers; l++) {
-        // Copy whichever buffer is currently "past" for src
-        void* src_k = *lm_trt_past_key(ctx, src, l);
-        void* src_v = *lm_trt_past_val(ctx, src, l);
-        void* dst_k = *lm_trt_past_key(ctx, dst, l);
-        void* dst_v = *lm_trt_past_val(ctx, dst, l);
-        cudaMemcpy(dst_k, src_k, bytes, cudaMemcpyDeviceToDevice);
-        cudaMemcpy(dst_v, src_v, bytes, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(ctx->d_kv_key[dst][l], ctx->d_kv_key[src][l],
+                   valid_bytes, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(ctx->d_kv_val[dst][l], ctx->d_kv_val[src][l],
+                   valid_bytes, cudaMemcpyDeviceToDevice);
     }
-    ctx->kv_pos[dst] = ctx->kv_pos[src];
-    ctx->kv_use_b[dst] = ctx->kv_use_b[src];
+    ctx->kv_pos[dst] = pos;
 }
 
 // ── Forward pass ───────────────────────────────────────────────────────────
@@ -614,17 +611,23 @@ inline bool lm_trt_forward(
     // past_seq_len for first forward (kv_pos=0) needs special handling:
     // TRT profile min is 1, so we use 1 even when kv_pos=0 and fill with zeros
     int past_len = std::max(kv_pos, 1);
-    nvinfer1::Dims4 kv_shape(batch, ctx->n_kv_heads, past_len, ctx->head_dim);
+    nvinfer1::Dims4 past_kv_shape(batch, ctx->n_kv_heads, past_len, ctx->head_dim);
+
+    // Present KV output shape: [1, n_kv_heads, n_tokens, head_dim]
+    // (new ONNX export outputs only the new tokens, not full history)
 
     for (int l = 0; l < ctx->n_layers; l++) {
         // Use pre-cached names (no snprintf in hot loop)
-        context->setInputShape(ctx->tn_past_key[l], kv_shape);
-        context->setInputShape(ctx->tn_past_val[l], kv_shape);
+        context->setInputShape(ctx->tn_past_key[l], past_kv_shape);
+        context->setInputShape(ctx->tn_past_val[l], past_kv_shape);
 
-        context->setTensorAddress(ctx->tn_past_key[l],    *lm_trt_past_key(ctx, kv_set, l));
-        context->setTensorAddress(ctx->tn_past_val[l],    *lm_trt_past_val(ctx, kv_set, l));
-        context->setTensorAddress(ctx->tn_present_key[l], *lm_trt_present_key(ctx, kv_set, l));
-        context->setTensorAddress(ctx->tn_present_val[l], *lm_trt_present_val(ctx, kv_set, l));
+        // Past: read from the single KV buffer
+        context->setTensorAddress(ctx->tn_past_key[l], ctx->d_kv_key[kv_set][l]);
+        context->setTensorAddress(ctx->tn_past_val[l], ctx->d_kv_val[kv_set][l]);
+
+        // Present: write to scratch buffers (NOT back to the KV buffer)
+        context->setTensorAddress(ctx->tn_present_key[l], ctx->d_present_key_scratch[l]);
+        context->setTensorAddress(ctx->tn_present_val[l], ctx->d_present_val_scratch[l]);
     }
 
     // Logits output
@@ -637,8 +640,38 @@ inline bool lm_trt_forward(
         return false;
     }
 
-    // Swap KV buffers: present becomes past for next step
-    ctx->kv_use_b[kv_set] = !ctx->kv_use_b[kv_set];
+    // Append present KV into the single buffer at kv_pos.
+    // present output: [1, n_kv_heads, n_tokens, head_dim] bf16
+    // Must be copied into kv_buf[head_h][kv_pos:kv_pos+n_tokens][:]
+    //
+    // The KV buffer is contiguous: [n_kv_heads, max_seq_len, head_dim]
+    // We need to insert n_tokens rows at position kv_pos for each head.
+    // Since the head stride is max_seq_len * head_dim, and we're inserting
+    // at a different offset per head, we need per-head copies.
+    //
+    // present output is [n_kv_heads, n_tokens, head_dim] contiguous.
+    // Destination in KV: head_h * max_seq * hd + kv_pos * hd
+    size_t hd_bytes = (size_t)ctx->head_dim * 2;  // bf16
+    size_t row_bytes = (size_t)n_tokens * hd_bytes;
+    size_t kv_head_stride = (size_t)ctx->max_seq_len * hd_bytes;
+    size_t present_head_stride = (size_t)n_tokens * hd_bytes;
+
+    for (int l = 0; l < ctx->n_layers; l++) {
+        char* dst_k = (char*)ctx->d_kv_key[kv_set][l];
+        char* dst_v = (char*)ctx->d_kv_val[kv_set][l];
+        char* src_k = (char*)ctx->d_present_key_scratch[l];
+        char* src_v = (char*)ctx->d_present_val_scratch[l];
+
+        for (int h = 0; h < ctx->n_kv_heads; h++) {
+            size_t dst_off = h * kv_head_stride + (size_t)kv_pos * hd_bytes;
+            size_t src_off = h * present_head_stride;
+            cudaMemcpyAsync(dst_k + dst_off, src_k + src_off, row_bytes,
+                           cudaMemcpyDeviceToDevice, s);
+            cudaMemcpyAsync(dst_v + dst_off, src_v + src_off, row_bytes,
+                           cudaMemcpyDeviceToDevice, s);
+        }
+    }
+
     ctx->kv_pos[kv_set] = kv_len;
 
     // Copy logits to host (async on the same stream)
@@ -713,14 +746,18 @@ inline void lm_trt_free(LmTrt* ctx) {
     }
     cudaDeviceSynchronize();
 
-    // Free KV cache
+    // Free KV cache (single-buffer)
     for (int s = 0; s < LM_TRT_MAX_KV_SETS; s++) {
         for (int l = 0; l < LM_TRT_MAX_LAYERS; l++) {
-            if (ctx->d_kv_key_a[s][l]) { cudaFree(ctx->d_kv_key_a[s][l]); ctx->d_kv_key_a[s][l] = nullptr; }
-            if (ctx->d_kv_val_a[s][l]) { cudaFree(ctx->d_kv_val_a[s][l]); ctx->d_kv_val_a[s][l] = nullptr; }
-            if (ctx->d_kv_key_b[s][l]) { cudaFree(ctx->d_kv_key_b[s][l]); ctx->d_kv_key_b[s][l] = nullptr; }
-            if (ctx->d_kv_val_b[s][l]) { cudaFree(ctx->d_kv_val_b[s][l]); ctx->d_kv_val_b[s][l] = nullptr; }
+            if (ctx->d_kv_key[s][l]) { cudaFree(ctx->d_kv_key[s][l]); ctx->d_kv_key[s][l] = nullptr; }
+            if (ctx->d_kv_val[s][l]) { cudaFree(ctx->d_kv_val[s][l]); ctx->d_kv_val[s][l] = nullptr; }
         }
+    }
+
+    // Free present KV scratch buffers
+    for (int l = 0; l < LM_TRT_MAX_LAYERS; l++) {
+        if (ctx->d_present_key_scratch[l]) { cudaFree(ctx->d_present_key_scratch[l]); ctx->d_present_key_scratch[l] = nullptr; }
+        if (ctx->d_present_val_scratch[l]) { cudaFree(ctx->d_present_val_scratch[l]); ctx->d_present_val_scratch[l] = nullptr; }
     }
 
     // Free scratch buffers
