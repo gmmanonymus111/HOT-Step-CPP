@@ -638,10 +638,29 @@ BPETokenizer * store_bpe(ModelStore * s, const char * lm_path) {
     if (is_gguf) {
         loaded = load_bpe_from_gguf(bpe, lm_path);
     } else {
-        // Safetensors directory: load from sidecar files
+        // Safetensors/ONNX directory: load from sidecar files
         std::string vocab_path  = std::string(lm_path) + WS_SEP + "vocab.json";
         std::string merges_path = std::string(lm_path) + WS_SEP + "merges.txt";
         loaded = load_bpe_from_files(bpe, vocab_path.c_str(), merges_path.c_str());
+
+        // Fallback: ONNX LM models may live in a subdirectory (e.g. onnx/lm-4B/)
+        // with tokenizer files in the parent directory (e.g. onnx/)
+        if (!loaded) {
+            std::string parent;
+            {
+                std::string p = lm_path;
+                // Strip trailing separator
+                while (!p.empty() && (p.back() == '/' || p.back() == '\\')) p.pop_back();
+                auto slash = p.find_last_of("/\\");
+                parent = (slash != std::string::npos) ? p.substr(0, slash) : ".";
+            }
+            vocab_path  = parent + WS_SEP + "vocab.json";
+            merges_path = parent + WS_SEP + "merges.txt";
+            loaded = load_bpe_from_files(bpe, vocab_path.c_str(), merges_path.c_str());
+            if (loaded) {
+                fprintf(stderr, "[BPE] Loaded from parent dir: %s\n", parent.c_str());
+            }
+        }
     }
 
     if (!loaded) {
