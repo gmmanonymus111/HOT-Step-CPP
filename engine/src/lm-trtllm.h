@@ -24,6 +24,10 @@
 
 #include <tensorrt_llm/executor/executor.h>
 
+// Forward-declare plugin initialization (exported by nvinfer_plugin_tensorrt_llm.dll)
+// Must be called before the Executor to register GPTAttention, PagedKVCache, etc.
+extern "C" bool initTrtLlmPlugins(void* logger, const char* libNamespace = "");
+
 namespace tle = tensorrt_llm::executor;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -63,6 +67,15 @@ inline bool lm_trtllm_load(
     ctx->max_seq_len = max_seq_len;
 
     try {
+        // Register TRT-LLM custom plugins (GPTAttention, PagedKVCache, etc.)
+        // Must happen before engine deserialization.
+        static bool plugins_inited = false;
+        if (!plugins_inited) {
+            initTrtLlmPlugins(nullptr, "tensorrt_llm");
+            plugins_inited = true;
+            fprintf(stderr, "[LM-TRTLLM] TRT-LLM plugins registered\n");
+        }
+
         // Executor config: single GPU, greedy/sampling, gather logits
         tle::ExecutorConfig exec_config(/*maxBeamWidth=*/1);
 
