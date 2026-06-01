@@ -638,6 +638,154 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     return results;
 }
 
+// ── TRT-LLM Phase 2: single-step logits extraction + CFG ──────────────────
+// Each forward call sends the FULL token sequence. The Executor creates an
+// ephemeral KV cache per request. N=1 only — the Executor handles the
+// cond/uncond scheduling internally for CFG.
+//
+// Flow:
+//   1. Prefill + first token: forward full prompt, get logits, sample.
+//   2. CFG decode: for each step, forward cond + uncond prompts (batch),
+//      get logits, combine, sample audio-only.
+//   3. Post-cutoff: continue without CFG (single forward per token).
+//   4. Return codes_to_string(audio_codes).
+#ifdef HOT_STEP_TRTLLM
+static std::vector<std::string> run_phase2_trtllm(
+    LmTrtLlm*             trtllm,
+    BPETokenizer&          bpe,
+    const AcePrompt&       ace,
+    float                  temperature,
+    float                  top_p,
+    int                    top_k,
+    uint32_t               seed,
+    float                  cfg_scale,
+    float                  cfg_cutoff_ratio,
+    const char*            negative_prompt,
+    bool (*cancel)(void*),
+    void* cancel_data
+) {
+    int  V             = LM_TRTLLM_VOCAB;
+    bool use_cfg       = cfg_scale > 1.0f;
+    int  compact_V     = AUDIO_CODE_COUNT + 1;  // EOS + audio codes
+
+    // Build prompts
+    std::string cot = build_cot_yaml(ace);
+    fprintf(stderr, "[LM-Phase2-TRTLLM] CoT:\n%s", cot.c_str());
+
+    std::vector<int> cond_prompt = build_lm_prompt_with_cot(bpe, ace, cot);
+    std::vector<int> uncond_prompt;
+    if (use_cfg) {
+        uncond_prompt = build_lm_prompt_uncond_with_cot(bpe, ace, negative_prompt);
+    }
+
+    int max_tokens = (int)(ace.duration * 5) + 100;
+    int cfg_tokens = use_cfg ? (int)(max_tokens * cfg_cutoff_ratio) : 0;
+
+    fprintf(stderr, "[LM-Phase2-TRTLLM] max_tokens=%d, cfg_scale=%.2f, cfg_cutoff=%d, prompt=%zu\n",
+            max_tokens, cfg_scale, cfg_tokens, cond_prompt.size());
+
+    // Growing token sequences (prompt + generated tokens)
+    std::vector<int> cond_seq = cond_prompt;   // mutable: append generated tokens
+    std::vector<int> uncond_seq = uncond_prompt; // mutable
+
+    // Logits buffers
+    std::vector<float> logits_cond(V);
+    std::vector<float> logits_uncond(V);
+    std::vector<float> compact(compact_V);
+
+    std::mt19937 rng(seed);
+    std::vector<int> audio_codes;
+
+    Timer t_decode;
+
+    for (int step = 0; step < max_tokens; step++) {
+        if (cancel && cancel(cancel_data)) {
+            fprintf(stderr, "[LM-Phase2-TRTLLM] Cancelled at step %d\n", step);
+            return {};
+        }
+
+        bool do_cfg = use_cfg && (cfg_cutoff_ratio >= 1.0f || step < cfg_tokens);
+
+        bool ok;
+        if (do_cfg) {
+            // CFG: forward both cond and uncond, get logits
+            ok = lm_trtllm_forward_logits_cfg(
+                trtllm,
+                cond_seq.data(), (int)cond_seq.size(),
+                uncond_seq.data(), (int)uncond_seq.size(),
+                logits_cond.data(), logits_uncond.data(),
+                seed + step
+            );
+            if (!ok) {
+                fprintf(stderr, "[LM-Phase2-TRTLLM] CFG forward failed at step %d\n", step);
+                return {};
+            }
+
+            // Targeted CFG: only combine EOS + audio code logits
+            float* lc = logits_cond.data();
+            float* lu = logits_uncond.data();
+            lc[TOKEN_IM_END] = lu[TOKEN_IM_END] + cfg_scale * (lc[TOKEN_IM_END] - lu[TOKEN_IM_END]);
+            for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
+                int idx = AUDIO_CODE_BASE + c;
+                lc[idx] = lu[idx] + cfg_scale * (lc[idx] - lu[idx]);
+            }
+        } else {
+            // No CFG: just forward cond
+            ok = lm_trtllm_forward_logits(
+                trtllm,
+                cond_seq.data(), (int)cond_seq.size(),
+                logits_cond.data(),
+                temperature,
+                seed + step
+            );
+            if (!ok) {
+                fprintf(stderr, "[LM-Phase2-TRTLLM] Forward failed at step %d\n", step);
+                return {};
+            }
+        }
+
+        // Compact sampling: extract EOS + audio codes only
+        compact[0] = logits_cond[TOKEN_IM_END];
+        for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
+            compact[c + 1] = logits_cond[AUDIO_CODE_BASE + c];
+        }
+
+        int compact_tok = sample_top_k_p(compact.data(), compact_V, temperature, top_p, top_k, rng);
+        int tok = (compact_tok == 0) ? TOKEN_IM_END : (AUDIO_CODE_BASE + compact_tok - 1);
+
+        if (tok == TOKEN_IM_END) {
+            break;
+        }
+
+        audio_codes.push_back(tok - AUDIO_CODE_BASE);
+
+        // Append token to sequences for next step
+        cond_seq.push_back(tok);
+        if (use_cfg && do_cfg) {
+            uncond_seq.push_back(tok);
+        }
+
+        // Progress logging
+        if ((step + 1) % 20 == 0) {
+            double elapsed = t_decode.ms() / 1000.0;
+            fprintf(stderr, "[LM-Phase2-TRTLLM] Step %d, %zu codes, %.1f tok/s%s\n",
+                    step + 1, audio_codes.size(),
+                    (double)(step + 1) / elapsed,
+                    do_cfg ? " (CFG)" : "");
+        }
+    }
+
+    double decode_ms = t_decode.ms();
+    fprintf(stderr, "[LM-Phase2-TRTLLM] %zu codes in %.0fms (%.1f tok/s), cfg_steps=%d\n",
+            audio_codes.size(), decode_ms,
+            (double)audio_codes.size() / (decode_ms / 1000.0),
+            std::min((int)audio_codes.size(), cfg_tokens));
+
+    return { codes_to_string(audio_codes) };
+}
+#endif // HOT_STEP_TRTLLM
+
+
 // Speculative decoding: Phase 2 audio code generation with draft model.
 // draft = 0.6B model (fast, no CFG), target = 4B model (verifies with CFG).
 // N=1 only (no batched spec decode). Returns 1-element vector.
@@ -1147,7 +1295,7 @@ int ace_lm_generate(AceLm *            ctx,
     }
 #endif
     else {
-        vocab_size = LM_TRT_VOCAB; // fallback, shouldn't happen
+        vocab_size = 217204; // fallback, shouldn't happen
     }
 
     // CPU-resident tokenizer and FSM template. Owned by the store, never
@@ -1369,6 +1517,15 @@ int ace_lm_generate(AceLm *            ctx,
         fprintf(stderr, "[LM-Generate] %s mode, no audio code generation\n",
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
+        // TRT-LLM Executor: highest priority, N=1 only
+#ifdef HOT_STEP_TRTLLM
+        if (ctx->use_trtllm && lm_batch_size == 1) {
+            const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
+            batch_codes = run_phase2_trtllm(&ctx->lm_trtllm, *bpe, aces[0],
+                                             temperature, top_p, top_k, seed, cfg_scale,
+                                             req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data);
+        } else
+#endif
         // Speculative decode: draft model available + batch_size=1
         if (ctx->draft_loaded && lm_batch_size == 1) {
             const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
