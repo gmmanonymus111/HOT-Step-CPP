@@ -48,10 +48,42 @@ static bool register_trtllm_plugins() {
 #ifdef _WIN32
     HMODULE hMod = GetModuleHandleA("nvinfer_plugin_tensorrt_llm.dll");
     if (!hMod) {
-        hMod = LoadLibraryA("nvinfer_plugin_tensorrt_llm.dll");
+        // Try to find the DLL in the trtllm-libs directory next to the engine
+        // First, add the trtllm-libs dir to the DLL search path so transitive
+        // deps (like nvinfer_10.dll) can be found
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string exeDir(exePath);
+        auto slash = exeDir.find_last_of("\\/");
+        if (slash != std::string::npos) exeDir = exeDir.substr(0, slash);
+
+        // Try: exe/../../../engine/trtllm-libs (exe is in engine/build/Release/)
+        // But simpler: walk up and check common locations
+        std::vector<std::string> searchDirs;
+        searchDirs.push_back(exeDir + "\\..\\..\\trtllm-libs");
+        searchDirs.push_back(exeDir + "\\..\\trtllm-libs");
+        searchDirs.push_back(exeDir);
+
+        for (auto& dir : searchDirs) {
+            std::string fullPath = dir + "\\nvinfer_plugin_tensorrt_llm.dll";
+            // Add the directory to DLL search path so transitive deps resolve
+            SetDllDirectoryA(dir.c_str());
+            hMod = LoadLibraryA(fullPath.c_str());
+            if (hMod) {
+                fprintf(stderr, "[LM-TRTLLM] Loaded plugin from %s\n", dir.c_str());
+                break;
+            }
+        }
+        SetDllDirectoryA(NULL);  // Reset to default search
+
+        if (!hMod) {
+            // Fall back to bare name (uses PATH)
+            hMod = LoadLibraryA("nvinfer_plugin_tensorrt_llm.dll");
+        }
     }
     if (!hMod) {
-        fprintf(stderr, "[LM-TRTLLM] Cannot load nvinfer_plugin_tensorrt_llm.dll\n");
+        DWORD err = GetLastError();
+        fprintf(stderr, "[LM-TRTLLM] Cannot load nvinfer_plugin_tensorrt_llm.dll (error %lu)\n", err);
         return false;
     }
 
