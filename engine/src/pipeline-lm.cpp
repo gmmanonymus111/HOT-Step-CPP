@@ -1105,11 +1105,50 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
         fprintf(stderr, "[Ace-LM] FP16 clamp enabled\n");
     }
 
-    // ── TRT LM detection ────────────────────────────────────────────────────
-    // If model_path points to an ONNX export directory (e.g. models/onnx/lm-4B/),
-    // use TRT inference instead of GGML.
-#ifdef HOT_STEP_TRT
+    // ── TRT-LLM Executor detection (preferred — fastest path) ────────────────
+    // If model_path/trtllm-engine-* exists, use TRT-LLM Executor. The Executor
+    // handles KV cache, attention kernels, and scheduling internally.
+    // Checked BEFORE raw TRT because the Executor path is faster.
+#ifdef HOT_STEP_TRTLLM
     {
+        std::string model_dir(params->model_path);
+        // Look for a trtllm-engine directory (match any suffix like -RTX5090)
+        std::string trtllm_dir;
+        try {
+            for (auto& entry : std::filesystem::directory_iterator(model_dir)) {
+                if (entry.is_directory()) {
+                    std::string name = entry.path().filename().string();
+                    if (name.find("trtllm-engine") == 0) {
+                        // Check for rank0.engine (the actual engine file)
+                        auto engine_file = entry.path() / "rank0.engine";
+                        if (std::filesystem::exists(engine_file)) {
+                            trtllm_dir = entry.path().string();
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+            // Filesystem errors are non-fatal
+        }
+
+        if (!trtllm_dir.empty()) {
+            fprintf(stderr, "[Ace-LM] TRT-LLM engine found at %s\n", trtllm_dir.c_str());
+            if (lm_trtllm_load(&ctx->lm_trtllm, trtllm_dir.c_str(), params->max_seq)) {
+                ctx->use_trtllm = true;
+                fprintf(stderr, "[Ace-LM] TRT-LLM Executor ready: max_seq=%d\n", params->max_seq);
+            } else {
+                fprintf(stderr, "[Ace-LM] WARNING: TRT-LLM init failed, falling back\n");
+            }
+        }
+    }
+#endif
+
+    // ── Raw TRT detection (fallback if TRT-LLM not available) ───────────────
+    // If model_path points to an ONNX export directory (e.g. models/onnx/lm-4B/),
+    // use raw TRT inference instead of GGML. Skipped if TRT-LLM is already active.
+#ifdef HOT_STEP_TRT
+    if (!ctx->use_trtllm) {
         std::string model_dir(params->model_path);
         std::string onnx_path = model_dir + "/lm_full.onnx";
         std::string engine_path = model_dir + "/lm_full.engine";
@@ -1146,45 +1185,6 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
             ctx->use_trt = true;
             fprintf(stderr, "[Ace-LM] TRT LM ready: %d KV sets, max_seq=%d\n",
                     n_kv, params->max_seq);
-        }
-    }
-#endif
-
-    // ── TRT-LLM Executor detection ──────────────────────────────────────────
-    // If model_path/trtllm-engine-* exists, use TRT-LLM Executor instead of
-    // GGML or raw TRT. The Executor handles KV cache, attention kernels, and
-    // scheduling internally — no manual buffer management needed.
-#ifdef HOT_STEP_TRTLLM
-    if (!ctx->use_trt) {  // Don't override raw TRT if it's already active
-        std::string model_dir(params->model_path);
-        // Look for a trtllm-engine directory (match any suffix like -RTX5090)
-        std::string trtllm_dir;
-        try {
-            for (auto& entry : std::filesystem::directory_iterator(model_dir)) {
-                if (entry.is_directory()) {
-                    std::string name = entry.path().filename().string();
-                    if (name.find("trtllm-engine") == 0) {
-                        // Check for rank0.engine (the actual engine file)
-                        auto engine_file = entry.path() / "rank0.engine";
-                        if (std::filesystem::exists(engine_file)) {
-                            trtllm_dir = entry.path().string();
-                            break;
-                        }
-                    }
-                }
-            }
-        } catch (...) {
-            // Filesystem errors are non-fatal
-        }
-
-        if (!trtllm_dir.empty()) {
-            fprintf(stderr, "[Ace-LM] TRT-LLM engine found at %s\n", trtllm_dir.c_str());
-            if (lm_trtllm_load(&ctx->lm_trtllm, trtllm_dir.c_str(), params->max_seq)) {
-                ctx->use_trtllm = true;
-                fprintf(stderr, "[Ace-LM] TRT-LLM Executor ready: max_seq=%d\n", params->max_seq);
-            } else {
-                fprintf(stderr, "[Ace-LM] WARNING: TRT-LLM init failed, falling back to GGML\n");
-            }
         }
     }
 #endif
