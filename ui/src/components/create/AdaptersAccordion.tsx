@@ -17,6 +17,7 @@ interface AdapterGroupScales {
   cross_attn: number;
   mlp: number;
   cond_embed: number;
+  time_embed: number;
 }
 
 interface AdaptersAccordionProps {
@@ -50,10 +51,11 @@ interface AdaptersAccordionProps {
 }
 
 const GROUP_INFO = [
-  { key: 'self_attn' as const,  label: 'Self-Attn',    help: 'How audio frames relate to each other over time' },
-  { key: 'cross_attn' as const, label: 'Cross-Attn',   help: 'How strongly your text prompt shapes the output' },
-  { key: 'mlp' as const,        label: 'MLP',          help: 'Timbre, tonal texture, and sonic character' },
-  { key: 'cond_embed' as const, label: 'Conditioning', help: 'How the adapter reshapes text/style interpretation' },
+  { key: 'self_attn' as const,  label: 'Self-Attn',    help: 'How audio frames relate to each other over time', defaultVal: 1.0 },
+  { key: 'cross_attn' as const, label: 'Cross-Attn',   help: 'How strongly your text prompt shapes the output', defaultVal: 1.0 },
+  { key: 'mlp' as const,        label: 'MLP',          help: 'Timbre, tonal texture, and sonic character', defaultVal: 1.0 },
+  { key: 'cond_embed' as const, label: 'Conditioning', help: 'How the adapter reshapes text/style interpretation', defaultVal: 1.0 },
+  { key: 'time_embed' as const, label: 'Timestep',     help: 'How the adapter modifies noise-schedule understanding (0 = skip)', defaultVal: 0.0 },
 ];
 
 /** Extract trigger word from adapter path — filename without extension, underscores kept */
@@ -99,7 +101,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
     onAdapterGroupScalesChange({ ...adapterGroupScales, [key]: value });
   };
 
-  const allDefault = GROUP_INFO.every(g => adapterGroupScales[g.key] === 1.0);
+  const allDefault = GROUP_INFO.every(g => adapterGroupScales[g.key] === g.defaultVal);
 
   // Scan folder for adapter files (Advanced mode)
   const handleScan = useCallback(async (folder?: string) => {
@@ -440,12 +442,12 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
 
                   {showGroupScales && (
                     <div className="rounded-xl bg-zinc-50/80 dark:bg-zinc-900/50 border border-zinc-200 dark:border-white/5 p-3 space-y-3">
-                      {GROUP_INFO.map(({ key, label, help }) => (
+                      {GROUP_INFO.map(({ key, label, help, defaultVal }) => (
                         <div key={key}>
                           <div className="flex items-center justify-between mb-1">
                             <label className="text-xs text-zinc-500" title={help}>{label}</label>
                             <span className={`text-xs font-mono ${
-                              adapterGroupScales[key] === 1.0 ? 'text-zinc-600' : 'text-pink-400'
+                              adapterGroupScales[key] === defaultVal ? 'text-zinc-600' : 'text-pink-400'
                             }`}>
                               {adapterGroupScales[key].toFixed(2)}
                             </span>

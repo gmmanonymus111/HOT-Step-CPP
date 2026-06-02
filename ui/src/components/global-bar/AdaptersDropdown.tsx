@@ -21,6 +21,7 @@ const GROUP_INFO = [
   { key: 'cross_attn' as const, label: 'Cross-Attn',   help: 'How strongly your text prompt shapes the output' },
   { key: 'mlp' as const,        label: 'MLP',          help: 'Timbre, tonal texture, and sonic character' },
   { key: 'cond_embed' as const, label: 'Conditioning', help: 'How the adapter reshapes text/style interpretation' },
+  { key: 'time_embed' as const, label: 'Timestep',     help: 'How the adapter modifies noise-schedule understanding (0 = skip)' },
 ];
 
 function deriveTriggerWord(adapterPath: string): string {
@@ -50,7 +51,8 @@ export const AdaptersDropdown: React.FC = () => {
   const fileBrowserMode = gp.advancedAdapters ? 'folder' as const : 'file' as const;
   const triggerWord = deriveTriggerWord(gp.adapter);
   const adapterFilename = gp.adapter ? gp.adapter.split(/[\\/]/).pop() || '' : '';
-  const allDefault = GROUP_INFO.every(g => gp.adapterGroupScales[g.key] === 1.0);
+  const GROUP_DEFAULTS: Record<string, number> = { self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0 };
+  const allDefault = GROUP_INFO.every(g => gp.adapterGroupScales[g.key] === (GROUP_DEFAULTS[g.key] ?? 1.0));
 
   const handleGroupScaleChange = (key: keyof typeof gp.adapterGroupScales, value: number) => {
     gp.setAdapterGroupScales({ ...gp.adapterGroupScales, [key]: value });
@@ -290,28 +292,6 @@ export const AdaptersDropdown: React.FC = () => {
                 ? 'Merges adapter at F32 precision. Same quality as Runtime, faster inference.'
                 : 'Classic merge to native type. Fastest, but may lose adapter detail.'}
             </p>
-            {gp.adapterMode === 'merge_hq' && (
-              <div className="mt-2 flex flex-col gap-1">
-                <label className="flex items-center gap-2 text-[11px] text-zinc-500 cursor-pointer hover:text-zinc-700 dark:hover:text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={gp.mergeHqIncludeCond}
-                    onChange={e => gp.setMergeHqIncludeCond(e.target.checked)}
-                    className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
-                  />
-                  Include Conditioning
-                </label>
-                <label className="flex items-center gap-2 text-[11px] text-zinc-500 cursor-pointer hover:text-zinc-700 dark:hover:text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={gp.mergeHqIncludeTime}
-                    onChange={e => gp.setMergeHqIncludeTime(e.target.checked)}
-                    className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
-                  />
-                  Include Timestep
-                </label>
-              </div>
-            )}
           </div>
 
           {/* Group Scales */}
@@ -330,7 +310,7 @@ export const AdaptersDropdown: React.FC = () => {
             <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 p-3 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">{t('adapter.layerScales')}</span>
-                <button type="button" onClick={() => gp.setAdapterGroupScales({ self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0 })}
+                <button type="button" onClick={() => gp.setAdapterGroupScales({ self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0 })}
                   className="flex items-center gap-1 text-[10px] text-zinc-600 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
                   <RotateCcw size={10} /> Reset
                 </button>

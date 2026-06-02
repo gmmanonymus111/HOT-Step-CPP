@@ -17,39 +17,43 @@
 // Per-group adapter scale multipliers. Applied on top of the global adapter_scale.
 struct AdapterGroupScales {
     float self_attn  = 1.0f;
-    float cross_attn = 1.0f;
-    float mlp        = 1.0f;
-    float cond_embed = 1.0f;
+    float cross_attn  = 1.0f;
+    float mlp         = 1.0f;
+    float cond_embed  = 1.0f;
+    float time_embed  = 1.0f;
 };
 
 // Classify a GGUF tensor name into its adapter group.
-// Returns "self_attn", "cross_attn", "mlp", "cond_embed", or "" for unclassified.
+// Returns "self_attn", "cross_attn", "mlp", "cond_embed", "time_embed", or "" for unclassified.
 //
 // ACE-Step v1.5 GGUF tensor naming:
 //   decoder.layers.N.self_attn.{q,k,v,o}_proj.weight  → self_attn
 //   decoder.layers.N.cross_attn.{q,k,v,o}_proj.weight → cross_attn
 //   decoder.layers.N.mlp.{gate,up,down}_proj.weight    → mlp
 //   decoder.condition_embedder.weight                  → cond_embed
+//   decoder.time_embed*.{linear_1,linear_2,time_proj}  → time_embed
 //
-// NOTE: cross_attn must be checked BEFORE the generic .attn. pattern.
+// NOTE: cross_attn must be checked BEFORE self_attn.
 // .ff. is kept alongside .mlp. for backward compat with older model variants.
 static inline std::string adapter_determine_group(const std::string & name) {
     if (name.find("cross_attn")      != std::string::npos) return "cross_attn";
-    if (name.find(".attn.")          != std::string::npos) return "self_attn";
+    if (name.find("self_attn")       != std::string::npos) return "self_attn";
     if (name.find(".mlp.")           != std::string::npos) return "mlp";
     if (name.find(".ff.")            != std::string::npos) return "mlp";
+    if (name.find("time_embed")      != std::string::npos) return "time_embed";
     if (name.find("condition_embed") != std::string::npos) return "cond_embed";
     return "";
 }
 
 // Look up the effective scale for a given group name.
-// Unclassified tensors get the average of all group scales.
+// Unclassified tensors (e.g. proj_in) get the average of all group scales.
 static inline float adapter_group_scale_for(const AdapterGroupScales & gs, const std::string & group) {
     if (group == "self_attn")   return gs.self_attn;
     if (group == "cross_attn") return gs.cross_attn;
     if (group == "mlp")        return gs.mlp;
     if (group == "cond_embed") return gs.cond_embed;
-    return (gs.self_attn + gs.cross_attn + gs.mlp + gs.cond_embed) / 4.0f;
+    if (group == "time_embed") return gs.time_embed;
+    return (gs.self_attn + gs.cross_attn + gs.mlp + gs.cond_embed + gs.time_embed) / 5.0f;
 }
 
 struct HotStepParams {
@@ -76,11 +80,6 @@ struct HotStepParams {
     // merge_hq stores merged weights as F32 to avoid catastrophic BF16 cancellation,
     // at the cost of ~2× VRAM for adapted tensors. Same quality as runtime, merge speed.
     std::string adapter_mode = "merge";
-
-    // merge_hq ablation: selectively re-enable non-layer tensor groups
-    // By default merge_hq skips these (matching runtime behavior).
-    bool merge_hq_include_cond = false;  // decoder.condition_embedder
-    bool merge_hq_include_time = false;  // decoder.time_embed* (6 tensors)
 
     // DCW (Differential Correction in Wavelet domain) — CVPR 2026
     // Training-free sampler-side correction that mitigates SNR-t bias.
