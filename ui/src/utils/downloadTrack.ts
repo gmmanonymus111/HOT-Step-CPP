@@ -108,3 +108,17 @@ export async function downloadTrack(
     triggerBrowserDownload(`/api/download/${song.id}?${latentParams}`);
   }
 }
+
+/**
+ * Bulk-download multiple tracks sequentially.
+ * Stagers downloads 800ms apart so the browser doesn't throttle/block them.
+ */
+export async function downloadAll(
+  songs: Song[],
+  options?: { artistName?: string; prepend?: string },
+): Promise<void> {
+  for (let i = 0; i < songs.length; i++) {
+    if (i > 0) await delay(800);
+    await downloadTrack(songs[i], options);
+  }
+}

@@ -9,11 +9,12 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Play, X, Trash2, ChevronUp, ChevronDown,
-  Music, ListPlus, ListMusic, Square, Download,
+  Music, ListPlus, ListMusic, Square, Download, DownloadCloud, Loader2,
 } from 'lucide-react';
 import { usePlaylist, type PlaylistItem } from '../lyric-studio/playlistStore';
 import { playFromList, playlistItemToTrack, usePlaybackSelector } from '../../stores/playbackStore';
-import { downloadTrack } from '../../utils/downloadTrack';
+import { downloadTrack, downloadAll } from '../../utils/downloadTrack';
+import type { Song } from '../../types';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface PlaylistSidebarProps {
@@ -25,6 +26,33 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
   const { t } = useTranslation();
   const currentSongId = usePlaybackSelector(s => s.currentTrack?.id ?? null);
   const { disguiseArtist, disguiseTitle } = useDisguiseMode();
+  const [downloading, setDownloading] = useState(false);
+
+  /** Convert a PlaylistItem to a Song shape for the download utility. */
+  const playlistItemToSong = useCallback((item: PlaylistItem): Song => ({
+    id: item.id,
+    title: item.title || 'Untitled',
+    style: item.style || '',
+    caption: item.style || '',
+    lyrics: '',
+    audioUrl: item.audioUrl,
+    masteredAudioUrl: item.masteredAudioUrl || '',
+    coverUrl: item.coverUrl || '',
+    duration: item.duration || 0,
+    artistName: item.artistName || '',
+    tags: [],
+  }), []);
+
+  const handleDownloadAll = useCallback(async () => {
+    if (downloading || playlist.items.length === 0) return;
+    setDownloading(true);
+    try {
+      const songs = playlist.items.map(playlistItemToSong);
+      await downloadAll(songs);
+    } finally {
+      setDownloading(false);
+    }
+  }, [playlist.items, downloading, playlistItemToSong]);
 
   const handlePlay = useCallback((item: PlaylistItem) => {
     const allTracks = playlist.items.map(playlistItemToTrack);
@@ -52,6 +80,15 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
           )}
         </div>
         <div className="flex items-center gap-1">
+          {playlist.items.length > 0 && (
+            <button onClick={handleDownloadAll} disabled={downloading}
+              className="p-1 rounded-md text-zinc-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
+              title={downloading ? 'Downloading...' : 'Download all tracks'}>
+              {downloading
+                ? <Loader2 className="w-3 h-3 animate-spin" />
+                : <DownloadCloud className="w-3 h-3" />}
+            </button>
+          )}
           {playlist.items.length > 0 && (
             <button onClick={playlist.clear}
               className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors"
