@@ -287,14 +287,12 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
             reg->vae.push_back(entry);
             fprintf(stderr, "[Registry] %s -> VAE (ONNX)\n", fname.c_str());
             count++;
-        } else if (lower.find("lm_") == 0 || lower.find("lm-") == 0) {
-            reg->lm.push_back(entry);
-            fprintf(stderr, "[Registry] %s -> LM (ONNX)\n", fname.c_str());
-            count++;
-        } else if (lower.find("text_enc") == 0 || lower.find("text-enc") == 0) {
-            reg->text_enc.push_back(entry);
-            fprintf(stderr, "[Registry] %s -> Text-Enc (ONNX)\n", fname.c_str());
-            count++;
+        } else if (lower.find("lm_") == 0 || lower.find("lm-") == 0 ||
+                   lower.find("text_enc") == 0 || lower.find("text-enc") == 0) {
+            // LM and Text-Enc have no ORT loading path — registering them would
+            // cause the GGUF/safetensors loader to treat the .onnx file as a
+            // directory, which crashes. Skip with an informational message.
+            fprintf(stderr, "[Registry] %s -> skipped (no ORT loader for this type)\n", fname.c_str());
         } else {
             fprintf(stderr, "[Registry] WARNING: skipping %s (unrecognized ONNX prefix)\n", fname.c_str());
         }
