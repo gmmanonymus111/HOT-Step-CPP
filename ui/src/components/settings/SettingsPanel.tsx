@@ -30,6 +30,8 @@ export interface AppSettings {
   downloadFormat: 'wav' | 'flac' | 'opus' | 'mp3';
   downloadMp3Bitrate: number;
   downloadOpusBitrate: number;
+  downloadVersion: 'original' | 'mastered' | 'both';
+  downloadIncludeLatent: boolean;
   // Adapter trigger word
   triggerUseFilename: boolean;
   triggerPlacement: 'prepend' | 'append' | 'replace';
@@ -47,6 +49,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   downloadFormat: 'flac',
   downloadMp3Bitrate: 192,
   downloadOpusBitrate: 192,
+  downloadVersion: 'mastered',
+  downloadIncludeLatent: false,
   triggerUseFilename: false,
   triggerPlacement: 'prepend',
   discoKickExtract: false,
@@ -617,6 +621,27 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             { value: 256, label: '256 kbps' },
           ]}
           onChange={(v) => update('downloadOpusBitrate', parseInt(v))}
+        />
+
+        <SelectRow
+          id="setting-dl-version"
+          label={t('settings.general.downloadVersion')}
+          description={t('settings.general.downloadVersionDesc')}
+          value={settings.downloadVersion}
+          options={[
+            { value: 'mastered', label: t('settings.general.versionMastered') },
+            { value: 'original', label: t('settings.general.versionOriginal') },
+            { value: 'both', label: t('settings.general.versionBoth') },
+          ]}
+          onChange={(v) => update('downloadVersion', v as AppSettings['downloadVersion'])}
+        />
+
+        <SettingRow
+          id="setting-dl-latent"
+          label={t('settings.general.includeLatent')}
+          description={t('settings.general.includeLatentDesc')}
+          checked={settings.downloadIncludeLatent}
+          onChange={(v) => update('downloadIncludeLatent', v)}
         />
       </div>
 

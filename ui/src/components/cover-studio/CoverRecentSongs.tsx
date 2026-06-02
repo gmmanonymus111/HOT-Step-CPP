@@ -10,7 +10,7 @@ import { Play, Loader2, Music, Download, Trash2, ListPlus, Check } from 'lucide-
 import { useAuth } from '../../context/AuthContext';
 import { songApi } from '../../services/api';
 import type { Song } from '../../types';
-import { DownloadModal } from '../shared/DownloadModal';
+import { downloadTrack } from '../../utils/downloadTrack';
 import { usePlaylist } from '../lyric-studio/playlistStore';
 import { playFromList, songToTrack, usePlaybackSelector } from '../../stores/playbackStore';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
@@ -34,8 +34,6 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
   const [songs, setSongs] = useState<Song[]>(_cachedCovers);
   const [loading, setLoading] = useState(_cachedCovers.length === 0);
   const mountedRef = useRef(true);
-  const [downloadSong, setDownloadSong] = useState<Song | null>(null);
-  const [downloadArtist, setDownloadArtist] = useState('');
   const { disguiseArtist, disguiseTitle } = useDisguiseMode();
 
   useEffect(() => {
@@ -118,11 +116,9 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
 
   const handleDownloadClick = useCallback((e: React.MouseEvent, song: Song) => {
     e.stopPropagation();
-    // Extract target artist from generation params
     const gp = song.generationParams as any;
     const targetArtist = gp?.artistName || song.artistName || '';
-    setDownloadSong(song);
-    setDownloadArtist(targetArtist);
+    downloadTrack(song, { artistName: targetArtist });
   }, []);
 
   if (loading && songs.length === 0) {
@@ -193,16 +189,6 @@ export const CoverRecentSongs: React.FC<CoverRecentSongsProps> = ({ showToast, r
           );
         })}
       </div>
-
-      {/* Download Modal */}
-      {downloadSong && (
-        <DownloadModal
-          song={downloadSong}
-          isOpen={!!downloadSong}
-          onClose={() => setDownloadSong(null)}
-          artistName={downloadArtist}
-        />
-      )}
     </>
   );
 };

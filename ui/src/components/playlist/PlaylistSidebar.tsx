@@ -7,15 +7,13 @@
 
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { createPortal } from 'react-dom';
 import {
   Play, X, Trash2, ChevronUp, ChevronDown,
   Music, ListPlus, ListMusic, Square, Download,
 } from 'lucide-react';
 import { usePlaylist, type PlaylistItem } from '../lyric-studio/playlistStore';
 import { playFromList, playlistItemToTrack, usePlaybackSelector } from '../../stores/playbackStore';
-import { DownloadModal } from '../shared/DownloadModal';
-import type { Song } from '../../types';
+import { downloadTrack } from '../../utils/downloadTrack';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 
 interface PlaylistSidebarProps {
@@ -26,7 +24,6 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
   const playlist = usePlaylist();
   const { t } = useTranslation();
   const currentSongId = usePlaybackSelector(s => s.currentTrack?.id ?? null);
-  const [downloadSong, setDownloadSong] = useState<Song | null>(null);
   const { disguiseArtist, disguiseTitle } = useDisguiseMode();
 
   const handlePlay = useCallback((item: PlaylistItem) => {
@@ -130,7 +127,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
                   <div className="hidden group-hover:flex items-center gap-0 flex-shrink-0">
                     <button onClick={(e) => {
                         e.stopPropagation();
-                        setDownloadSong({
+                        downloadTrack({
                           id: item.id,
                           title: item.title || 'Untitled',
                           style: item.style || '',
@@ -142,7 +139,7 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
                           duration: item.duration || 0,
                           artistName: item.artistName || '',
                           tags: [],
-                        });
+                        }, { artistName: item.artistName || '' });
                       }}
                       className="p-0.5 text-zinc-600 hover:text-emerald-400 transition-colors" title={t('playlist.download')}>
                       <Download className="w-3 h-3" />
@@ -183,17 +180,6 @@ export const PlaylistSidebar: React.FC<PlaylistSidebarProps> = ({ onClose }) => 
           </button>
           <span className="text-[9px] text-zinc-600 font-mono">{totalDuration}</span>
         </div>
-      )}
-
-      {/* Download Modal — portalled to body so it's not clipped by sidebar overflow */}
-      {downloadSong && createPortal(
-        <DownloadModal
-          song={downloadSong}
-          isOpen={!!downloadSong}
-          onClose={() => setDownloadSong(null)}
-          artistName={downloadSong.artistName}
-        />,
-        document.body
       )}
     </div>
   );

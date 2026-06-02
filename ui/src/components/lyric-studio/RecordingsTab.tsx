@@ -17,7 +17,7 @@ import type { Generation, AudioGeneration } from '../../services/lireekApi';
 import { generateApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import type { Song } from '../../types';
-import { DownloadModal } from '../shared/DownloadModal';
+import { downloadTrack } from '../../utils/downloadTrack';
 import { usePlaylist } from './playlistStore';
 import { playFromList, songToTrack } from '../../stores/playbackStore';
 
@@ -47,7 +47,6 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
   const [loading, setLoading] = useState(true);
   const [expandedGenId, setExpandedGenId] = useState<number | null>(null);
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
-  const [downloadSong, setDownloadSong] = useState<Song | null>(null);
 
   const generationsRef = useRef(generations);
   generationsRef.current = generations;
@@ -263,7 +262,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
                                   </p>
                                 )}
                               </div>
-                              <button onClick={() => setDownloadSong(song)}
+                              <button onClick={() => downloadTrack(song)}
                                 className="p-1.5 rounded-lg text-zinc-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
                                 title="Download">
                                 <Download className="w-3.5 h-3.5" />
@@ -287,15 +286,6 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
           })
         )}
       </div>
-
-      {/* Download Modal */}
-      {downloadSong && (
-        <DownloadModal
-          song={downloadSong}
-          isOpen={!!downloadSong}
-          onClose={() => setDownloadSong(null)}
-        />
-      )}
     </>
   );
 };

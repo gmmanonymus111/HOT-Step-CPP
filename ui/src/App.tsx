@@ -27,7 +27,7 @@ import { SpectrumAnalyzer } from './components/player/SpectrumAnalyzer';
 import { RightSidebar } from './components/details/RightSidebar';
 import { Toast, type ToastType } from './components/shared/Toast';
 import { ConfirmDialog } from './components/shared/ConfirmDialog';
-import { DownloadModal } from './components/shared/DownloadModal';
+import { downloadTrack } from './utils/downloadTrack';
 import { SettingsPanel, type AppSettings, DEFAULT_SETTINGS } from './components/settings/SettingsPanel';
 import { TerminalPanel } from './components/terminal/TerminalPanel';
 import { AssistantPanel } from './components/assistant/AssistantPanel';
@@ -402,8 +402,8 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Download modal state
-  const [downloadSong, setDownloadSong] = useState<Song | null>(null);
+  // Direct download helper (reads settings from localStorage)
+  const handleDownload = useCallback((song: Song) => downloadTrack(song), []);
 
   const showToast = (message: string, type: ToastType = 'success') => {
     setToast({ message, type, isVisible: true });
@@ -724,7 +724,7 @@ const AppContent: React.FC = () => {
               onBulkDelete={handleBulkDelete}
               onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
               onReuse={handleReuse}
-              onDownload={setDownloadSong}
+              onDownload={handleDownload}
               onRename={handleRename}
               showFilters={false}
               viewMode="grid"
@@ -819,7 +819,7 @@ const AppContent: React.FC = () => {
                   onDelete={handleDelete}
                   onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                   isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}
-                  onDownload={setDownloadSong}
+                  onDownload={handleDownload}
                   onRename={handleRename}
                 />
               </DiscoPulseWrapper>
@@ -841,7 +841,7 @@ const AppContent: React.FC = () => {
               onBulkDelete={handleBulkDelete}
               onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
               onReuse={handleReuse}
-              onDownload={setDownloadSong}
+              onDownload={handleDownload}
               onRename={handleRename}
               onAddToPlaylist={(song) => {
                 addToPlaylist({
@@ -898,7 +898,7 @@ const AppContent: React.FC = () => {
                   onDelete={handleDelete}
                   onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                   isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}
-                  onDownload={setDownloadSong}
+                  onDownload={handleDownload}
                   onRename={handleRename}
                 />
               </DiscoPulseWrapper>
@@ -956,7 +956,7 @@ const AppContent: React.FC = () => {
             onBulkDelete={handleBulkDelete}
             onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
             onReuse={handleReuse}
-            onDownload={setDownloadSong}
+            onDownload={handleDownload}
             onRename={handleRename}
             showFilters={false}
             viewMode="grid"
@@ -1051,7 +1051,7 @@ const AppContent: React.FC = () => {
                 onDelete={handleDelete}
                 onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                 isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}
-                onDownload={setDownloadSong}
+                onDownload={handleDownload}
                 onRename={handleRename}
               />
             </DiscoPulseWrapper>
@@ -1333,7 +1333,7 @@ const AppContent: React.FC = () => {
           onToggleRepeat={pbCycleRepeat}
           onReusePrompt={() => currentSong && handleReuse(currentSong as Song)}
           onDelete={() => currentSong && handleDelete(currentSong as Song)}
-          onDownload={() => currentSong && setDownloadSong(currentSong as Song)}
+          onDownload={() => currentSong && downloadTrack(currentSong as Song)}
           playMastered={playMastered}
           onToggleMastered={pbToggleMastered}
           spectrumEnabled={spectrumEnabled}
@@ -1369,16 +1369,7 @@ const AppContent: React.FC = () => {
         onConfirm={() => confirmDialog?.onConfirm()}
         onCancel={() => setConfirmDialog(null)}
       />
-      {downloadSong && (
-        <DownloadModal
-          song={downloadSong}
-          isOpen={true}
-          onClose={() => setDownloadSong(null)}
-          defaultFormat={settings.downloadFormat}
-          defaultMp3Bitrate={settings.downloadMp3Bitrate}
-          defaultOpusBitrate={settings.downloadOpusBitrate}
-        />
-      )}
+
       <ABCompareModal />
     </div>
   );

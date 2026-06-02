@@ -20,7 +20,7 @@ import {
 import type { AudioQueueItem } from '../../stores/audioGenQueueStore';
 import { usePlaylist } from './playlistStore';
 import type { Song } from '../../types';
-import { DownloadModal } from '../shared/DownloadModal';
+import { downloadTrack } from '../../utils/downloadTrack';
 import { play as pbPlay, audioQueueItemToTrack, usePlaybackSelector } from '../../stores/playbackStore';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 import { ToggleSwitch } from '../global-bar/BarSection';
@@ -53,7 +53,6 @@ function useSendToPlaylist(): [boolean, (v: boolean) => void] {
 export const InlineAudioQueue: React.FC = () => {
   const { items } = useAudioGenQueue();
   const { t } = useTranslation();
-  const [downloadSong, setDownloadSong] = React.useState<Song | null>(null);
   const currentSongId = usePlaybackSelector(s => s.currentTrack?.id ?? null);
   const [sendToPlaylist, setS2P] = useSendToPlaylist();
 
@@ -86,7 +85,7 @@ export const InlineAudioQueue: React.FC = () => {
       artistName: item.artistName || '',
       tags: [],
     };
-    setDownloadSong(song);
+    downloadTrack(song);
   }, []);
 
   // Send To Playlist toggle — always visible at top
@@ -157,13 +156,6 @@ export const InlineAudioQueue: React.FC = () => {
         </>
       )}
 
-      {downloadSong && (
-        <DownloadModal
-          song={downloadSong}
-          isOpen={!!downloadSong}
-          onClose={() => setDownloadSong(null)}
-        />
-      )}
     </div>
   );
 };

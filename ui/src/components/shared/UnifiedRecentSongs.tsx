@@ -12,7 +12,7 @@ import { songApi } from '../../services/api';
 import type { UnifiedRecentSong } from '../../types';
 import type { Song } from '../../types';
 import { useAuth } from '../../context/AuthContext';
-import { DownloadModal } from './DownloadModal';
+import { downloadTrack } from '../../utils/downloadTrack';
 import { usePlaylist } from '../lyric-studio/playlistStore';
 import { playFromList, unifiedRecentSongToTrack } from '../../stores/playbackStore';
 import { useABCompareSelector, setTrackA, setTrackB } from '../../stores/abCompareStore';
@@ -44,8 +44,6 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
   // A cache entry with songs=[] means "we fetched and there are none" — don't spin for that.
   const [loading, setLoading] = useState(!cached);
   const mountedRef = useRef(true);
-  const [downloadSong, setDownloadSong] = useState<Song | null>(null);
-  const [downloadArtist, setDownloadArtist] = useState('');
   const { disguiseArtist, disguiseTitle } = useDisguiseMode();
   const abTrackAId = useABCompareSelector(s => s.trackA?.id ?? null);
   const abTrackBId = useABCompareSelector(s => s.trackB?.id ?? null);
@@ -126,8 +124,7 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
       latentUrl: rs.latent_url || '',
       latent_url: rs.latent_url || '',
     };
-    setDownloadSong(song);
-    setDownloadArtist(rs.artist_name || '');
+    downloadTrack(song, { artistName: rs.artist_name || '' });
   }, []);
 
   if (loading && songs.length === 0) {
@@ -213,16 +210,6 @@ export const UnifiedRecentSongs: React.FC<UnifiedRecentSongsProps> = ({
           );
         })}
       </div>
-
-      {/* Download Modal */}
-      {downloadSong && (
-        <DownloadModal
-          song={downloadSong}
-          isOpen={!!downloadSong}
-          onClose={() => setDownloadSong(null)}
-          artistName={downloadArtist}
-        />
-      )}
     </>
   );
 };
