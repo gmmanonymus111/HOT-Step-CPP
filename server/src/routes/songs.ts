@@ -334,20 +334,38 @@ router.post('/nuke-generations', (req, res) => {
   const userId = getUserId(req);
   if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
 
-  // 1. Collect all audio file paths from songs table
+  // 1. Collect all file-reference columns from songs table
   const songs = getDb()
-    .prepare('SELECT id, audio_url, mastered_audio_url FROM songs WHERE user_id = ?')
+    .prepare(`SELECT id, audio_url, mastered_audio_url, latent_url,
+                     kick_stem_url, snare_stem_url, hihat_stem_url,
+                     disco_data_url, cover_url
+              FROM songs WHERE user_id = ?`)
     .all(userId) as any[];
 
-  // 2. Delete audio files from disk
+  // 2. Delete referenced files from disk
   let filesDeleted = 0;
+  const fileColumns = [
+    'audio_url', 'mastered_audio_url', 'latent_url',
+    'kick_stem_url', 'snare_stem_url', 'hihat_stem_url',
+    'disco_data_url', 'cover_url',
+  ];
   for (const song of songs) {
-    for (const urlField of ['audio_url', 'mastered_audio_url']) {
-      const url = song[urlField];
-      if (url) {
+    for (const col of fileColumns) {
+      const url = song[col];
+      if (url && !url.startsWith('extracting:')) {
         const filepath = path.join(config.data.audioDir, path.basename(url));
         if (fs.existsSync(filepath)) {
           try { fs.unlinkSync(filepath); filesDeleted++; } catch { /* best effort */ }
+        }
+      }
+    }
+    // Also delete companion files (lyrics JSON, LRC) that share the audio filename stem
+    if (song.audio_url) {
+      const baseName = path.basename(song.audio_url).replace(/\.[^.]+$/, '');
+      for (const ext of ['.lyrics.json', '.lrc']) {
+        const companionPath = path.join(config.data.audioDir, baseName + ext);
+        if (fs.existsSync(companionPath)) {
+          try { fs.unlinkSync(companionPath); filesDeleted++; } catch { /* best effort */ }
         }
       }
     }
@@ -360,7 +378,6 @@ router.post('/nuke-generations', (req, res) => {
   // 4. Delete all audio_generations (same DB now)
   let lireekDeleted = 0;
   try {
-    // Delete by matching job IDs first (precise)
     if (songIds.length > 0) {
       lireekDeleted += deleteAudioGenerationsByJobIds(songIds);
     }
@@ -371,12 +388,35 @@ router.post('/nuke-generations', (req, res) => {
     console.error('[Songs] NUKE audio_generations cleanup error:', err);
   }
 
-  console.log(`[Songs] NUKE: ${songResult.changes} songs, ${filesDeleted} files, ${lireekDeleted} lireek audio_gens deleted`);
+  // 5. Sweep the audio directory — remove any orphan files the DB didn't know about
+  let orphansDeleted = 0;
+  try {
+    if (fs.existsSync(config.data.audioDir)) {
+      const remaining = fs.readdirSync(config.data.audioDir);
+      for (const file of remaining) {
+        const filePath = path.join(config.data.audioDir, file);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.isFile()) {
+            fs.unlinkSync(filePath);
+            orphansDeleted++;
+          }
+        } catch { /* best effort */ }
+      }
+      if (orphansDeleted > 0) {
+        console.log(`[Songs] NUKE: swept ${orphansDeleted} orphan files from audio directory`);
+      }
+    }
+  } catch (err) {
+    console.error('[Songs] NUKE: audio directory sweep error:', err);
+  }
+
+  console.log(`[Songs] NUKE: ${songResult.changes} songs, ${filesDeleted} referenced files, ${orphansDeleted} orphans, ${lireekDeleted} lireek audio_gens deleted`);
 
   res.json({
     success: true,
     songsDeleted: songResult.changes,
-    filesDeleted,
+    filesDeleted: filesDeleted + orphansDeleted,
     lireekAudioGensDeleted: lireekDeleted,
   });
 });
