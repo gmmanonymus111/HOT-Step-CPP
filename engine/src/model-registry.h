@@ -282,7 +282,8 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
             reg->dit.push_back(entry);
             fprintf(stderr, "[Registry] %s -> DiT (ONNX)\n", fname.c_str());
             count++;
-        } else if (lower.find("vae_") == 0 || lower.find("vae-") == 0) {
+        } else if (lower.find("vae_") == 0 || lower.find("vae-") == 0 ||
+                   lower.find("scragvae_") == 0 || lower.find("scragvae-") == 0) {
             reg->vae.push_back(entry);
             fprintf(stderr, "[Registry] %s -> VAE (ONNX)\n", fname.c_str());
             count++;
