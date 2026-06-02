@@ -619,6 +619,23 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
         ggml_type data_type;
         const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
 
+        // Conv1d tensors (e.g. proj_in): see comment in LoKr path
+        if (n_dims >= 3 && pending_idx.find(base_ptr) == pending_idx.end()) {
+            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+                auto & pc = wctx->pending[pi];
+                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                    ne0      = pc.tensor->ne[0];
+                    ne1      = pc.tensor->ne[1];
+                    ttype    = pc.tensor->type;
+                    base_ptr = pc.src;
+                    fprintf(stderr, "[Adapter] Conv1d %s: using pre-permuted shape [%lld, %lld] (%s)\n",
+                            gguf_name.c_str(), (long long) ne0, (long long) ne1,
+                            ggml_type_name(ttype));
+                    break;
+                }
+            }
+        }
+
         // LoRA shapes (safetensors PyTorch convention, row major):
         //   A: [rank, in_features]
         //   B: [out_features, rank]
@@ -703,8 +720,8 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
 
     const auto & gs = g_hotstep_params.adapter_group_scales;
     fprintf(stderr, "[Adapter] LoRA merged %d pairs (skipped %d), scale=%.2f\n", merged, skipped, scale);
-    fprintf(stderr, "[Adapter] Group scales: self_attn=%.2f, cross_attn=%.2f, mlp=%.2f, cond_embed=%.2f, time_embed=%.2f\n",
-            gs.self_attn, gs.cross_attn, gs.mlp, gs.cond_embed, gs.time_embed);
+    fprintf(stderr, "[Adapter] Group scales: self_attn=%.2f, cross_attn=%.2f, mlp=%.2f, cond_embed=%.2f, time_embed=%.2f, proj_in=%.2f\n",
+            gs.self_attn, gs.cross_attn, gs.mlp, gs.cond_embed, gs.time_embed, gs.proj_in);
     return merged > 0;
 }
 
@@ -845,6 +862,30 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
         int64_t ne1 = ne_arr[1];
         ggml_type data_type;
         const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
+
+        // Conv1d tensors (e.g. proj_in) are stored as 3D in GGUF [P, in_ch, H]
+        // but dit_load_proj_in_w() pre-permutes them to 2D F32 [in_ch*P, H].
+        // The raw GGUF pointer won't match pending_idx (which indexes the permuted
+        // staging buffer), so we fall back to the PendingCopy's tensor shape.
+        bool is_prepermuted = false;
+        if (n_dims >= 3 && pending_idx.find(base_ptr) == pending_idx.end()) {
+            // Search for the matching PendingCopy by tensor name
+            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+                auto & pc = wctx->pending[pi];
+                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                    // Use the permuted tensor's 2D shape and staging data pointer
+                    ne0      = pc.tensor->ne[0];
+                    ne1      = pc.tensor->ne[1];
+                    ttype    = pc.tensor->type;
+                    base_ptr = pc.src;
+                    is_prepermuted = true;
+                    fprintf(stderr, "[Adapter] Conv1d %s: using pre-permuted shape [%lld, %lld] (%s)\n",
+                            gguf_name.c_str(), (long long) ne0, (long long) ne1,
+                            ggml_type_name(ttype));
+                    break;
+                }
+            }
+        }
 
         // LoKr shapes (safetensors row major):
         //   w1 : (a, b)
@@ -1031,8 +1072,8 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
     fprintf(stderr,
             "[Adapter] LoKr merged %d modules (%d factorized, %d monolithic, %d with DoRA, skipped %d), scale=%.2f\n",
             merged, merged - mono_count, mono_count, dora_count, skipped, user_scale);
-    fprintf(stderr, "[Adapter] Group scales: self_attn=%.2f, cross_attn=%.2f, mlp=%.2f, cond_embed=%.2f, time_embed=%.2f\n",
-            gs2.self_attn, gs2.cross_attn, gs2.mlp, gs2.cond_embed, gs2.time_embed);
+    fprintf(stderr, "[Adapter] Group scales: self_attn=%.2f, cross_attn=%.2f, mlp=%.2f, cond_embed=%.2f, time_embed=%.2f, proj_in=%.2f\n",
+            gs2.self_attn, gs2.cross_attn, gs2.mlp, gs2.cond_embed, gs2.time_embed, gs2.proj_in);
     return merged > 0;
 }
 

@@ -134,6 +134,7 @@ export interface GenerationParams {
     mlp: number;
     cond_embed: number;
     time_embed: number;
+    proj_in: number;
   };
   adapterMode: string;  // "merge", "merge_hq", or "runtime"
 

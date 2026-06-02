@@ -45,7 +45,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   adapterScale: readKey("hs-adapterScale", 1.0),
   adapterMode: readKey("hs-adapterMode", 'runtime'),
   adapterGroupScales: readKey("hs-adapterGroupScales", {
-    self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0,
+    self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0,
   }),
   adapterFolder: readKey("hs-adapterFolder", ''),
   advancedAdapters: readKey("hs-advancedAdapters", false),

@@ -82,6 +82,7 @@ export interface AceRequest {
     mlp: number;
     cond_embed: number;
     time_embed: number;
+    proj_in: number;
   };
   adapter_mode?: string;  // "merge" (default), "merge_hq" (F32 promoted), or "runtime"
   // Solver sub-parameters

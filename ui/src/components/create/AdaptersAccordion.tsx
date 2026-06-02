@@ -18,6 +18,7 @@ interface AdapterGroupScales {
   mlp: number;
   cond_embed: number;
   time_embed: number;
+  proj_in: number;
 }
 
 interface AdaptersAccordionProps {
@@ -56,6 +57,7 @@ const GROUP_INFO = [
   { key: 'mlp' as const,        label: 'MLP',          help: 'Timbre, tonal texture, and sonic character', defaultVal: 1.0 },
   { key: 'cond_embed' as const, label: 'Conditioning', help: 'How the adapter reshapes text/style interpretation', defaultVal: 1.0 },
   { key: 'time_embed' as const, label: 'Timestep',     help: 'How the adapter modifies noise-schedule understanding (0 = skip)', defaultVal: 0.0 },
+  { key: 'proj_in' as const,    label: 'Proj-In',      help: 'Input patchification layer — how latent tokens enter the model (0 = skip)', defaultVal: 0.0 },
 ];
 
 /** Extract trigger word from adapter path — filename without extension, underscores kept */

@@ -606,9 +606,11 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
             sf->group_scales.cond_embed = get_num(v);
         if ((v = yyjson_obj_get(gs_obj, "time_embed")) && yyjson_is_num(v))
             sf->group_scales.time_embed = get_num(v);
-        fprintf(stderr, "[DIAG] Parsed adapter_group_scales from JSON: sa=%.2f ca=%.2f mlp=%.2f ce=%.2f te=%.2f\n",
+        if ((v = yyjson_obj_get(gs_obj, "proj_in")) && yyjson_is_num(v))
+            sf->group_scales.proj_in = get_num(v);
+        fprintf(stderr, "[DIAG] Parsed adapter_group_scales from JSON: sa=%.2f ca=%.2f mlp=%.2f ce=%.2f te=%.2f pi=%.2f\n",
                 sf->group_scales.self_attn, sf->group_scales.cross_attn,
-                sf->group_scales.mlp, sf->group_scales.cond_embed, sf->group_scales.time_embed);
+                sf->group_scales.mlp, sf->group_scales.cond_embed, sf->group_scales.time_embed, sf->group_scales.proj_in);
     } else {
         fprintf(stderr, "[DIAG] adapter_group_scales: gs_obj=%p is_obj=%d\n",
                 (void*)gs_obj, gs_obj ? yyjson_is_obj(gs_obj) : -1);
