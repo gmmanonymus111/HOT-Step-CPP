@@ -100,6 +100,8 @@ export interface GlobalParams {
   timbreAudioPath: string; setTimbreAudioPath: (v: string) => void;
   // Naturalizer
   vocalNaturalizerEnabled: boolean; setVocalNaturalizerEnabled: (v: boolean) => void;
+  // Pre-VST gain offset
+  gainOffsetDb: number; setGainOffsetDb: (v: number) => void;
   naturalizeAmount: number; setNaturalizeAmount: (v: number) => void;
   natVibratoRate: number; setNatVibratoRate: (v: number) => void;
   natVibratoDepth: number; setNatVibratoDepth: (v: number) => void;

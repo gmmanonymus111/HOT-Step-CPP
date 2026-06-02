@@ -167,6 +167,9 @@ export interface GenerationParams {
   masteringReference?: string;
   timbreReference?: boolean | string;  // true = reuse mastering ref, string = dedicated timbre audio path
 
+  // Pre-VST gain offset (dB adjustment to unmastered track before VST chain)
+  gainOffsetDb?: number;           // -10 to +10, 0 = no change
+
   // Solver sub-parameters (conditional on selected solver)
   storkSubsteps?: number;
   beatStability?: number;

@@ -40,6 +40,8 @@ interface PostProcessParams {
   natTransitionSmooth?: number;
   // Context — used to skip naturalizer on instrumentals
   instrumental?: boolean;
+  // Pre-VST gain offset (dB)
+  gainOffsetDb?: number;
   // Audio Quality Evaluator
   qualityEvalEnabled?: boolean;
   qualityEvalTarget?: 'unmastered' | 'mastered' | 'both';
@@ -187,6 +189,54 @@ export async function runPostProcessingChain(
         log('WARNING', `[Vocal Naturalizer] Failed (non-fatal): ${natErr.message}`);
       }
       timing.push({ name: 'Vocal Naturalizer', ms: Math.round(performance.now() - natStart) });
+    }
+
+    // ── Pre-VST Gain Offset ──
+    const gainDb = params.gainOffsetDb ?? 0;
+    if (ppMasterOn && gainDb !== 0) {
+      const gainStart = performance.now();
+      setStage(`Gain offset ${gainDb > 0 ? '+' : ''}${gainDb} dB${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+      try {
+        const buf = fs.readFileSync(processedPath);
+        // Parse WAV: find 'data' chunk
+        let dataOffset = -1;
+        for (let off = 36; off < buf.length - 8; off++) {
+          if (buf[off] === 0x64 && buf[off+1] === 0x61 && buf[off+2] === 0x74 && buf[off+3] === 0x61) {
+            dataOffset = off;
+            break;
+          }
+        }
+        if (dataOffset >= 0) {
+          const dataSize = buf.readUInt32LE(dataOffset + 4);
+          const pcmStart = dataOffset + 8;
+          const audioFormat = buf.readUInt16LE(20);
+          const bitsPerSample = buf.readUInt16LE(34);
+          const linearGain = Math.pow(10, gainDb / 20);
+
+          if (audioFormat === 1 && bitsPerSample === 16) {
+            // PCM 16-bit
+            for (let p = pcmStart; p + 1 < pcmStart + dataSize && p + 1 < buf.length; p += 2) {
+              let sample = buf.readInt16LE(p) * linearGain;
+              sample = Math.max(-32768, Math.min(32767, Math.round(sample)));
+              buf.writeInt16LE(sample, p);
+            }
+          } else if (audioFormat === 3 && bitsPerSample === 32) {
+            // IEEE float 32-bit
+            for (let p = pcmStart; p + 3 < pcmStart + dataSize && p + 3 < buf.length; p += 4) {
+              buf.writeFloatLE(buf.readFloatLE(p) * linearGain, p);
+            }
+          }
+          // else: unsupported format, skip silently
+
+          fs.writeFileSync(processedPath, buf);
+          anyStageRan = true;
+          log('INFO', `[Gain] Applied ${gainDb > 0 ? '+' : ''}${gainDb} dB to ${processedFilename}`);
+        }
+      } catch (gainErr: any) {
+        log('WARNING', `[Gain] Offset failed (non-fatal): ${gainErr.message}`);
+      }
+      const gainMs = Math.round(performance.now() - gainStart);
+      if (gainMs > 10) timing.push({ name: 'Gain Offset', ms: gainMs });
     }
 
     if (ppMasterOn) {

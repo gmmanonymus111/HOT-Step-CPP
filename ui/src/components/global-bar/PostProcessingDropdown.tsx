@@ -644,6 +644,45 @@ export const PostProcessingDropdown: React.FC = () => {
         </div>
       </Accordion>
 
+      {/* 2.5. Pre-VST Gain Offset */}
+      <Accordion
+        icon={<AudioWaveform size={14} />}
+        label="Gain Offset"
+        accentColor="amber"
+        persistKey="hs-ppAccordion-gain"
+        badge={gp.gainOffsetDb !== 0 ? (
+          <span className="text-[10px] text-amber-400/60 font-mono">
+            {gp.gainOffsetDb > 0 ? '+' : ''}{gp.gainOffsetDb} dB
+          </span>
+        ) : undefined}
+      >
+        <div className="space-y-2 mt-2">
+          <p className="text-[10px] text-zinc-500 leading-relaxed">
+            Apply a volume offset to the unmastered track before the VST chain
+            and mastering stages. Use negative values to reduce volume (headroom
+            for VST processing), positive to boost.
+          </p>
+          <EditableSlider
+            label="Offset"
+            value={gp.gainOffsetDb}
+            min={-10} max={10} step={0.5}
+            onChange={gp.setGainOffsetDb}
+            formatDisplay={v => v === 0 ? '0 dB (bypass)' : `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            tooltip="dB gain applied to the audio before VST chain. 0 = no change."
+          />
+          {gp.gainOffsetDb !== 0 && (
+            <button
+              type="button"
+              onClick={() => gp.setGainOffsetDb(0)}
+              className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-amber-400 transition-colors"
+            >
+              <RotateCcw size={11} />
+              Reset to 0 dB
+            </button>
+          )}
+        </div>
+      </Accordion>
+
       {/* 3. VST Chain */}
       <Accordion
         icon={<Sparkles size={14} />}
@@ -738,7 +777,7 @@ export const PostProcessingDropdown: React.FC = () => {
 // ── Badge ───────────────────────────────────────────────────────
 
 export const PostProcessingBadge: React.FC = () => {
-  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, qualityEvalEnabled, postprocessEnabled, postprocessPlugin, whisperLyricsEnabled } = useGlobalParams();
+  const { masteringEnabled, masteringReference, spectralLifterEnabled, ppVaeReencode, coverArtEnabled, vocalNaturalizerEnabled, gainOffsetDb, qualityEvalEnabled, postprocessEnabled, postprocessPlugin, whisperLyricsEnabled } = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
 
@@ -747,6 +786,7 @@ export const PostProcessingBadge: React.FC = () => {
   if (ppVaeReencode) parts.push('PP-VAE');
   if (spectralLifterEnabled) parts.push('SL');
   if (vocalNaturalizerEnabled) parts.push('Nat');
+  if (gainOffsetDb !== 0) parts.push(`${gainOffsetDb > 0 ? '+' : ''}${gainOffsetDb}dB`);
   if (vstEnabled > 0) parts.push(`${vstEnabled} VST${vstEnabled !== 1 ? 's' : ''}`);
   if (masteringEnabled && masteringReference) parts.push('Master');
   if (coverArtEnabled) parts.push('Cover');
