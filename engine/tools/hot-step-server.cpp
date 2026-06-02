@@ -2461,8 +2461,8 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Server] PP-VAE backend=gguf, skipping ONNX discovery\n");
         }
 
-        // Default VAE tiling params
-        int vae_chunk   = 256;
+        // Default VAE tiling params (match scragvae: same Oobleck architecture)
+        int vae_chunk   = 1024;
         int vae_overlap = 64;
 
         // Phase 1: Encode (planar → interleaved → VAE encoder → latents)
