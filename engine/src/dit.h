@@ -486,8 +486,19 @@ static bool dit_ggml_load(DiTGGML *    m,
     if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
         if (!runtime_mode) {
+            // Auto-detect promote_f32: NVFP4/MXFP4 stay in native quant (saves ~13 GB
+            // VRAM vs F32 promotion). GGML CUDA has full dequant kernels for these types
+            // and ggml_quantize_chunk handles host requantization.
+            bool promote_f32 = true;
+            {
+                ggml_type t = ws.type("decoder.layers.0.self_attn.q_proj.weight");
+                if (t == GGML_TYPE_NVFP4 || t == GGML_TYPE_MXFP4) {
+                    promote_f32 = false;
+                    fprintf(stderr, "[Adapter] FP4 model detected — merge will requant to native type (no F32 promotion)\n");
+                }
+            }
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, true)) {
+            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, promote_f32)) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
                 if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;

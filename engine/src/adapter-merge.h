@@ -1119,6 +1119,13 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
 // Directories exist only for PEFT. LyCORIS ships as a single file for both LoRA
 // and LoKr payloads.
+//
+// promote_f32: when true, merged weights stay F32 on the backend (avoids
+// host requantization precision loss for K-quants). When false, the merge
+// graph encodes back to the native type on GPU when possible, falling back
+// to host requantization via ggml_quantize_chunk otherwise.
+// Default AUTO: NVFP4/MXFP4 → false (saves ~13 GB VRAM, host requant is
+// well-supported), everything else → true.
 static bool adapter_merge(WeightCtx *          wctx,
                           const WeightSource & ws,
                           const char *         adapter_path,
