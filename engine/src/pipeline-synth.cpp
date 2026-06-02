@@ -173,32 +173,51 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
         fprintf(stderr, "[Synth-Load] ORT-VAE: %s\n", params->onnx_vae_path);
     }
 
-    // ORT text/cond encoder: auto-discover from ONNX directory when on ONNX path.
-    // text_encoder.onnx and cond_encoder.onnx must be in the same directory
-    // as the DiT ONNX model (dit_sidecar_dir).
+    // ORT text/cond encoder: auto-discover from ONNX directory.
+    // Triggers when:
+    //   (a) DiT is ONNX → discover text_encoder.onnx + cond_encoder.onnx from dit_sidecar_dir
+    //   (b) text_encoder_path itself is .onnx → discover cond_encoder.onnx from the same dir
+    // Case (b) supports mixing GGUF DiT with ORT text encoding (e.g. NVFP4 DiT + ONNX text enc)
     ctx->is_onnx_pipeline = false;
-    if (is_onnx_dit) {
-        std::string onnx_dir = dit_sidecar_dir(params->dit_path);
-        std::string te_onnx  = onnx_dir + WS_SEP + "text_encoder.onnx";
-        std::string ce_onnx  = onnx_dir + WS_SEP + "cond_encoder.onnx";
+    {
+        std::string te_onnx;
+        std::string ce_onnx;
 
-        // Check if the ONNX files exist
-        FILE * f_te = fopen(te_onnx.c_str(), "rb");
-        FILE * f_ce = fopen(ce_onnx.c_str(), "rb");
-        if (f_te && f_ce) {
-            fclose(f_te);
-            fclose(f_ce);
-            ctx->text_enc_ort_key.kind = MODEL_TEXT_ENC_ORT;
-            ctx->text_enc_ort_key.path = te_onnx;
-            ctx->cond_enc_ort_key.kind = MODEL_COND_ENC_ORT;
-            ctx->cond_enc_ort_key.path = ce_onnx;
-            ctx->is_onnx_pipeline = true;
-            fprintf(stderr, "[Synth-Load] ONNX pipeline: TextEnc=%s, CondEnc=%s\n",
-                    te_onnx.c_str(), ce_onnx.c_str());
-        } else {
-            if (f_te) fclose(f_te);
-            if (f_ce) fclose(f_ce);
-            fprintf(stderr, "[Synth-Load] ONNX DiT but no text/cond encoder ONNX — using GGML fallback\n");
+        if (is_onnx_dit) {
+            // Case (a): DiT is ONNX — look for text/cond encoders in the same directory
+            std::string onnx_dir = dit_sidecar_dir(params->dit_path);
+            te_onnx = onnx_dir + WS_SEP + "text_encoder.onnx";
+            ce_onnx = onnx_dir + WS_SEP + "cond_encoder.onnx";
+        } else if (params->text_encoder_path) {
+            // Case (b): text encoder path is an ONNX file
+            std::string te_path(params->text_encoder_path);
+            if (te_path.size() >= 5 && te_path.substr(te_path.size() - 5) == ".onnx") {
+                te_onnx = te_path;
+                // cond_encoder.onnx must be in the same directory
+                auto sep = te_path.find_last_of("/\\");
+                std::string onnx_dir = (sep != std::string::npos) ? te_path.substr(0, sep) : ".";
+                ce_onnx = onnx_dir + WS_SEP + "cond_encoder.onnx";
+            }
+        }
+
+        if (!te_onnx.empty()) {
+            FILE * f_te = fopen(te_onnx.c_str(), "rb");
+            FILE * f_ce = fopen(ce_onnx.c_str(), "rb");
+            if (f_te && f_ce) {
+                fclose(f_te);
+                fclose(f_ce);
+                ctx->text_enc_ort_key.kind = MODEL_TEXT_ENC_ORT;
+                ctx->text_enc_ort_key.path = te_onnx;
+                ctx->cond_enc_ort_key.kind = MODEL_COND_ENC_ORT;
+                ctx->cond_enc_ort_key.path = ce_onnx;
+                ctx->is_onnx_pipeline = true;
+                fprintf(stderr, "[Synth-Load] ONNX pipeline: TextEnc=%s, CondEnc=%s\n",
+                        te_onnx.c_str(), ce_onnx.c_str());
+            } else {
+                if (f_te) fclose(f_te);
+                if (f_ce) fclose(f_ce);
+                fprintf(stderr, "[Synth-Load] ONNX text encoder selected but cond_encoder.onnx missing — using GGML fallback\n");
+            }
         }
     }
 
