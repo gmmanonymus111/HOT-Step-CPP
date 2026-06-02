@@ -365,6 +365,55 @@ struct adapter_delta_build {
 
 // Execute the unified merge graph for one tensor. Returns true on success.
 // See adapter_delta_build for the caller contract.
+
+// Compute one delta on GPU and store the result as F32.
+// Uses a temporary graph: builds the delta subgraph (LoRA B@A or LoKr kron),
+// computes on backend, downloads the result.
+// Returns true on success. Used by the split merge path (NVFP4/MXFP4) and
+// by adapter-runtime.h for precomputing runtime deltas.
+static bool adapter_compute_delta(
+    const std::function<adapter_delta_build(struct ggml_context *)> & build_delta,
+    int64_t          ne0,
+    int64_t          ne1,
+    ggml_backend_t   backend,
+    std::vector<float> & out_f32) {
+
+    int64_t nel = ne0 * ne1;
+
+    // Build a minimal graph: just the delta subgraph
+    size_t                  meta   = ggml_tensor_overhead() * 64 + ggml_graph_overhead() + 32 * 1024;
+    struct ggml_init_params params = { meta, NULL, true };
+    struct ggml_context *   ctx    = ggml_init(params);
+    if (!ctx) return false;
+
+    adapter_delta_build db = build_delta(ctx);
+
+    struct ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, db.tdelta);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buf) {
+        ggml_free(ctx);
+        return false;
+    }
+
+    // Upload adapter factor tensors
+    db.upload();
+
+    // Compute delta on GPU
+    ggml_backend_graph_compute(backend, graph);
+
+    // Download result
+    out_f32.resize((size_t) nel);
+    ggml_backend_tensor_get(db.tdelta, out_f32.data(), 0, (size_t) nel * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    return true;
+}
+
+// Execute the unified merge graph for one tensor. Returns true on success.
+// See adapter_delta_build for the caller contract.
 static bool adapter_merge_on_backend(WeightCtx *                                                       wctx,
                                      std::unordered_map<const void *, size_t> &                        pending_idx,
                                      const void *                                                      base_ptr,
@@ -401,11 +450,10 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 
     // Check if the backend can decode (dequant) from native to F32 via ggml_cast.
     // NVFP4/MXFP4 have dequant in mul_mat kernels but NOT in ggml_cuda_cpy,
-    // so ggml_cast(NVFP4 → F32) fails on CUDA. For these types, dequant on host.
+    // so ggml_cast(NVFP4 → F32) fails on CUDA. For these types, use a split
+    // path: compute delta on GPU, then merge + requant on host.
     bool decode_on_host = false;
-    std::vector<float> base_f32_host;
     if (ttype != GGML_TYPE_F32 && ttype != GGML_TYPE_BF16 && ttype != GGML_TYPE_F16) {
-        // Probe: can the backend do native → F32 cast?
         size_t                  pmeta   = ggml_tensor_overhead() * 4 + 1024;
         struct ggml_init_params pparams = { pmeta, NULL, true };
         struct ggml_context *   pctx    = ggml_init(pparams);
@@ -415,27 +463,69 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         ggml_free(pctx);
     }
 
-    // base uploaded in native type, dequant to F32 on backend via ggml_cast
-    // OR: when backend lacks native→F32 cast, upload pre-dequantized F32
-    struct ggml_tensor * tbase_native = nullptr;
-    struct ggml_tensor * tbase_f32    = nullptr;
-
     if (decode_on_host) {
-        // Dequant on host: native → F32, upload as plain F32 tensor
-        base_f32_host.resize((size_t) nel);
+        // ─── Split path for types without GPU cast (NVFP4, MXFP4) ───
+        // Step 1: compute delta on GPU only (adapter factors are small, fast upload)
+        std::vector<float> delta_f32;
+        if (!adapter_compute_delta(build_delta, ne0, ne1, backend, delta_f32)) {
+            ggml_free(ctx);
+            return false;
+        }
+
+        // Step 2: dequant base weight on host
+        std::vector<float> base_f32((size_t) nel);
         const struct ggml_type_traits * traits = ggml_get_type_traits(ttype);
-        if (traits->to_float) {
-            traits->to_float(base_ptr, base_f32_host.data(), nel);
-        } else {
+        if (!traits->to_float) {
             fprintf(stderr, "[Adapter] WARNING: no host dequant for type %d, skipping %s\n", ttype, gguf_name);
             ggml_free(ctx);
             return false;
         }
-        tbase_f32 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1);
-    } else {
-        tbase_native = ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
-        tbase_f32    = ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+        traits->to_float(base_ptr, base_f32.data(), nel);
+
+        // Step 3: merge on host — base + delta (with user_scale and DoRA if present)
+        if (!ds) {
+            // plain: merged = base + user_scale * delta
+            for (size_t i = 0; i < (size_t) nel; i++) {
+                base_f32[i] += user_scale * delta_f32[i];
+            }
+        } else {
+            // DoRA: merged = (base + delta) * dora_scale_per_row
+            for (size_t i = 0; i < (size_t) nel; i++) {
+                base_f32[i] += delta_f32[i];
+            }
+            // per-row DoRA rescale
+            for (int64_t row = 0; row < ne1; row++) {
+                float * rp = base_f32.data() + row * ne0;
+                float sum_sq = 0.0f;
+                for (int64_t j = 0; j < ne0; j++) { sum_sq += rp[j] * rp[j]; }
+                float rn = sqrtf(sum_sq) + eps;
+                float s = ds[row] / rn;
+                if (user_scale != 1.0f) { s = s * user_scale + (1.0f - user_scale); }
+                for (int64_t j = 0; j < ne0; j++) { rp[j] *= s; }
+            }
+        }
+        delta_f32.clear();  // free delta memory
+
+        // Step 4: requant merged F32 back to native type
+        size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
+        auto   staging_buf = std::make_unique<float[]>(n_floats);
+        size_t merged_bytes = adapter_requant(base_f32.data(), staging_buf.get(), nel, ne0, ttype);
+        if (merged_bytes == 0) {
+            ggml_free(ctx);
+            return false;
+        }
+
+        pc->src    = staging_buf.get();
+        pc->nbytes = merged_bytes;
+        wctx->staging.push_back(std::move(staging_buf));
+        ggml_free(ctx);
+        return true;
     }
+
+    // ─── Unified GPU graph path (BF16, F16, K-quants — types with GPU cast) ───
+
+    struct ggml_tensor * tbase_native = ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
+    struct ggml_tensor * tbase_f32    = ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
 
     // DoRA scale vector, one F32 per output row when dora_scale is set
     struct ggml_tensor * tds = ds ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, ne1) : NULL;
@@ -493,14 +583,8 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         return false;
     }
 
-    // helper-owned uploads: base weight + DoRA scale
-    if (decode_on_host) {
-        // Upload pre-dequantized F32 data
-        ggml_backend_tensor_set(tbase_f32, base_f32_host.data(), 0, (size_t) nel * sizeof(float));
-    } else {
-        // Upload in native type, backend casts to F32
-        ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
-    }
+    // helper-owned uploads: base in native type from mmap, ds if DoRA
+    ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
     if (tds) {
         ggml_backend_tensor_set(tds, ds, 0, (size_t) ne1 * sizeof(float));
     }

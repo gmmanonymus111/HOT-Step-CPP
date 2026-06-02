@@ -117,50 +117,7 @@ static DiTLoRADelta * dit_lora_slot(DiTLoRA * lora, const std::string & gguf_nam
     return nullptr;
 }
 
-// Compute one delta on GPU and store the result as F32.
-// Uses a temporary graph: builds the delta subgraph (LoRA B@A or LoKr kron),
-// computes on backend, downloads the result.
-// Returns true on success.
-static bool adapter_compute_delta(
-    const std::function<adapter_delta_build(struct ggml_context *)> & build_delta,
-    int64_t          ne0,
-    int64_t          ne1,
-    ggml_backend_t   backend,
-    std::vector<float> & out_f32) {
-
-    int64_t nel = ne0 * ne1;
-
-    // Build a minimal graph: just the delta subgraph
-    size_t                  meta   = ggml_tensor_overhead() * 64 + ggml_graph_overhead() + 32 * 1024;
-    struct ggml_init_params params = { meta, NULL, true };
-    struct ggml_context *   ctx    = ggml_init(params);
-    if (!ctx) return false;
-
-    adapter_delta_build db = build_delta(ctx);
-
-    struct ggml_cgraph * graph = ggml_new_graph(ctx);
-    ggml_build_forward_expand(graph, db.tdelta);
-
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
-    if (!buf) {
-        ggml_free(ctx);
-        return false;
-    }
-
-    // Upload adapter factor tensors
-    db.upload();
-
-    // Compute delta on GPU
-    ggml_backend_graph_compute(backend, graph);
-
-    // Download result
-    out_f32.resize((size_t) nel);
-    ggml_backend_tensor_get(db.tdelta, out_f32.data(), 0, (size_t) nel * sizeof(float));
-
-    ggml_backend_buffer_free(buf);
-    ggml_free(ctx);
-    return true;
-}
+// adapter_compute_delta is defined in adapter-merge.h (shared with split merge path)
 
 // Stage a precomputed delta: create BF16 tensor in lora context, store F32 data for later upload.
 // The tensor and data are paired so upload order doesn't matter.
