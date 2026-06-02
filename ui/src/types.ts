@@ -134,7 +134,7 @@ export interface GenerationParams {
     mlp: number;
     cond_embed: number;
   };
-  adapterMode: string;  // "merge" or "runtime"
+  adapterMode: string;  // "merge", "merge_hq", or "runtime"
 
   // Trigger word (applied server-side to caption)
   triggerWord?: string;

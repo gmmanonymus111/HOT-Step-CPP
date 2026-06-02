@@ -354,8 +354,12 @@ static bool dit_ggml_load(DiTGGML *    m,
         DiTGGMLLayer & ly = m->layers[i];
 
         // Self-attention: try full QKV, partial QK, separate
-        // HOT-Step: Runtime LoRA needs individual projections (no fusion)
-        bool skip_fusion = (g_hotstep_params.adapter_mode == "runtime" && adapter_path);
+        // HOT-Step: Runtime LoRA and merge_hq need individual projections (no fusion)
+        // Runtime: deltas are applied per-projection in the compute graph
+        // Merge HQ: projections are promoted to F32, incompatible with fused BF16 tensors
+        bool skip_fusion = (adapter_path && 
+            (g_hotstep_params.adapter_mode == "runtime" || 
+             g_hotstep_params.adapter_mode == "merge_hq"));
         ly.self_attn_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".self_attn_norm.weight");
         if (!skip_fusion) {
         ly.sa_qkv = ws_load_qkv_fused(&m->wctx, ws, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
@@ -481,9 +485,10 @@ static bool dit_ggml_load(DiTGGML *    m,
     // HOT-Step: skip merge in runtime mode — runtime adapter loaded after wctx_alloc
     if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
+        bool hq_mode      = (g_hotstep_params.adapter_mode == "merge_hq");
         if (!runtime_mode) {
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend)) {
+            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, hq_mode)) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
                 if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;

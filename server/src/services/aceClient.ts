@@ -82,7 +82,7 @@ export interface AceRequest {
     mlp: number;
     cond_embed: number;
   };
-  adapter_mode?: string;  // "merge" (default) or "runtime" (fast, for K-quant models)
+  adapter_mode?: string;  // "merge" (default), "merge_hq" (F32 promoted), or "runtime"
   // Solver sub-parameters
   stork_substeps?: number;
   beat_stability?: number;

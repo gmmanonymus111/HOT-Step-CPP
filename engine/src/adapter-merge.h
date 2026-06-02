@@ -375,7 +375,8 @@ static bool adapter_merge_on_backend(WeightCtx *                                
                                      float                                                             user_scale,
                                      ggml_backend_t                                                    backend,
                                      const char *                                                      gguf_name,
-                                     const std::function<adapter_delta_build(struct ggml_context *)> & build_delta) {
+                                     const std::function<adapter_delta_build(struct ggml_context *)> & build_delta,
+                                     bool                                                              promote_f32 = false) {
     // torch.finfo(torch.bfloat16).eps, used verbatim in LyCORIS apply_weight_decompose
     const float eps = 7.8125e-3f;
 
@@ -411,17 +412,25 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 
     // BF16 round mirrors LyCORIS diff.to(base.dtype) and PEFT merge_and_unload
     // intermediate cast. Cast chain runs entirely on backend.
-    struct ggml_tensor * tdelta_bf = ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16);
-    struct ggml_tensor * tdelta_f  = ggml_cast(ctx, tdelta_bf, GGML_TYPE_F32);
+    // When promote_f32: skip the round-trip — the delta stays in full F32 precision,
+    // and the merged result will be stored as F32 to avoid catastrophic cancellation
+    // when a small adapter delta is added to a large base weight in limited precision.
+    struct ggml_tensor * tdelta_use;
+    if (promote_f32) {
+        tdelta_use = db.tdelta;  // skip BF16 round-trip, preserve full precision
+    } else {
+        struct ggml_tensor * tdelta_bf = ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16);
+        tdelta_use = ggml_cast(ctx, tdelta_bf, GGML_TYPE_F32);
+    }
 
     // merge: plain scaled add for no DoRA, weight decompose otherwise
     struct ggml_tensor * tmerged;
     if (!tds) {
-        struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_f, user_scale) : tdelta_f;
+        struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_use, user_scale) : tdelta_use;
         tmerged                   = ggml_add(ctx, tbase_f32, td_u);
     } else {
         // DoRA per output row: scale = user * (ds / sqrt(sum_sq(m_pre)) + eps) + (1 - user)
-        struct ggml_tensor * tm_pre  = ggml_add(ctx, tbase_f32, tdelta_f);
+        struct ggml_tensor * tm_pre  = ggml_add(ctx, tbase_f32, tdelta_use);
         struct ggml_tensor * tsq     = ggml_sqr(ctx, tm_pre);
         struct ggml_tensor * tss     = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
         struct ggml_tensor * trn     = ggml_sqrt(ctx, tss);
@@ -433,8 +442,13 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         tmerged = ggml_mul(ctx, tm_pre, tscale_m);
     }
 
-    // output: native type when the backend can encode, else F32 for host requant
-    struct ggml_tensor * tout = encode_ok ? ggml_cast(ctx, tmerged, ttype) : tmerged;
+    // output: promote_f32 keeps F32 (no encode back to native), otherwise native
+    struct ggml_tensor * tout;
+    if (promote_f32) {
+        tout = tmerged;  // stay F32 — tensor type will be promoted below
+    } else {
+        tout = encode_ok ? ggml_cast(ctx, tmerged, ttype) : tmerged;
+    }
 
     struct ggml_cgraph * graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, tout);
@@ -455,34 +469,61 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 
     ggml_backend_graph_compute(backend, graph);
 
-    // allocate a staging slot sized for the native encoded weight, then download
-    size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
-    auto   staging_buf = std::make_unique<float[]>(n_floats);
-    void * merged_buf  = staging_buf.get();
-
-    if (encode_ok) {
-        // download straight into staging in native type, zero host postprocess
-        ggml_backend_tensor_get(tout, merged_buf, 0, base_nb);
-        pc->src    = merged_buf;
-        pc->nbytes = base_nb;
-    } else {
-        // download F32 then requant on host (K-quants on CUDA: Q4_K_M, Q5_K_M, Q6_K)
-        std::vector<float> merged_f32((size_t) nel);
-        ggml_backend_tensor_get(tout, merged_f32.data(), 0, (size_t) nel * sizeof(float));
-        size_t merged_bytes = adapter_requant(merged_f32.data(), merged_buf, nel, ne0, ttype);
-        if (merged_bytes == 0) {
-            ggml_backend_buffer_free(buf);
-            ggml_free(ctx);
-            return false;
+    // allocate a staging slot and download the merged result
+    if (promote_f32) {
+        // F32 promotion: download merged F32, promote tensor type so wctx_alloc
+        // allocates the right amount of backend memory for this tensor.
+        size_t f32_nb = (size_t) nel * sizeof(float);
+        auto staging_buf = std::make_unique<float[]>((size_t) nel);
+        ggml_backend_tensor_get(tout, staging_buf.get(), 0, f32_nb);
+        // Promote tensor type AND recalculate strides. ggml_nbytes uses nb[]
+        // to compute buffer size, so leaving BF16 strides after type change
+        // causes the backend to allocate a BF16-sized buffer for F32 data.
+        pc->tensor->type  = GGML_TYPE_F32;
+        pc->tensor->nb[0] = sizeof(float);
+        for (int d = 1; d < GGML_MAX_DIMS; d++) {
+            pc->tensor->nb[d] = pc->tensor->nb[d - 1] * pc->tensor->ne[d - 1];
         }
-        pc->src    = merged_buf;
-        pc->nbytes = merged_bytes;
+        pc->src    = staging_buf.get();
+        pc->nbytes = f32_nb;
+        wctx->staging.push_back(std::move(staging_buf));
+    } else {
+        size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
+        auto   staging_buf = std::make_unique<float[]>(n_floats);
+        void * merged_buf  = staging_buf.get();
+
+        if (encode_ok) {
+            // download straight into staging in native type, zero host postprocess
+            ggml_backend_tensor_get(tout, merged_buf, 0, base_nb);
+            pc->src    = merged_buf;
+            pc->nbytes = base_nb;
+        } else {
+            // download F32 then requant on host (K-quants on CUDA: Q4_K_M, Q5_K_M, Q6_K)
+            std::vector<float> merged_f32((size_t) nel);
+            ggml_backend_tensor_get(tout, merged_f32.data(), 0, (size_t) nel * sizeof(float));
+            size_t merged_bytes = adapter_requant(merged_f32.data(), merged_buf, nel, ne0, ttype);
+            if (merged_bytes == 0) {
+                ggml_backend_buffer_free(buf);
+                ggml_free(ctx);
+                return false;
+            }
+            pc->src    = merged_buf;
+            pc->nbytes = merged_bytes;
+        }
+        wctx->staging.push_back(std::move(staging_buf));
     }
-    wctx->staging.push_back(std::move(staging_buf));
 
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
     return true;
+}
+
+// Check if a GGUF tensor name corresponds to a DiT layer projection (decoder.layers.N.*).
+// Non-layer weights (condition_embedder, time_embed, proj_in) are skipped in merge_hq
+// mode to match runtime behavior — runtime has no slots for these and leaves them
+// at base weights. Modifying them can hurt quality for style/timbre adapters.
+static bool adapter_is_layer_weight(const std::string & name) {
+    return name.find("decoder.layers.") == 0;
 }
 
 // LoRA merge path. Matches PEFT merge_and_unload for PEFT payloads and ComfyUI
@@ -495,7 +536,8 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
                                const STFile &      st,
                                const std::string & cfg_dir,
                                float               scale,
-                               ggml_backend_t      backend) {
+                               ggml_backend_t      backend,
+                               bool                promote_f32 = false) {
     int alpha_cfg = adapter_read_alpha(cfg_dir.c_str());
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
@@ -553,6 +595,13 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
 
         if (!ws.exists(gguf_name.c_str())) {
             fprintf(stderr, "[Adapter] WARNING: tensor %s not in base model, skipping\n", gguf_name.c_str());
+            skipped++;
+            continue;
+        }
+
+        // merge_hq: skip non-layer weights to match runtime behavior
+        if (promote_f32 && !adapter_is_layer_weight(gguf_name)) {
+            fprintf(stderr, "[Adapter-HQ] Skipping non-layer weight: %s\n", gguf_name.c_str());
             skipped++;
             continue;
         }
@@ -639,7 +688,7 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
         };
 
         if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, nullptr, 1.0f, backend,
-                                      gguf_name.c_str(), build)) {
+                                      gguf_name.c_str(), build, promote_f32)) {
             skipped++;
             continue;
         }
@@ -693,7 +742,8 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
                                const WeightSource & ws,
                                const STFile &    st,
                                float             user_scale,
-                               ggml_backend_t    backend) {
+                               ggml_backend_t    backend,
+                               bool              promote_f32 = false) {
     // group the per module tensors by LyCORIS prefix. Each module has either
     // w2 alone (monolithic) or w2_a + w2_b (factorized), never both.
     struct LoKrEntry {
@@ -772,6 +822,13 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
 
         if (!ws.exists(gguf_name.c_str())) {
             fprintf(stderr, "[Adapter] WARNING: tensor %s not in base model, skipping\n", gguf_name.c_str());
+            skipped++;
+            continue;
+        }
+
+        // merge_hq: skip non-layer weights to match runtime behavior
+        if (promote_f32 && !adapter_is_layer_weight(gguf_name)) {
+            fprintf(stderr, "[Adapter-HQ] Skipping non-layer weight: %s\n", gguf_name.c_str());
             skipped++;
             continue;
         }
@@ -951,7 +1008,7 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
         };
 
         if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, effective_user_scale, backend,
-                                      gguf_name.c_str(), build)) {
+                                      gguf_name.c_str(), build, promote_f32)) {
             skipped++;
             continue;
         }
@@ -986,7 +1043,8 @@ static bool adapter_merge(WeightCtx *          wctx,
                           const WeightSource & ws,
                           const char *         adapter_path,
                           float                scale,
-                          ggml_backend_t       backend) {
+                          ggml_backend_t       backend,
+                          bool                 promote_f32 = false) {
     std::string sf_path;
     std::string cfg_dir;
 
@@ -1028,9 +1086,9 @@ static bool adapter_merge(WeightCtx *          wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, ws, st, scale, backend);
+        ok = adapter_merge_lokr(wctx, ws, st, scale, backend, promote_f32);
     } else {
-        ok = adapter_merge_lora(wctx, ws, st, cfg_dir, scale, backend);
+        ok = adapter_merge_lora(wctx, ws, st, cfg_dir, scale, backend, promote_f32);
     }
 
     st_close(&st);

@@ -260,25 +260,35 @@ export const AdaptersDropdown: React.FC = () => {
             <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
               <button
                 onClick={() => gp.setAdapterMode('merge')}
-                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
                   gp.adapterMode === 'merge' ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                 }`}
               >
                 Merge
               </button>
               <button
+                onClick={() => gp.setAdapterMode('merge_hq')}
+                className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  gp.adapterMode === 'merge_hq' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+                }`}
+              >
+                Merge HQ
+              </button>
+              <button
                 onClick={() => gp.setAdapterMode('runtime')}
-                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
                   gp.adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                 }`}
               >
-                Runtime LoRA ⚡
+                Runtime ⚡
               </button>
             </div>
             <p className="text-[10px] text-zinc-600 mt-1">
               {gp.adapterMode === 'runtime'
-                ? 'Fast: keeps base weights quantized, applies adapter at inference (~5s load)'
-                : 'Classic: merges adapter into weights (slow for K-quant models, ~127s)'}
+                ? 'Keeps base weights intact, applies adapter per-step. Best quality, slowest.'
+                : gp.adapterMode === 'merge_hq'
+                ? 'Merges adapter at F32 precision. Same quality as Runtime, faster inference.'
+                : 'Classic merge to native type. Fastest, but may lose adapter detail.'}
             </p>
           </div>
 
