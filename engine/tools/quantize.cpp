@@ -5,7 +5,7 @@
 // Streaming write: one tensor at a time, low memory footprint for small configs.
 //
 // Usage: quantize <input.gguf> <output.gguf> <type>
-// Types: Q2_K Q3_K_S Q3_K_M Q3_K_L Q4_K_S Q4_K_M Q5_K_S Q5_K_M Q6_K Q8_0
+// Types: Q2_K Q3_K_S Q3_K_M Q3_K_L Q4_K_S Q4_K_M Q5_K_S Q5_K_M Q6_K Q8_0 NVFP4 MXFP4
 
 #include <cstdio>
 #include <cstdlib>
@@ -49,6 +49,8 @@ static const QuantVariant VARIANTS[] = {
     { "Q5_K_M", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,  GGML_TYPE_Q6_K, 2, 0 },
     { "Q6_K",   GGML_TYPE_Q6_K, GGML_TYPE_COUNT, GGML_TYPE_Q6_K, 0, 0 },
     { "Q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
+    { "NVFP4",  GGML_TYPE_NVFP4, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
+    { "MXFP4",  GGML_TYPE_MXFP4, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
 };
 
 static const QuantVariant * find_variant(const char * s) {
