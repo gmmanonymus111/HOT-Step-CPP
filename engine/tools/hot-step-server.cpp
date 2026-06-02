@@ -2425,19 +2425,70 @@ int main(int argc, char ** argv) {
         }
         float in_rms = (float) sqrt(in_sum_sq / (double) n_total);
 
-        // Phase 1: Encode (planar → interleaved → VAE encoder → latents)
-        ModelKey enc_key;
-        enc_key.kind = MODEL_VAE_ENC;
-        enc_key.path = pp_vae_path;
+        // Resolve PP-VAE ONNX paths for ORT/TRT acceleration.
+        // Look for pp-vae_encoder.onnx / pp-vae_decoder.onnx in models/onnx/
+        std::string pp_dir;
+        {
+            std::string p = pp_vae_path;
+            auto slash = p.find_last_of("/\\");
+            pp_dir = (slash != std::string::npos) ? p.substr(0, slash) : ".";
+        }
+        std::string onnx_dir = pp_dir + "/" + "onnx";
+        std::string onnx_enc_path, onnx_dec_path;
+        {
+            std::string ep = onnx_dir + "/" + "pp-vae_encoder.onnx";
+            FILE * f = fopen(ep.c_str(), "rb");
+            if (f) { fclose(f); onnx_enc_path = ep; }
+        }
+        {
+            std::string dp = onnx_dir + "/" + "pp-vae_decoder.onnx";
+            FILE * f = fopen(dp.c_str(), "rb");
+            if (f) { fclose(f); onnx_dec_path = dp; }
+        }
 
         // Default VAE tiling params
         int vae_chunk   = 256;
         int vae_overlap = 64;
 
+        // Phase 1: Encode (planar → interleaved → VAE encoder → latents)
+        // Prefers ORT/TRT when pp-vae_encoder.onnx exists, falls back to GGML.
         std::vector<float> latents;
         int T_latent = 0;
 
+        // Convert planar → interleaved for encoder
+        std::vector<float> interleaved(T_audio * 2);
         {
+            const float * L = planar;
+            const float * R = planar + T_audio;
+            for (int i = 0; i < T_audio; i++) {
+                interleaved[i * 2 + 0] = L[i];
+                interleaved[i * 2 + 1] = R[i];
+            }
+        }
+
+        int max_T = (T_audio / 1920) + 64;
+        latents.resize((size_t) max_T * 64);
+
+        if (!onnx_enc_path.empty()) {
+            // Try ORT encoder
+            ModelKey enc_ort_key;
+            enc_ort_key.kind = MODEL_VAE_ENC_ORT;
+            enc_ort_key.path = onnx_enc_path;
+            VaeEncOrt * enc_ort = store_require_vae_enc_ort(g_store, enc_ort_key);
+            if (enc_ort) {
+                ModelHandle enc_guard(g_store, enc_ort);
+                fprintf(stderr, "[Server] PP-VAE encoding via ORT/TRT: %s\n", onnx_enc_path.c_str());
+                T_latent = vae_enc_ort_encode_tiled(enc_ort, interleaved.data(), T_audio,
+                                                     latents.data(), max_T, vae_chunk, vae_overlap);
+            } else {
+                fprintf(stderr, "[Server] PP-VAE ORT encoder load failed, falling back to GGML\n");
+            }
+        }
+        if (T_latent <= 0) {
+            // Fall back to GGML encoder
+            ModelKey enc_key;
+            enc_key.kind = MODEL_VAE_ENC;
+            enc_key.path = pp_vae_path;
             VAEEncoder * enc = store_require_vae_enc(g_store, enc_key);
             if (!enc) {
                 free(planar);
@@ -2445,21 +2496,9 @@ int main(int argc, char ** argv) {
                 return;
             }
             ModelHandle enc_guard(g_store, enc);
-
-            // Convert planar → interleaved for encoder
-            std::vector<float> interleaved(T_audio * 2);
-            const float * L = planar;
-            const float * R = planar + T_audio;
-            for (int i = 0; i < T_audio; i++) {
-                interleaved[i * 2 + 0] = L[i];
-                interleaved[i * 2 + 1] = R[i];
-            }
-
-            int max_T = (T_audio / 1920) + 64;
-            latents.resize((size_t) max_T * 64);
-
-            T_latent = vae_enc_encode_tiled(enc, interleaved.data(), T_audio, latents.data(), max_T,
-                                            vae_chunk, vae_overlap);
+            fprintf(stderr, "[Server] PP-VAE encoding via GGML\n");
+            T_latent = vae_enc_encode_tiled(enc, interleaved.data(), T_audio,
+                                             latents.data(), max_T, vae_chunk, vae_overlap);
             if (T_latent <= 0) {
                 free(planar);
                 json_error(res, 500, "PP-VAE encode failed");
@@ -2469,14 +2508,33 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Server] PP-VAE encode: T_latent=%d\n", T_latent);
 
         // Phase 2: Decode (latents → VAE decoder → planar PCM)
-        ModelKey dec_key;
-        dec_key.kind = MODEL_VAE_DEC;
-        dec_key.path = pp_vae_path;
-
+        // Prefers ORT/TRT when pp-vae_decoder.onnx exists, falls back to GGML.
         std::vector<float> decoded;
         int T_decoded = 0;
 
-        {
+        int T_audio_max = T_latent * 1920;
+        decoded.resize(2 * T_audio_max);
+
+        if (!onnx_dec_path.empty()) {
+            // Try ORT decoder
+            ModelKey dec_ort_key;
+            dec_ort_key.kind = MODEL_VAE_DEC_ORT;
+            dec_ort_key.path = onnx_dec_path;
+            VaeOrt * dec_ort = store_require_vae_dec_ort(g_store, dec_ort_key);
+            if (dec_ort) {
+                ModelHandle dec_guard(g_store, dec_ort);
+                fprintf(stderr, "[Server] PP-VAE decoding via ORT/TRT: %s\n", onnx_dec_path.c_str());
+                T_decoded = vae_ort_decode_tiled(dec_ort, latents.data(), T_latent,
+                                                  decoded.data(), T_audio_max, vae_chunk, vae_overlap);
+            } else {
+                fprintf(stderr, "[Server] PP-VAE ORT decoder load failed, falling back to GGML\n");
+            }
+        }
+        if (T_decoded <= 0) {
+            // Fall back to GGML decoder
+            ModelKey dec_key;
+            dec_key.kind = MODEL_VAE_DEC;
+            dec_key.path = pp_vae_path;
             VAEGGML * dec = store_require_vae_dec(g_store, dec_key);
             if (!dec) {
                 free(planar);
@@ -2484,12 +2542,9 @@ int main(int argc, char ** argv) {
                 return;
             }
             ModelHandle dec_guard(g_store, dec);
-
-            int T_audio_max = T_latent * 1920;
-            decoded.resize(2 * T_audio_max);
-
-            T_decoded = vae_ggml_decode_tiled(dec, latents.data(), T_latent, decoded.data(), T_audio_max,
-                                              vae_chunk, vae_overlap, NULL, NULL);
+            fprintf(stderr, "[Server] PP-VAE decoding via GGML\n");
+            T_decoded = vae_ggml_decode_tiled(dec, latents.data(), T_latent,
+                                               decoded.data(), T_audio_max, vae_chunk, vae_overlap, NULL, NULL);
             if (T_decoded <= 0) {
                 free(planar);
                 json_error(res, 500, "PP-VAE decode failed");
