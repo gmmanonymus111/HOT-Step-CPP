@@ -31,8 +31,8 @@ REM Start server (which spawns ace-server) with restart loop
 cd /d "%~dp0server"
 echo Starting server...
 
-REM Open browser after a short delay
-start "" cmd /c "timeout /t 4 /nobreak > nul & start http://localhost:3001/"
+REM Open browser if no existing tab is found
+start /MIN "" powershell -ExecutionPolicy Bypass -File "%~dp0open-browser-if-needed.ps1" "http://localhost:3001/" 4
 
 :loop
 call npx tsx src/index.ts

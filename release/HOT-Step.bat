@@ -12,8 +12,8 @@ set HOT_STEP_ROOT=%~dp0
 REM Create models directory if it doesn't exist (first run)
 if not exist "%~dp0models" mkdir "%~dp0models"
 
-REM Open browser after a short delay
-start "" cmd /c "timeout /t 5 /nobreak > nul & start http://localhost:3001/"
+REM Open browser if no existing tab is found
+start /MIN "" powershell -ExecutionPolicy Bypass -File "%~dp0open-browser-if-needed.ps1" "http://localhost:3001/" 5
 
 REM ── Restart loop ──────────────────────────────────────────
 REM The server writes .restart-requested when the user clicks
