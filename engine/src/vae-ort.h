@@ -276,9 +276,19 @@ static inline int vae_ort_decode_tiled(VaeOrt *      ctx,
         overlap /= 2;
     }
 
-    // Short sequence: decode directly (no tiling needed)
+    // Short sequence: pad to chunk_size and decode (fixed TRT shape)
     if (T_latent <= chunk_size) {
-        return vae_ort_decode(ctx, latent, T_latent, audio_out, T_audio_max);
+        std::vector<float> padded((size_t)chunk_size * 64, 0.0f);
+        memcpy(padded.data(), latent, (size_t)T_latent * 64 * sizeof(float));
+        int full_T = vae_ort_decode(ctx, padded.data(), chunk_size, audio_out, T_audio_max);
+        if (full_T < 0) return full_T;
+        // Trim to actual T_latent proportion
+        int actual_T = (int)roundf((float)T_latent / (float)chunk_size * (float)full_T);
+        if (actual_T > full_T) actual_T = full_T;
+        // Compact ch1 from [full_T..full_T+actual_T] to [actual_T..2*actual_T]
+        // vae_ort_decode writes planar [L0..L(full_T), R0..R(full_T)]
+        memmove(audio_out + actual_T, audio_out + full_T, (size_t)actual_T * sizeof(float));
+        return actual_T;
     }
 
     int stride    = chunk_size - 2 * overlap;
@@ -307,16 +317,28 @@ static inline int vae_ort_decode_tiled(VaeOrt *      ctx,
         if (win_end > T_latent) win_end = T_latent;
         int win_len = win_end - win_start;
 
-        // Decode this tile
-        int tile_T = vae_ort_decode(ctx,
-                                     latent + win_start * 64,  // offset into latent
-                                     win_len,
+        // Pad tile input to fixed chunk_size so TRT always sees shape
+        // [1, 64, chunk_size]. This avoids expensive engine recompilation
+        // for edge tiles with different sizes.
+        std::vector<float> padded_latent((size_t)chunk_size * 64, 0.0f);
+        memcpy(padded_latent.data(),
+               latent + win_start * 64,
+               (size_t)win_len * 64 * sizeof(float));
+
+        // Decode the padded tile (always chunk_size frames)
+        int tile_T_full = vae_ort_decode(ctx,
+                                     padded_latent.data(),
+                                     chunk_size,
                                      tile_audio.data(),
                                      tile_audio_max);
-        if (tile_T < 0) {
+        if (tile_T_full < 0) {
             fprintf(stderr, "[VAE-ORT] FATAL: tile %d decode failed\n", i);
             return -1;
         }
+
+        // Trim output to actual win_len worth of audio (discard padding)
+        int tile_T = (int)roundf((float)win_len / (float)chunk_size * (float)tile_T_full);
+        if (tile_T > tile_T_full) tile_T = tile_T_full;
 
         // Determine upsample factor from first tile
         if (i == 0) {

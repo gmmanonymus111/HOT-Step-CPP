@@ -664,6 +664,15 @@ void store_release(ModelStore * s, void * handle) {
     assert(e.refcount > 0);
     e.refcount--;
     if (e.refcount == 0 && s->policy == EVICT_STRICT) {
+        // ORT sessions report 0 bytes because they manage their own VRAM.
+        // Evicting them saves nothing in the store budget but recreating
+        // them is extremely expensive (TRT engine compilation can take
+        // 30-120s per unique input shape). Keep them alive until a real
+        // model needs the GPU and triggers evict_all_except().
+        if (e.bytes == 0) {
+            // Keep alive — will be evicted by evict_all_except() when needed.
+            return;
+        }
         fprintf(stderr, "[Store] Unload %s (%.1f MB)\n", e.label, (float) e.bytes / (1024.0f * 1024.0f));
         e.deleter(e.ptr);
         s->handle_to_key.erase(hit);
