@@ -2375,6 +2375,12 @@ int main(int argc, char ** argv) {
             if (blend > 1.0f) blend = 1.0f;
         }
 
+        // Parse backend preference: "onnx" = force ORT/TRT, "gguf" = force GGML, absent = auto
+        std::string backend = "auto";
+        if (req.has_param("backend")) {
+            backend = req.get_param_value("backend");
+        }
+
         // Resolve PP-VAE model path from registry (prefer F32 > BF16 > F16)
         if (g_registry.pp_vae.empty()) {
             json_error(res, 501, "No PP-VAE model in registry");
@@ -2401,8 +2407,8 @@ int main(int argc, char ** argv) {
             return;
         }
 
-        fprintf(stderr, "[Server] PP-VAE re-encode: %.2fs @ 48kHz, model=%s, blend=%.2f\n",
-                (float) T_audio / 48000.0f, pp_vae_path, blend);
+        fprintf(stderr, "[Server] PP-VAE re-encode: %.2fs @ 48kHz, model=%s, blend=%.2f, backend=%s\n",
+                (float) T_audio / 48000.0f, pp_vae_path, blend, backend.c_str());
 
         // If blend is 1.0 (fully original), skip processing entirely
         if (blend >= 1.0f) {
@@ -2427,6 +2433,7 @@ int main(int argc, char ** argv) {
 
         // Resolve PP-VAE ONNX paths for ORT/TRT acceleration.
         // Look for pp-vae_encoder.onnx / pp-vae_decoder.onnx in models/onnx/
+        // Skipped entirely when backend=gguf.
         std::string pp_dir;
         {
             std::string p = pp_vae_path;
@@ -2435,15 +2442,23 @@ int main(int argc, char ** argv) {
         }
         std::string onnx_dir = pp_dir + "/" + "onnx";
         std::string onnx_enc_path, onnx_dec_path;
-        {
-            std::string ep = onnx_dir + "/" + "pp-vae_encoder.onnx";
-            FILE * f = fopen(ep.c_str(), "rb");
-            if (f) { fclose(f); onnx_enc_path = ep; }
-        }
-        {
-            std::string dp = onnx_dir + "/" + "pp-vae_decoder.onnx";
-            FILE * f = fopen(dp.c_str(), "rb");
-            if (f) { fclose(f); onnx_dec_path = dp; }
+        if (backend != "gguf") {
+            {
+                std::string ep = onnx_dir + "/" + "pp-vae_encoder.onnx";
+                FILE * f = fopen(ep.c_str(), "rb");
+                if (f) { fclose(f); onnx_enc_path = ep; }
+            }
+            {
+                std::string dp = onnx_dir + "/" + "pp-vae_decoder.onnx";
+                FILE * f = fopen(dp.c_str(), "rb");
+                if (f) { fclose(f); onnx_dec_path = dp; }
+            }
+            if (backend == "onnx" && (onnx_enc_path.empty() || onnx_dec_path.empty())) {
+                fprintf(stderr, "[Server] PP-VAE backend=onnx but ONNX models not found in %s, falling back to GGML\n",
+                        onnx_dir.c_str());
+            }
+        } else {
+            fprintf(stderr, "[Server] PP-VAE backend=gguf, skipping ONNX discovery\n");
         }
 
         // Default VAE tiling params

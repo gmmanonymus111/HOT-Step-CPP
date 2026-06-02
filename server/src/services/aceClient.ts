@@ -434,9 +434,11 @@ export const aceClient = {
   /** POST /pp-vae-reencode — synchronous PP-VAE re-encode processing.
    *  Sends WAV audio body. Returns processed WAV buffer with RMS-matched gain.
    *  blend: 0.0 = fully PP-VAE, 1.0 = fully original (wet/dry mix). */
-  async submitPpVaeReencode(wavBuffer: Buffer, blend = 0.0): Promise<Buffer> {
+  async submitPpVaeReencode(wavBuffer: Buffer, blend = 0.0, useOnnx?: boolean): Promise<Buffer> {
     const params = new URLSearchParams();
     if (blend > 0) params.set('blend', blend.toFixed(3));
+    if (useOnnx === true) params.set('backend', 'onnx');
+    else if (useOnnx === false) params.set('backend', 'gguf');
     const qs = params.toString();
     const url = qs ? `${BASE}/pp-vae-reencode?${qs}` : `${BASE}/pp-vae-reencode`;
     const res = await fetch(url, {

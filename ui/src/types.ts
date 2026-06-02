@@ -210,6 +210,7 @@ export interface GenerationParams {
   // PP-VAE re-encode (spectral cleanup via post-processing VAE)
   ppVaeReencode?: boolean;
   ppVaeBlend?: number;         // 0.0 = fully PP-VAE, 1.0 = fully original
+  ppVaeUseOnnx?: boolean;      // true = prefer ONNX/TRT, false = force GGUF
 
   // DCW (Dynamic CFG Weighting)
   dcwEnabled?: boolean;

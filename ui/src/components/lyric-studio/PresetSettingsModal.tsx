@@ -11,7 +11,6 @@ interface PresetForm {
   mlp: number;
   cond_embed: number;
   reference_track_path: string;
-  audio_cover_strength: number;
 }
 
 const DEFAULT_FORM: PresetForm = {
@@ -21,7 +20,6 @@ const DEFAULT_FORM: PresetForm = {
   mlp: 1.0,
   cond_embed: 1.0,
   reference_track_path: '',
-  audio_cover_strength: 0.5,
 };
 
 interface PresetSettingsModalProps {
@@ -75,7 +73,6 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
             mlp: res.preset.adapter_group_scales?.mlp ?? 1.0,
             cond_embed: res.preset.adapter_group_scales?.cond_embed ?? 1.0,
             reference_track_path: res.preset.reference_track_path || '',
-            audio_cover_strength: res.preset.audio_cover_strength ?? 0.5,
           });
         } else {
           setForm(DEFAULT_FORM);
@@ -92,7 +89,6 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
         adapter_path: form.adapter_path || undefined,
         adapter_group_scales: { self_attn: form.self_attn, cross_attn: form.cross_attn, mlp: form.mlp, cond_embed: form.cond_embed },
         reference_track_path: form.reference_track_path || undefined,
-        audio_cover_strength: form.audio_cover_strength,
       });
       showToast('Preset saved');
       onClose();
@@ -217,12 +213,7 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                       <span className="text-[10px] text-zinc-500 truncate block" title={form.reference_track_path}>{matchFileName}</span>
                     )}
                   </div>
-                  {form.reference_track_path && (
-                    <Slider label="Reference Strength" value={form.audio_cover_strength} min={0} max={1} step={0.05}
-                      onChange={v => setForm(p => ({ ...p, audio_cover_strength: v }))}
-                      help="How strongly the reference track influences generation timbre"
-                    />
-                  )}
+
                   <p className="text-[10px] text-zinc-600">
                     Used for timbre conditioning during generation
                   </p>

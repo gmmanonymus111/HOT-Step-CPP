@@ -21,6 +21,7 @@ interface PostProcessParams {
   postProcessingEnabled?: boolean;
   ppVaeReencode?: boolean;
   ppVaeBlend?: number;
+  ppVaeUseOnnx?: boolean;
   spectralLifterEnabled?: boolean;
   slDenoiseStrength?: number;
   slNoiseFloor?: number;
@@ -132,7 +133,7 @@ export async function runPostProcessingChain(
       try {
         const wavBuf = fs.readFileSync(processedPath);
         const blend = params.ppVaeBlend ?? 0;
-        const processed = await aceClient.submitPpVaeReencode(wavBuf, blend);
+        const processed = await aceClient.submitPpVaeReencode(wavBuf, blend, params.ppVaeUseOnnx);
         fs.writeFileSync(processedPath, processed);
         anyStageRan = true;
         log('INFO', `[PP-VAE] Re-encoded ${audioFilename}`);

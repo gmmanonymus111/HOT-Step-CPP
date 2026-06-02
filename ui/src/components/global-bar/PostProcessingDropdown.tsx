@@ -450,8 +450,18 @@ export const PostProcessingDropdown: React.FC = () => {
                   formatDisplay={v => v === 0 ? 'Full PP-VAE' : v >= 1 ? 'Original' : (v * 100).toFixed(0) + '% original'}
                   tooltip="Blend original audio back into the PP-VAE output. 0% = fully processed, 100% = fully original."
                 />
-                <p className="text-[10px] text-emerald-400/60 leading-relaxed">
-                  ✓ PP-VAE model detected — will re-encode after VAE decode.
+                {/* Backend selector: ONNX (ORT/TRT) vs GGUF (GGML) */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Zap size={14} className={gp.ppVaeUseOnnx ? 'text-emerald-400' : 'text-zinc-500'} />
+                    <span className="text-sm text-zinc-600 dark:text-zinc-400">ONNX (ORT/TRT)</span>
+                  </div>
+                  <ToggleSwitch checked={gp.ppVaeUseOnnx} onChange={gp.setPpVaeUseOnnx} accentColor="emerald" />
+                </div>
+                <p className="text-[10px] text-zinc-500 leading-relaxed">
+                  {gp.ppVaeUseOnnx
+                    ? 'Using ONNX Runtime with TensorRT acceleration. Falls back to GGUF if ONNX models are missing.'
+                    : 'Using GGUF (GGML) backend. Slower but proven stable.'}
                 </p>
               </div>
             )}

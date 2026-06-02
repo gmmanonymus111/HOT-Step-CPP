@@ -112,6 +112,7 @@ export interface GlobalParams {
   // PP-VAE
   ppVaeReencode: boolean; setPpVaeReencode: (v: boolean) => void;
   ppVaeBlend: number; setPpVaeBlend: (v: number) => void;
+  ppVaeUseOnnx: boolean; setPpVaeUseOnnx: (v: boolean) => void;
   // Cover Art
   coverArtEnabled: boolean; setCoverArtEnabled: (v: boolean) => void;
   coverArtSubject: string; setCoverArtSubject: (v: string) => void;
