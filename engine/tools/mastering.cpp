@@ -91,6 +91,86 @@ static bool wav_read(const char * path, WavData & out) {
         return false;
     }
 
+    // WAVE_FORMAT_EXTENSIBLE (0xFFFE): the real format code is in the sub-format
+    // GUID at the end of the extended fmt chunk. The first 2 bytes of the GUID
+    // encode the actual format (1=PCM, 3=float). Common for 24/32-bit and
+    // multi-channel audio from DAWs.
+    if (fmt.format == 0xFFFE) {
+        // The extended fmt chunk has: cbSize(2) + validBitsPerSample(2) +
+        // channelMask(4) + subFormat GUID(16). We already read the base WavFmt
+        // (16 bytes), and we skipped any extra bytes. We need to re-read the
+        // extension. Seek back to re-read the extension portion.
+        // Actually, we skipped extra fmt bytes — we need to read them before skip.
+        // Let's fix: the fmt chunk was already fully consumed (read + skip).
+        // We need to handle this in the fmt reading section above. For now,
+        // the simplest fix: re-open and re-parse just the fmt extension.
+        fprintf(stderr, "[WAV] WAVE_FORMAT_EXTENSIBLE detected, attempting re-parse: %s\n", path);
+        fclose(f);
+
+        f = fopen(path, "rb");
+        if (!f) return false;
+        fseek(f, sizeof(WavHeader), SEEK_SET);
+
+        // Scan for fmt chunk again
+        while (!feof(f)) {
+            WavChunkHdr chunk2;
+            if (fread(&chunk2, sizeof(chunk2), 1, f) != 1) break;
+            if (memcmp(chunk2.id, "fmt ", 4) == 0) {
+                // Read base fmt (16 bytes)
+                WavFmt fmt2 = {};
+                int base = std::min((uint32_t)sizeof(fmt2), chunk2.size);
+                if (fread(&fmt2, base, 1, f) != 1) break;
+
+                // Read extension: cbSize(2), validBits(2), channelMask(4), subFormat(16)
+                if (chunk2.size >= 40) {  // 16 base + 2 cbSize + 2 validBits + 4 mask + 16 GUID
+                    uint16_t cb_size = 0;
+                    uint16_t valid_bits = 0;
+                    uint32_t channel_mask = 0;
+                    uint16_t sub_format = 0;
+
+                    fread(&cb_size, 2, 1, f);
+                    fread(&valid_bits, 2, 1, f);
+                    fread(&channel_mask, 4, 1, f);
+                    fread(&sub_format, 2, 1, f);  // first 2 bytes of GUID = real format
+
+                    fmt.format = sub_format;
+                    if (valid_bits > 0) {
+                        fmt.bits_per_sample = valid_bits;
+                    }
+                    fprintf(stderr, "[WAV] EXTENSIBLE sub-format: %d (%s), valid bits: %d\n",
+                            sub_format, sub_format == 1 ? "PCM" : sub_format == 3 ? "float" : "unknown",
+                            valid_bits > 0 ? valid_bits : fmt.bits_per_sample);
+                }
+                break;
+            } else {
+                fseek(f, chunk2.size, SEEK_CUR);
+            }
+        }
+        fclose(f);
+
+        // Re-open and seek to data chunk
+        f = fopen(path, "rb");
+        if (!f) return false;
+        fseek(f, sizeof(WavHeader), SEEK_SET);
+        found_data = false;
+        while (!feof(f)) {
+            WavChunkHdr chunk2;
+            if (fread(&chunk2, sizeof(chunk2), 1, f) != 1) break;
+            if (memcmp(chunk2.id, "data", 4) == 0) {
+                data_size = chunk2.size;
+                found_data = true;
+                break;
+            } else {
+                fseek(f, chunk2.size, SEEK_CUR);
+            }
+        }
+        if (!found_data) {
+            fprintf(stderr, "[WAV] Cannot find data chunk on re-parse: %s\n", path);
+            fclose(f);
+            return false;
+        }
+    }
+
     if (fmt.format != 1 && fmt.format != 3) {
         fprintf(stderr, "[WAV] Unsupported format %d (need PCM=1 or float=3): %s\n",
                 fmt.format, path);
