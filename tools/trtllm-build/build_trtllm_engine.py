@@ -67,7 +67,7 @@ def detect_output_dir(workspace_root):
     return candidates[0]
 
 
-def build_engine(model_dir, output_dir, max_seq_len, max_batch_size=1):
+def build_engine(model_dir, output_dir, max_seq_len, max_batch_size=1, no_fmha=False):
     """Build TRT-LLM engine from HF model."""
     
     print("=" * 60)
@@ -78,23 +78,33 @@ def build_engine(model_dir, output_dir, max_seq_len, max_batch_size=1):
     print(f"  Max seq len:  {max_seq_len}")
     print(f"  Max batch:    {max_batch_size}")
     print(f"  GPU:          {get_gpu_name()}")
+    print(f"  context_fmha: {'DISABLED' if no_fmha else 'enabled'}")
     print()
 
     # Import TRT-LLM
     try:
         from tensorrt_llm._tensorrt_engine import LLM as TrtLLM
         from tensorrt_llm import BuildConfig
+        from tensorrt_llm.plugin import PluginConfig
         print(f"  TRT-LLM version: {__import__('tensorrt_llm').__version__}")
     except ImportError as e:
         print(f"ERROR: Cannot import TRT-LLM: {e}")
         print("Run this script inside the TRT-LLM Docker container.")
         sys.exit(1)
 
+    # Plugin config — disable FMHA if requested (Windows compatibility)
+    plugin_config = PluginConfig()
+    if no_fmha:
+        plugin_config.context_fmha = False
+        plugin_config.use_paged_context_fmha = False
+        print("  *** context_fmha DISABLED for Windows compatibility ***")
+
     # Build config
     build_config = BuildConfig(
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
         max_num_tokens=max_seq_len,
+        plugin_config=plugin_config,
     )
 
     print("\nBuilding engine (this takes 60-120 seconds)...")
@@ -135,6 +145,8 @@ def main():
     parser.add_argument("--max-seq-len", type=int, default=8192, help="Maximum sequence length")
     parser.add_argument("--max-batch-size", type=int, default=1, help="Maximum batch size")
     parser.add_argument("--force", action="store_true", help="Rebuild even if engine exists")
+    parser.add_argument("--no-fmha", action="store_true",
+                        help="Disable context_fmha (for Windows native TRT-LLM)")
     args = parser.parse_args()
 
     model_dir = args.model or detect_model_dir()
@@ -150,7 +162,12 @@ def main():
         print("Use --force to rebuild.")
         return
 
-    build_engine(model_dir, output_dir, args.max_seq_len, args.max_batch_size)
+    # Append -nofmha suffix if building without FMHA
+    if args.no_fmha and not output_dir.endswith("-nofmha"):
+        output_dir = output_dir + "-nofmha"
+
+    build_engine(model_dir, output_dir, args.max_seq_len, args.max_batch_size,
+                 no_fmha=args.no_fmha)
     print("\n✓ Engine build complete!")
 
 
