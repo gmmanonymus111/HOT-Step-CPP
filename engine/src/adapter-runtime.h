@@ -45,6 +45,8 @@ struct DiTLoRAStagedDelta {
 struct DiTLoRA {
     bool                            active = false;
     DiTLoRALayer                    layers[DIT_LORA_MAX_LAYERS];
+    DiTLoRADelta                    proj_in;
+    DiTLoRADelta                    cond_emb;
     struct ggml_context *           ctx    = nullptr;  // owns the delta tensors
     ggml_backend_buffer_t           buffer = nullptr;  // single buffer for all deltas
     std::vector<DiTLoRAStagedDelta> staged;            // temp F32 data awaiting BF16 upload
@@ -63,6 +65,9 @@ static void dit_lora_free(DiTLoRA * lora) {
 // Map a GGUF tensor name to the corresponding DiTLoRADelta slot.
 // Returns NULL if the name doesn't correspond to an adapted projection.
 static DiTLoRADelta * dit_lora_slot(DiTLoRA * lora, const std::string & gguf_name) {
+    if (gguf_name == "decoder.proj_in.1.weight") return &lora->proj_in;
+    if (gguf_name == "decoder.condition_embedder.weight") return &lora->cond_emb;
+
     // Parse: "decoder.layers.<N>.<block>.<proj>.weight"
     const char * p = gguf_name.c_str();
     if (strncmp(p, "decoder.layers.", 15) != 0) return nullptr;
@@ -159,6 +164,7 @@ static void adapter_stage_delta(DiTLoRA * lora, DiTLoRADelta * slot,
 // ─── LoRA runtime loading ───
 
 static bool adapter_runtime_lora(DiTLoRA *                  lora,
+                                  WeightCtx *                wctx,
                                   const WeightSource &       ws,
                                   const STFile &             st,
                                   const std::string &        cfg_dir,
@@ -224,6 +230,20 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
         ws.shape(gguf_name.c_str(), n_dims, ne_arr);
         int64_t ne0 = ne_arr[0], ne1 = ne_arr[1];
 
+        // Conv1d pre-permuted check
+        if (n_dims >= 3 && wctx) {
+            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+                auto & pc = wctx->pending[pi];
+                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                    ne0 = pc.tensor->ne[0];
+                    ne1 = pc.tensor->ne[1];
+                    fprintf(stderr, "[Adapter-RT] Conv1d %s: using pre-permuted shape [%lld, %lld]\n",
+                            gguf_name.c_str(), (long long) ne0, (long long) ne1);
+                    break;
+                }
+            }
+        }
+
         DiTLoRADelta * slot = dit_lora_slot(lora, gguf_name);
         if (!slot) {
             fprintf(stderr, "[Adapter-RT] INFO: no runtime slot for %s (non-layer weight, merge-only)\n",
@@ -232,7 +252,22 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
         }
 
         int64_t rank = ea->shape[0], in_feat = ea->shape[1], out_feat = eb->shape[0];
-        if (eb->shape[1] != rank || in_feat != ne0 || out_feat != ne1) {
+        if (eb->shape[1] != rank) {
+            fprintf(stderr, "[Adapter-RT] WARNING: rank mismatch A=%lld vs B=%lld for %s\n", (long long) rank,
+                    (long long) eb->shape[1], gguf_name.c_str());
+            skipped++; continue;
+        }
+
+        // Conv1d expansion check
+        int64_t conv_expand = 1;
+        if (in_feat == ne0 && out_feat == ne1) {
+            // exact match
+        } else if (out_feat == ne1 && ne0 > 0 && (ne0 % in_feat) == 0) {
+            conv_expand = ne0 / in_feat;
+            fprintf(stderr, "[Adapter-RT] Conv1d %s: tiling LoRA delta [%lld, %lld] x%lld -> [%lld, %lld]\n",
+                    gguf_name.c_str(), (long long) in_feat, (long long) out_feat,
+                    (long long) conv_expand, (long long) ne0, (long long) ne1);
+        } else {
             fprintf(stderr, "[Adapter-RT] WARNING: shape mismatch for %s: adapter [%lld,%lld] (rank=%lld) vs GGUF [%lld,%lld]\n",
                     gguf_name.c_str(), (long long) out_feat, (long long) in_feat, (long long) rank,
                     (long long) ne1, (long long) ne0);
@@ -267,6 +302,13 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
             struct ggml_tensor * tb_br  = ggml_cast(ctx, ggml_cast(ctx, tb, round_type), GGML_TYPE_F32);
             struct ggml_tensor * ta_t   = ggml_cont(ctx, ggml_transpose(ctx, ta_br));
             struct ggml_tensor * tdelta = ggml_scale(ctx, ggml_mul_mat(ctx, ta_t, tb_br), scaling);
+
+            // Conv1d expansion: tile delta [in_ch, out] -> [in_ch*P, out]
+            if (conv_expand > 1) {
+                struct ggml_tensor * ttile = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_feat * conv_expand, out_feat);
+                tdelta = ggml_repeat(ctx, tdelta, ttile);
+            }
+
             adapter_delta_build db;
             db.tdelta = tdelta;
             db.upload = [=]() {
@@ -293,6 +335,7 @@ static bool adapter_runtime_lora(DiTLoRA *                  lora,
 // ─── LoKr runtime loading ───
 
 static bool adapter_runtime_lokr(DiTLoRA *                  lora,
+                                  WeightCtx *                wctx,
                                   const WeightSource &       ws,
                                   const STFile &             st,
                                   float                      user_scale,
@@ -348,6 +391,20 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
         ws.shape(gguf_name.c_str(), n_dims, ne_arr);
         int64_t ne0 = ne_arr[0], ne1 = ne_arr[1];
 
+        // Conv1d pre-permuted check
+        if (n_dims >= 3 && wctx) {
+            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+                auto & pc = wctx->pending[pi];
+                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                    ne0 = pc.tensor->ne[0];
+                    ne1 = pc.tensor->ne[1];
+                    fprintf(stderr, "[Adapter-RT] Conv1d %s: using pre-permuted shape [%lld, %lld]\n",
+                            gguf_name.c_str(), (long long) ne0, (long long) ne1);
+                    break;
+                }
+            }
+        }
+
         DiTLoRADelta * slot = dit_lora_slot(lora, gguf_name);
         if (!slot) {
             fprintf(stderr, "[Adapter-RT] INFO: no runtime slot for %s (non-layer weight, merge-only)\n",
@@ -373,7 +430,17 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
             }
             r = lokr_dim;
         }
-        if (a * c != ne1 || b * d != ne0) {
+
+        // Conv1d expansion check
+        int64_t conv_expand = 1;
+        if (a * c == ne1 && b * d == ne0) {
+            // exact match
+        } else if (a * c == ne1 && ne0 > 0 && (ne0 % (b * d)) == 0) {
+            conv_expand = ne0 / (b * d);
+            fprintf(stderr, "[Adapter-RT] Conv1d %s: tiling LoKr delta [%lld, %lld] x%lld -> [%lld, %lld]\n",
+                    gguf_name.c_str(), (long long)(b * d), (long long)(a * c),
+                    (long long) conv_expand, (long long) ne0, (long long) ne1);
+        } else {
             fprintf(stderr, "[Adapter-RT] WARNING: LoKr shape mismatch for %s: kron(%lldx%lld, %lldx%lld) = %lldx%lld vs GGUF [%lld,%lld]\n",
                     gguf_name.c_str(), (long long) a, (long long) b, (long long) c, (long long) d,
                     (long long)(a*c), (long long)(b*d), (long long) ne1, (long long) ne0);
@@ -440,6 +507,12 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
             struct ggml_tensor * tperm    = ggml_permute(ctx, t4d, 1, 3, 0, 2);
             struct ggml_tensor * tdelta   = ggml_reshape_2d(ctx, ggml_cont(ctx, tperm), b * d, a * c);
 
+            // Conv1d expansion: tile delta [in_ch, out] -> [in_ch*P, out]
+            if (conv_expand > 1) {
+                struct ggml_tensor * ttile = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, b * d * conv_expand, a * c);
+                tdelta = ggml_repeat(ctx, tdelta, ttile);
+            }
+
             adapter_delta_build db;
             db.tdelta = tdelta;
             db.upload = [=]() {
@@ -472,6 +545,7 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
 // ─── Main entry point ───
 
 static bool adapter_load_runtime(DiTLoRA *                  lora,
+                                  WeightCtx *                wctx,
                                   const WeightSource &       ws,
                                   const char *               adapter_path,
                                   float                      adapter_scale,
@@ -519,7 +593,7 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_runtime_lokr(lora, ws, st, adapter_scale, gs, backend);
+        ok = adapter_runtime_lokr(lora, wctx, ws, st, adapter_scale, gs, backend);
     } else {
         std::string cfg_dir;
         size_t slash = path_str.find_last_of("/\\");
@@ -529,7 +603,7 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
         } else {
             cfg_dir = path_str;  // directory format
         }
-        ok = adapter_runtime_lora(lora, ws, st, cfg_dir, adapter_scale, gs, backend);
+        ok = adapter_runtime_lora(lora, wctx, ws, st, cfg_dir, adapter_scale, gs, backend);
     }
 
     st_close(&st);

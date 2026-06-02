@@ -81,9 +81,8 @@ struct HotStepParams {
     // Per-group adapter scales
     AdapterGroupScales adapter_group_scales;
 
-    // Adapter loading mode: "merge" (default), "merge_hq" (F32 promoted), or "runtime"
-    // merge_hq stores merged weights as F32 to avoid catastrophic BF16 cancellation,
-    // at the cost of ~2× VRAM for adapted tensors. Same quality as runtime, merge speed.
+    // Adapter loading mode: "merge" (default, F32 promoted) or "runtime" for runtime LoRA.
+    // merge stores merged weights as F32 to avoid catastrophic BF16 cancellation.
     std::string adapter_mode = "merge";
 
     // DCW (Differential Correction in Wavelet domain) — CVPR 2026

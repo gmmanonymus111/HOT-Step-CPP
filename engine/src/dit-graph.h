@@ -560,11 +560,19 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_output(input);
     struct ggml_tensor * patched = ggml_reshape_3d(ctx, input, c.in_channels * P, S, N);
     struct ggml_tensor * hidden  = dit_ggml_linear_bias(ctx, m->proj_in_w, m->proj_in_b, patched);
+    if (m->lora.active && m->lora.proj_in.delta) {
+        struct ggml_tensor * dy = ggml_mul_mat(ctx, m->lora.proj_in.delta, patched);
+        hidden = ggml_add(ctx, hidden, dy);
+    }
     ggml_set_name(hidden, "hidden_after_proj_in");
     ggml_set_output(hidden);
 
     // 3) Condition embedder: project encoder hidden states
     struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m->cond_emb_w, m->cond_emb_b, enc_hidden);
+    if (m->lora.active && m->lora.cond_emb.delta) {
+        struct ggml_tensor * dy = ggml_mul_mat(ctx, m->lora.cond_emb.delta, enc_hidden);
+        enc = ggml_add(ctx, enc, dy);
+    }
     ggml_set_name(enc, "enc_after_cond_emb");
     ggml_set_output(enc);
 

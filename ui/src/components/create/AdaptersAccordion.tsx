@@ -243,22 +243,16 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Loading Mode</label>
                     <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
                       <button
+                        type="button"
                         onClick={() => onAdapterModeChange('merge')}
                         className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge' ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+                          adapterMode === 'merge' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Merge
                       </button>
                       <button
-                        onClick={() => onAdapterModeChange('merge_hq')}
-                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge_hq' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
-                        }`}
-                      >
-                        Merge HQ
-                      </button>
-                      <button
+                        type="button"
                         onClick={() => onAdapterModeChange('runtime')}
                         className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
                           adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
@@ -269,10 +263,8 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     </div>
                     <p className="text-[10px] text-zinc-600 mt-1">
                       {adapterMode === 'runtime'
-                        ? 'Keeps base weights intact, applies adapter per-step. Best quality, slowest.'
-                        : adapterMode === 'merge_hq'
-                        ? 'Merges adapter at F32 precision. Same quality as Runtime, faster inference.'
-                        : 'Classic merge to native type. Fastest, but may lose adapter detail.'}
+                        ? 'Keeps base weights intact, applies adapter per-step. Same quality, slower inference, saves VRAM.'
+                        : 'Merges adapter at F32 precision. Best quality, fast inference, but uses more VRAM during synthesis.'}
                     </p>
                   </div>
                 </>
@@ -397,22 +389,16 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Loading Mode</label>
                     <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
                       <button
+                        type="button"
                         onClick={() => onAdapterModeChange('merge')}
                         className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge' ? 'bg-zinc-200 dark:bg-zinc-700 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+                          adapterMode === 'merge' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                         }`}
                       >
                         Merge
                       </button>
                       <button
-                        onClick={() => onAdapterModeChange('merge_hq')}
-                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                          adapterMode === 'merge_hq' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
-                        }`}
-                      >
-                        Merge HQ
-                      </button>
-                      <button
+                        type="button"
                         onClick={() => onAdapterModeChange('runtime')}
                         className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
                           adapterMode === 'runtime' ? 'bg-pink-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
@@ -423,10 +409,8 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                     </div>
                     <p className="text-[10px] text-zinc-600 mt-1">
                       {adapterMode === 'runtime'
-                        ? 'Keeps base weights intact, applies adapter per-step. Best quality, slowest.'
-                        : adapterMode === 'merge_hq'
-                        ? 'Merges adapter at F32 precision. Same quality as Runtime, faster inference.'
-                        : 'Classic merge to native type. Fastest, but may lose adapter detail.'}
+                        ? 'Keeps base weights intact, applies adapter per-step. Same quality, slower inference, saves VRAM.'
+                        : 'Merges adapter at F32 precision. Best quality, fast inference, but uses more VRAM during synthesis.'}
                     </p>
                   </div>
 

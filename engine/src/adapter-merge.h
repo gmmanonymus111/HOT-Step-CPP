@@ -390,7 +390,6 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 
     int64_t nel       = ne0 * ne1;
     size_t  base_nb   = ggml_row_size(ttype, ne0) * (size_t) ne1;
-    bool    encode_ok = adapter_backend_can_encode(backend, ttype);
 
     // slack for the largest graph (DoRA + BF16 round + cast in/out + caller subgraph)
     size_t                  meta   = ggml_tensor_overhead() * 64 + ggml_graph_overhead() + 32 * 1024;
@@ -447,6 +446,7 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     if (promote_f32) {
         tout = tmerged;  // stay F32 — tensor type will be promoted below
     } else {
+        bool encode_ok = adapter_backend_can_encode(backend, ttype);
         tout = encode_ok ? ggml_cast(ctx, tmerged, ttype) : tmerged;
     }
 
@@ -488,6 +488,7 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         pc->nbytes = f32_nb;
         wctx->staging.push_back(std::move(staging_buf));
     } else {
+        bool encode_ok = adapter_backend_can_encode(backend, ttype);
         size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
         auto   staging_buf = std::make_unique<float[]>(n_floats);
         void * merged_buf  = staging_buf.get();
@@ -1123,7 +1124,7 @@ static bool adapter_merge(WeightCtx *          wctx,
                           const char *         adapter_path,
                           float                scale,
                           ggml_backend_t       backend,
-                          bool                 promote_f32 = false) {
+                          bool                 promote_f32 = true) {
     std::string sf_path;
     std::string cfg_dir;
 

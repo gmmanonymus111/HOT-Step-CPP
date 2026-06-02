@@ -136,7 +136,7 @@ export interface GenerationParams {
     time_embed: number;
     proj_in: number;
   };
-  adapterMode: string;  // "merge", "merge_hq", or "runtime"
+  adapterMode: string;  // "merge" or "runtime"
 
   // Trigger word (applied server-side to caption)
   triggerWord?: string;

@@ -84,7 +84,7 @@ export interface AceRequest {
     time_embed: number;
     proj_in: number;
   };
-  adapter_mode?: string;  // "merge" (default), "merge_hq" (F32 promoted), or "runtime"
+  adapter_mode?: string;  // "merge" (default, F32 promoted) or "runtime"
   // Solver sub-parameters
   stork_substeps?: number;
   beat_stability?: number;

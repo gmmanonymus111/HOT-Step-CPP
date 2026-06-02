@@ -359,7 +359,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         // Merge HQ: projections are promoted to F32, incompatible with fused BF16 tensors
         bool skip_fusion = (adapter_path && 
             (g_hotstep_params.adapter_mode == "runtime" || 
-             g_hotstep_params.adapter_mode == "merge_hq"));
+             g_hotstep_params.adapter_mode == "merge"));
         ly.self_attn_norm = ws_load_tensor_f32(&m->wctx, ws, p + ".self_attn_norm.weight");
         if (!skip_fusion) {
         ly.sa_qkv = ws_load_qkv_fused(&m->wctx, ws, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
@@ -485,10 +485,9 @@ static bool dit_ggml_load(DiTGGML *    m,
     // HOT-Step: skip merge in runtime mode — runtime adapter loaded after wctx_alloc
     if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
-        bool hq_mode      = (g_hotstep_params.adapter_mode == "merge_hq");
         if (!runtime_mode) {
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, hq_mode)) {
+            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, true)) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
                 if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;
@@ -510,7 +509,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
         if (runtime_mode) {
             Timer rt_timer;
-            if (!adapter_load_runtime(&m->lora, ws, adapter_path, adapter_scale,
+            if (!adapter_load_runtime(&m->lora, &m->wctx, ws, adapter_path, adapter_scale,
                                        g_hotstep_params.adapter_group_scales, m->backend)) {
                 fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed\n");
             }

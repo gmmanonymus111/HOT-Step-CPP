@@ -504,7 +504,7 @@ struct ServerFields {
     float       frequency_damping  = 0.4f;
     float       temporal_smoothing = 0.13f;
     AdapterGroupScales group_scales;  // per-group adapter scale multipliers
-    std::string adapter_mode;         // "merge" (default), "merge_hq" (F32), or "runtime"
+    std::string adapter_mode;         // "merge" (default, F32 promoted) or "runtime"
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
