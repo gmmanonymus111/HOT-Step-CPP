@@ -217,10 +217,16 @@ export const aceClient = {
   },
 
   /** POST /lm — submit LM generation job, returns job ID.
-   *  mode: 'inspire' (Phase 1 only, no codes) | 'format' (reformat, no codes) */
-  async submitLm(request: AceRequest, mode?: 'inspire' | 'format'): Promise<string> {
+   *  mode: 'inspire' (Phase 1 only, no codes) | 'format' (reformat, no codes)
+   *  keepLoaded: flip store to EVICT_NEVER before LM loads, so the LM stays
+   *  cached for subsequent gens instead of being freed under STRICT. */
+  async submitLm(request: AceRequest, mode?: 'inspire' | 'format', keepLoaded = false): Promise<string> {
     const body = mode ? { ...request, lm_mode: mode } : request;
-    const res = await acePost('/lm', body);
+    const params = new URLSearchParams();
+    if (keepLoaded) params.set('keep_loaded', '1');
+    const qs = params.toString();
+    const path = qs ? `/lm?${qs}` : '/lm';
+    const res = await acePost(path, body);
     const data = await res.json() as { id: string };
     return data.id;
   },

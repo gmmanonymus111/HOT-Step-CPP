@@ -767,6 +767,17 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
         return;
     }
 
+    // Co-resident mode: flip store policy BEFORE the LM loads so it stays
+    // cached. Without this, gen 1 frees the LM under STRICT (the synth
+    // worker flips to NEVER too late), and gen 2 reloads ~8 GB on top of
+    // the synth models that are already resident.
+    const bool req_keep_loaded = req.has_param("keep_loaded") && req.get_param_value("keep_loaded") == "1";
+    if (req_keep_loaded && !g_keep_loaded) {
+        g_keep_loaded = true;
+        store_set_policy(g_store, EVICT_NEVER);
+        fprintf(stderr, "[Server] Co-resident mode activated (from /lm)\n");
+    }
+
     // parse request
     AceRequest ace_req;
     if (!request_parse_json(&ace_req, req.body.c_str())) {
@@ -801,7 +812,8 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     }
 
     auto job = job_create();
-    fprintf(stderr, "[Server] Job %s created (LM, mode=%d)\n", job->id.c_str(), mode);
+    fprintf(stderr, "[Server] Job %s created (LM, mode=%d)%s\n", job->id.c_str(), mode,
+            g_keep_loaded ? " [keep-loaded]" : "");
 
     work_push([job, ace_req, lm_batch_size, mode]() { lm_worker(job, ace_req, lm_batch_size, mode); });
 

@@ -200,7 +200,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
         logGeneration(job.id, 'INFO', `[LM Phase] Submitting to ace-server... (cache key=${cacheKey})`);
 
-        const lmJobId = await aceClient.submitLm(aceReq);
+        const coResident = job.params.coResident === true;
+        const lmJobId = await aceClient.submitLm(aceReq, undefined, coResident);
         job.aceJobId = lmJobId;
 
         await pollUntilDone(lmJobId, job, abortController.signal);
