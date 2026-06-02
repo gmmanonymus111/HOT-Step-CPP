@@ -506,17 +506,24 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         }
         delta_f32.clear();  // free delta memory
 
-        // Step 4: requant merged F32 back to native type
-        size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
-        auto   staging_buf = std::make_unique<float[]>(n_floats);
-        size_t merged_bytes = adapter_requant(base_f32.data(), staging_buf.get(), nel, ne0, ttype);
-        if (merged_bytes == 0) {
-            ggml_free(ctx);
-            return false;
-        }
+        // Step 4: promote to BF16 instead of requanting to native type.
+        // NVFP4/MXFP4 quantization on host is extremely slow (~60s for 359 tensors).
+        // BF16 conversion is a trivial bitshift and completes instantly.
+        // VRAM cost: 2x native (e.g. 2.8 GB NVFP4 → 5.6 GB BF16), still reasonable.
+        size_t bf16_nb = (size_t) nel * sizeof(ggml_bf16_t);
+        size_t n_floats = (bf16_nb + sizeof(float) - 1) / sizeof(float);
+        auto staging_buf = std::make_unique<float[]>(n_floats);
+        ggml_fp32_to_bf16_row(base_f32.data(), (ggml_bf16_t *) staging_buf.get(), nel);
+        base_f32.clear();  // free F32 buffer
 
+        // Promote tensor type to BF16 and recalculate strides
+        pc->tensor->type  = GGML_TYPE_BF16;
+        pc->tensor->nb[0] = sizeof(ggml_bf16_t);
+        for (int d = 1; d < GGML_MAX_DIMS; d++) {
+            pc->tensor->nb[d] = pc->tensor->nb[d - 1] * pc->tensor->ne[d - 1];
+        }
         pc->src    = staging_buf.get();
-        pc->nbytes = merged_bytes;
+        pc->nbytes = bf16_nb;
         wctx->staging.push_back(std::move(staging_buf));
         ggml_free(ctx);
         return true;
