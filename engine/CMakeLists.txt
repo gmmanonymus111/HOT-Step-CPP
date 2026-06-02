@@ -253,10 +253,20 @@ endif()
 # Pre-built TRT-LLM SDK (tensorrt_llm.dll + plugin DLL).
 # Auto-detect from engine/trtllm-libs/.
 # This is SEPARATE from HOT_STEP_TRT (raw NvInfer for DiT). Both can coexist.
+#
+# STATUS: DISABLED (2026-06-02). Native Windows TRT-LLM is not viable:
+#   - FMHA/XQA cubin embedding requires GCC inline asm (INCBIN), impossible on MSVC
+#   - Docker-built engines have Linux platform tags, can't deserialize on Windows
+#   - TRT version mismatch between Docker (10.14) and Windows SDK (10.16)
+#   - ONNX-rebuilt engines lack TRT-LLM tensor bindings (kv_cache_block_offsets etc.)
+# The code remains intact behind #ifdef HOT_STEP_TRTLLM for future WSL2 or
+# cross-platform engine support. To re-enable, set HOT_STEP_TRTLLM_ENABLE=ON.
+option(HOT_STEP_TRTLLM_ENABLE "Enable TRT-LLM Executor (currently broken on native Windows)" OFF)
 set(TRTLLM_ENABLED FALSE)
 set(_TRTLLM_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/trtllm-libs")
 set(_TRTLLM_INC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/trtllm-include")
-if(WIN32 AND EXISTS "${_TRTLLM_LIBS_DIR}/tensorrt_llm.lib"
+if(HOT_STEP_TRTLLM_ENABLE AND WIN32
+         AND EXISTS "${_TRTLLM_LIBS_DIR}/tensorrt_llm.lib"
          AND EXISTS "${_TRTLLM_INC_DIR}/tensorrt_llm/executor/executor.h")
     set(TRTLLM_ENABLED TRUE)
     message(STATUS "[TRT-LLM] Found at ${_TRTLLM_LIBS_DIR}")
@@ -268,7 +278,11 @@ if(WIN32 AND EXISTS "${_TRTLLM_LIBS_DIR}/tensorrt_llm.lib"
     # in lm-trtllm.h to avoid pulling its dependency chain at process startup.
     message(STATUS "[TRT-LLM] LM Executor: ENABLED")
 else()
-    message(STATUS "[TRT-LLM] Not found (set engine/trtllm-libs/ + trtllm-include/ to enable)")
+    if(HOT_STEP_TRTLLM_ENABLE)
+        message(STATUS "[TRT-LLM] Not found (set engine/trtllm-libs/ + trtllm-include/ to enable)")
+    else()
+        message(STATUS "[TRT-LLM] DISABLED (set -DHOT_STEP_TRTLLM_ENABLE=ON to re-enable)")
+    endif()
 endif()
 
 

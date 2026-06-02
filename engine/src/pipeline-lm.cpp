@@ -1148,7 +1148,11 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
     // If model_path points to an ONNX export directory (e.g. models/onnx/lm-4B/),
     // use raw TRT inference instead of GGML. Skipped if TRT-LLM is already active.
 #ifdef HOT_STEP_TRT
+#ifdef HOT_STEP_TRTLLM
     if (!ctx->use_trtllm) {
+#else
+    {  // TRT-LLM disabled — always try TRT path
+#endif
         std::string model_dir(params->model_path);
         std::string onnx_path = model_dir + "/lm_full.onnx";
         std::string engine_path = model_dir + "/lm_full.engine";
