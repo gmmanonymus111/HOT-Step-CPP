@@ -371,6 +371,33 @@ DiTGGML * store_require_dit(ModelStore * s, const ModelKey & k) {
     }
     if (s->policy == EVICT_STRICT) {
         evict_all_except(s, k);
+    } else {
+        // EVICT_NEVER: still evict stale DiTs with the same base model but
+        // different adapter params (path, scale, group_scales). Without this,
+        // each adapter switch accumulates a full DiT copy (~3-4 GB) that is
+        // never freed, eventually pushing into shared memory or OOM.
+        // We already know the exact key is not cached (cache_hit returned null),
+        // so any DiT with the same base path must have different adapter fields.
+        for (auto it = s->gpu.begin(); it != s->gpu.end(); ) {
+            if (it->first.kind == MODEL_DIT && it->first.path == k.path) {
+                GpuEntry & e = it->second;
+                if (e.refcount > 0) {
+                    fprintf(stderr, "[Store] WARNING: stale DiT still in use (refcount=%d), "
+                                    "cannot evict for adapter swap\n", e.refcount);
+                    ++it;
+                    continue;
+                }
+                fprintf(stderr, "[Store] Adapter swap: evicting DiT (adapter=%s → %s, %.1f MB)\n",
+                        it->first.adapter_path.empty() ? "(none)" : it->first.adapter_path.c_str(),
+                        k.adapter_path.empty()         ? "(none)" : k.adapter_path.c_str(),
+                        (float) e.bytes / (1024.0f * 1024.0f));
+                s->handle_to_key.erase(e.ptr);
+                e.deleter(e.ptr);
+                it = s->gpu.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     Timer        t;
     DiTGGML *    m       = new DiTGGML();
