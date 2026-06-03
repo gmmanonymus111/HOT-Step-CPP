@@ -62,6 +62,14 @@ export const GenerateAllModal: React.FC<GenerateAllModalProps> = ({
         const artistIds = new Set(gens.map((g: any) => g.artist_id));
         const albumNames = new Set(gens.map((g: any) => `${g.artist_id}-${g.album || 'Unknown'}`));
 
+        // Sort deterministically: artist name A→Z, then song title A→Z within each artist.
+        // This lets the user see exactly where a batch stopped and resume from there.
+        gens.sort((a: any, b: any) => {
+          const artistCmp = (a.artist_name || '').localeCompare(b.artist_name || '', undefined, { sensitivity: 'base' });
+          if (artistCmp !== 0) return artistCmp;
+          return (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+        });
+
         setStats({
           totalSongs: gens.length,
           artistCount: artistIds.size,
