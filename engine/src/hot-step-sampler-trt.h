@@ -480,13 +480,56 @@ static int dit_trt_generate(DitTrt *              trt,
         }
     };
 
-    // ── Diffusion loop ──────────────────────────────────────────────────
+    // ── Step-level velocity caching (shared by both solver paths) ────────
+    float cache_ratio = g_hotstep_params.cache_ratio;
+    std::vector<bool> step_computes(num_steps, true);
+    std::vector<float> vt_cached;
+    bool has_cached_vt = false;
+    int  cached_count  = 0;
+
+    if (cache_ratio > 0.0f && num_steps > 4) {
+        int protect = 2;
+        int middle_start = protect;
+        int middle_end   = num_steps - protect;
+        int middle_len   = middle_end - middle_start;
+        if (middle_len > 1) {
+            int target_cached = std::min(middle_len - 1,
+                                         (int)roundf(cache_ratio * middle_len));
+            int target_compute = middle_len - target_cached;
+            if (target_compute > 0 && target_cached > 0) {
+                for (int s = middle_start; s < middle_end; s++) {
+                    step_computes[s] = false;
+                }
+                for (int ci = 0; ci < target_compute; ci++) {
+                    int idx = middle_start + (int)roundf((float)ci * middle_len / target_compute);
+                    if (idx < middle_end) step_computes[idx] = true;
+                }
+            }
+        }
+        vt_cached.resize(n_total);
+        for (int s = 0; s < num_steps; s++) {
+            if (!step_computes[s]) cached_count++;
+        }
+        fprintf(stderr, "[DiT-TRT] Velocity cache: ratio=%.2f, %d/%d cached\n",
+                cache_ratio, cached_count, num_steps);
+    }
+
+    // ── Diffusion loop ────────────────────────────────────────────
     if (solver_plugin->owns_loop) {
         // Full-loop solver path
         bool switched_cover_fl = false;
+        int  current_model_step = 0;
 
         LoopModelFn loop_model_fn = [&](const float * xt_in, float t_val) {
-            evaluate_velocity(xt_in, t_val);
+            if (cached_count > 0 && !step_computes[current_model_step] && has_cached_vt) {
+                memcpy(vt.data(), vt_cached.data(), n_total * sizeof(float));
+            } else {
+                evaluate_velocity(xt_in, t_val);
+                if (cached_count > 0) {
+                    memcpy(vt_cached.data(), vt.data(), n_total * sizeof(float));
+                    has_cached_vt = true;
+                }
+            }
         };
 
         LoopOnStepFn loop_on_step = [&](int step_idx, float t_curr, float t_next) -> bool {
@@ -520,8 +563,57 @@ static int dit_trt_generate(DitTrt *              trt,
             sampler_apply_dcw(xt.data(), vt.data(), N, T, Oc, t_curr, t_next, step_idx, num_steps);
             sampler_repaint_inject(xt.data(), noise, nullptr, N, T, Oc,
                                    0, 0, 0.5f, step_idx, num_steps, t_next);
-            fprintf(stderr, "[DiT-TRT] Step %d/%d t=%.3f [%s]\n",
-                    step_idx + 1, num_steps, t_curr, solver_plugin->display_name.c_str());
+
+            // Advance step counter for next model_fn call
+            current_model_step = step_idx + 1;
+
+            // ── CFG cutoff ──
+            int cfg_cutoff_step = (int) ceilf(g_hotstep_params.cfg_cutoff_ratio * num_steps);
+            if (do_cfg && current_model_step == cfg_cutoff_step && cfg_cutoff_step < num_steps) {
+                fprintf(stderr, "[DiT-TRT] CFG cutoff at step %d/%d — switching to cond-only (N_graph %d -> %d)\n",
+                        current_model_step, num_steps, N_graph, N);
+                do_cfg    = false;
+                batch_cfg = false;
+                N_graph   = N;
+
+                // Resize GPU buffers for N (half size)
+                cudaFree(d_input); cudaFree(d_enc); cudaFree(d_vel);
+                cudaFree(d_t); cudaFree(d_t_r);
+
+                size_t new_input_elems = (size_t)N * T * in_ch;
+                size_t new_enc_elems   = (size_t)N * enc_S * H_enc;
+                size_t new_vel_elems   = (size_t)N * T * Oc;
+
+                cudaMalloc(&d_input, new_input_elems * io_elem_bytes);
+                cudaMalloc(&d_enc,   new_enc_elems * io_elem_bytes);
+                cudaMalloc(&d_vel,   new_vel_elems * io_elem_bytes);
+                cudaMalloc((void**)&d_t,   N * sizeof(float));
+                cudaMalloc((void**)&d_t_r, N * sizeof(float));
+
+                input_buf.resize(in_ch * T * N);
+                for (int b = 0; b < N; b++) {
+                    for (int t = 0; t < T; t++) {
+                        memcpy(&input_buf[b * T * in_ch + t * in_ch],
+                               &context_latents[b * T * ctx_ch + t * ctx_ch],
+                               ctx_ch * sizeof(float));
+                    }
+                }
+                enc_buf.resize(H_enc * enc_S * N);
+                memcpy(enc_buf.data(), enc_hidden_data, H_enc * enc_S * N * sizeof(float));
+
+                if (!io_is_fp32) {
+                    h_input_staged.resize(new_input_elems);
+                    h_enc_staged.resize(new_enc_elems);
+                    h_vel_staged.resize(new_vel_elems);
+                }
+                if (batch_cfg) { full_output.clear(); }  // no longer needed
+
+                fprintf(stderr, "[DiT-TRT] GPU buffers resized for N=%d\n", N);
+            }
+
+            fprintf(stderr, "[DiT-TRT] Step %d/%d t=%.3f [%s]%s\n",
+                    step_idx + 1, num_steps, t_curr, solver_plugin->display_name.c_str(),
+                    (cached_count > 0 && !step_computes[step_idx]) ? " (cached)" : "");
             return false;
         };
 
@@ -533,41 +625,8 @@ static int dit_trt_generate(DitTrt *              trt,
 
     } else {
         // Per-step loop
+        // (step_computes, vt_cached, cached_count are declared above the if/else split)
         bool switched_cover = false;
-
-        // Velocity caching
-        float cache_ratio = g_hotstep_params.cache_ratio;
-        std::vector<bool> step_computes(num_steps, true);
-        std::vector<float> vt_cached;
-        bool has_cached_vt = false;
-        int  cached_count  = 0;
-
-        if (cache_ratio > 0.0f && num_steps > 4) {
-            int protect = 2;
-            int middle_start = protect;
-            int middle_end   = num_steps - protect;
-            int middle_len   = middle_end - middle_start;
-            if (middle_len > 1) {
-                int target_cached = std::min(middle_len - 1,
-                                             (int)roundf(cache_ratio * middle_len));
-                int target_compute = middle_len - target_cached;
-                if (target_compute > 0 && target_cached > 0) {
-                    for (int s = middle_start; s < middle_end; s++) {
-                        step_computes[s] = false;
-                    }
-                    for (int ci = 0; ci < target_compute; ci++) {
-                        int idx = middle_start + (int)roundf((float)ci * middle_len / target_compute);
-                        if (idx < middle_end) step_computes[idx] = true;
-                    }
-                }
-            }
-            vt_cached.resize(n_total);
-            for (int s = 0; s < num_steps; s++) {
-                if (!step_computes[s]) cached_count++;
-            }
-            fprintf(stderr, "[DiT-TRT] Velocity cache: ratio=%.2f, %d/%d cached\n",
-                    cache_ratio, cached_count, num_steps);
-        }
 
         auto t_gen_start = std::chrono::steady_clock::now();
 

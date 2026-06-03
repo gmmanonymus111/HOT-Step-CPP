@@ -566,13 +566,64 @@ static int dit_ggml_generate(DiTGGML *           model,
         ggml_backend_tensor_get(t_output, out_buf, 0, n_total * sizeof(float));
     };
 
+    // ── Step-level velocity caching (shared by both solver paths) ────────
+    // Build a static schedule: which steps COMPUTE vs reuse cached velocity.
+    // Pattern: always compute first 2 and last 2 steps (boundaries matter most).
+    // Middle steps are computed every Nth step based on cache_ratio.
+    float cache_ratio = g_hotstep_params.cache_ratio;
+    std::vector<bool> step_computes(num_steps, true);
+    std::vector<float> vt_cached;
+    bool has_cached_vt = false;
+    int  cached_count  = 0;
+
+    if (cache_ratio > 0.0f && num_steps > 4) {
+        int protect = 2;  // protect first/last N steps
+        int middle_start = protect;
+        int middle_end   = num_steps - protect;
+        int middle_len   = middle_end - middle_start;
+
+        if (middle_len > 1) {
+            int target_cached = std::min(middle_len - 1,
+                                         (int) roundf(cache_ratio * middle_len));
+            int target_compute = middle_len - target_cached;
+
+            if (target_compute > 0 && target_cached > 0) {
+                for (int s = middle_start; s < middle_end; s++) {
+                    step_computes[s] = false;
+                }
+                for (int ci = 0; ci < target_compute; ci++) {
+                    int idx = middle_start + (int) roundf((float) ci * middle_len / target_compute);
+                    if (idx < middle_end) step_computes[idx] = true;
+                }
+            }
+        }
+
+        vt_cached.resize(n_total);
+
+        for (int s = 0; s < num_steps; s++) {
+            if (!step_computes[s]) cached_count++;
+        }
+        fprintf(stderr, "[DiT] Velocity cache: ratio=%.2f, %d/%d steps cached, %d computed\n",
+                cache_ratio, cached_count, num_steps, num_steps - cached_count);
+    }
+
     // Flow matching loop
     if (solver_plugin->owns_loop) {
         // ── Full-loop solver path ──────────────────────────────────────
         bool switched_cover_fl = false;
+        int  current_model_step = 0;  // tracks which step the next model_fn call serves
 
         LoopModelFn loop_model_fn = [&](const float * xt_in, float t_val) {
-            evaluate_velocity(xt_in, t_val);
+            // Velocity caching: skip forward pass on cached steps
+            if (cached_count > 0 && !step_computes[current_model_step] && has_cached_vt) {
+                memcpy(vt.data(), vt_cached.data(), n_total * sizeof(float));
+            } else {
+                evaluate_velocity(xt_in, t_val);
+                if (cached_count > 0) {
+                    memcpy(vt_cached.data(), vt.data(), n_total * sizeof(float));
+                    has_cached_vt = true;
+                }
+            }
         };
 
         LoopOnStepFn loop_on_step = [&](int step_idx, float t_curr, float t_next) -> bool {
@@ -638,8 +689,82 @@ static int dit_ggml_generate(DiTGGML *           model,
             sampler_repaint_inject(xt.data(), noise, repaint_src, N, T, Oc,
                                    repaint_t0, repaint_t1, repaint_injection_ratio,
                                    step_idx, num_steps, t_next);
-            fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]\n",
-                    step_idx + 1, num_steps, t_curr, solver_plugin->display_name.c_str());
+
+            // Advance step counter for next model_fn call
+            current_model_step = step_idx + 1;
+
+            // ── CFG cutoff: switch from 2N batched graph to N cond-only graph ──
+            int cfg_cutoff_step = (int) ceilf(g_hotstep_params.cfg_cutoff_ratio * num_steps);
+            if (do_cfg && current_model_step == cfg_cutoff_step && cfg_cutoff_step < num_steps) {
+                fprintf(stderr, "[DiT] CFG cutoff at step %d/%d — switching to cond-only (N_graph %d -> %d)\n",
+                        current_model_step, num_steps, N_graph, N);
+
+                do_cfg    = false;
+                batch_cfg = false;
+                N_graph   = N;
+
+                ggml_free(ctx);
+                ctx_buf.assign(ctx_size, 0);
+                struct ggml_init_params gp2 = { ctx_size, ctx_buf.data(), true };
+                ctx = ggml_init(gp2);
+                gf  = dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output);
+
+                ggml_backend_sched_reset(model->sched);
+                if (model->backend != model->cpu_backend) {
+                    const char * input_names[] = { "enc_hidden", "input_latents", "t", "t_r",
+                                                   "positions", "sa_mask_sw", "sa_mask_pad", "ca_mask" };
+                    for (const char * iname : input_names) {
+                        struct ggml_tensor * ti = ggml_graph_get_tensor(gf, iname);
+                        if (ti) ggml_backend_sched_set_tensor_backend(model->sched, ti, model->backend);
+                    }
+                }
+                if (!ggml_backend_sched_alloc_graph(model->sched, gf)) {
+                    fprintf(stderr, "[DiT] FATAL: failed to re-allocate graph after CFG cutoff\n");
+                    // Can't return from lambda with int, just log and continue
+                }
+
+                t_enc        = ggml_graph_get_tensor(gf, "enc_hidden");
+                t_t          = ggml_graph_get_tensor(gf, "t");
+                t_tr         = ggml_graph_get_tensor(gf, "t_r");
+                t_pos        = ggml_graph_get_tensor(gf, "positions");
+                t_sa_mask_sw = ggml_graph_get_tensor(gf, "sa_mask_sw");
+                t_sa_mask_pad= ggml_graph_get_tensor(gf, "sa_mask_pad");
+                t_ca_mask    = ggml_graph_get_tensor(gf, "ca_mask");
+
+                input_buf.resize(in_ch * T * N);
+                for (int b = 0; b < N; b++) {
+                    for (int t = 0; t < T; t++) {
+                        memcpy(&input_buf[b * T * in_ch + t * in_ch],
+                               &context_latents[b * T * ctx_ch + t * ctx_ch],
+                               ctx_ch * sizeof(float));
+                    }
+                }
+
+                enc_buf.resize(H_enc * enc_S * N);
+                memcpy(enc_buf.data(), enc_hidden_data, H_enc * enc_S * N * sizeof(float));
+
+                pos_data.resize(S * N);
+                for (int b = 0; b < N; b++)
+                    for (int i = 0; i < S; i++)
+                        pos_data[b * S + i] = i;
+
+                sa_sw_data.resize(S * S * N);
+                sa_pad_data.resize(S * S * N);
+                ca_data.resize(enc_S * S * N);
+
+                ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+                ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
+                ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
+                ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+                ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
+
+                fprintf(stderr, "[DiT] Graph rebuilt: %d nodes (was 2N, now N=%d)\n",
+                        ggml_graph_n_nodes(gf), N);
+            }
+
+            fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]%s\n",
+                    step_idx + 1, num_steps, t_curr, solver_plugin->display_name.c_str(),
+                    (cached_count > 0 && !step_computes[step_idx]) ? " (cached)" : "");
             return false;
         };
 
@@ -651,55 +776,9 @@ static int dit_ggml_generate(DiTGGML *           model,
 
 
     } else {
-    // ── Existing per-step loop (unchanged) ─────────────────────────
+    // ── Existing per-step loop ─────────────────────────────────────
+    // (step_computes, vt_cached, cached_count are declared above the if/else split)
     bool switched_cover = false;
-
-    // ── Step-level velocity caching ──────────────────────────────────
-    // Build a static schedule: which steps COMPUTE vs reuse cached velocity.
-    // Pattern: always compute first 2 and last 2 steps (boundaries matter most).
-    // Middle steps are computed every Nth step based on cache_ratio.
-    float cache_ratio = g_hotstep_params.cache_ratio;
-    std::vector<bool> step_computes(num_steps, true);
-    std::vector<float> vt_cached;
-    bool has_cached_vt = false;
-    int  cached_count  = 0;
-
-    if (cache_ratio > 0.0f && num_steps > 4) {
-        int protect = 2;  // protect first/last N steps
-        int middle_start = protect;
-        int middle_end   = num_steps - protect;
-        int middle_len   = middle_end - middle_start;
-
-        if (middle_len > 1) {
-            // Target number of cached steps in the middle region.
-            // Distribute cache slots evenly: pick the steps whose positions
-            // in the middle region are furthest from compute boundaries.
-            int target_cached = std::min(middle_len - 1,
-                                         (int) roundf(cache_ratio * middle_len));
-            int target_compute = middle_len - target_cached;
-
-            if (target_compute > 0 && target_cached > 0) {
-                // Mark all middle steps as cached, then un-cache evenly spaced ones
-                for (int s = middle_start; s < middle_end; s++) {
-                    step_computes[s] = false;
-                }
-                // Place compute steps evenly: stride = middle_len / target_compute
-                for (int ci = 0; ci < target_compute; ci++) {
-                    int idx = middle_start + (int) roundf((float) ci * middle_len / target_compute);
-                    if (idx < middle_end) step_computes[idx] = true;
-                }
-            }
-        }
-
-        vt_cached.resize(n_total);
-
-        // Count and log
-        for (int s = 0; s < num_steps; s++) {
-            if (!step_computes[s]) cached_count++;
-        }
-        fprintf(stderr, "[DiT] Velocity cache: ratio=%.2f, %d/%d steps cached, %d computed\n",
-                cache_ratio, cached_count, num_steps, num_steps - cached_count);
-    }
 
     for (int step = 0; step < num_steps; step++) {
         if (cancel && cancel(cancel_data)) {
