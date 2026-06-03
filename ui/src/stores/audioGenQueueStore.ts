@@ -61,81 +61,146 @@ export interface AudioGenQueueState {
 // (mergeCreatePanelSettings removed — we now use getGlobalParams() snapshot
 // passed in at enqueue time, identical to the Create page path.)
 
-// ── Persistence ──────────────────────────────────────────────────────────────
+// ── Persistence (IndexedDB — no 5MB cap) ─────────────────────────────────────
+// localStorage has a hard 5MB browser limit that large queues (600+ items with
+// lyrics/prompts) easily exceed. IndexedDB has virtually unlimited storage
+// (~50% of available disk space). Writes are async and non-blocking.
 
-const STORAGE_KEY = 'lireek-audio-gen-queue';
+const IDB_NAME = 'lireek-queue-store';
+const IDB_STORE = 'queue';
+const IDB_KEY = 'state';
+const LS_KEY = 'lireek-audio-gen-queue'; // legacy localStorage key for migration
 
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Serialize queue state for persistence. Strips globalParams from all items
- *  to reduce payload — params are only needed at submit time, not for restore. */
-function _serializeForStorage(): string {
-  return JSON.stringify({
+function _openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_STORE)) {
+        req.result.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function _idbGet<T>(key: string): Promise<T | undefined> {
+  const db = await _openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const store = tx.objectStore(IDB_STORE);
+    const req = store.get(key);
+    req.onsuccess = () => resolve(req.result as T | undefined);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function _idbSet(key: string, value: unknown): Promise<void> {
+  const db = await _openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Prepare queue data for persistence. Strips globalParams (only needed at
+ *  submit time) to reduce storage churn — not for quota reasons anymore. */
+function _dataForStorage(): { items: AudioQueueItem[]; completionCounter: number } {
+  return {
     items: _state.items.map(item => {
       if (item.globalParams && Object.keys(item.globalParams).length > 0) {
         const { globalParams, ...rest } = item;
-        return rest;
+        return rest as AudioQueueItem;
       }
       return item;
     }),
     completionCounter: _state.completionCounter,
-  });
+  };
 }
 
-/** Debounced persistence — avoids JSON.stringify on every 2.5s poll tick. */
+/** Debounced persistence — avoids writes on every 2.5s poll tick. */
 function _persist(): void {
   if (_persistTimer) clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, _serializeForStorage());
-    } catch (e) {
-      console.error('[AudioGenQueue] localStorage write failed (quota?):', e);
-    }
+    _idbSet(IDB_KEY, _dataForStorage()).catch(e =>
+      console.error('[AudioGenQueue] IDB write failed:', e));
   }, 2000);
 }
 
-/** Force-flush persistence immediately (status transitions, not progress ticks). */
+/** Force-flush persistence immediately (status transitions). */
 function _persistNow(): void {
   if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
-  try {
-    localStorage.setItem(STORAGE_KEY, _serializeForStorage());
-  } catch (e) {
-    console.error('[AudioGenQueue] localStorage write failed (quota?):', e);
-  }
+  _idbSet(IDB_KEY, _dataForStorage()).catch(e =>
+    console.error('[AudioGenQueue] IDB write failed:', e));
 }
 
-function _restore(): AudioGenQueueState {
+/** Sanitize restored items — reset in-flight items to pending. */
+function _sanitizeItems(items: AudioQueueItem[]): AudioQueueItem[] {
+  return items.map((item: AudioQueueItem) => {
+    if (item.status === 'loading-adapter' || item.status === 'generating') {
+      return {
+        ...item,
+        status: 'pending' as AudioQueueStatus,
+        stage: 'Reconnecting…',
+        progress: undefined,
+        elapsed: undefined,
+      };
+    }
+    return item;
+  });
+}
+
+/** Async restore from IndexedDB (with one-time localStorage migration). */
+async function _restoreFromIDB(): Promise<void> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { items: [], completionCounter: 0 };
-    const parsed = JSON.parse(raw);
-    const items: AudioQueueItem[] = (parsed.items || []).map((item: AudioQueueItem) => {
-      // After a page reload, in-flight items may still be running on the
-      // server (browser-only refresh) or dead (full server restart).
-      // Keep the jobId so resumeQueue() can check with the server before
-      // deciding whether to reconnect or re-submit.
-      if (item.status === 'loading-adapter' || item.status === 'generating') {
-        return {
-          ...item,
-          // Keep jobId! resumeQueue() will probe the server to decide.
-          status: 'pending' as AudioQueueStatus,
-          stage: 'Reconnecting…',
-          progress: undefined,
-          elapsed: undefined,
-        };
+    // Try IDB first
+    let data = await _idbGet<{ items: AudioQueueItem[]; completionCounter: number }>(IDB_KEY);
+
+    // One-time migration from localStorage → IDB
+    if (!data) {
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          data = { items: parsed.items || [], completionCounter: parsed.completionCounter || 0 };
+          // Write to IDB and remove from localStorage
+          await _idbSet(IDB_KEY, data);
+          localStorage.removeItem(LS_KEY);
+          console.log('[AudioGenQueue] Migrated', data.items.length, 'items from localStorage to IndexedDB');
+        }
+      } catch (e) {
+        console.warn('[AudioGenQueue] localStorage migration failed:', e);
       }
-      return item;
-    });
-    return { items, completionCounter: parsed.completionCounter || 0 };
-  } catch {
-    return { items: [], completionCounter: 0 };
+    }
+
+    if (data && data.items && data.items.length > 0) {
+      _state = {
+        items: _sanitizeItems(data.items),
+        completionCounter: data.completionCounter || 0,
+      };
+      // Notify UI of restored state
+      _state = { ..._state, items: [..._state.items] };
+      _listeners.forEach(fn => fn());
+    }
+  } catch (e) {
+    console.error('[AudioGenQueue] IDB restore failed:', e);
   }
 }
 
 // ── Module-level singleton ───────────────────────────────────────────────────
+// NOTE: _state and _listeners MUST be declared before _idbReady because
+// _restoreFromIDB() writes to _state and notifies _listeners.
 
-let _state: AudioGenQueueState = _restore();
+let _state: AudioGenQueueState = { items: [], completionCounter: 0 };
 const _listeners = new Set<() => void>();
+
+/** Ready gate — resolves when IDB restore is complete.
+ *  resumeQueue() awaits this before processing items. */
+const _idbReady: Promise<void> = _restoreFromIDB();
 
 function _emit(immediate = false) {
   _state = { ..._state, items: [..._state.items] };
@@ -538,12 +603,13 @@ export async function enqueueSimpleGen(
   }
 }
 
-export function resumeQueue(token: string): void {
+export async function resumeQueue(token: string): Promise<void> {
   if (_resumeCalled) return;
   _resumeCalled = true;
 
-  // _restore() already reset any in-flight items to 'pending' (with jobId cleared).
-  // All we need to do is kick the queue processor if there's work to do.
+  // Wait for IndexedDB restore to complete before processing
+  await _idbReady;
+
   const hasPending = _state.items.some(i => i.status === 'pending');
   if (hasPending) {
     _processQueue(token);
@@ -758,7 +824,7 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
     params.masteringReference = preset.reference_track_path;
     // Timbre: use dedicated timbre path from globalParams if set,
     // otherwise default to preset reference track
-    if (typeof item.globalParams.timbreReference === 'string' && item.globalParams.timbreReference) {
+    if (typeof item.globalParams?.timbreReference === 'string' && item.globalParams.timbreReference) {
       params.timbreReference = item.globalParams.timbreReference;  // dedicated timbre audio path
     } else {
       params.timbreReference = true;  // use preset reference track as timbre
