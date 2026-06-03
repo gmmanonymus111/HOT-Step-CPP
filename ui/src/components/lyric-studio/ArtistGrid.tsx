@@ -124,34 +124,37 @@ export const ArtistGrid: React.FC<ArtistGridProps> = ({
           {artists.map((artist, idx) => (
             <div
               key={artist.id}
-              className={`group relative aspect-[3/4] rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:scale-[1.03] hover:shadow-2xl hover:shadow-pink-500/10 ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
+              className={`group relative aspect-[3/4] rounded-2xl cursor-pointer transition-all duration-300 hover:scale-[1.03] hover:shadow-2xl hover:shadow-pink-500/10 ls2-card-in ls2-stagger-${Math.min(idx + 1, 11)}`}
               onClick={() => onSelectArtist(artist)}
             >
-              {/* Background image or gradient */}
-              {(() => {
-                const dUrl = disguiseImageUrl(artist.image_url, artist.name);
-                const dName = disguiseArtist(artist.name);
-                return dUrl && !imageErrors.has(artist.id) ? (
-                <img
-                  src={dUrl}
-                  alt={dName}
-                  className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                  onError={() => setImageErrors(prev => new Set(prev).add(artist.id))}
-                />
-              ) : (
-                <div
-                  className="absolute inset-0 flex items-center justify-center"
-                  style={{ background: gradient(dName) }}
-                >
-                  <span className="text-5xl font-black text-white/20 select-none">
-                    {dName.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-              );
-              })()}
+              {/* Image clip wrapper — overflow-hidden here so the context menu can extend beyond the card */}
+              <div className="absolute inset-0 rounded-2xl overflow-hidden">
+                {/* Background image or gradient */}
+                {(() => {
+                  const dUrl = disguiseImageUrl(artist.image_url, artist.name);
+                  const dName = disguiseArtist(artist.name);
+                  return dUrl && !imageErrors.has(artist.id) ? (
+                  <img
+                    src={dUrl}
+                    alt={dName}
+                    className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                    onError={() => setImageErrors(prev => new Set(prev).add(artist.id))}
+                  />
+                ) : (
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ background: gradient(dName) }}
+                  >
+                    <span className="text-5xl font-black text-white/20 select-none">
+                      {dName.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                );
+                })()}
 
-              {/* Dark overlay gradient */}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
+                {/* Dark overlay gradient */}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
+              </div>
 
               {/* Content */}
               <div className="absolute inset-x-0 bottom-0 p-4">

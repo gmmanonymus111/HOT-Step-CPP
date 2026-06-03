@@ -42,6 +42,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useGlobalParamsStore } from '../../context/GlobalParamsContext';
 import { QueuePanel } from './QueuePanel';
 import { PromptEditor } from './PromptEditor';
+import { GenerateAllModal } from './GenerateAllModal';
 // streamingStore used via queue panel
 import { loadSelections } from './ProviderSelector';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
@@ -148,6 +149,7 @@ export const LyricStudioV2: React.FC = () => {
   const [addAlbumModalOpen, setAddAlbumModalOpen] = useState(false);
   const [addSongModalOpen, setAddSongModalOpen] = useState(false);
   const [curatedModalOpen, setCuratedModalOpen] = useState(false);
+  const [generateAllOpen, setGenerateAllOpen] = useState(false);
 
   // ── Fetch lyrics progress ──
   const [fetchingLyrics, setFetchingLyrics] = useState(false);
@@ -624,7 +626,7 @@ export const LyricStudioV2: React.FC = () => {
               </div>
               <div className="flex-1 flex min-h-0">
                 <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
-                  <ArtistPageSidebar onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} />
+                  <ArtistPageSidebar onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} onGenerateAll={() => setGenerateAllOpen(true)} />
                 </div>
                 <div className="flex-1 overflow-y-auto">
                   <ArtistGrid
@@ -670,7 +672,7 @@ export const LyricStudioV2: React.FC = () => {
               <div className="flex-1 flex min-h-0">
                 <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-white/5 overflow-hidden">
                   <ArtistPageSidebar artist={nav.selectedArtist} albumCount={albums.length}
-                    onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} />
+                    onOpenQueue={openQueuePanel} onOpenPromptEditor={() => setPromptEditorOpen(true)} onGenerateAll={() => setGenerateAllOpen(true)} />
                 </div>
                 <div className="flex-1 overflow-y-auto">
                   <AlbumGrid
@@ -821,6 +823,10 @@ export const LyricStudioV2: React.FC = () => {
 
       {/* Prompt Editor modal */}
       <PromptEditor open={promptEditorOpen} onClose={() => setPromptEditorOpen(false)} />
+
+      {/* Generate All Audio modal */}
+      <GenerateAllModal open={generateAllOpen} onClose={() => setGenerateAllOpen(false)}
+        artists={artists} showToast={showToast} />
 
       {/* Manual add modals */}
       <AddArtistModal isOpen={addArtistModalOpen} onClose={() => setAddArtistModalOpen(false)} onSubmit={handleAddArtistManual} />
