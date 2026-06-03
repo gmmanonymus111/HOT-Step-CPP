@@ -930,7 +930,9 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
 
 export function useAudioGenQueue(token?: string): AudioGenQueueState {
   useEffect(() => {
-    if (token && _state.items.length > 0) {
+    // No items guard — _state is empty at this point because IDB restore is
+    // async. resumeQueue itself awaits _idbReady before checking for work.
+    if (token) {
       resumeQueue(token);
     }
   }, [token]);
@@ -941,7 +943,7 @@ export function useAudioGenQueue(token?: string): AudioGenQueueState {
 /** Resume queue on mount (if items exist).  Does NOT subscribe to queue state. */
 export function useResumeQueue(token?: string): void {
   useEffect(() => {
-    if (token && _state.items.length > 0) {
+    if (token) {
       resumeQueue(token);
     }
   }, [token]);
