@@ -624,48 +624,55 @@ async function _processQueue(token: string): Promise<void> {
   if (_running) return;
   _running = true;
 
-  while (true) {
-    const pending = _state.items.filter(i => i.status === 'pending');
-    if (pending.length === 0) break;
+  try {
+    while (true) {
+      const pending = _state.items.filter(i => i.status === 'pending');
+      if (pending.length === 0) break;
 
-    // Artist batching: prefer items with same adapter as last completed
-    const next = pending[0];
+      // Artist batching: prefer items with same adapter as last completed
+      const next = pending[0];
 
-    try {
-      // If the item has a jobId from a previous session, try to reconnect
-      // to the server job (browser-only reload). If the server doesn't know
-      // about it (404 = full restart), clear the jobId and re-submit.
-      if (next.jobId) {
-        const reconnected = await _tryReconnect(next, token);
-        if (reconnected) {
-          next.status = 'succeeded';
-          _state.completionCounter++;
-          if (next.songId) _notifySongCreated(next.songId);
-          _maybeAutoAddToPlaylist(next);
+      try {
+        // If the item has a jobId from a previous session, try to reconnect
+        // to the server job (browser-only reload). If the server doesn't know
+        // about it (404 = full restart), clear the jobId and re-submit.
+        if (next.jobId) {
+          const reconnected = await _tryReconnect(next, token);
+          if (reconnected) {
+            // _tryReconnect already set the item's status, audioUrl, songId, etc.
+            // Just ensure it's counted and notified.
+            if (next.status === 'succeeded') {
+              _state.completionCounter++;
+              if (next.songId) _notifySongCreated(next.songId);
+              _maybeAutoAddToPlaylist(next);
+            }
+            _emit(true);
+            continue;
+          }
+          // Server doesn't know about this job — clear and re-submit
+          console.log(`[AudioQueue] Job ${next.jobId} not found on server — re-submitting`);
+          next.jobId = undefined;
+          next.stage = 'Re-submitting…';
           _emit(true);
-          continue;
         }
-        // Server doesn't know about this job — clear and re-submit
-        console.log(`[AudioQueue] Job ${next.jobId} not found on server — re-submitting`);
-        next.jobId = undefined;
-        next.stage = 'Re-submitting…';
-        _emit(true);
+
+        await _executeItem(next, token);
+        next.status = 'succeeded';
+        _state.completionCounter++;
+        // Notify App.tsx so Library updates in real-time
+        if (next.songId) _notifySongCreated(next.songId);
+        _maybeAutoAddToPlaylist(next);
+      } catch (err) {
+        next.status = 'failed';
+        next.error = (err as Error).message;
+        console.error(`[AudioQueue] Item ${next.id} failed:`, (err as Error).message);
       }
-
-      await _executeItem(next, token);
-      next.status = 'succeeded';
-      _state.completionCounter++;
-      // Notify App.tsx so Library updates in real-time
-      if (next.songId) _notifySongCreated(next.songId);
-      _maybeAutoAddToPlaylist(next);
-    } catch (err) {
-      next.status = 'failed';
-      next.error = (err as Error).message;
+      _emit(true);
     }
-    _emit(true);
+  } finally {
+    _running = false;
+    console.log('[AudioQueue] Queue processor stopped');
   }
-
-  _running = false;
 }
 
 /**
@@ -691,6 +698,7 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
         if (masteredUrl) item.masteredAudioUrl = masteredUrl;
         if (status.result?.duration) item.audioDuration = status.result.duration;
       }
+      item.status = 'succeeded';
       item.progress = 100;
       item.stage = 'Complete!';
       console.log(`[AudioQueue] Reconnected to job ${jobId} — already succeeded`);
@@ -699,6 +707,7 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
     if (status.status === 'failed' || status.status === 'cancelled') {
       item.status = 'failed';
       item.error = status.error || (status.status === 'cancelled' ? 'Cancelled' : 'Failed');
+      console.log(`[AudioQueue] Reconnected to job ${jobId} — ${status.status}`);
       return true; // Don't re-submit a failed job
     }
 
@@ -710,6 +719,12 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
     _emit(true);
 
     await _pollUntilDone(item, _token);
+
+    // _pollUntilDone sets audioUrl etc. on success, or throws on failure.
+    // Mark succeeded here (poll doesn't set status).
+    item.status = 'succeeded';
+    item.progress = 100;
+    item.stage = 'Complete!';
 
     // Resolve audio generation in Lireek DB if applicable
     if (item.audioUrl && jobId) {
