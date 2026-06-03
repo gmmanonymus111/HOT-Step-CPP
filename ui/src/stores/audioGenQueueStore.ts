@@ -138,18 +138,7 @@ function _emit(immediate = false) {
   _listeners.forEach(fn => fn());
 }
 
-/**
- * Emit only if the active item's progress or stage actually changed.
- * Avoids ~50% of unnecessary re-renders during poll ticks.
- */
-let _lastEmitStage: string | undefined;
-let _lastEmitProgress: number | undefined;
-function _emitIfChanged(item: AudioQueueItem) {
-  if (item.stage === _lastEmitStage && item.progress === _lastEmitProgress) return;
-  _lastEmitStage = item.stage;
-  _lastEmitProgress = item.progress;
-  _emit();
-}
+
 
 /** Prune oldest completed items beyond MAX_COMPLETED and strip globalParams
  *  from terminal items (succeeded/failed) to reduce serialization cost. */
@@ -508,7 +497,7 @@ export async function enqueueSimpleGen(
           : undefined;
         item.stage = status.stage || 'Generating…';
         item.elapsed = Math.round((Date.now() - startTime) / 1000);
-        _emitIfChanged(item);  // progress tick — skip if nothing changed
+        _emit();  // progress tick — debounced persistence
 
         if (status.status === 'succeeded') {
           const audioUrl = status.result?.audioUrls?.[0] || '';
@@ -835,7 +824,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
         : undefined;
       item.stage = status.stage || 'Generating…';
       item.elapsed = Math.round((Date.now() - startTime) / 1000);
-      _emitIfChanged(item);  // progress tick — skip if nothing changed
+      _emit();  // progress tick — debounced persistence
 
       if (status.status === 'succeeded') {
         const audioUrl = status.result?.audioUrls?.[0];
