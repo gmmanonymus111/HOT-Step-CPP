@@ -8,12 +8,13 @@
 
 import React, { useCallback, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, CheckCircle2, XCircle, X, Music, Play, Square, ListPlus, Check, Download } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, X, Music, Play, Square, ListPlus, Check, Download, RotateCcw } from 'lucide-react';
 import {
   useAudioGenQueue,
   removeFromAudioQueue,
   clearFinishedFromAudioQueue,
   forceFailQueueItem,
+  resetServerQueue,
   getSendToPlaylist,
   setSendToPlaylist,
 } from '../../stores/audioGenQueueStore';
@@ -121,12 +122,25 @@ export const InlineAudioQueue: React.FC = () => {
           {pendingCount > 0 && finishedCount > 0 && ' · '}
           {finishedCount > 0 && `${finishedCount} done`}
         </span>
-        {finishedCount > 0 && (
-          <button onClick={clearFinishedFromAudioQueue}
-            className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors">
-            {t('lyric.clearDone')}
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {(active.length > 0 || queued.length > 0) && (
+            <button onClick={async () => {
+              if (!confirm('Reset the generation queue? All active and pending generations will be cancelled.')) return;
+              try { await resetServerQueue(); } catch (err) { console.error('Queue reset failed:', err); }
+            }}
+              className="text-[10px] text-red-400/60 hover:text-red-400 transition-colors flex items-center gap-0.5"
+              title="Force-reset the generation queue">
+              <RotateCcw className="w-2.5 h-2.5" />
+              Reset
+            </button>
+          )}
+          {finishedCount > 0 && (
+            <button onClick={clearFinishedFromAudioQueue}
+              className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors">
+              {t('lyric.clearDone')}
+            </button>
+          )}
+        </div>
       </div>
 
       {active.length > 0 && (

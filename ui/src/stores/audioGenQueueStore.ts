@@ -291,6 +291,22 @@ export function failManualQueueItem(id: string, error: string): void {
   item.stage = undefined;
   _emit(true);
 }
+
+/** Force-reset the server's generation queue and mark all local active items as failed. */
+export async function resetServerQueue(): Promise<{ cancelled: number; drained: number }> {
+  const result = await generateApi.resetQueue();
+  // Mark all local active items as failed
+  for (const item of _state.items) {
+    if (item.status === 'pending' || item.status === 'loading-adapter' || item.status === 'generating') {
+      item.status = 'failed';
+      item.error = 'Queue reset';
+      item.stage = undefined;
+      item.progress = undefined;
+    }
+  }
+  _emit(true);
+  return result;
+}
 // ── Auto-add to playlist ─────────────────────────────────────────────────────
 
 const SEND_TO_PLAYLIST_KEY = 'hs-sendToPlaylist';

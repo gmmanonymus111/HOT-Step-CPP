@@ -65,27 +65,67 @@ const jobs = new Map<string, GenerationJob>();
 
 // translateParams is now imported from ../services/generation/translateParams.ts
 
-/** Poll ace-server job until completion */
+/** Poll ace-server job until completion, with stall detection watchdog.
+ *  If job.stage/progress don't change for STALE_TIMEOUT_MS, the job is
+ *  considered stalled and is cancelled + failed. This prevents a single
+ *  wedged generation from blocking the entire queue for 45 minutes. */
 async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal): Promise<void> {
-  const POLL_INTERVAL = 100; // ms — fast polling for tight phase-transition detection
-  const MAX_POLLS = 27000; // 45 minutes max (TRT engine build can take 12-30 min on first run)
+  const POLL_INTERVAL = 500;          // ms — 500ms is tight enough for UI, avoids hammering
+  const MAX_WALL_MS = 45 * 60 * 1000; // 45 min absolute max
+  const STALE_TIMEOUT_MS = 120_000;   // 2 min with no progress = stalled
+  const startedAt = Date.now();
+  let lastProgressAt = Date.now();
+  let lastStage = job.stage;
+  let lastProgress = job.progress;
 
-  for (let i = 0; i < MAX_POLLS; i++) {
+  while (true) {
     if (signal.aborted || job.status === 'cancelled') {
-      await aceClient.cancelJob(aceJobId);
+      await aceClient.cancelJob(aceJobId).catch(() => {});
       throw new Error('Cancelled');
     }
 
-    const status = await aceClient.pollJob(aceJobId);
+    // Detect progress changes (set by subscribeLines callbacks in runGeneration)
+    if (job.stage !== lastStage || job.progress !== lastProgress) {
+      lastProgressAt = Date.now();
+      lastStage = job.stage;
+      lastProgress = job.progress;
+    }
 
-    if (status.status === 'done') return;
-    if (status.status === 'failed') throw new Error('Generation failed on ace-server');
-    if (status.status === 'cancelled') throw new Error('Cancelled by ace-server');
+    // Stall detection: no progress update for STALE_TIMEOUT_MS
+    const stalledFor = Date.now() - lastProgressAt;
+    if (stalledFor > STALE_TIMEOUT_MS) {
+      await aceClient.cancelJob(aceJobId).catch(() => {});
+      throw new Error(
+        `Generation stalled — no progress for ${Math.round(stalledFor / 1000)}s ` +
+        `(last stage: "${lastStage}")`
+      );
+    }
+
+    // Absolute wall-clock timeout
+    if (Date.now() - startedAt > MAX_WALL_MS) {
+      await aceClient.cancelJob(aceJobId).catch(() => {});
+      throw new Error('Generation timed out (45 min absolute limit)');
+    }
+
+    // Poll ace-server — wrap in try-catch so transient HTTP timeouts
+    // (e.g. ace-server busy mid-DiT-step) don't kill the loop
+    try {
+      const status = await aceClient.pollJob(aceJobId);
+      if (status.status === 'done') return;
+      if (status.status === 'failed') throw new Error('Generation failed on ace-server');
+      if (status.status === 'cancelled') throw new Error('Cancelled by ace-server');
+    } catch (pollErr: any) {
+      // Re-throw non-transient errors (actual generation failures)
+      if (pollErr.message?.includes('Generation failed') ||
+          pollErr.message?.includes('Cancelled')) {
+        throw pollErr;
+      }
+      // Transient poll error (timeout, connection refused) — log and retry
+      console.warn(`[Generate] Poll error for job ${aceJobId}: ${pollErr.message} (will retry)`);
+    }
 
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
   }
-
-  throw new Error('Generation timed out');
 }
 
 /** Run the full generation pipeline */
@@ -1077,20 +1117,56 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 const pendingQueue: (() => void)[] = [];
 let generationRunning = false;
 
+const MAX_RETRIES = 1; // retry once on transient failures
+
 function enqueueGeneration(job: GenerationJob): void {
   const execute = async () => {
     generationRunning = true;
-    try {
-      await runGeneration(job);
-    } catch (err: any) {
-      console.error(`[Generate] Unhandled error in job ${job.id}:`, err);
-      job.status = 'failed';
-      job.error = err.message;
-    } finally {
-      generationRunning = false;
-      const next = pendingQueue.shift();
-      if (next) next();
+    let attempts = 0;
+
+    while (attempts <= MAX_RETRIES) {
+      try {
+        await runGeneration(job);
+        break; // success — exit retry loop
+      } catch (err: any) {
+        const msg = err.message || '';
+        const isRetryable = !msg.includes('Cancelled')
+          && !msg.includes('Unauthorized')
+          && job.status !== 'cancelled';
+
+        if (isRetryable && attempts < MAX_RETRIES) {
+          attempts++;
+          console.log(`[Generate] Job ${job.id} failed (attempt ${attempts}), retrying: ${msg}`);
+          logGeneration(job.id, 'WARNING', `[Retry] Attempt ${attempts} failed: ${msg} — retrying with new seed...`);
+
+          // Reset job state for retry
+          job.status = 'pending';
+          job.stage = `Retrying (attempt ${attempts + 1})...`;
+          job.progress = 0;
+          job.error = undefined;
+          job.aceJobId = undefined;
+
+          // Randomize seed on retry — bad LM output (same seed) may have caused the stall
+          job.params.seed = Math.floor(Math.random() * 2_147_483_647);
+          job.params.randomSeed = true;
+
+          // Brief pause before retry
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          // Final failure — no more retries
+          job.status = 'failed';
+          job.error = msg;
+          job.stage = 'Failed';
+          console.error(`[Generate] Job ${job.id} failed permanently${attempts > 0 ? ` after ${attempts + 1} attempt(s)` : ''}: ${msg}`);
+          failGenerationLog(job.id, msg, 'unknown');
+          break;
+        }
+      }
     }
+
+    generationRunning = false;
+    const next = pendingQueue.shift();
+    if (next) next();
   };
 
   if (generationRunning) {
@@ -1184,6 +1260,66 @@ router.post('/cancel-all', (req, res) => {
     }
   }
   res.json({ success: true, cancelled });
+});
+
+// GET /api/generate/queue — queue health / status inspection
+router.get('/queue', (_req, res) => {
+  const activeJob = Array.from(jobs.values()).find(j =>
+    j.status === 'lm_running' || j.status === 'synth_running' || j.status === 'saving'
+  );
+
+  // Count all non-terminal jobs in the jobs Map (includes pending jobs waiting in queue)
+  const depth = Array.from(jobs.values()).filter(j =>
+    ['pending', 'lm_running', 'synth_running', 'saving'].includes(j.status)
+  ).length;
+
+  res.json({
+    depth,
+    running: generationRunning,
+    current: activeJob ? {
+      id: activeJob.id,
+      status: activeJob.status,
+      stage: activeJob.stage,
+      progress: activeJob.progress,
+      age: Math.round((Date.now() - activeJob.createdAt) / 1000),
+      aceJobId: activeJob.aceJobId,
+    } : null,
+    pending: pendingQueue.length,
+  });
+});
+
+// POST /api/generate/reset-queue — force-reset: cancel everything, drain queue
+router.post('/reset-queue', (_req, res) => {
+  let cancelled = 0;
+
+  // Cancel all non-terminal jobs in the jobs Map
+  for (const [, job] of jobs) {
+    if (['pending', 'lm_running', 'synth_running', 'saving'].includes(job.status)) {
+      job.status = 'failed';
+      job.error = 'Queue reset by user';
+      job.stage = 'Reset';
+      if (job.aceJobId) {
+        aceClient.cancelJob(job.aceJobId).catch(() => {});
+      }
+      if ((job as any)._abort) {
+        (job as any)._abort.abort();
+      }
+      cancelled++;
+    }
+  }
+
+  // Drain the pending execution queue
+  const drained = pendingQueue.length;
+  pendingQueue.length = 0;
+  generationRunning = false;
+
+  console.log(`[Generate] Queue reset: ${cancelled} job(s) cancelled, ${drained} pending drained`);
+
+  res.json({
+    success: true,
+    cancelled,
+    drained,
+  });
 });
 
 export default router;

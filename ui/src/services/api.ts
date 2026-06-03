@@ -150,6 +150,20 @@ export const generateApi = {
   status: (jobId: string) => get<GenerationJob>(`/generate/status/${jobId}`),
   cancel: (jobId: string) => post<{ success: boolean }>(`/generate/cancel/${jobId}`),
   cancelAll: () => post<{ success: boolean; cancelled: number }>('/generate/cancel-all'),
+  queueStatus: () => get<{
+    depth: number;
+    running: boolean;
+    current: {
+      id: string;
+      status: string;
+      stage: string;
+      progress: number;
+      age: number;
+      aceJobId?: string;
+    } | null;
+    pending: number;
+  }>('/generate/queue'),
+  resetQueue: () => post<{ success: boolean; cancelled: number; drained: number }>('/generate/reset-queue'),
 };
 
 // ── Models ──────────────────────────────────────────────────

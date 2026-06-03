@@ -15,7 +15,7 @@ const BASE = config.aceServer.url;
 // compute (DiT steps, adapter merge) it can't respond. These must be
 // generous enough to survive the longest possible stall.
 const TIMEOUT_QUICK  =  15_000;   // health checks, props, job submit
-const TIMEOUT_POLL   = 120_000;   // job polling (ace-server may be busy with a DiT step)
+const TIMEOUT_POLL   =  30_000;   // job polling — fail fast, let watchdog decide on stalls
 const TIMEOUT_RESULT = 300_000;   // fetching large audio results (encode + transfer)
 
 /** Props response from GET /props */
