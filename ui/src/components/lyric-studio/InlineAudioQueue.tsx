@@ -187,7 +187,7 @@ interface QueueItemRowProps {
   onDownload?: (item: AudioQueueItem) => void;
 }
 
-const QueueItemRow = memo<QueueItemRowProps>(({ item, isPlayingInMain, onPlay, onDownload }) => {
+const QueueItemRow: React.FC<QueueItemRowProps> = ({ item, isPlayingInMain, onPlay, onDownload }) => {
   const { disguiseArtist } = useDisguiseMode();
   const isRunning = item.status === 'loading-adapter' || item.status === 'generating';
   const isSucceeded = item.status === 'succeeded';
@@ -297,20 +297,7 @@ const QueueItemRow = memo<QueueItemRowProps>(({ item, isPlayingInMain, onPlay, o
       )}
     </div>
   );
-}, (prev, next) => {
-  // Custom equality — item objects are mutated in place, so reference equality
-  // always returns true. Compare the individual fields that affect rendering.
-  if (prev.isPlayingInMain !== next.isPlayingInMain) return false;
-  const a = prev.item, b = next.item;
-  return a.status === b.status
-    && a.stage === b.stage
-    && a.progress === b.progress
-    && a.elapsed === b.elapsed
-    && a.error === b.error
-    && a.audioUrl === b.audioUrl
-    && a.songId === b.songId
-    && a.audioDuration === b.audioDuration;
-});
+};
 
 const QueueAddToPlaylistBtn = memo<{ item: AudioQueueItem }>(({ item }) => {
   const playlist = usePlaylist();
