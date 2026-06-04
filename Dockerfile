@@ -85,6 +85,7 @@ WORKDIR /app
 
 # Engine binaries + shared libraries (GGML backends, ORT, cuDNN)
 COPY --from=engine-builder /staging/engine/ /app/engine/
+# NOTE: Lua plugins are bind-mounted at runtime via docker-compose.yml
 
 # Server source code + production dependencies
 COPY server/ /app/server/

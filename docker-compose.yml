@@ -30,6 +30,9 @@ services:
       - ./models:/app/models              # GGUF model files
       - ./adapters:/app/adapters           # LoRA safetensors
       - ./data:/app/server/data            # SQLite DB + generated audio
+      # Lua plugins (bind-mounted so edits are instant, no rebuild needed)
+      - ./engine/plugins:/app/engine/plugins:ro   # Built-in (solvers, schedulers, etc.)
+      - ./plugins:/app/plugins:ro                  # Community/custom plugins
     env_file:
       - .env.docker
     restart: unless-stopped
