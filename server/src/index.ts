@@ -213,13 +213,14 @@ function startAceServer(): ChildProcess | null {
     const env = { ...process.env };
     // Find the actual PATH key (case-insensitive on Windows)
     const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
-    env[pathKey] = config.aceServer.trtLibs + ';' + (env[pathKey] || '');
+    const pathSep = process.platform === 'win32' ? ';' : ':';
+    env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
 
     // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
     // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
     const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
     if (fs.existsSync(trtllmLibs)) {
-      env[pathKey] = trtllmLibs + ';' + env[pathKey];
+      env[pathKey] = trtllmLibs + pathSep + env[pathKey];
       console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
     }
 
