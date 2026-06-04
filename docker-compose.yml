@@ -33,6 +33,9 @@ services:
       # Lua plugins (bind-mounted so edits are instant, no rebuild needed)
       - ./engine/plugins:/app/engine/plugins:ro   # Built-in (solvers, schedulers, etc.)
       - ./plugins:/app/plugins:ro                  # Community/custom plugins
+      # Server source (live from host — `docker compose restart` to apply changes)
+      # node_modules stays baked in the image; only src/ is overlaid
+      - ./server/src:/app/server/src:ro
     env_file:
       - .env.docker
     restart: unless-stopped
