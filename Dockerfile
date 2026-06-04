@@ -55,7 +55,7 @@ FROM node:22-slim AS ui-builder
 
 WORKDIR /build/ui
 COPY ui/package*.json ./
-RUN npm ci
+RUN npm install
 COPY ui/ .
 RUN npx vite build
 
@@ -67,7 +67,7 @@ FROM node:22 AS server-deps
 WORKDIR /build/server
 COPY server/package*.json ./
 # Install production deps only. tsx comes from optionalDependencies.
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 
 # ── Stage 4: Runtime ────────────────────────────────────────────────
