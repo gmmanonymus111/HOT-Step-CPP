@@ -79,7 +79,6 @@ export function formatVaeModel(filename: string): string {
   if (name === 'vae') return 'VAE';
   if (name === 'scragvae') return 'ScragVAE';
   if (name === 'vae-DreamVAE') return 'DreamVAE';
-  if (name === 'vae-Regrind-V7') return 'Regrind V7';
   if (name === 'vae-Regrind-V9b') return 'Regrind V9b';
   if (name === 'vae-Regrind-V9b-Blend50') return 'Regrind V9b Blend50';
   return name;

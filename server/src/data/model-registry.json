@@ -1487,18 +1487,6 @@
       "tags": ["recommended"]
     },
     {
-      "id": "vae-dreamvae-f32-st",
-      "filename": "vae-DreamVAE-F32.safetensors",
-      "role": "vae",
-      "displayName": "DreamVAE (Safetensors)",
-      "scale": null,
-      "variant": "DreamVAE",
-      "quant": "F32",
-      "sizeBytes": 206773504,
-      "description": "DreamVAE — alternative decoder architecture with smoother output characteristics. Safetensors format.",
-      "tags": []
-    },
-    {
       "id": "vae-dreamvae-onnx",
       "filename": "vae-DreamVAE.onnx",
       "role": "vae",
@@ -1507,19 +1495,7 @@
       "variant": "DreamVAE",
       "quant": null,
       "sizeBytes": 206905696,
-      "description": "DreamVAE in ONNX format — decoder-only, for TRT-accelerated inference.",
-      "tags": []
-    },
-    {
-      "id": "vae-regrind-v7-f32-st",
-      "filename": "vae-Regrind-V7-F32.safetensors",
-      "role": "vae",
-      "displayName": "Regrind V7 (Safetensors)",
-      "scale": null,
-      "variant": "Regrind-V7",
-      "quant": "F32",
-      "sizeBytes": 337432092,
-      "description": "Regrind V7 — retrained decoder for improved spectral fidelity. Safetensors format.",
+      "description": "DreamVAE in ONNX format — alternative decoder architecture, runs via ORT decode path.",
       "tags": []
     },
     {
