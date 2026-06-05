@@ -82,11 +82,16 @@ RUN npm install --omit=dev && npm install tsx
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # Install Node.js 22 (LTS) + runtime libraries the engine needs
-# TensorRT 11 runtime libraries for DiT/LM acceleration
+# TensorRT runtime libraries:
+#   TRT 11 — native DiT/LM acceleration (dit-trt.h, compiled in)
+#   TRT 10 — ORT TensorRT EP (bundled libonnxruntime_providers_tensorrt.so needs libnvinfer.so.10)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnvinfer11 \
     libnvinfer-plugin11 \
     libnvonnxparsers11 \
+    libnvinfer10 \
+    libnvinfer-plugin10 \
+    libnvonnxparsers10 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update \
