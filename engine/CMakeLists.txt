@@ -278,6 +278,17 @@ if(TRT_ENABLED)
         target_link_directories(acestep-core PUBLIC "${_TRT_LIB_DIR}")
     endif()
     target_link_libraries(acestep-core PUBLIC ${_TRT_NVINFER_LIB} ${_TRT_NVONNXPARSER_LIB})
+    # TRT headers include cuda_runtime_api.h — on Linux g++ needs the CUDA
+    # include path explicitly (nvcc gets it automatically, but acestep-core
+    # compiles as plain C++). Windows CUDA Toolkit puts headers on PATH.
+    if(NOT WIN32)
+        find_package(CUDAToolkit QUIET)
+        if(CUDAToolkit_FOUND)
+            target_include_directories(acestep-core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+            target_link_libraries(acestep-core PUBLIC CUDA::cudart)
+            message(STATUS "[TRT] CUDA include: ${CUDAToolkit_INCLUDE_DIRS}")
+        endif()
+    endif()
     message(STATUS "[TRT] DiT TRT acceleration: ENABLED")
 endif()
 
