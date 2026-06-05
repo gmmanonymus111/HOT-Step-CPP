@@ -1193,9 +1193,8 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
 int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
 #ifdef HOT_STEP_TRT
-    // TRT path: if DiT model is an ONNX file, use TensorRT acceleration
-    if (ctx->dit_key.path.size() > 5 &&
-        ctx->dit_key.path.compare(ctx->dit_key.path.size() - 5, 5, ".onnx") == 0) {
+    // TRT path: if DiT model is ONNX (file or directory), use TensorRT acceleration
+    if (dit_ends_with_onnx(ctx->dit_key.path.c_str())) {
 
         fprintf(stderr, "[DiT-Generate] Using TRT path: %s\n", ctx->dit_key.path.c_str());
 
@@ -1213,7 +1212,54 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
                 s_trt_ready = false;
             }
 
-            const std::string & onnx_path = ctx->dit_key.path;
+            // Resolve actual ONNX file: dit_key.path may be a directory or .onnx file
+            std::string onnx_path;
+            {
+                const std::string & p = ctx->dit_key.path;
+                size_t plen = p.size();
+                if (plen >= 5 && p.compare(plen - 5, 5, ".onnx") == 0) {
+                    onnx_path = p;  // already a .onnx file path
+                } else {
+                    // Directory: find the dit*.onnx file inside
+#ifdef _WIN32
+                    std::string pattern = p + "\\*.onnx";
+                    WIN32_FIND_DATAA fd;
+                    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+                    if (h != INVALID_HANDLE_VALUE) {
+                        do {
+                            std::string fname(fd.cFileName);
+                            std::string lower = fname;
+                            for (auto & c : lower) c = (char)tolower((unsigned char)c);
+                            if (lower.find("dit") != std::string::npos) {
+                                onnx_path = p + "\\" + fname;
+                                break;
+                            }
+                        } while (FindNextFileA(h, &fd));
+                        FindClose(h);
+                    }
+#else
+                    DIR * d = opendir(p.c_str());
+                    if (d) {
+                        struct dirent * ent;
+                        while ((ent = readdir(d)) != nullptr) {
+                            std::string fname(ent->d_name);
+                            std::string lower = fname;
+                            for (auto & c : lower) c = (char)tolower((unsigned char)c);
+                            if (lower.find("dit") != std::string::npos &&
+                                lower.size() >= 5 && lower.compare(lower.size() - 5, 5, ".onnx") == 0) {
+                                onnx_path = p + "/" + fname;
+                                break;
+                            }
+                        }
+                        closedir(d);
+                    }
+#endif
+                    if (onnx_path.empty()) {
+                        fprintf(stderr, "[DiT-Generate] FATAL: no dit*.onnx found in %s\n", p.c_str());
+                        return -1;
+                    }
+                }
+            }
 
             // Engine path: same directory, same name but .engine extension
             std::string engine_path = onnx_path.substr(0, onnx_path.size() - 5) + ".engine";
