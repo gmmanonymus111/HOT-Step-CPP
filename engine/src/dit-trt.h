@@ -143,19 +143,16 @@ inline bool dit_trt_build(
         return false;
     }
 
-    // Create network — STRONGLY_TYPED: TRT honors per-tensor dtypes from ONNX.
-    // The dynamo-exported bf16_mixed ONNX has bf16 trunk + fp32 islands.
-    // TRT runs bf16 tensor cores for matmuls and fp32 for norms/residuals.
-    // Note: kEXPLICIT_BATCH was removed in TRT 10.x (always-on since TRT 8).
-    uint32_t net_flags = 1U << static_cast<uint32_t>(
-        nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
-    auto network = builder->createNetworkV2(net_flags);
+    // Create network — no STRONGLY_TYPED so TRT can auto-promote
+    // numerically sensitive ops (LayerNorm, Reduce, Pow) to FP32.
+    // kEXPLICIT_BATCH was removed in TRT 10.x (always-on since TRT 8).
+    auto network = builder->createNetworkV2(0);
     if (!network) {
         fprintf(stderr, "[DiT-TRT] Failed to create network\n");
         delete builder;
         return false;
     }
-    fprintf(stderr, "[DiT-TRT] STRONGLY_TYPED network (bf16_mixed from dynamo)\n");
+    fprintf(stderr, "[DiT-TRT] Network created (FP16 auto-precision)\n");
 
     // Parse ONNX
     auto parser = nvonnxparser::createParser(*network, logger);
@@ -171,11 +168,16 @@ inline bool dit_trt_build(
     // Builder config
     auto config = builder->createBuilderConfig();
 
-    // STRONGLY_TYPED + TF32: graph types are authoritative.
-    // TF32 accelerates fp32 island ops on tensor cores.
-    // No FP16/BF16 builder flags — STRONGLY_TYPED forbids them.
+    // FP16 + TF32: allow TRT to use FP16 tensor cores for matmuls
+    // while auto-promoting numerically sensitive ops (LayerNorm, Reduce,
+    // Pow) to FP32 to prevent overflow/NaN.
+    // NOT using STRONGLY_TYPED — that forces ONNX dtypes exactly,
+    // including FP16 LayerNorm which overflows on large sequences.
+    config->setFlag(nvinfer1::BuilderFlag::kFP16);
     config->setFlag(nvinfer1::BuilderFlag::kTF32);
-    fprintf(stderr, "[DiT-TRT] STRONGLY_TYPED + TF32 (bf16_mixed from dynamo ONNX)\n");
+    // OBEY_PRECISION_CONSTRAINTS respects explicit FP32 ops in the ONNX
+    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+    fprintf(stderr, "[DiT-TRT] FP16 + TF32 + OBEY_PRECISION_CONSTRAINTS\n");
 
     // Enable refittable engine (zero perf penalty with IDENTICAL)
     config->setFlag(nvinfer1::BuilderFlag::kREFIT_IDENTICAL);
