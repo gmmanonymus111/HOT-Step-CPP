@@ -188,6 +188,8 @@ export const config = {
     ollamaModel: process.env.OLLAMA_MODEL || 'llama3',
     lmstudioModel: process.env.LMSTUDIO_MODEL || '',
     unslothModel: process.env.UNSLOTH_MODEL || '',
+    llamacppBaseUrl: process.env.LLAMACPP_BASE_URL || 'http://127.0.0.1:8080/v1',
+    llamacppModel: process.env.LLAMACPP_MODEL || '',
     openaiCompatBaseUrl: process.env.OPENAI_COMPAT_BASE_URL || '',
     openaiCompatApiKey: process.env.OPENAI_COMPAT_API_KEY || '',
     openaiCompatModel: process.env.OPENAI_COMPAT_MODEL || '',
@@ -247,6 +249,7 @@ export const EXPOSED_ENV_KEYS = [
   // LLM endpoints
   'OLLAMA_BASE_URL', 'LMSTUDIO_BASE_URL',
   'UNSLOTH_BASE_URL', 'UNSLOTH_USERNAME', 'UNSLOTH_PASSWORD',
+  'LLAMACPP_BASE_URL', 'LLAMACPP_MODEL',
   'OPENAI_COMPAT_BASE_URL', 'OPENAI_COMPAT_API_KEY', 'OPENAI_COMPAT_MODEL', 'OPENAI_COMPAT_NAME',
   // Paths
   'LYRICS_EXPORT_DIR',
@@ -333,6 +336,10 @@ export function reloadEnvConfig(): string[] {
     () => config.lireek.lmstudioModel);
   apply('UNSLOTH_MODEL', v => { config.lireek.unslothModel = v; },
     () => config.lireek.unslothModel);
+  apply('LLAMACPP_BASE_URL', v => { config.lireek.llamacppBaseUrl = v || 'http://127.0.0.1:8080/v1'; },
+    () => config.lireek.llamacppBaseUrl);
+  apply('LLAMACPP_MODEL', v => { config.lireek.llamacppModel = v; },
+    () => config.lireek.llamacppModel);
   apply('OPENAI_COMPAT_BASE_URL', v => { config.lireek.openaiCompatBaseUrl = v; },
     () => config.lireek.openaiCompatBaseUrl);
   apply('OPENAI_COMPAT_API_KEY', v => { config.lireek.openaiCompatApiKey = v; },

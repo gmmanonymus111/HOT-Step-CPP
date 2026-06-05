@@ -9,6 +9,7 @@ import { OllamaProvider } from './ollama.js';
 import { LMStudioProvider } from './lmstudio.js';
 import { UnslothProvider } from './unsloth.js';
 import { OpenAICompatProvider } from './openai-compat.js';
+import { LlamaCppProvider } from './llamacpp.js';
 
 const providers: Record<string, LLMProvider> = {
   gemini: new GeminiProvider(),
@@ -17,6 +18,7 @@ const providers: Record<string, LLMProvider> = {
   ollama: new OllamaProvider(),
   lmstudio: new LMStudioProvider(),
   unsloth: new UnslothProvider(),
+  llamacpp: new LlamaCppProvider(),
   'openai-compat': new OpenAICompatProvider(),
 };
 
@@ -31,7 +33,7 @@ export async function listProviders(): Promise<ProviderInfo[]> {
 
   const promises = Object.values(providers).map(async (p): Promise<ProviderInfo> => {
     try {
-      if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider || p instanceof OpenAICompatProvider) {
+      if (p instanceof GeminiProvider || p instanceof OllamaProvider || p instanceof LMStudioProvider || p instanceof UnslothProvider || p instanceof LlamaCppProvider || p instanceof OpenAICompatProvider) {
         // Race against a timeout so one dead provider can't block the rest
         const info = await Promise.race([
           p.toInfoAsync(),
