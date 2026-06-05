@@ -143,16 +143,17 @@ inline bool dit_trt_build(
         return false;
     }
 
-    // Create network — no STRONGLY_TYPED so TRT can auto-promote
-    // numerically sensitive ops (LayerNorm, Reduce, Pow) to FP32.
-    // kEXPLICIT_BATCH was removed in TRT 10.x (always-on since TRT 8).
-    auto network = builder->createNetworkV2(0);
+    // Create network — STRONGLY_TYPED is mandatory in TRT 11.
+    // TRT honors per-tensor dtypes from the ONNX graph.
+    uint32_t net_flags = 1U << static_cast<uint32_t>(
+        nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+    auto network = builder->createNetworkV2(net_flags);
     if (!network) {
         fprintf(stderr, "[DiT-TRT] Failed to create network\n");
         delete builder;
         return false;
     }
-    fprintf(stderr, "[DiT-TRT] Network created (FP16 auto-precision)\n");
+    fprintf(stderr, "[DiT-TRT] STRONGLY_TYPED network\n");
 
     // Parse ONNX
     auto parser = nvonnxparser::createParser(*network, logger);
@@ -165,19 +166,60 @@ inline bool dit_trt_build(
         return false;
     }
 
+    // Post-parse precision fixup: promote LayerNorm-sensitive ops to FP32.
+    // ONNX may mark Reduce/Pow as FP16 but these overflow on large hidden dims.
+    // With STRONGLY_TYPED, we must explicitly set output tensor types.
+    {
+        int n_layers = network->getNbLayers();
+        int promoted = 0;
+        for (int i = 0; i < n_layers; i++) {
+            auto * layer = network->getLayer(i);
+            auto lt = layer->getType();
+            bool needs_fp32 = false;
+            switch (lt) {
+                case nvinfer1::LayerType::kREDUCE:
+                case nvinfer1::LayerType::kUNARY:       // includes Sqrt, Rsqrt
+                case nvinfer1::LayerType::kELEMENTWISE:  // includes Pow, Sub in LN decomposition
+                    // Only promote if output is FP16 (don't touch FP32/BF16)
+                    if (layer->getNbOutputs() > 0) {
+                        auto dtype = layer->getOutput(0)->getType();
+                        if (dtype == nvinfer1::DataType::kHALF) {
+                            needs_fp32 = true;
+                        }
+                    }
+                    break;
+                case nvinfer1::LayerType::kNORMALIZATION:
+                    // TRT 11 native INormalizationLayer
+                    if (layer->getNbOutputs() > 0) {
+                        auto dtype = layer->getOutput(0)->getType();
+                        if (dtype == nvinfer1::DataType::kHALF) {
+                            needs_fp32 = true;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+            if (needs_fp32) {
+                for (int o = 0; o < layer->getNbOutputs(); o++) {
+                    layer->getOutput(o)->setType(nvinfer1::DataType::kFLOAT);
+                }
+                promoted++;
+            }
+        }
+        if (promoted > 0) {
+            fprintf(stderr, "[DiT-TRT] Promoted %d FP16 Reduce/Unary/Norm layers to FP32\n",
+                    promoted);
+        }
+    }
+
     // Builder config
     auto config = builder->createBuilderConfig();
 
-    // FP16 + TF32: allow TRT to use FP16 tensor cores for matmuls
-    // while auto-promoting numerically sensitive ops (LayerNorm, Reduce,
-    // Pow) to FP32 to prevent overflow/NaN.
-    // NOT using STRONGLY_TYPED — that forces ONNX dtypes exactly,
-    // including FP16 LayerNorm which overflows on large sequences.
-    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    // STRONGLY_TYPED is mandatory in TRT 11 (kFP16/kOBEY removed).
+    // TF32 accelerates fp32 island ops on tensor cores.
     config->setFlag(nvinfer1::BuilderFlag::kTF32);
-    // OBEY_PRECISION_CONSTRAINTS respects explicit FP32 ops in the ONNX
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
-    fprintf(stderr, "[DiT-TRT] FP16 + TF32 + OBEY_PRECISION_CONSTRAINTS\n");
+    fprintf(stderr, "[DiT-TRT] STRONGLY_TYPED + TF32\n");
 
     // Enable refittable engine (zero perf penalty with IDENTICAL)
     config->setFlag(nvinfer1::BuilderFlag::kREFIT_IDENTICAL);
