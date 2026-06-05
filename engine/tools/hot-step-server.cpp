@@ -2132,10 +2132,17 @@ int main(int argc, char ** argv) {
     }
 
     // ONNX/TensorRT: auto-detect vae_decoder.onnx in --onnx-dir
+    // Try new subdirectory layout first (onnx/vae/), fall back to legacy flat layout.
     static std::string g_onnx_vae_path_buf;
     if (g_onnx_dir) {
-        g_onnx_vae_path_buf = std::string(g_onnx_dir) + "/vae_decoder.onnx";
+        // Try new location: onnx_dir/vae/vae_decoder.onnx
+        g_onnx_vae_path_buf = std::string(g_onnx_dir) + "/vae/vae_decoder.onnx";
         FILE * f = fopen(g_onnx_vae_path_buf.c_str(), "rb");
+        if (!f) {
+            // Fall back to legacy flat layout: onnx_dir/vae_decoder.onnx
+            g_onnx_vae_path_buf = std::string(g_onnx_dir) + "/vae_decoder.onnx";
+            f = fopen(g_onnx_vae_path_buf.c_str(), "rb");
+        }
         if (f) {
             fclose(f);
             g_synth_params.onnx_vae_path = g_onnx_vae_path_buf.c_str();
@@ -2433,6 +2440,7 @@ int main(int argc, char ** argv) {
 
         // Resolve PP-VAE ONNX paths for ORT/TRT acceleration.
         // Look for pp-vae_encoder.onnx / pp-vae_decoder.onnx in models/onnx/
+        // Try new subdirectory layout (onnx/pp-vae/) first, fall back to legacy flat layout.
         // Skipped entirely when backend=gguf.
         std::string pp_dir;
         {
@@ -2444,13 +2452,25 @@ int main(int argc, char ** argv) {
         std::string onnx_enc_path, onnx_dec_path;
         if (backend != "gguf") {
             {
-                std::string ep = onnx_dir + "/" + "pp-vae_encoder.onnx";
+                // Try new location first: onnx/pp-vae/pp-vae_encoder.onnx
+                std::string ep = onnx_dir + "/" + "pp-vae" + "/" + "pp-vae_encoder.onnx";
                 FILE * f = fopen(ep.c_str(), "rb");
+                if (!f) {
+                    // Fall back to legacy flat layout
+                    ep = onnx_dir + "/" + "pp-vae_encoder.onnx";
+                    f = fopen(ep.c_str(), "rb");
+                }
                 if (f) { fclose(f); onnx_enc_path = ep; }
             }
             {
-                std::string dp = onnx_dir + "/" + "pp-vae_decoder.onnx";
+                // Try new location first: onnx/pp-vae/pp-vae_decoder.onnx
+                std::string dp = onnx_dir + "/" + "pp-vae" + "/" + "pp-vae_decoder.onnx";
                 FILE * f = fopen(dp.c_str(), "rb");
+                if (!f) {
+                    // Fall back to legacy flat layout
+                    dp = onnx_dir + "/" + "pp-vae_decoder.onnx";
+                    f = fopen(dp.c_str(), "rb");
+                }
                 if (f) { fclose(f); onnx_dec_path = dp; }
             }
             if (backend == "onnx" && (onnx_enc_path.empty() || onnx_dec_path.empty())) {

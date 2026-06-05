@@ -169,6 +169,7 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
         // PP-VAE is a DIFFERENT model from the main VAE (scragvae) — same
         // Oobleck architecture but different weights. Look for pp-vae_encoder.onnx
         // and pp-vae_decoder.onnx in the models/onnx/ directory.
+        // Try new subdirectory layout (onnx/pp-vae/) first, fall back to legacy flat layout.
         {
             // Derive onnx/ directory from pp_vae_path:
             //   models/pp-vae-BF16.gguf → models/onnx/
@@ -180,10 +181,16 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
             }
             std::string onnx_dir = pp_dir + WS_SEP + "onnx";
 
-            std::string enc_path = onnx_dir + WS_SEP + "pp-vae_encoder.onnx";
-            std::string dec_path = onnx_dir + WS_SEP + "pp-vae_decoder.onnx";
+            // Try new location first: onnx/pp-vae/pp-vae_encoder.onnx
+            std::string enc_path = onnx_dir + WS_SEP + "pp-vae" + WS_SEP + "pp-vae_encoder.onnx";
+            std::string dec_path = onnx_dir + WS_SEP + "pp-vae" + WS_SEP + "pp-vae_decoder.onnx";
 
             FILE * f_enc = fopen(enc_path.c_str(), "rb");
+            if (!f_enc) {
+                // Fall back to legacy flat layout: onnx/pp-vae_encoder.onnx
+                enc_path = onnx_dir + WS_SEP + "pp-vae_encoder.onnx";
+                f_enc = fopen(enc_path.c_str(), "rb");
+            }
             if (f_enc) {
                 fclose(f_enc);
                 ctx->pp_vae_onnx_enc_path      = enc_path;
@@ -193,6 +200,11 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
             }
 
             FILE * f_dec = fopen(dec_path.c_str(), "rb");
+            if (!f_dec) {
+                // Fall back to legacy flat layout: onnx/pp-vae_decoder.onnx
+                dec_path = onnx_dir + WS_SEP + "pp-vae_decoder.onnx";
+                f_dec = fopen(dec_path.c_str(), "rb");
+            }
             if (f_dec) {
                 fclose(f_dec);
                 ctx->pp_vae_onnx_dec_path      = dec_path;
