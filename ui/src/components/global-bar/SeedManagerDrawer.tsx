@@ -179,11 +179,11 @@ export const SeedManagerDrawer: React.FC<SeedManagerDrawerProps> = ({
   return (
     <>
       {/* Backdrop — click to close */}
-      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
 
       {/* Drawer panel */}
       <div
-        className="fixed z-50 w-72 bg-zinc-900/98 rounded-xl border border-zinc-700 shadow-2xl overflow-hidden"
+        className="fixed z-50 w-72 bg-zinc-900 rounded-xl border border-zinc-700 shadow-2xl overflow-hidden"
         style={{ bottom: '3.5rem', right: '1rem' }}   // anchors above seed row; adjust if needed
         onClick={e => e.stopPropagation()}
       >
