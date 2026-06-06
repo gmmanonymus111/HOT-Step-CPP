@@ -26,11 +26,14 @@ export const StreamingPanel: React.FC<StreamingPanelProps> = ({
     return '…(earlier output trimmed)…\n' + streamText.slice(-MAX_DISPLAY);
   }, [streamText]);
 
-  // Debounced auto-scroll — avoids forcing layout reflow on every chunk
+  // Throttled auto-scroll — fires at most every 100ms to avoid layout thrashing,
+  // but guarantees scrolling during active streaming (unlike a debounce which
+  // gets perpetually reset by fast rAF updates).
   useEffect(() => {
     if (collapsed) return;
-    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    if (scrollTimerRef.current) return; // already scheduled — skip
     scrollTimerRef.current = setTimeout(() => {
+      scrollTimerRef.current = null;
       if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
     }, 100);
   }, [displayText, collapsed]);
