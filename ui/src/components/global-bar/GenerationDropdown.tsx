@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 // Seed input uses local string state to avoid parseInt("-") → NaN → -1 snap-back
 import { useTranslation } from 'react-i18next';
-import { RotateCcw, ChevronDown, Music2, Upload, Trash2, Zap } from 'lucide-react';
+import { RotateCcw, ChevronDown, Music2, Upload, Trash2, Zap, Save } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
@@ -16,6 +16,7 @@ import { masteringApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { usePluginRegistry } from '../../hooks/usePluginRegistry';
 import { PluginControls } from './PluginControls';
+import { SeedManagerDrawer } from './SeedManagerDrawer';
 
 const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
@@ -37,6 +38,7 @@ export const GenerationDropdown: React.FC = () => {
   interface ReferenceTrack { name: string; size: number; url: string; }
   const [timbreRefs, setTimbreRefs] = useState<ReferenceTrack[]>([]);
   const [timbreUploading, setTimbreUploading] = useState(false);
+  const [seedDrawerOpen, setSeedDrawerOpen] = useState(false);
 
   useEffect(() => {
     masteringApi.listReferences()
@@ -737,9 +739,15 @@ export const GenerationDropdown: React.FC = () => {
       </div>
 
       {/* Seed */}
-      <div>
+      <div className="relative">
         <div className="flex items-center justify-between mb-1.5">
-          <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Seed</label>
+          <div className="flex items-center gap-1.5">
+            <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Seed</label>
+            <button onClick={() => setSeedDrawerOpen(true)} title="Seed Manager"
+              className="text-zinc-500 hover:text-amber-400 transition-colors">
+              <Save size={12} />
+            </button>
+          </div>
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-zinc-500">Random</span>
             <ToggleSwitch checked={gp.randomSeed} onChange={gp.setRandomSeed} accentColor="sky" />
@@ -748,6 +756,13 @@ export const GenerationDropdown: React.FC = () => {
         {!gp.randomSeed && (
           <SeedInput value={gp.seed} onChange={gp.setSeed} className={inputClasses} />
         )}
+        <SeedManagerDrawer
+          isOpen={seedDrawerOpen}
+          onClose={() => setSeedDrawerOpen(false)}
+          currentSeed={gp.seed}
+          onLoad={(seed) => { gp.setSeed(seed); gp.setRandomSeed(false); setSeedDrawerOpen(false); }}
+          onLoadRandom={(seed) => { gp.setSeed(seed); gp.setRandomSeed(false); }}
+        />
       </div>
 
       {/* Batch */}

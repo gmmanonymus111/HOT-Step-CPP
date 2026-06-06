@@ -40,6 +40,7 @@ import assistantRoutes from './routes/assistant.js';
 import pluginRoutes from './routes/plugins.js';
 import inspireRoutes from './routes/inspire.js';
 import coverArtRoutes from './routes/coverArt.js';
+import seedsRoutes from './routes/seeds.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -89,6 +90,7 @@ app.use('/api/assistant', assistantRoutes);
 app.use('/api/plugins', pluginRoutes);
 app.use('/api/inspire', inspireRoutes);
 app.use('/api/cover-art', coverArtRoutes);
+app.use('/api/seeds', seedsRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {
