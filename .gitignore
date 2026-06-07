@@ -64,6 +64,8 @@ engine/.cache/
 # Downloaded tools (whisper.cpp, etc.)
 tools/*
 !tools/onnx-export/
+!tools/mcp-lyricstudio/
+tools/mcp-lyricstudio/node_modules/
 
 # Test output logs
 engine/tests/*.log
