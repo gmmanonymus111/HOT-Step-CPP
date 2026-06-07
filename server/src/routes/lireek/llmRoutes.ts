@@ -325,6 +325,58 @@ export function registerLlmRoutes(router: Router): void {
     res.status(501).json({ error: 'Curated profiles not yet implemented in TS' });
   });
 
+  // ── Generate Style Caption ─────────────────────────────────────────────────
+
+  router.post('/artists/:id/generate-caption', async (req: Request, res: Response) => {
+    try {
+      const artistId = intParam(req, 'id');
+      const { provider, model, force } = req.body;
+      if (!provider) return res.status(400).json({ error: 'provider is required' });
+
+      const artist = db.getArtist(artistId);
+      if (!artist) return res.status(404).json({ error: 'Artist not found' });
+
+      // Find the first profile across all lyrics sets
+      const lyricsSets = db.getLyricsSets(artistId);
+      let profileRow: any = null;
+      for (const ls of lyricsSets) {
+        const profiles = db.getProfiles(ls.id);
+        if (profiles.length) { profileRow = profiles[0]; break; }
+      }
+      if (!profileRow) return res.status(404).json({ error: 'No profile found for this artist' });
+
+      const profileData = profileRow.profile_data || {};
+
+      // Return cached caption unless force regeneration
+      if (profileData.style_caption && !force) {
+        return res.json({ caption: profileData.style_caption });
+      }
+
+      // Build user prompt from profile data
+      const { STYLE_CAPTION_PROMPT } = await import('../../services/lireek/prompts.js');
+      const captionUserPrompt = [
+        `Artist: ${artist.name}`,
+        profileData.album ? `Album: ${profileData.album}` : '',
+        profileData.themes?.length ? `Themes: ${profileData.themes.join(', ')}` : '',
+        profileData.tone_and_mood ? `Tone and mood: ${profileData.tone_and_mood}` : '',
+        profileData.vocabulary_notes ? `Vocabulary: ${profileData.vocabulary_notes}` : '',
+      ].filter(Boolean).join('\n');
+
+      const llmProvider = llmService.getProvider(provider);
+      const effModel = model || llmProvider.defaultModel;
+      const raw = await llmProvider.call(STYLE_CAPTION_PROMPT, captionUserPrompt, effModel);
+      const caption = raw.replace(/^["'`]+|["'`]+$/g, '').trim();
+
+      // Persist back to profile
+      profileData.style_caption = caption;
+      db.updateProfileData(profileRow.id, profileData);
+
+      res.json({ caption });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Skip Thinking ───────────────────────────────────────────────────────────
 
   router.post('/skip-thinking', (_req: Request, res: Response) => {

@@ -37,6 +37,7 @@ export interface ModelSelections {
   profiling: { provider: string; model: string };
   generation: { provider: string; model: string };
   refinement: { provider: string; model: string };
+  coverCaption: { provider: string; model: string };
 }
 
 export function loadSelections(): ModelSelections {
@@ -44,6 +45,7 @@ export function loadSelections(): ModelSelections {
     profiling: { provider: '', model: '' },
     generation: { provider: '', model: '' },
     refinement: { provider: '', model: '' },
+    coverCaption: { provider: '', model: '' },
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -54,6 +56,7 @@ export function loadSelections(): ModelSelections {
         profiling: { ...defaults.profiling, ...parsed.profiling },
         generation: { ...defaults.generation, ...parsed.generation },
         refinement: { ...defaults.refinement, ...parsed.refinement },
+        coverCaption: { ...defaults.coverCaption, ...parsed.coverCaption },
       };
     }
   } catch { /* ignore */ }
@@ -65,7 +68,7 @@ export function saveSelections(sel: ModelSelections) {
 }
 
 // ── Single row selector ──────────────────────────────────────────────────
-const RowSelector: React.FC<{
+export const RowSelector: React.FC<{
   label: string;
   color: string;
   providers: LlmProviderInfo[];
@@ -136,7 +139,7 @@ export const TripleProviderSelector: React.FC<TripleProviderSelectorProps> = ({
           const current = selectionsRef.current;
           const updated = { ...current };
           let changed = false;
-          for (const role of ['profiling', 'generation', 'refinement'] as const) {
+          for (const role of ['profiling', 'generation', 'refinement', 'coverCaption'] as const) {
             if (!updated[role].provider || !p.find(pp => pp.id === updated[role].provider)) {
               updated[role] = { provider: first.id, model: first.default_model || '' };
               changed = true;

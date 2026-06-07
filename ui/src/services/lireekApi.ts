@@ -366,6 +366,10 @@ export const lireekApi = {
       method: 'POST', body: params, timeoutMs: 300_000,
     }),
 
+  // ── Caption Generation ───────────────────────────────────────────────────
+  generateCaption: (artistId: number, params: { provider: string; model?: string; force?: boolean }): Promise<{ caption: string }> =>
+    api(`/api/lireek/artists/${artistId}/generate-caption`, { method: 'POST', body: params, timeoutMs: 60_000 }),
+
   // ── LLM Providers ───────────────────────────────────────────────────────
   getProviders: (): Promise<{ id: string; name: string; available: boolean; models: string[]; default_model: string }[]> =>
     api('/api/lireek/providers', { timeoutMs: 15000 }),

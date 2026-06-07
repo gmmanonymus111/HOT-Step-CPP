@@ -27,6 +27,7 @@ import {
   type AudioMetadata, type AudioAnalysis,
 } from './coverStudioUtils';
 import type { LatentMetadata } from '../shared/LatentImport';
+import { loadSelections, saveSelections } from '../lyric-studio/ProviderSelector';
 
 export const CoverStudio: React.FC = () => {
   const { t } = useTranslation();
@@ -55,6 +56,11 @@ export const CoverStudio: React.FC = () => {
   const [artistCaption, setArtistCaption] = useState(() => restore<string>('artistCaption', ''));
   const [artistPresets, setArtistPresets] = useState<{ lsId: number; album: string; preset: AlbumPreset | null }[]>([]);
   const [isLoadingArtists, setIsLoadingArtists] = useState(false);
+
+  // ── Cover caption LLM ──
+  const [coverCaptionProvider, setCoverCaptionProvider] = useState(() => loadSelections().coverCaption.provider);
+  const [coverCaptionModel, setCoverCaptionModel] = useState(() => loadSelections().coverCaption.model);
+  const [isGeneratingCaption, setIsGeneratingCaption] = useState(false);
 
   // ── Cover settings ──
   const [audioCoverStrength, setAudioCoverStrength] = useState(() => restore<number>('audioCoverStrength', 0.5));
@@ -266,8 +272,9 @@ export const CoverStudio: React.FC = () => {
         } catch { results.push({ lsId: ls.id, album: ls.album || ls.id.toString(), preset: null }); }
       }
       setArtistPresets(results);
-      // Find caption
+      // Find caption — waterfall: generations → profiles → LLM
       let caption = '';
+      // Step 1: Try generation captions
       for (const ls of lyrics_sets) {
         try {
           const { generations } = await lireekApi.listGenerations(undefined, ls.id);
@@ -275,7 +282,35 @@ export const CoverStudio: React.FC = () => {
           if (wc?.caption) { caption = wc.caption; break; }
         } catch {}
       }
+      // Step 2: Try profile style_caption
+      if (!caption) {
+        for (const ls of lyrics_sets) {
+          try {
+            const profiles = await lireekApi.listProfiles(ls.id);
+            for (const p of profiles.profiles) {
+              const full = await lireekApi.getProfile(p.id);
+              if (full.profile_data?.style_caption) {
+                caption = full.profile_data.style_caption;
+                break;
+              }
+            }
+            if (caption) break;
+          } catch {}
+        }
+      }
       setArtistCaption(caption);
+      // Step 3: On-demand LLM generation (async, non-blocking)
+      if (!caption) {
+        const sel = loadSelections();
+        const { provider, model } = sel.coverCaption;
+        if (provider) {
+          setIsGeneratingCaption(true);
+          lireekApi.generateCaption(artist.id, { provider, model: model || undefined })
+            .then(res => { if (res.caption) setArtistCaption(res.caption); })
+            .catch(err => console.warn('[CoverStudio] Caption generation failed:', err))
+            .finally(() => setIsGeneratingCaption(false));
+        }
+      }
       // Pick adapter preset — use first album with adapter (don't override cover settings)
       const withAdapter = results.find(p => p.preset?.adapter_path);
       if (withAdapter?.preset) {
@@ -288,6 +323,32 @@ export const CoverStudio: React.FC = () => {
   const handleSelectArtist = async (artist: Artist) => {
     setSelectedArtistId(artist.id);
     await loadArtistPresets(artist);
+  };
+
+  // ── Cover caption LLM handlers ──
+  const handleCoverProviderChange = (provider: string) => {
+    setCoverCaptionProvider(provider);
+    const sel = loadSelections();
+    sel.coverCaption = { ...sel.coverCaption, provider };
+    saveSelections(sel);
+  };
+  const handleCoverModelChange = (model: string) => {
+    setCoverCaptionModel(model);
+    const sel = loadSelections();
+    sel.coverCaption = { ...sel.coverCaption, model };
+    saveSelections(sel);
+  };
+  const handleRegenerateCaption = async () => {
+    if (!selectedArtistId) return;
+    const sel = loadSelections();
+    const { provider, model } = sel.coverCaption;
+    if (!provider) { showToast('Select a Caption LLM provider first'); return; }
+    setIsGeneratingCaption(true);
+    try {
+      const res = await lireekApi.generateCaption(selectedArtistId, { provider, model: model || undefined, force: true });
+      if (res.caption) setArtistCaption(res.caption);
+    } catch (err: any) { showToast(`Caption generation failed: ${err.message}`); }
+    finally { setIsGeneratingCaption(false); }
   };
 
   // ── Generation ──
@@ -572,6 +633,10 @@ export const CoverStudio: React.FC = () => {
           timbreOverridePath={timbreOverridePath}
           onTimbreOverridePathChange={setTimbreOverridePath}
           token={token}
+          coverCaptionProvider={coverCaptionProvider}
+          coverCaptionModel={coverCaptionModel}
+          onCoverCaptionProviderChange={handleCoverProviderChange}
+          onCoverCaptionModelChange={handleCoverModelChange}
         />
 
         {/* Center: Lyrics */}
@@ -626,6 +691,8 @@ export const CoverStudio: React.FC = () => {
           canGenerate={canGenerate}
           isGenerating={isGenerating} genProgress={genProgress} genStage={genStage}
           onGenerate={handleGenerate} onCancel={handleCancel}
+          isGeneratingCaption={isGeneratingCaption}
+          onRegenerateCaption={handleRegenerateCaption}
         />
 
         {/* Resize handle */}

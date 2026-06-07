@@ -8,6 +8,7 @@ import { SEPARATION_LEVELS } from '../../services/supersepApi';
 import { LatentImport, type LatentMetadata } from '../shared/LatentImport';
 import { masteringApi } from '../../services/api';
 import { VOCAL_LANGUAGES } from '../../constants/languages';
+import { ProviderSelector } from '../lyric-studio/ProviderSelector';
 
 interface SourcePanelProps {
   sourceFileName: string;
@@ -44,6 +45,11 @@ interface SourcePanelProps {
   timbreOverridePath: string;
   onTimbreOverridePathChange: (v: string) => void;
   token: string | null;
+  // Caption LLM selector
+  coverCaptionProvider: string;
+  coverCaptionModel: string;
+  onCoverCaptionProviderChange: (provider: string) => void;
+  onCoverCaptionModelChange: (model: string) => void;
 }
 
 export const SourcePanel: React.FC<SourcePanelProps> = ({
@@ -60,6 +66,8 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
   hasStems, onConfigureStems,
   sourceLatentUrl, onLatentLoaded, onLatentClear,
   timbreOverridePath, onTimbreOverridePathChange, token,
+  coverCaptionProvider, coverCaptionModel,
+  onCoverCaptionProviderChange, onCoverCaptionModelChange,
 }) => {
   const { t } = useTranslation();
   const [isDragging, setIsDragging] = useState(false);
@@ -483,6 +491,25 @@ export const SourcePanel: React.FC<SourcePanelProps> = ({
             )}
           </div>
         )}
+      </div>
+
+      {/* Caption LLM */}
+      <div className="border-t border-zinc-200 dark:border-white/5 pt-4 space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+          <span className="text-base">✨</span>
+          Caption LLM
+        </div>
+        <ProviderSelector
+          selectedProvider={coverCaptionProvider}
+          selectedModel={coverCaptionModel}
+          onProviderChange={onCoverCaptionProviderChange}
+          onModelChange={onCoverCaptionModelChange}
+          label="Caption LLM"
+          compact
+        />
+        <p className="text-[10px] text-zinc-500 leading-tight">
+          Used to auto-generate a style description when no caption is found for the selected artist.
+        </p>
       </div>
     </div>
   );

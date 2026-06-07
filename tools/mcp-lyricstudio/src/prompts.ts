@@ -503,9 +503,14 @@ export function buildGenerationPrompt(
       ? selectBestBlueprint(profile.structure_blueprints).split('-')
       : ['I', 'V', 'C', 'V', 'C', 'B', 'C', 'O'];
     const sectionCount = blueprintParts.length;
-    const transitionBars = (sectionCount - 1) * 3;
+    const transitionBars = (sectionCount - 1) * 2;
+
+    // BPM-aware bars-per-line: fast tempos need more bars per line because
+    // each bar is shorter in real time and the music model needs breathing room.
+    // Scale from 2.5 bars/line at ≤80 BPM to 4.0 bars/line at ≥180 BPM.
+    const barsPerLine = Math.min(4.0, Math.max(2.5, 2.5 + 1.5 * ((bpm - 80) / 100)));
     const singableBars = totalBars - transitionBars;
-    const maxLyricLines = Math.max(12, Math.floor(singableBars / 2));
+    const maxLyricLines = Math.max(8, Math.floor(singableBars / barsPerLine));
     const minutes = Math.floor(targetDuration / 60);
     const seconds = Math.round(targetDuration % 60);
 
@@ -513,18 +518,21 @@ export function buildGenerationPrompt(
     lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')})`);
     lines.push(`BPM: ${bpm} — one bar of 4/4 = ${barSeconds.toFixed(1)} seconds`);
     lines.push(`Total bars available: ~${totalBars} bars for the entire song`);
-    lines.push(`After accounting for ~${transitionBars} bars of instrumental transitions between ${sectionCount} sections, you have ~${singableBars} singable bars.`);
-    lines.push(`At roughly 2 bars per lyric line, aim for approximately ${maxLyricLines} total lyric lines (across ALL sections).`);
+    lines.push(`At this tempo, each lyric line needs ~${barsPerLine.toFixed(1)} bars (vocal delivery + melodic phrasing).`);
+    lines.push(`After accounting for ~${transitionBars} bars of transitions, you have ~${singableBars} singable bars.`);
+    lines.push(`*** MAXIMUM LYRIC LINES: ${maxLyricLines} total lines across ALL sections. ***`);
+    lines.push(`This is a HARD LIMIT. The music model WILL skip lines if you write more than ${maxLyricLines}.`);
     lines.push('');
     lines.push('USE THIS TO DECIDE LINE COUNTS:');
-    if (maxLyricLines <= 20) {
-      lines.push('- This is a SHORT song. Use 4-line verses and 4-line choruses. Keep it tight.');
-    } else if (maxLyricLines <= 32) {
-      lines.push('- This is a STANDARD-length song. Use 4-line verses (or one 8-line verse). Choruses should be 4-6 lines.');
+    if (maxLyricLines <= 16) {
+      lines.push('- This is a SHORT/FAST song. Use 4-line verses and 4-line choruses ONLY. Minimal sections.');
+      lines.push('- Consider dropping one verse or chorus from the blueprint if needed to stay under the line limit.');
+    } else if (maxLyricLines <= 28) {
+      lines.push('- This is a STANDARD-length song. Use 4-line verses and 4-line choruses. One verse can be 8 lines if budget allows.');
     } else {
       lines.push('- This is a LONGER song. You can use 8-line verses and 6-8 line choruses if the blueprint calls for it.');
     }
-    lines.push(`- Count your total lyric lines before finalising. If you exceed ~${maxLyricLines} lines, the song will run over its target duration.`);
+    lines.push(`- Count your total lyric lines before finalising. If you exceed ${maxLyricLines} lines, the music model WILL skip content.`);
   }
 
   lines.push(

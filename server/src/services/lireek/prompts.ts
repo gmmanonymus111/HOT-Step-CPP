@@ -208,6 +208,24 @@ Return JSON with exactly these 4 keys:
 
 ALL values must be plain strings (paragraphs). No arrays, no nested objects.`;
 
+export const STYLE_CAPTION_PROMPT = `You are a music production expert. You will receive an artist profile containing tone/mood, themes, and vocabulary information.
+
+Your job: produce a concise style caption that describes this artist's MUSICAL sound for an AI music generator.
+
+Write a comma-separated list of descriptive tags/phrases covering:
+- Genre and subgenre
+- Key instruments (be specific: "distorted electric guitar" not "guitar", "808 bass" not "bass")
+- Vocal style (gender, delivery: "breathy female vocal" not "female vocal", "aggressive male shout" not "male vocal")
+- Production style and texture
+- Atmosphere and energy
+- Era or reference period
+
+Keep to 1-3 sentences of comma-separated tags. Be specific and vivid.
+
+Return ONLY the caption text. No JSON, no explanation, no quotes, no labels — just the comma-separated descriptors on a single line.
+
+Example: "indie rock, driving electric guitars, male vocal, raw and energetic, garage production, anthemic chorus, 2010s alternative"`;
+
 export const REFINEMENT_SYSTEM_PROMPT = `You are a professional songwriting editor. Your job is to take a rough song draft and make it feel finished, singable, emotionally precise, and true to its intended artistic lane.
 
 You will receive:

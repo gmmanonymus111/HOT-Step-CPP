@@ -59,6 +59,7 @@ export interface LyricsProfile {
   emotional_arc?: string;
   rhyme_quality?: Record<string, number>;
   examples?: any[];
+  style_caption?: string;
   [key: string]: any;
 }
 
@@ -66,7 +67,8 @@ import * as llmService from './llmService.js';
 import { 
   PROFILE_PROMPT_1,
   PROFILE_PROMPT_2,
-  PROFILE_PROMPT_3
+  PROFILE_PROMPT_3,
+  STYLE_CAPTION_PROMPT
 } from './prompts.js';
 
 // The imported dict is a default export depending on interop.
@@ -762,8 +764,27 @@ export async function buildProfile(
   const res3 = await llmCallWithRetry(providerName, effModel, PROFILE_PROMPT_3, usrPrompt, "Call 3/4", onPhase, onChunk);
   raws.push(res3.raw); Object.assign(merged, res3.data);
 
-  if (onPhase) onPhase("Analysing song subjects… (4/4)");
+  if (onPhase) onPhase("Analysing song subjects… (4/5)");
   const subjects = await analyseSongSubjects(songs, providerName, effModel, onChunk);
+
+  // Step 5: Generate style caption (non-critical)
+  let style_caption = '';
+  try {
+    if (onPhase) onPhase("Generating style caption… (5/5)");
+    const captionUserPrompt = [
+      `Artist: ${artist}`,
+      album ? `Album: ${album}` : '',
+      merged.themes?.length ? `Themes: ${merged.themes.join(', ')}` : '',
+      merged.tone_and_mood ? `Tone and mood: ${merged.tone_and_mood}` : '',
+      merged.vocabulary_notes ? `Vocabulary: ${merged.vocabulary_notes}` : '',
+    ].filter(Boolean).join('\n');
+    const provider = llmService.getProvider(providerName);
+    const captionRaw = await provider.call(STYLE_CAPTION_PROMPT, captionUserPrompt, effModel, onChunk);
+    // Strip any wrapping quotes or whitespace
+    style_caption = captionRaw.replace(/^["'`]+|["'`]+$/g, '').trim();
+  } catch (e) {
+    console.warn('Style caption generation failed (non-critical):', e);
+  }
 
   const rawCombined = raws.join('\n\n---\n\n');
 
@@ -794,6 +815,7 @@ export async function buildProfile(
     song_subjects: subjects.song_subjects as any,
     subject_categories: subjects.subject_categories,
     repetition_stats: rep as any,
+    style_caption,
   };
 }
 

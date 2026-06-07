@@ -1,6 +1,6 @@
 // ArtistSettingsPanel.tsx — Right panel: artist selector + cover settings + generate
 import React from 'react';
-import { Guitar, Disc3, Zap, Music, ChevronDown, Loader2, Type, X, Mic } from 'lucide-react';
+import { Guitar, Disc3, Zap, Music, ChevronDown, Loader2, Type, X, Mic, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { EditableSlider } from './EditableSlider';
 import { transposeKey, type AudioAnalysis } from './coverStudioUtils';
@@ -40,6 +40,8 @@ interface ArtistSettingsPanelProps {
   genStage: string;
   onGenerate: () => void;
   onCancel: () => void;
+  isGeneratingCaption: boolean;
+  onRegenerateCaption: () => void;
 }
 
 export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) => {
@@ -52,6 +54,7 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
     tempoScale, onTempoScale, pitchShift, onPitchShift, analysis, bpmCorrection, keyOverride,
     artistCaption, onArtistCaptionChange,
     canGenerate, isGenerating, genProgress, genStage, onGenerate, onCancel,
+    isGeneratingCaption, onRegenerateCaption,
   } = props;
 
   const { t } = useTranslation();
@@ -168,6 +171,17 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
           <Type className="w-4 h-4 text-purple-400" />
           Style Description
+          {selectedArtistId && (
+            <button
+              onClick={onRegenerateCaption}
+              disabled={isGeneratingCaption}
+              className="ml-auto flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 transition-colors disabled:opacity-50"
+              title="Regenerate style caption using LLM"
+            >
+              {isGeneratingCaption ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              {isGeneratingCaption ? 'Generating...' : 'Generate'}
+            </button>
+          )}
         </div>
         <textarea
           value={artistCaption}
