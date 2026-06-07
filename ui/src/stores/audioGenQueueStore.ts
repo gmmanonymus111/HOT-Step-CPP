@@ -22,6 +22,20 @@ import { addToPlaylist } from '../components/lyric-studio/playlistStore';
 import type { GenerationParams } from '../types';
 import { resolveDuration } from '../utils/estimateDuration';
 
+/** Read the generation timeout (minutes) from localStorage settings.
+ *  Falls back to 30 minutes if unset or unparsable. */
+function _getTimeoutMinutes(): number {
+  try {
+    const raw = localStorage.getItem('ace-settings');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const val = parsed.generationTimeoutMinutes;
+      if (typeof val === 'number' && val >= 10 && val <= 120) return val;
+    }
+  } catch { /* ignore parse errors */ }
+  return 30;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type AudioQueueStatus = 'pending' | 'loading-adapter' | 'generating' | 'succeeded' | 'failed';
@@ -583,9 +597,10 @@ export async function enqueueSimpleGen(
         if (status.status === 'failed' || status.status === 'cancelled') {
           throw new Error(status.error || (status.status === 'cancelled' ? 'Cancelled' : 'Generation failed'));
         }
-        // Safety: timeout after 30 minutes
-        if (Date.now() - startTime > 30 * 60 * 1000) {
-          throw new Error('Generation timed out');
+        // Safety: configurable timeout (default 30 min)
+        const timeoutMs = _getTimeoutMinutes() * 60 * 1000;
+        if (Date.now() - startTime > timeoutMs) {
+          throw new Error(`Generation timed out after ${_getTimeoutMinutes()} minutes`);
         }
       } catch (e) {
         if ((e as Error).message.includes('failed') || (e as Error).message.includes('timed out') || (e as Error).message.includes('Cancelled')) {
@@ -794,6 +809,10 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
       params.parallelWhisper = appSettings.parallelWhisper;
       params.parallelQualityEval = appSettings.parallelQualityEval;
       params.parallelCoverArt = appSettings.parallelCoverArt;
+      // Pass timeout to server so server-side wall-clock limit matches user preference
+      if (typeof appSettings.generationTimeoutMinutes === 'number') {
+        params.generationTimeoutMinutes = appSettings.generationTimeoutMinutes;
+      }
     }
   } catch { /* ignore parse errors */ }
 
@@ -879,6 +898,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
   const jobId = item.jobId!;
   item.stage = 'Generating audio…';
   const startTime = item.elapsed ? Date.now() - item.elapsed * 1000 : Date.now();
+  const timeoutMs = _getTimeoutMinutes() * 60 * 1000;
   _emit(true);
 
   while (true) {
@@ -914,9 +934,14 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
         return;
       }
       if (status.status === 'failed' || status.status === 'cancelled') throw new Error(status.error || (status.status === 'cancelled' ? 'Cancelled' : 'Generation failed'));
+
+      // Safety: configurable timeout (default 30 min)
+      if (Date.now() - startTime > timeoutMs) {
+        throw new Error(`Generation timed out after ${_getTimeoutMinutes()} minutes`);
+      }
     } catch (e) {
       const msg = (e as Error).message;
-      if ((msg.includes('failed') || msg.includes('Cancelled')) && !msg.includes('fetch')) {
+      if ((msg.includes('failed') || msg.includes('Cancelled') || msg.includes('timed out')) && !msg.includes('fetch')) {
         throw e;
       }
       // Transient network error — keep polling

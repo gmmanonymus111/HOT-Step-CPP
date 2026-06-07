@@ -84,9 +84,11 @@ setInterval(() => {
  *  If job.stage/progress don't change for STALE_TIMEOUT_MS, the job is
  *  considered stalled and is cancelled + failed. This prevents a single
  *  wedged generation from blocking the entire queue for 45 minutes. */
-async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal): Promise<void> {
+async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: AbortSignal, timeoutMinutes?: number): Promise<void> {
   const POLL_INTERVAL = 500;          // ms — 500ms is tight enough for UI, avoids hammering
-  const MAX_WALL_MS = 45 * 60 * 1000; // 45 min absolute max
+  // User-configurable wall-clock timeout, clamped to [5, 120] min. Default 45 min.
+  const clampedTimeout = Math.max(5, Math.min(120, timeoutMinutes || 45));
+  const MAX_WALL_MS = clampedTimeout * 60 * 1000;
   const STALE_TIMEOUT_MS = 120_000;   // 2 min with no progress = stalled
   const startedAt = Date.now();
   let lastProgressAt = Date.now();
@@ -119,7 +121,7 @@ async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: Abort
     // Absolute wall-clock timeout
     if (Date.now() - startedAt > MAX_WALL_MS) {
       await aceClient.cancelJob(aceJobId).catch(() => {});
-      throw new Error('Generation timed out (45 min absolute limit)');
+      throw new Error(`Generation timed out (${clampedTimeout} min limit)`);
     }
 
     // Poll ace-server — wrap in try-catch so transient HTTP timeouts
@@ -147,6 +149,9 @@ async function pollUntilDone(aceJobId: string, job: GenerationJob, signal: Abort
 async function runGeneration(job: GenerationJob): Promise<void> {
   const pipelineStart = performance.now();
   const timing: StageTiming[] = [];
+
+  // User-configurable timeout from settings (passed via request body)
+  const timeoutMinutes: number | undefined = job.params.generationTimeoutMinutes;
 
   /** Time a synchronous or async block and record its duration. */
   async function timed<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
@@ -274,7 +279,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         const lmJobId = await aceClient.submitLm(aceReq, undefined, coResident);
         job.aceJobId = lmJobId;
 
-        await pollUntilDone(lmJobId, job, abortController.signal);
+        await pollUntilDone(lmJobId, job, abortController.signal, timeoutMinutes);
 
         // Fetch LM results (array of enriched AceRequests)
         const resultRes = await aceClient.getJobResult(lmJobId);
@@ -746,7 +751,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       }
       job.aceJobId = synthJobId;
 
-      await pollUntilDone(synthJobId, job, abortController.signal);
+      await pollUntilDone(synthJobId, job, abortController.signal, timeoutMinutes);
       unsubSynth();
 
       // Fetch single-track audio result

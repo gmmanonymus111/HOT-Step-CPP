@@ -40,6 +40,8 @@ export interface AppSettings {
   parallelWhisper: boolean;
   parallelQualityEval: boolean;
   parallelCoverArt: boolean;
+  // Generation timeout (minutes) — how long to wait before declaring a generation timed out
+  generationTimeoutMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   parallelWhisper: false,
   parallelQualityEval: false,
   parallelCoverArt: false,
+  generationTimeoutMinutes: 30,
 };
 
 interface SettingsPanelProps {
@@ -539,6 +542,24 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           badges={[
             { text: '−12s', type: 'speed' as const },
           ]}
+        />
+
+        <SelectRow
+          id="setting-gen-timeout"
+          label="Generation Timeout"
+          description="Maximum time to wait for a single generation before it's considered timed out. Increase if you use high step counts or have slower hardware."
+          value={settings.generationTimeoutMinutes}
+          options={[
+            { value: 10, label: '10 minutes' },
+            { value: 15, label: '15 minutes' },
+            { value: 20, label: '20 minutes' },
+            { value: 30, label: '30 minutes (default)' },
+            { value: 45, label: '45 minutes' },
+            { value: 60, label: '60 minutes' },
+            { value: 90, label: '90 minutes' },
+            { value: 120, label: '120 minutes' },
+          ]}
+          onChange={(v) => update('generationTimeoutMinutes', parseInt(v))}
         />
       </div>
       </>
