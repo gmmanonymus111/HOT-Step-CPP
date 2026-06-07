@@ -72,6 +72,8 @@ jobs:
       - name: Init required submodules
         shell: bash
         run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
           # Init top-level submodule (vst3sdk)
           git submodule update --init engine/vendor/vst3sdk
           # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
@@ -503,6 +505,8 @@ jobs:
 
       - name: Init required submodules
         run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
           # Init top-level submodule (vst3sdk)
           git submodule update --init engine/vendor/vst3sdk
           # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
@@ -732,6 +736,8 @@ jobs:
 
       - name: Init required submodules
         run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
           # Init top-level submodule (vst3sdk)
           git submodule update --init engine/vendor/vst3sdk
           # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials

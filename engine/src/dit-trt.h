@@ -166,52 +166,10 @@ inline bool dit_trt_build(
         return false;
     }
 
-    // Post-parse precision fixup: promote LayerNorm-sensitive ops to FP32.
-    // ONNX may mark Reduce/Pow as FP16 but these overflow on large hidden dims.
-    // With STRONGLY_TYPED, we must explicitly set output tensor types.
-    {
-        int n_layers = network->getNbLayers();
-        int promoted = 0;
-        for (int i = 0; i < n_layers; i++) {
-            auto * layer = network->getLayer(i);
-            auto lt = layer->getType();
-            bool needs_fp32 = false;
-            switch (lt) {
-                case nvinfer1::LayerType::kREDUCE:
-                case nvinfer1::LayerType::kUNARY:       // includes Sqrt, Rsqrt
-                case nvinfer1::LayerType::kELEMENTWISE:  // includes Pow, Sub in LN decomposition
-                    // Only promote if output is FP16 (don't touch FP32/BF16)
-                    if (layer->getNbOutputs() > 0) {
-                        auto dtype = layer->getOutput(0)->getType();
-                        if (dtype == nvinfer1::DataType::kHALF) {
-                            needs_fp32 = true;
-                        }
-                    }
-                    break;
-                case nvinfer1::LayerType::kNORMALIZATION:
-                    // TRT 11 native INormalizationLayer
-                    if (layer->getNbOutputs() > 0) {
-                        auto dtype = layer->getOutput(0)->getType();
-                        if (dtype == nvinfer1::DataType::kHALF) {
-                            needs_fp32 = true;
-                        }
-                    }
-                    break;
-                default:
-                    break;
-            }
-            if (needs_fp32) {
-                for (int o = 0; o < layer->getNbOutputs(); o++) {
-                    layer->getOutput(o)->setType(nvinfer1::DataType::kFLOAT);
-                }
-                promoted++;
-            }
-        }
-        if (promoted > 0) {
-            fprintf(stderr, "[DiT-TRT] Promoted %d FP16 Reduce/Unary/Norm layers to FP32\n",
-                    promoted);
-        }
-    }
+    // Note: TRT 11 STRONGLY_TYPED forbids setPrecision/setOutputType/setType.
+    // The "FP16 layernorm" warning is handled by TRT's internal optimizer which
+    // auto-promotes Reduce/Pow to FP32 in layernorm patterns when it detects
+    // overflow risk. If NaN persists, the ONNX must be re-exported with FP32 norms.
 
     // Builder config
     auto config = builder->createBuilderConfig();
@@ -666,6 +624,44 @@ inline bool dit_trt_forward(
     bool ok = context->enqueueV3(stream ? stream : 0);
     if (!ok) {
         fprintf(stderr, "[DiT-TRT] enqueueV3 failed\n");
+    }
+
+    // First-call diagnostic: dump a few output values to catch NaN early
+    static bool first_call = true;
+    if (first_call && ok) {
+        first_call = false;
+        cudaStreamSynchronize(stream ? stream : 0);
+        float probe[8] = {};
+        size_t probe_bytes = sizeof(probe);
+        auto io_dt = ctx->engine->getTensorDataType(velocity_name);
+        if (io_dt == nvinfer1::DataType::kFLOAT) {
+            cudaMemcpy(probe, velocity_out, probe_bytes, cudaMemcpyDeviceToHost);
+        } else if (io_dt == nvinfer1::DataType::kHALF) {
+            uint16_t h[8];
+            cudaMemcpy(h, velocity_out, sizeof(h), cudaMemcpyDeviceToHost);
+            for (int i = 0; i < 8; i++) {
+                // FP16 → FP32
+                uint32_t sign = ((uint32_t)h[i] & 0x8000) << 16;
+                uint32_t exp = (h[i] >> 10) & 0x1F;
+                uint32_t mant = h[i] & 0x03FF;
+                uint32_t u = (exp == 0) ? sign :
+                             (exp == 31) ? (sign | 0x7F800000 | (mant << 13)) :
+                             (sign | ((uint32_t)(exp + 127 - 15) << 23) | (mant << 13));
+                memcpy(&probe[i], &u, 4);
+            }
+        } else {
+            // BF16
+            uint16_t h[8];
+            cudaMemcpy(h, velocity_out, sizeof(h), cudaMemcpyDeviceToHost);
+            for (int i = 0; i < 8; i++) {
+                uint32_t u = (uint32_t)h[i] << 16;
+                memcpy(&probe[i], &u, 4);
+            }
+        }
+        fprintf(stderr, "[DiT-TRT] DIAG first output: [%.4g, %.4g, %.4g, %.4g, %.4g, %.4g, %.4g, %.4g]\n",
+                probe[0], probe[1], probe[2], probe[3],
+                probe[4], probe[5], probe[6], probe[7]);
+        fflush(stderr);
     }
     return ok;
 }

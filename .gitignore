@@ -118,5 +118,13 @@ ui/temp_strings.json
 engine/trtllm-libs/
 engine/trtllm-include/
 
+# TRT experiment files (local dev only)
+test_trtllm_*.cpp
+test_trtllm_*.h
+create_test_onnx.py
+test_smoke.*
+rebuild_engine.*
+Important.md
+
 # Docker (container-specific overrides, not committed)
 docker-compose.override.yml
