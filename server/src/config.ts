@@ -103,6 +103,8 @@ export const config = {
     host: process.env.ACESTEPCPP_HOST || '127.0.0.1',
     vaeChunk: parseInt(process.env.ACESTEPCPP_VAE_CHUNK || '1024', 10),
     vaeOverlap: parseInt(process.env.ACESTEPCPP_VAE_OVERLAP || '64', 10),
+    /** GPU device selection — maps to CUDA_VISIBLE_DEVICES env var for the engine process */
+    cudaVisibleDevices: process.env.CUDA_VISIBLE_DEVICES || '',
     noiseProfile: process.env.ACESTEPCPP_NOISE_PROFILE || (() => {
       // Auto-detect: find first .wav in noise_samples/
       const dir = DEFAULT_NOISE_SAMPLES;
@@ -238,6 +240,8 @@ export const EXPOSED_ENV_KEYS = [
   // Engine
   'ACESTEPCPP_MODELS', 'ACESTEPCPP_ADAPTERS', 'ACESTEPCPP_PORT', 'ACESTEPCPP_HOST',
   'ACESTEPCPP_VAE_CHUNK', 'ACESTEPCPP_VAE_OVERLAP',
+  // GPU
+  'CUDA_VISIBLE_DEVICES',
   // Server
   'SERVER_PORT', 'DATA_DIR',
   // API keys
@@ -259,6 +263,7 @@ export const EXPOSED_ENV_KEYS = [
 export const RESTART_REQUIRED_KEYS = new Set([
   'ACESTEPCPP_MODELS', 'ACESTEPCPP_ADAPTERS', 'ACESTEPCPP_PORT', 'ACESTEPCPP_HOST',
   'ACESTEPCPP_VAE_CHUNK', 'ACESTEPCPP_VAE_OVERLAP',
+  'CUDA_VISIBLE_DEVICES',
   'SERVER_PORT', 'DATA_DIR',
 ]);
 
@@ -295,6 +300,8 @@ export function reloadEnvConfig(): string[] {
     () => String(config.aceServer.vaeChunk));
   apply('ACESTEPCPP_VAE_OVERLAP', v => { config.aceServer.vaeOverlap = parseInt(v || '64', 10); },
     () => String(config.aceServer.vaeOverlap));
+  apply('CUDA_VISIBLE_DEVICES', v => { config.aceServer.cudaVisibleDevices = v; },
+    () => config.aceServer.cudaVisibleDevices);
 
   // ── Server ──
   apply('SERVER_PORT', v => { config.server.port = parseInt(v || '3001', 10); },

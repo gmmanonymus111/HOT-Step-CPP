@@ -298,6 +298,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 value={envValues.ACESTEPCPP_VAE_CHUNK || ''} onChange={handleEnvChange} type="number" placeholder="1024" />
               <EnvTextRow envKey="ACESTEPCPP_VAE_OVERLAP" label={t('settings.env.vaeOverlap')} description={t('settings.env.vaeOverlapDesc')}
                 value={envValues.ACESTEPCPP_VAE_OVERLAP || ''} onChange={handleEnvChange} type="number" placeholder="64" />
+              <EnvTextRow envKey="CUDA_VISIBLE_DEVICES" label="GPU Device"
+                description="Which GPU(s) the engine should use. Set to 0 for first GPU, 1 for second, etc. Leave empty for auto-detect (picks the best GPU). Requires restart."
+                value={envValues.CUDA_VISIBLE_DEVICES || ''} onChange={handleEnvChange} placeholder="(auto)" />
             </EnvSubsection>
 
             {/* Server */}

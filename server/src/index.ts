@@ -205,29 +205,44 @@ function startAceServer(): ChildProcess | null {
   console.log(`[Server] Port: ${config.aceServer.port}`);
 
   // Inject TensorRT libs into PATH if available (so ORT can load nvinfer_10.dll)
+  // and CUDA_VISIBLE_DEVICES for GPU selection.
   // IMPORTANT: On Windows, process.env is a case-insensitive Proxy, but spreading
   // it to a plain object creates case-sensitive keys. The key is typically 'Path'
   // not 'PATH', so we must find the actual key to avoid creating a shadowing duplicate.
   let spawnOpts: { stdio: any; env?: NodeJS.ProcessEnv } = {
     stdio: ['ignore', 'pipe', 'pipe'] as any,
   };
-  if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
-    const env = { ...process.env };
-    // Find the actual PATH key (case-insensitive on Windows)
-    const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
-    const pathSep = process.platform === 'win32' ? ';' : ':';
-    env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
 
-    // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
-    // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
-    const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
-    if (fs.existsSync(trtllmLibs)) {
-      env[pathKey] = trtllmLibs + pathSep + env[pathKey];
-      console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
+  const needsCustomEnv = (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs))
+    || config.aceServer.cudaVisibleDevices;
+
+  if (needsCustomEnv) {
+    const env = { ...process.env };
+
+    // GPU device selection (e.g. "0", "1", "0,1")
+    if (config.aceServer.cudaVisibleDevices) {
+      env.CUDA_VISIBLE_DEVICES = config.aceServer.cudaVisibleDevices;
+      console.log(`[Server] GPU selection: CUDA_VISIBLE_DEVICES=${config.aceServer.cudaVisibleDevices}`);
+    }
+
+    if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
+      // Find the actual PATH key (case-insensitive on Windows)
+      const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
+      const pathSep = process.platform === 'win32' ? ';' : ':';
+      env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
+
+      // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
+      // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
+      const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
+      if (fs.existsSync(trtllmLibs)) {
+        env[pathKey] = trtllmLibs + pathSep + env[pathKey];
+        console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
+      }
+
+      console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
     }
 
     spawnOpts.env = env;
-    console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
   }
 
   const child = spawn(exe, args, spawnOpts);
