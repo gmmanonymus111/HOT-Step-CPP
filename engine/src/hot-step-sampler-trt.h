@@ -717,4 +717,134 @@ static int dit_trt_generate(DitTrt *              trt,
     return 0;
 }
 
+// ── Single-step TRT forward for streaming ring buffer ───────────────────
+//
+// Runs ONE batched DiT forward pass using pre-allocated DitTrtStreamBuffers.
+// Each batch row can have a DIFFERENT timestep (t_per_row[i]).
+//
+// The caller (StreamPipeline::tick) packs multiple in-flight slots into
+// the batch dimension. This function handles:
+//   - Host FP32 → IO dtype conversion
+//   - Upload to pre-allocated GPU buffers
+//   - TRT enqueue
+//   - Download + IO dtype → FP32 conversion
+//
+// input_latents: [B, T, 192] FP32 (context[128] + xt[64] pre-packed)
+// enc_hidden:    [B, S, 2048] FP32
+// t_per_row:     [B] FP32, per-row timesteps
+// B, T, S:       batch, time, encoder sequence dims
+// velocity_out:  [B, T, 64] FP32 (output)
+//
+// Returns true on success.
+static bool dit_trt_step(
+    DitTrt*                trt,
+    DitTrtStreamBuffers*   bufs,
+    const float*           input_latents,  // [B, T, 192] FP32
+    const float*           enc_hidden,     // [B, S, 2048] FP32
+    const float*           t_per_row,      // [B] FP32, per-row timesteps
+    int B, int T, int S,
+    float*                 velocity_out    // [B, T, 64] FP32
+) {
+    if (!bufs->allocated || B > bufs->max_B || T > bufs->T || S > bufs->S) {
+        fprintf(stderr, "[DiT-TRT-Step] ERROR: stream buffers not allocated or undersized "
+                "(B=%d/%d T=%d/%d S=%d/%d)\n", B, bufs->max_B, T, bufs->T, S, bufs->S);
+        return false;
+    }
+
+    const int in_ch  = 192;
+    const int H_enc  = 2048;
+    const int Oc     = 64;
+    bool io_is_fp32 = (trt->io_dtype == DitTrt::IO_FP32);
+
+    // ── Upload input_latents ────────────────────────────────────────
+    size_t input_n = (size_t)B * T * in_ch;
+    if (io_is_fp32) {
+        cudaMemcpyAsync(bufs->d_input, input_latents, input_n * sizeof(float),
+                        cudaMemcpyHostToDevice, trt->stream);
+    } else {
+        // Convert FP32 → BF16/FP16 on host, then upload
+        // Use a thread-local staging buffer to avoid allocation in the hot path
+        thread_local std::vector<uint16_t> h_staged;
+        if (h_staged.size() < input_n) h_staged.resize(input_n);
+        if (trt->io_dtype == DitTrt::IO_FP16) {
+            convert_fp32_to_fp16(input_latents, h_staged.data(), input_n);
+        } else {
+            convert_fp32_to_bf16(input_latents, h_staged.data(), input_n);
+        }
+        cudaMemcpyAsync(bufs->d_input, h_staged.data(), input_n * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice, trt->stream);
+    }
+
+    // ── Upload enc_hidden ───────────────────────────────────────────
+    size_t enc_n = (size_t)B * S * H_enc;
+    if (io_is_fp32) {
+        cudaMemcpyAsync(bufs->d_enc, enc_hidden, enc_n * sizeof(float),
+                        cudaMemcpyHostToDevice, trt->stream);
+    } else {
+        thread_local std::vector<uint16_t> h_enc_staged;
+        if (h_enc_staged.size() < enc_n) h_enc_staged.resize(enc_n);
+        if (trt->io_dtype == DitTrt::IO_FP16) {
+            convert_fp32_to_fp16(enc_hidden, h_enc_staged.data(), enc_n);
+        } else {
+            convert_fp32_to_bf16(enc_hidden, h_enc_staged.data(), enc_n);
+        }
+        cudaMemcpyAsync(bufs->d_enc, h_enc_staged.data(), enc_n * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice, trt->stream);
+    }
+
+    // ── Upload timesteps (per-row, NOT broadcast) ───────────────────
+    cudaMemcpyAsync(bufs->d_t,   t_per_row, B * sizeof(float), cudaMemcpyHostToDevice, trt->stream);
+    cudaMemcpyAsync(bufs->d_t_r, t_per_row, B * sizeof(float), cudaMemcpyHostToDevice, trt->stream);
+
+    // ── TRT forward ─────────────────────────────────────────────────
+    bool ok = dit_trt_forward(trt, bufs->d_input, bufs->d_enc, bufs->d_t, bufs->d_t_r,
+                               B, T, S, bufs->d_velocity, trt->stream);
+    if (!ok) {
+        fprintf(stderr, "[DiT-TRT-Step] Forward pass failed!\n");
+        return false;
+    }
+    cudaStreamSynchronize(trt->stream);
+
+    // ── Download velocity ───────────────────────────────────────────
+    size_t vel_n = (size_t)B * T * Oc;
+    if (io_is_fp32) {
+        cudaMemcpy(velocity_out, bufs->d_velocity, vel_n * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+    } else {
+        thread_local std::vector<uint16_t> h_vel_staged;
+        if (h_vel_staged.size() < vel_n) h_vel_staged.resize(vel_n);
+        cudaMemcpy(h_vel_staged.data(), bufs->d_velocity, vel_n * sizeof(uint16_t),
+                   cudaMemcpyDeviceToHost);
+        if (trt->io_dtype == DitTrt::IO_FP16) {
+            convert_fp16_to_fp32(h_vel_staged.data(), velocity_out, vel_n);
+        } else {
+            convert_bf16_to_fp32(h_vel_staged.data(), velocity_out, vel_n);
+        }
+    }
+
+    return true;
+}
+
+// ── Euler ODE integration step ──────────────────────────────────────────
+//
+// Integrates one slot's latent using Euler method:
+//   xt = xt + (t_next - t_curr) * vt
+//
+// This is the simplest ODE solver — the ring buffer uses it for each slot
+// independently after unpacking the batched velocity output.
+//
+// xt:     [T * 64] FP32, in/out
+// vt:     [T * 64] FP32, velocity from dit_trt_step
+// t_curr: current timestep (from schedule)
+// t_next: next timestep (from schedule, or 0.0 for final step)
+// n:      total elements (T * 64)
+static void dit_trt_euler_step(float* xt, const float* vt,
+                                float t_curr, float t_next, int n) {
+    float dt = t_next - t_curr;
+    for (int i = 0; i < n; i++) {
+        xt[i] += dt * vt[i];
+    }
+}
+
 #endif // HOT_STEP_TRT
+

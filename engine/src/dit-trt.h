@@ -112,20 +112,94 @@ struct DitTrt {
     int64_t load_time_ms  = 0;
 };
 
+// ── Streaming buffer management ─────────────────────────────────────────────
+
+// Pre-allocated GPU buffers for the streaming ring buffer pipeline.
+// These persist across tick() calls, avoiding per-step cudaMalloc overhead.
+// One instance per StreamPipeline; sized for max_batch × max_T.
+struct DitTrtStreamBuffers {
+    void*  d_input;     // [max_B, T, 192] in IO dtype (BF16/FP16/FP32)
+    void*  d_enc;       // [max_B, S, 2048] in IO dtype
+    float* d_t;         // [max_B] FP32
+    float* d_t_r;       // [max_B] FP32
+    void*  d_velocity;  // [max_B, T, 64] in IO dtype
+    int    max_B = 0;
+    int    T     = 0;
+    int    S     = 0;
+    size_t elem_bytes = 2; // 2 for BF16/FP16, 4 for FP32
+    bool   allocated = false;
+};
+
+inline void dit_trt_stream_free(DitTrtStreamBuffers* bufs);
+
+inline bool dit_trt_stream_alloc(DitTrtStreamBuffers* bufs, int max_B, int T, int S,
+                                 DitTrt::IODtype io_dtype = DitTrt::IO_BF16) {
+    if (bufs->allocated) {
+        // Check if existing allocation is sufficient
+        if (bufs->max_B >= max_B && bufs->T >= T && bufs->S >= S) {
+            return true;
+        }
+        // Need to reallocate
+        dit_trt_stream_free(bufs);
+    }
+    
+    bufs->max_B = max_B;
+    bufs->T = T;
+    bufs->S = S;
+    bufs->elem_bytes = (io_dtype == DitTrt::IO_FP32) ? 4 : 2;
+    
+    size_t input_bytes = (size_t)max_B * T * 192 * bufs->elem_bytes;
+    size_t enc_bytes   = (size_t)max_B * S * 2048 * bufs->elem_bytes;
+    size_t t_bytes     = (size_t)max_B * sizeof(float);
+    size_t vel_bytes   = (size_t)max_B * T * 64 * bufs->elem_bytes;
+    
+    cudaError_t err;
+    err = cudaMalloc(&bufs->d_input, input_bytes);
+    if (err != cudaSuccess) { fprintf(stderr, "[DiT-TRT-Stream] cudaMalloc input failed: %s\n", cudaGetErrorString(err)); return false; }
+    err = cudaMalloc(&bufs->d_enc, enc_bytes);
+    if (err != cudaSuccess) { cudaFree(bufs->d_input); bufs->d_input = nullptr; fprintf(stderr, "[DiT-TRT-Stream] cudaMalloc enc failed\n"); return false; }
+    err = cudaMalloc((void**)&bufs->d_t, t_bytes);
+    if (err != cudaSuccess) { cudaFree(bufs->d_input); cudaFree(bufs->d_enc); bufs->d_input = nullptr; bufs->d_enc = nullptr; fprintf(stderr, "[DiT-TRT-Stream] cudaMalloc t failed\n"); return false; }
+    err = cudaMalloc((void**)&bufs->d_t_r, t_bytes);
+    if (err != cudaSuccess) { cudaFree(bufs->d_input); cudaFree(bufs->d_enc); cudaFree(bufs->d_t); bufs->d_input = nullptr; bufs->d_enc = nullptr; bufs->d_t = nullptr; fprintf(stderr, "[DiT-TRT-Stream] cudaMalloc t_r failed\n"); return false; }
+    err = cudaMalloc(&bufs->d_velocity, vel_bytes);
+    if (err != cudaSuccess) { cudaFree(bufs->d_input); cudaFree(bufs->d_enc); cudaFree(bufs->d_t); cudaFree(bufs->d_t_r); bufs->d_input = nullptr; bufs->d_enc = nullptr; bufs->d_t = nullptr; bufs->d_t_r = nullptr; fprintf(stderr, "[DiT-TRT-Stream] cudaMalloc velocity failed\n"); return false; }
+    
+    bufs->allocated = true;
+    size_t total_mb = (input_bytes + enc_bytes + t_bytes * 2 + vel_bytes) / (1024 * 1024);
+    fprintf(stderr, "[DiT-TRT-Stream] Allocated stream buffers: max_B=%d T=%d S=%d (%zu MB)\n",
+            max_B, T, S, total_mb);
+    return true;
+}
+
+inline void dit_trt_stream_free(DitTrtStreamBuffers* bufs) {
+    if (!bufs->allocated) return;
+    if (bufs->d_input)    { cudaFree(bufs->d_input);    bufs->d_input    = nullptr; }
+    if (bufs->d_enc)      { cudaFree(bufs->d_enc);      bufs->d_enc      = nullptr; }
+    if (bufs->d_t)        { cudaFree(bufs->d_t);         bufs->d_t        = nullptr; }
+    if (bufs->d_t_r)      { cudaFree(bufs->d_t_r);       bufs->d_t_r      = nullptr; }
+    if (bufs->d_velocity) { cudaFree(bufs->d_velocity);  bufs->d_velocity = nullptr; }
+    bufs->max_B = 0;
+    bufs->T = 0;
+    bufs->S = 0;
+    bufs->allocated = false;
+    fprintf(stderr, "[DiT-TRT-Stream] Freed stream buffers\n");
+}
+
 // ── Engine build (once per GPU architecture) ────────────────────────────────
 
 // Build a TRT engine from ONNX and serialize to disk.
 // Returns true on success.  engine_path will be created/overwritten.
 //
 // This is slow (5-30 minutes) but only needs to run once per GPU arch.
-// The engine is built with:
-//   - kREFIT_IDENTICAL: allows weight refitting with zero inference penalty
-//   - kSTRIP_PLAN: strips weights from engine file (~50MB vs ~5GB)
-//   - kFP16: FP16 inference
+// max_batch: maximum batch size for the optimization profile.
+//   - Default 8 for standard/streaming.
+//   - Higher values use more VRAM for TRT workspace/activations
 inline bool dit_trt_build(
     const char* onnx_path,
     const char* engine_path,
-    int         device_id = 0
+    int         device_id  = 0,
+    int         max_batch  = 8
 ) {
     DitTrtLogger logger;
 
@@ -191,39 +265,47 @@ inline bool dit_trt_build(
     // Optimization profile with dynamic shapes
     auto profile = builder->createOptimizationProfile();
 
+    // Clamp max_batch to a sane range
+    if (max_batch < 1) max_batch = 1;
+    if (max_batch > 16) max_batch = 16;
+    // Opt batch: 1 for standard, scale with streaming depth
+    int opt_batch = (max_batch <= 2) ? 1 : std::min(4, max_batch);
+
+    fprintf(stderr, "[DiT-TRT] Profile: batch min=1 opt=%d max=%d\n", opt_batch, max_batch);
+
     // input_latents: [B, T, 192]
     //   T ranges: min=64, opt=2048, max=8192
     profile->setDimensions("input_latents",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims3(1, 64, 192));
     profile->setDimensions("input_latents",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(1, 2048, 192));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(opt_batch, 2048, 192));
     profile->setDimensions("input_latents",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(2, 8192, 192));
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(max_batch, 8192, 192));
 
     // enc_hidden: [B, S, 2048]
     //   S ranges: min=64, opt=512, max=2048
     profile->setDimensions("enc_hidden",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims3(1, 64, 2048));
     profile->setDimensions("enc_hidden",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(1, 512, 2048));
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3(opt_batch, 512, 2048));
     profile->setDimensions("enc_hidden",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(2, 2048, 2048));
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3(max_batch, 2048, 2048));
 
     // t: [B]
     profile->setDimensions("t",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims{1, {1}});
     profile->setDimensions("t",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims{1, {1}});
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims{1, {opt_batch}});
     profile->setDimensions("t",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims{1, {2}});
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims{1, {max_batch}});
 
     // t_r: [B]
     profile->setDimensions("t_r",
         nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims{1, {1}});
     profile->setDimensions("t_r",
-        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims{1, {1}});
+        nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims{1, {opt_batch}});
     profile->setDimensions("t_r",
-        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims{1, {2}});
+        nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims{1, {max_batch}});
 
     config->addOptimizationProfile(profile);
 
