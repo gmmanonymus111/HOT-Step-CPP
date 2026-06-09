@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/stat.h>
 #include <system_error>
 #include <vector>
 
@@ -1988,63 +1989,109 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
     static bool   s_stream_trt_ready = false;
     static std::string s_stream_onnx_path;
 
-    // Build/load TRT engine if needed (same logic as ops_dit_generate)
-    if (!s_stream_trt_ready || s_stream_onnx_path != ctx->dit_key.path) {
+    // ── Resolve ONNX model for streaming ─────────────────────────────────
+    // Prefer a dedicated "dit-stream" sibling directory (FP32 ONNX, no QDQ)
+    // over the main DiT path (which may be FP8 QDQ, incompatible with
+    // native TRT STRONGLY_TYPED builds).
+    //
+    // Directory layout:
+    //   models/onnx/dit-fp8/dit_fp8.onnx      ← main DiT (FP8, for ORT-TRT)
+    //   models/onnx/dit-stream/dit.onnx        ← streaming DiT (FP32, for native TRT)
+    //
+    // Resolution order:
+    //   1. <parent_of_dit_path>/dit-stream/*.onnx  (preferred)
+    //   2. <dit_key.path>/*.onnx                   (fallback)
+
+    auto find_onnx_in_dir = [](const std::string& dir) -> std::string {
+        std::string result;
+#ifdef _WIN32
+        std::string pattern = dir + "\\*.onnx";
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                std::string fname(fd.cFileName);
+                std::string lower = fname;
+                for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                if (lower.find("dit") != std::string::npos ||
+                    lower.find("stream") == std::string::npos) {
+                    // Prefer dit*.onnx, but accept any .onnx
+                    result = dir + "\\" + fname;
+                    if (lower.find("dit") != std::string::npos) break;
+                }
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+#else
+        DIR* d = opendir(dir.c_str());
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                std::string fname(ent->d_name);
+                std::string lower = fname;
+                for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                if (lower.size() >= 5 && lower.compare(lower.size() - 5, 5, ".onnx") == 0) {
+                    result = dir + "/" + fname;
+                    if (lower.find("dit") != std::string::npos) break;
+                }
+            }
+            closedir(d);
+        }
+#endif
+        return result;
+    };
+
+    std::string stream_onnx_resolved;
+    {
+        const std::string& p = ctx->dit_key.path;
+
+        // Try dedicated dit-stream directory first
+        // Find parent: models/onnx/dit-fp8 → models/onnx
+        size_t sep = p.find_last_of("/\\");
+        if (sep != std::string::npos) {
+            std::string parent = p.substr(0, sep);
+            std::string stream_dir = parent + "/dit-stream";
+            // Check if dit-stream directory exists
+            struct stat st;
+            if (stat(stream_dir.c_str(), &st) == 0 && (st.st_mode & S_IFDIR)) {
+                stream_onnx_resolved = find_onnx_in_dir(stream_dir);
+                if (!stream_onnx_resolved.empty()) {
+                    fprintf(stderr, "[Stream] Using dedicated FP32 stream model: %s\n",
+                            stream_onnx_resolved.c_str());
+                }
+            }
+        }
+
+        // Fallback: use the main DiT path
+        if (stream_onnx_resolved.empty()) {
+            if (p.size() >= 5 && p.compare(p.size() - 5, 5, ".onnx") == 0) {
+                stream_onnx_resolved = p;
+            } else {
+                stream_onnx_resolved = find_onnx_in_dir(p);
+            }
+            if (!stream_onnx_resolved.empty()) {
+                fprintf(stderr, "[Stream] Using main DiT model (no dit-stream found): %s\n",
+                        stream_onnx_resolved.c_str());
+            }
+        }
+
+        if (stream_onnx_resolved.empty()) {
+            fprintf(stderr, "[Stream] FATAL: no ONNX model found for streaming\n");
+            return -1;
+        }
+    }
+
+    // Build/load TRT engine if needed
+    if (!s_stream_trt_ready || s_stream_onnx_path != stream_onnx_resolved) {
         if (s_stream_trt_ready) {
             dit_trt_free(&s_stream_trt);
             s_stream_trt.current_adapter.clear();
             s_stream_trt_ready = false;
         }
 
-        std::string onnx_path;
-        {
-            const std::string& p = ctx->dit_key.path;
-            size_t plen = p.size();
-            if (plen >= 5 && p.compare(plen - 5, 5, ".onnx") == 0) {
-                onnx_path = p;
-            } else {
-#ifdef _WIN32
-                std::string pattern = p + "\\*.onnx";
-                WIN32_FIND_DATAA fd;
-                HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-                if (h != INVALID_HANDLE_VALUE) {
-                    do {
-                        std::string fname(fd.cFileName);
-                        std::string lower = fname;
-                        for (auto& c : lower) c = (char)tolower((unsigned char)c);
-                        if (lower.find("dit") != std::string::npos) {
-                            onnx_path = p + "\\" + fname;
-                            break;
-                        }
-                    } while (FindNextFileA(h, &fd));
-                    FindClose(h);
-                }
-#else
-                DIR* d = opendir(p.c_str());
-                if (d) {
-                    struct dirent* ent;
-                    while ((ent = readdir(d)) != nullptr) {
-                        std::string fname(ent->d_name);
-                        std::string lower = fname;
-                        for (auto& c : lower) c = (char)tolower((unsigned char)c);
-                        if (lower.find("dit") != std::string::npos &&
-                            lower.size() >= 5 && lower.compare(lower.size() - 5, 5, ".onnx") == 0) {
-                            onnx_path = p + "/" + fname;
-                            break;
-                        }
-                    }
-                    closedir(d);
-                }
-#endif
-                if (onnx_path.empty()) {
-                    fprintf(stderr, "[Stream] FATAL: no dit*.onnx found in %s\n", p.c_str());
-                    return -1;
-                }
-            }
-        }
-
         // Engine with batch=8 profile for streaming
-        std::string engine_path = onnx_path.substr(0, onnx_path.size() - 5) + "_stream.engine";
+        std::string engine_path = stream_onnx_resolved.substr(
+            0, stream_onnx_resolved.size() - 5) + "_stream.engine";
 
         FILE* ef = fopen(engine_path.c_str(), "rb");
         if (ef) {
@@ -2052,17 +2099,17 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
             fprintf(stderr, "[Stream] Loading cached streaming TRT engine: %s\n", engine_path.c_str());
         } else {
             fprintf(stderr, "[Stream] Building streaming TRT engine (max_batch=8)...\n");
-            if (!dit_trt_build(onnx_path.c_str(), engine_path.c_str(), 0, 8)) {
+            if (!dit_trt_build(stream_onnx_resolved.c_str(), engine_path.c_str(), 0, 8)) {
                 fprintf(stderr, "[Stream] FATAL: TRT engine build failed\n");
                 return -1;
             }
         }
 
-        if (!dit_trt_load(&s_stream_trt, engine_path.c_str(), onnx_path.c_str())) {
+        if (!dit_trt_load(&s_stream_trt, engine_path.c_str(), stream_onnx_resolved.c_str())) {
             fprintf(stderr, "[Stream] FATAL: TRT engine load failed\n");
             return -1;
         }
-        s_stream_onnx_path = onnx_path;
+        s_stream_onnx_path = stream_onnx_resolved;
         s_stream_trt_ready = true;
     }
 

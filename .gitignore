@@ -60,6 +60,8 @@ engine/.cache/
 *.pt
 *.pth
 *.onnx
+# ONNX external data files (dit-stream has ~500 weight files with no extension)
+models/onnx/dit-stream/
 
 # Downloaded tools (whisper.cpp, etc.)
 tools/*
