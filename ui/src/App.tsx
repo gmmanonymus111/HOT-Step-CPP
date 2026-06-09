@@ -466,6 +466,14 @@ const AppContent: React.FC = () => {
     s.items.filter(i => i.status === 'pending' || i.status === 'loading-adapter' || i.status === 'generating').length
   );
 
+  // Track the active streaming job ID — for SSE connection in CreatePanel
+  const streamJobId = useAudioGenQueueSelector(s => {
+    const active = s.items.find(i =>
+      i.status === 'generating' && i.jobId && (i.globalParams as any)?.streamMode === true
+    );
+    return active?.jobId || null;
+  });
+
   // Load songs on mount
   useEffect(() => {
     if (!token) return;
@@ -500,7 +508,16 @@ const AppContent: React.FC = () => {
       parallelQualityEval: settings.parallelQualityEval,
       parallelCoverArt: settings.parallelCoverArt,
     };
-    enqueueSimpleGen(enrichedParams, token, handleSongCreated);
+    // When stream mode is active, capture the jobId for SSE via callback
+    const isStream = !!(enrichedParams as any).streamMode;
+    if (!isStream) setStreamJobId(null);
+
+    enqueueSimpleGen(
+      enrichedParams,
+      token,
+      handleSongCreated,
+      isStream ? (jobId) => setStreamJobId(jobId) : undefined,
+    );
   }, [token, settings, globalParams, handleSongCreated]);
 
   // Handle delete
@@ -917,6 +934,7 @@ const AppContent: React.FC = () => {
             onGenerate={handleGenerate}
             activeJobCount={activeJobCount}
             reuseData={reuseData}
+            streamJobId={streamJobId}
           />
         </DiscoPulseWrapper>
 

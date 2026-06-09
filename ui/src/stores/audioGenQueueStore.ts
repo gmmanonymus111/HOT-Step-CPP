@@ -522,6 +522,7 @@ export async function enqueueSimpleGen(
   params: Record<string, any>,
   token: string,
   onSongCreated?: (song: any) => void,
+  onJobId?: (jobId: string) => void,
 ): Promise<void> {
   const title = (params.title as string) || 'Untitled';
   const id = _genId();
@@ -549,6 +550,9 @@ export async function enqueueSimpleGen(
     item.jobId = res.jobId;
     item.stage = 'Queued…';
     _emit(true);
+
+    // Notify caller of jobId (used by stream mode for SSE connection)
+    onJobId?.(res.jobId);
 
     // Poll until done
     const startTime = Date.now();

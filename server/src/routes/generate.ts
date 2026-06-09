@@ -611,6 +611,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
     for (let trackIdx = 0; trackIdx < totalTracks; trackIdx++) {
       const synthReq = lmResults[trackIdx];
       const trackLabel = totalTracks > 1 ? ` (track ${trackIdx + 1}/${totalTracks})` : '';
+
+      // Auto-set stream_chunk_dir inside data/audio/stream/ so previews are
+      // served by the static /audio middleware. Create the directory if needed.
+      if (synthReq.stream_mode && !synthReq.stream_chunk_dir) {
+        const streamDir = path.join(config.data.audioDir, 'stream');
+        fs.mkdirSync(streamDir, { recursive: true });
+        synthReq.stream_chunk_dir = streamDir;
+      }
       const trackProgressBase = SYNTH_PROGRESS_START + trackIdx * progressPerTrack;
 
       // Vary DiT seed per track for additional variation
@@ -1487,12 +1495,21 @@ router.get('/stream/:id', (req, res) => {
     const previews = job.streamPreviews;
     if (previews && previews.length > lastPreviewIdx) {
       for (let i = lastPreviewIdx; i < previews.length; i++) {
-        // Convert filesystem path to a URL the frontend can fetch
-        // Preview WAVs are written to the stream_chunk_dir, which should be
-        // inside data/audio/ or a temp dir served by the static middleware
+        // Convert filesystem path to a URL relative to /audio/
+        // Preview WAVs live in data/audio/stream/ → served at /audio/stream/
         const p = previews[i];
+        const audioDir = config.data.audioDir.replace(/\\/g, '/');
+        const filePath = (p.path || '').replace(/\\/g, '/');
+        let url = p.path;
+        if (filePath.startsWith(audioDir)) {
+          url = '/audio' + filePath.substring(audioDir.length);
+        } else {
+          // Fallback: extract filename only
+          const filename = path.basename(p.path);
+          url = `/audio/stream/${filename}`;
+        }
         sendSSE('preview', {
-          url: p.path,  // absolute path — frontend will need a serving route
+          url,
           step: p.step,
           totalSteps: p.totalSteps,
           slot: p.slot,
