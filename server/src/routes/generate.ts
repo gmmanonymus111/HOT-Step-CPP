@@ -20,6 +20,7 @@ import { getUserId } from './auth.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
 import { engineReady, engineBootStatus } from '../engineState.js';
 import { autoTrimSilence } from '../services/autoTrim.js';
+import { wavDurationSec } from '../services/audioCrop.js';
 import { writeHslat, latentFrameCount, latentDuration, type HslatMetadata } from '../services/latentFormat.js';
 import { subscribeLines, pushLog } from './logs.js';
 import { translateParams } from '../services/generation/translateParams.js';
@@ -1115,6 +1116,17 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         ? JSON.stringify(trackQualityScores)
         : '';
 
+      // Duration: the LM provides one for text2music, but repaint/cover skip the
+      // LM (firstResult.duration = 0). Backfill from the actual output WAV so the
+      // song has a real length — downstream features (e.g. Song Builder clip
+      // points) rely on it. Falls back to 0 for non-WAV / read failures.
+      let trackDuration = duration;
+      if (!(trackDuration > 0)) {
+        const wavPath = path.join(config.data.audioDir, path.basename(audioUrl));
+        const measured = wavDurationSec(wavPath);
+        if (measured > 0) trackDuration = Math.round(measured);
+      }
+
       const songId = uuidv4();
       getDb().prepare(`
         INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
@@ -1123,7 +1135,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         songId, job.userId, title, trackLyrics, style, trackCaption,
-        audioUrl, duration, bpm, keyScale, timeSignature,
+        audioUrl, trackDuration, bpm, keyScale, timeSignature,
         JSON.stringify([]), aceReq.synth_model || '', JSON.stringify(job.params),
         trackMastered, trackLatent, qualityJson,
       );

@@ -55,6 +55,7 @@ export const SongBuilder: React.FC = () => {
   const playingTrackId = usePlaybackSelector(s => s.currentTrack?.id ?? null);
   const isPlaying = usePlaybackSelector(s => s.isPlaying);
   const playheadTime = usePlaybackSelector(s => s.currentTime);
+  const playbarDuration = usePlaybackSelector(s => s.duration);
 
   // Play a song in the global bar within a navigable list; clicking the already-
   // playing track toggles pause. Returns nothing — state lives in the play store.
@@ -130,6 +131,13 @@ export const SongBuilder: React.FC = () => {
   }, [chosenSections]);
   const headSong = head?.chosen ?? null;
   const headDuration = headSong?.duration ?? 0;
+  // Some songs (older repaint sections) were saved with duration 0. When the head
+  // is loaded in the play bar, trust the bar's real measured duration instead, so
+  // clip-point clamping and region math never collapse to the start of the song.
+  const headLoadedInBar = !!headSong && playingTrackId === headSong.id;
+  const effHeadDuration = headDuration > 0
+    ? headDuration
+    : (headLoadedInBar && playbarDuration > 0 ? playbarDuration : headDuration);
 
   // The section currently being generated/auditioned (variants stream in while
   // 'generating', finalize at 'ready'). Either way it's the audition target.
@@ -301,7 +309,7 @@ export const SongBuilder: React.FC = () => {
         // resolution (append) or song-start (prepend) is regenerated as a
         // transition rather than preserved verbatim. Clamp so we never overwrite
         // the whole source or more than the new section is long.
-        const overlap = Math.max(0, Math.min(transitionOverlap, headDuration - 1, effectiveLength));
+        const overlap = Math.max(0, Math.min(transitionOverlap, effHeadDuration - 1, effectiveLength));
         params.taskType = 'repaint';
         params.duration = 0; // engine derives from source canvas
         if (direction === 'prepend') {
@@ -313,11 +321,11 @@ export const SongBuilder: React.FC = () => {
         } else {
           // extend-from point: content after it (the unwanted tail) is fully inside
           // the regenerated region and gets discarded. Default = the very end.
-          const from = clipPoint ?? headDuration;
+          const from = clipPoint ?? effHeadDuration;
           params.repaintingStart = from - overlap;       // overwrite back from the attach point
           // Ensure the whole tail past `from` is regenerated (never preserve a
           // sliver of old tail beyond the new content when the user trims).
-          params.repaintingEnd = Math.max(from + effectiveLength, headDuration);
+          params.repaintingEnd = Math.max(from + effectiveLength, effHeadDuration);
         }
         params.repaintInjectionRatio = 0.5;
         params.repaintCrossfadeFrames = 10;
@@ -354,7 +362,7 @@ export const SongBuilder: React.FC = () => {
       showToast(`Generation failed: ${e.message}`);
       setIsGenerating(false);
     }
-  }, [token, project, direction, headSong, headDuration, gp, nextLabel, nextLyrics, effectiveLength, cumulativeLyrics, previewMastering, transitionOverlap, clipPoint]);
+  }, [token, project, direction, headSong, effHeadDuration, gp, nextLabel, nextLyrics, effectiveLength, cumulativeLyrics, previewMastering, transitionOverlap, clipPoint]);
 
   // Poll all variant jobs; append each finished song to the section's candidate
   // list as it lands (streaming), then mark 'ready' when the last one finishes.
@@ -578,7 +586,7 @@ export const SongBuilder: React.FC = () => {
         </div>
         {headSong && (
           <div className="text-[11px] text-zinc-400">
-            Song so far: <span className="text-violet-300 font-medium">{Math.round(headDuration)}s</span> · {timeline.length} section{timeline.length === 1 ? '' : 's'}
+            Song so far: <span className="text-violet-300 font-medium">{Math.round(effHeadDuration)}s</span> · {timeline.length} section{timeline.length === 1 ? '' : 's'}
           </div>
         )}
       </div>
@@ -818,7 +826,7 @@ export const SongBuilder: React.FC = () => {
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[11px] text-zinc-400">
                     {direction === 'prepend' ? 'Connect intro at' : 'Extend from'}:{' '}
-                    <span className="text-violet-300 font-mono">{(clipPoint ?? (direction === 'prepend' ? 0 : headDuration)).toFixed(1)}s</span>
+                    <span className="text-violet-300 font-mono">{(clipPoint ?? (direction === 'prepend' ? 0 : effHeadDuration)).toFixed(1)}s</span>
                     {clipPoint == null && <span className="text-zinc-600"> (default {direction === 'prepend' ? 'start' : 'end'})</span>}
                   </span>
                   {clipPoint != null && (
@@ -833,7 +841,7 @@ export const SongBuilder: React.FC = () => {
                     <Play size={11} /> Load song so far
                   </button>
                   <button
-                    onClick={() => setClipPoint(Math.max(0, Math.min(playheadTime, headDuration)))}
+                    onClick={() => { const cap = effHeadDuration > 0 ? effHeadDuration : playheadTime; setClipPoint(Math.max(0, Math.min(playheadTime, cap))); }}
                     disabled={playingTrackId !== headSong.id}
                     className="px-2.5 py-1 rounded-lg bg-violet-600/80 hover:bg-violet-500 disabled:opacity-40 text-[11px] text-white flex items-center gap-1.5"
                     title="Scrub the play bar below to the spot, then capture it here"

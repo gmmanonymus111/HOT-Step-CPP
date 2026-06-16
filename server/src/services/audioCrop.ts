@@ -59,6 +59,27 @@ function parseWavHeader(buf: Buffer): WavInfo {
   return { sampleRate, numChannels, bitsPerSample, dataOffset, dataSize };
 }
 
+/**
+ * Read a WAV file's duration in seconds from its header (cheap — reads only the
+ * first 8 KB, enough to find the fmt + data chunks). Returns 0 on any failure
+ * or for non-WAV input. Used to backfill song duration when the LM/request did
+ * not provide one (e.g. repaint/cover tasks where the LM is skipped).
+ */
+export function wavDurationSec(filePath: string): number {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const head = Buffer.alloc(8192);
+    const n = fs.readSync(fd, head, 0, 8192, 0);
+    fs.closeSync(fd);
+    const info = parseWavHeader(head.subarray(0, n));
+    const bytesPerFrame = info.numChannels * (info.bitsPerSample / 8);
+    if (info.sampleRate <= 0 || bytesPerFrame <= 0) return 0;
+    return info.dataSize / bytesPerFrame / info.sampleRate;
+  } catch {
+    return 0;
+  }
+}
+
 // ── WAV crop ─────────────────────────────────────────────────────────────────
 
 export interface CropResult {
