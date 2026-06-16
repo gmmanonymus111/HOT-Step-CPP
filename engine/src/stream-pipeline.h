@@ -38,13 +38,14 @@
 // ── Configuration ───────────────────────────────────────────────────────
 
 struct StreamConfig {
-    int   depth       = 8;      // ring buffer depth (user-configurable, default 8)
-    int   num_steps   = 50;     // denoising steps (adapts to user's step setting)
-    float shift       = 3.0f;   // timestep shift
-    float denoise     = 1.0f;   // global denoise strength
-    int   vae_chunk   = 64;     // VAE tiled decode chunk size
-    int   vae_overlap = 4;      // VAE tiled decode overlap
-    std::string chunk_dir;      // directory for preview WAV files
+    int   depth            = 8;      // ring buffer depth (user-configurable, default 8)
+    int   num_steps        = 50;     // denoising steps (adapts to user's step setting)
+    float shift            = 3.0f;   // timestep shift
+    float denoise          = 1.0f;   // global denoise strength
+    int   vae_chunk        = 64;     // VAE tiled decode chunk size
+    int   vae_overlap      = 4;      // VAE tiled decode overlap
+    int   preview_interval = 4;      // emit a preview every N denoising steps (0 = final only)
+    std::string chunk_dir;           // directory for preview WAV files
 };
 
 // ── Slot request (what the caller submits) ──────────────────────────────
@@ -75,6 +76,8 @@ struct StreamPreview {
     float  duration;        // window duration in seconds
     int    tick_idx;        // which tick produced this
     int    slot_idx;        // which slot completed
+    int    step_idx;        // denoising step index (0-based)
+    int    total_steps;     // total denoising steps
     bool   is_final;        // true if this is the last preview
 };
 
@@ -238,16 +241,26 @@ public:
 
             // Advance step
             slot->step_idx++;
+            int total_steps = (int)slot->schedule.size();
 
             // Check completion (reached last step)
-            if (slot->step_idx >= (int)slot->schedule.size()) {
+            if (slot->step_idx >= total_steps) {
                 slot->completed = true;
 
-                // Windowed VAE decode of completed slot
-                result = decode_completed(slot, active_indices[bi]);
+                // Final VAE decode
+                result = decode_slot(slot, active_indices[bi], /*is_final=*/true);
 
                 fprintf(stderr, "[StreamPipeline] Slot %d completed (id=%d, tick=%d)\n",
                         active_indices[bi], slot->slot_id, m_tick_count);
+            }
+            // Intermediate preview: decode at regular intervals
+            else if (m_config.preview_interval > 0 &&
+                     slot->step_idx > 0 &&
+                     slot->step_idx % m_config.preview_interval == 0) {
+                auto preview = decode_slot(slot, active_indices[bi], /*is_final=*/false);
+                if (preview && !result) {
+                    result = std::move(preview);
+                }
             }
         }
 
@@ -255,10 +268,17 @@ public:
         m_last_tick_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
         m_tick_count++;
 
+        // Log format: [Stream] tick N step M/S — matches node parser regex
         if (m_tick_count % 10 == 0 || result.has_value()) {
-            fprintf(stderr, "[StreamPipeline] Tick %d: %d active, %.1f ms%s\n",
-                    m_tick_count, B, m_last_tick_ms,
-                    result ? " [COMPLETED]" : "");
+            int cur_step = 0, max_step = m_config.num_steps;
+            if (!m_slots.empty()) {
+                for (auto* s : m_slots) {
+                    if (s && !s->completed) { cur_step = s->step_idx; break; }
+                }
+            }
+            fprintf(stderr, "[Stream] tick %d step %d/%d: %d active, %.1f ms%s\n",
+                    m_tick_count, cur_step, max_step, B, m_last_tick_ms,
+                    result ? " [PREVIEW]" : "");
         }
 
         return result;
@@ -380,8 +400,9 @@ private:
         return slot;
     }
 
-    // ── Decode completed slot via windowed VAE ──────────────────────────
-    std::optional<StreamPreview> decode_completed(StreamSlot* slot, int slot_idx) {
+    // ── Decode slot via windowed VAE (intermediate or final) ─────────────
+    std::optional<StreamPreview> decode_slot(StreamSlot* slot, int slot_idx,
+                                             bool is_final) {
         if (!m_vae) {
             fprintf(stderr, "[StreamPipeline] WARNING: no VAE available, skipping decode\n");
             return std::nullopt;
@@ -406,15 +427,19 @@ private:
             return std::nullopt;
         }
 
-        fprintf(stderr, "[StreamPipeline] VAE decode: slot=%d T=%d T_audio=%d %.1f ms\n",
-                slot_idx, T, T_audio, vae_ms);
+        int step = slot->step_idx;
+        int total = (int)slot->schedule.size();
+
+        fprintf(stderr, "[StreamPipeline] VAE decode: slot=%d step=%d/%d T=%d T_audio=%d %.1f ms%s\n",
+                slot_idx, step, total, T, T_audio, vae_ms,
+                is_final ? " [FINAL]" : "");
 
         // Write preview WAV
         std::string wav_path;
         if (!m_config.chunk_dir.empty()) {
             char fname[128];
-            snprintf(fname, sizeof(fname), "stream_%04d_slot%d.wav",
-                     m_tick_count, slot_idx);
+            snprintf(fname, sizeof(fname), "stream_step%03d_slot%d.wav",
+                     step, slot_idx);
             wav_path = m_config.chunk_dir + "/" + fname;
 
             // Write 48kHz stereo WAV (interleaved from planar)
@@ -424,12 +449,14 @@ private:
         float duration = (float)T_audio / 48000.0f;
 
         StreamPreview preview;
-        preview.wav_path  = wav_path;
-        preview.t_start   = 0.0f;  // full decode for now
-        preview.duration  = duration;
-        preview.tick_idx  = m_tick_count;
-        preview.slot_idx  = slot_idx;
-        preview.is_final  = m_queue.empty() && active_slots() <= 1;
+        preview.wav_path    = wav_path;
+        preview.t_start     = 0.0f;  // full decode for now
+        preview.duration    = duration;
+        preview.tick_idx    = m_tick_count;
+        preview.slot_idx    = slot_idx;
+        preview.step_idx    = step;
+        preview.total_steps = m_config.num_steps;
+        preview.is_final    = is_final;
 
         return preview;
     }

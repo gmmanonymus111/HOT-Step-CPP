@@ -2138,8 +2138,9 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
 #endif
     }
 
-    fprintf(stderr, "[Stream] Starting: depth=%d steps=%d T=%d enc_S=%d\n",
-            stream_cfg.depth, stream_cfg.num_steps, s.T, s.enc_S);
+    fprintf(stderr, "[Stream] Starting: depth=%d steps=%d T=%d enc_S=%d preview_every=%d\n",
+            stream_cfg.depth, stream_cfg.num_steps, s.T, s.enc_S,
+            stream_cfg.preview_interval);
 
     StreamPipeline pipeline(&s_stream_trt, vae_ort, stream_cfg);
 
@@ -2172,9 +2173,10 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
         auto preview = pipeline.tick();
         if (preview) {
             preview_count++;
-            fprintf(stderr, "[STREAM_PREVIEW] path=%s t_start=%.3f duration=%.3f tick=%d slot=%d final=%d\n",
-                    preview->wav_path.c_str(), preview->t_start, preview->duration,
-                    preview->tick_idx, preview->slot_idx, preview->is_final ? 1 : 0);
+            // Format must match node parser: [STREAM_PREVIEW] path=<file> step=N/M slot=K
+            fprintf(stderr, "[STREAM_PREVIEW] path=%s step=%d/%d slot=%d\n",
+                    preview->wav_path.c_str(), preview->step_idx, preview->total_steps,
+                    preview->slot_idx);
             fflush(stderr);
         }
     }
