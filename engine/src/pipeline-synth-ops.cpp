@@ -2128,6 +2128,10 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
     stream_cfg.vae_chunk   = ctx->params.vae_chunk;
     stream_cfg.vae_overlap = ctx->params.vae_overlap;
     stream_cfg.chunk_dir   = s.rr.stream_chunk_dir;
+    // Intermediate previews disabled — previewing partially-denoised latents
+    // produces scrambled audio (VAE expects clean latents). Real streaming
+    // will use temporal chunking where each chunk is fully denoised.
+    stream_cfg.preview_interval = 0;
 
     // Ensure chunk directory exists
     if (!stream_cfg.chunk_dir.empty()) {
