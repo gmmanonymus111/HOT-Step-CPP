@@ -252,6 +252,18 @@ export const SongBuilder: React.FC = () => {
     setLengthMode('bars');
   }, [lyricLineCount]);
 
+  // Per-section length label: bars (recovered from the stored section_length +
+  // current BPM) so the user can match a previous section's bar count, plus the
+  // seconds. Falls back to seconds when there's no BPM to convert against.
+  const sectionLenLabel = useCallback((s: BuilderSection) => {
+    const secs = s.section_length || 0;
+    if (bpm > 0 && secs > 0) {
+      const bars = Math.round((secs * bpm) / (beatsPerBar * 60));
+      return `${bars} bar${bars === 1 ? '' : 's'} · ${Math.round(secs)}s`;
+    }
+    return secs > 0 ? `${Math.round(secs)}s` : `${Math.round(s.chosen?.duration || 0)}s`;
+  }, [bpm, beatsPerBar]);
+
   // ── Generate the next section ──
   const handleGenerate = useCallback(async () => {
     if (!token || !project) return;
@@ -659,7 +671,7 @@ export const SongBuilder: React.FC = () => {
                       </div>
                     </div>
                     <div className="text-sm text-white font-medium truncate">{s.label || 'Section'}</div>
-                    <div className="text-[11px] text-zinc-500 mb-2">{Math.round(s.chosen?.duration || 0)}s · {s.direction}</div>
+                    <div className="text-[11px] text-zinc-500 mb-2" title={`Section length · ${s.direction}`}>{sectionLenLabel(s)} · {s.direction}</div>
                     <button
                       onClick={() => playSong(s.chosen, timeline.map(t => t.chosen))}
                       className="w-full px-2 py-1.5 rounded-lg bg-black/20 hover:bg-black/30 text-xs text-white flex items-center justify-center gap-1.5"
