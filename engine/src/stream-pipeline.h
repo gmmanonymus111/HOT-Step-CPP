@@ -296,6 +296,19 @@ public:
     int   total_ticks()  const { return m_tick_count; }
     bool  queue_empty()  const { return m_queue.empty(); }
 
+    // Access the final denoised latent from the first completed slot.
+    // Must be called BEFORE the next tick() harvests and deletes it.
+    // Returns pointer to xt data [T * 64] or nullptr if no completed slot.
+    const float* get_completed_latent(int* out_T = nullptr) const {
+        for (const auto* slot : m_slots) {
+            if (slot && slot->completed) {
+                if (out_T) *out_T = slot->request.T;
+                return slot->xt.data();
+            }
+        }
+        return nullptr;
+    }
+
 private:
     DitTrt*              m_trt;
     VaeOrt*              m_vae;

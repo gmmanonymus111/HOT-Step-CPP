@@ -2184,6 +2184,30 @@ int ops_stream_generate(const AceSynth* ctx, int batch_n, SynthState& s,
     fprintf(stderr, "[Stream] Complete: %d ticks, %d previews, %.1f ms total\n",
             pipeline.total_ticks(), preview_count, total_ms);
 
+    // ── Copy final latent to s.output for downstream VAE decode ─────────
+    // The completed slot's xt [T, 64] is the denoised latent.
+    // s.output is [batch_n * T * Oc], same layout as the normal DiT path.
+    {
+        int latent_T = 0;
+        const float* completed_xt = pipeline.get_completed_latent(&latent_T);
+        if (completed_xt && latent_T > 0) {
+            const int Oc = 64;
+            s.output.resize(batch_n * s.T * Oc);
+            // Copy the stream result into batch 0
+            memcpy(s.output.data(), completed_xt, (size_t)s.T * Oc * sizeof(float));
+            // For batch_n > 1, duplicate to all batches (stream only does 1 request)
+            for (int b = 1; b < batch_n; b++) {
+                memcpy(s.output.data() + b * s.T * Oc,
+                       completed_xt, (size_t)s.T * Oc * sizeof(float));
+            }
+            fprintf(stderr, "[Stream] Copied final latent to s.output (T=%d, Oc=%d)\n",
+                    s.T, Oc);
+        } else {
+            fprintf(stderr, "[Stream] WARNING: no completed latent to copy — "
+                    "s.output will be zeros\n");
+        }
+    }
+
     // Release VAE
     if (vae_ort) {
         store_release(ctx->store, vae_ort);
