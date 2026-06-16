@@ -1,0 +1,96 @@
+# CLAUDE.md — HOT-Step CPP
+
+Orientation map for agents. Keep this short and navigational — point at the deep docs, don't duplicate them.
+
+## What this is
+
+A desktop app for **local AI music generation** — a heavily-extended superset of [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) (a C++/GGML port of ACE-Step 1.5). Caption + lyrics in → stereo 48 kHz audio out, fully local. Ships as portable releases (Windows CUDA/Vulkan/CPU, Linux, macOS Metal). GitHub: `scragnog/HOT-Step-CPP`.
+
+## Architecture (3 tiers)
+
+| Tier | Stack | Location | Role |
+|------|-------|----------|------|
+| **Engine** | C++17 / CUDA / GGML | [engine/](engine/) | Inference binaries: `ace-lm`, `ace-synth`, `ace-server`, `ace-understand`, `neural-codec`, `mp3-codec`, `quantize`. Pipeline: LM → DiT → VAE |
+| **Server** | Node / TypeScript / Express / better-sqlite3 | [server/src/](server/src/) | Orchestrates the engine, manages songs/jobs/SQLite, serves UI. Per-feature [routes/](server/src/routes/) + [services/](server/src/services/) |
+| **UI** | React 19 / Vite / Zustand / Tailwind | [ui/src/](ui/src/) | Browser frontend. Component folder per "studio" |
+
+```
+LAUNCH.bat → Node server (Express :3001)
+  ├── serves React frontend (prebuilt ui/dist/)
+  ├── /api/* → SQLite
+  └── spawns child: ace-server.exe (C++ engine) on :8085
+```
+
+| Service | Port |
+|---------|------|
+| Node server | 3001 (prod) |
+| Vite dev server | 3000 (dev, HMR) |
+| ace-server (C++ engine) | 8085 (default, `config.ts`) |
+
+## Environment
+
+- **Windows 11 + PowerShell.** This repo's primary dev environment is Windows. The Claude Code harness also gives you a Bash (POSIX) tool — each takes its own syntax. In PowerShell use `;` not `&&`.
+- **Node 18–22 LTS only.** Node 24+ breaks dependencies (`engines` field enforces `<24`).
+
+## Build & run rules (IMPORTANT — learned the hard way)
+
+- **C++ engine changes → `dev-rebuild.bat`, NEVER `engine/build.cmd` directly.** The Node server auto-respawns ace-server on crash; killing it without clean shutdown causes an infinite respawn + file-lock loop. `dev-rebuild.bat` handles shutdown/rebuild/restart.
+  - Recompile **immediately** after editing any `engine/src/` or `engine/tools/` file — don't wait to be asked.
+- **NEVER `cmake --build . --clean-first`** unless the GGML/CUDA layer itself changed — CUDA kernel recompilation is **20+ min**. For stale `.obj` issues, delete only `engine/build/acestep-core.dir/` and `engine/build/Release/acestep-core.lib`.
+- **Don't `npm run build` during dev.** Type-check with `npx tsc --noEmit`. Only build before user testing.
+- **`dev.bat`** = dev mode (Vite :3000 HMR + Node :3001, tsx watch auto-restart). **`LAUNCH.bat`** = prod. Use `dev.bat` for development.
+
+## Git rules
+
+- **All work on `master`. No feature branches, ever.**
+- **Never `git add -A`** (re-adds gitignored dirs: `.agents/`, `checkpoints/`, `node_modules/`, etc.). **Never `git add -f`** on gitignored paths. Stage explicit paths.
+- **Push requires explicit user approval — always ask first.**
+- Commit to local git **often** (data has been lost before to uncommitted files).
+- Tag releases after a successful feature: `v1.5-<feature-name>`.
+- Use `gh` CLI for GitHub ops (authenticated as `scragnog`).
+
+## Upstream sync (fork hooks that break silently)
+
+The C++ engine is a patched fork of acestep.cpp. Three upstream files carry HOT-Step `#include` hooks that break if overwritten during a sync:
+
+| Upstream file | Hook | If lost |
+|---|---|---|
+| `pipeline-synth-ops.cpp` | `hot-step-sampler.h` (replaces `dit-sampler.h`) | **SILENT** — compiles, but all solvers/guidance/schedulers go dead |
+| `model-store.h` | `hot-step-params.h` | compile error |
+| `dit.h` | `adapter-merge.h` + `adapter-runtime.h` | compile error |
+
+After any sync: run `engine/verify-hooks.ps1`. Full process: `docs/plans/upstream-sync-workflow.md` *(local, gitignored)*.
+
+## UI / browser verification
+
+- **Don't use the built-in browser agent to visually verify UI** — too slow/unreliable here. **Ask the user to check**; they provide screenshots/feedback. Browser agent is fine for non-visual tasks (hitting API endpoints).
+
+## Debugging — logs
+
+App writes per-session logs to `logs/` at repo root:
+
+```
+logs/YYYY-MM-DD_HH-MM-SS/        ← one folder per session (name-sorted = time-sorted)
+  ├── ace_engine.log              ← C++ engine output
+  ├── node_console.log            ← Node server output
+  └── generations/gen_<uuid>_<task>.log
+```
+
+Start with the newest session folder. Generation failures → matching `gen_*.log` first, then cross-ref `ace_engine.log` + `node_console.log`. Startup/crash → `node_console.log` + `ace_engine.log`.
+
+## Plugin system
+
+Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable Lua plugins** in [engine/plugins/](engine/plugins/) — drop a `.lua` in the right subdir, appears in the UI next launch, no C++ rebuild. Each plugin can declare its own UI params. Native C++ bridge via `apg()`; advanced plugins use `post_step()` for extra forward passes. **Adding a solver/scheduler/guidance = write a `.lua` plugin** (the old approach of editing `dit-sampler.h` is obsolete — the engine now routes through `hot-step-sampler.h`). Authoring guide: [docs/PLUGINS.md](docs/PLUGINS.md).
+
+## Read-Y-for-X index
+
+| For… | Read |
+|------|------|
+| Full feature catalogue (100+) | [FEATURES.md](FEATURES.md) |
+| Engine internals, CLI, request JSON, generation modes | [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) |
+| Writing a Lua plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
+| Build / install / releases | [README.md](README.md) |
+| Internal design/investigation docs (perf, adapters, upstream sync, feature designs) | `docs/plans/` *(gitignored, local-only)* |
+| In-app assistant behaviour/KB | [server/src/data/assistant-knowledge.md](server/src/data/assistant-knowledge.md) |
+
+> **Doc convention:** committed contributor-facing docs = `README.md`, `FEATURES.md`, `docs/PLUGINS.md`, `engine/docs/ARCHITECTURE.md`. Internal planning/investigation docs live in `docs/plans/`, which is **gitignored** (local only). This file (`CLAUDE.md`) is committed.
