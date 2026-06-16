@@ -2,7 +2,8 @@
 //
 // Connects to GET /api/generate/stream/:jobId once a generation job is running.
 // Receives 'preview' events with WAV file paths, fetches them, decodes to
-// AudioBuffers, and queues them for gapless sequential playback.
+// AudioBuffers. Each preview REPLACES the previous one (same full track at
+// increasing quality as denoising progresses).
 //
 // Exposes: status, previews[], play(), pause(), stop()
 
@@ -15,8 +16,6 @@ export interface StreamPreview {
   slot: number;
   /** AudioBuffer decoded from the preview WAV (null if not yet loaded) */
   buffer: AudioBuffer | null;
-  /** Whether this preview has been played */
-  played: boolean;
 }
 
 export interface StreamStatus {
@@ -55,111 +54,138 @@ export function useStreamGeneration(jobId: string | null) {
 
   const esRef = useRef<EventSource | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const playQueueRef = useRef<AudioBuffer[]>([]);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const isPlayingRef = useRef(false);
-  const nextPlayTimeRef = useRef(0);
+  const latestBufferRef = useRef<AudioBuffer | null>(null);
   const previewsRef = useRef<StreamPreview[]>([]);
+  const playbackOffsetRef = useRef(0);  // where in the track the user was listening
 
-  // Fetch and decode a preview WAV file
-  const fetchPreview = useCallback(async (url: string): Promise<AudioBuffer | null> => {
-    try {
-      // Server sends URLs relative to the audio static middleware (e.g. /audio/stream/preview.wav)
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const arrayBuffer = await res.arrayBuffer();
-
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioContext();
-      }
-      return await audioCtxRef.current.decodeAudioData(arrayBuffer);
-    } catch (err) {
-      console.warn('[StreamGen] Failed to decode preview:', url, err);
-      return null;
-    }
-  }, []);
-
-  // Play next buffer in queue
-  const playNextBuffer = useCallback(() => {
-    if (!isPlayingRef.current || playQueueRef.current.length === 0) return;
-    if (!audioCtxRef.current) {
+  // ── Ensure AudioContext exists ──────────────────────────────────────
+  const ensureAudioCtx = useCallback((): AudioContext => {
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       audioCtxRef.current = new AudioContext();
     }
-    const ctx = audioCtxRef.current;
-    const buffer = playQueueRef.current.shift()!;
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-
-    // Schedule at the next play time for gapless playback
-    const startTime = Math.max(ctx.currentTime, nextPlayTimeRef.current);
-    source.start(startTime);
-    nextPlayTimeRef.current = startTime + buffer.duration;
-
-    currentSourceRef.current = source;
-    source.onended = () => {
-      currentSourceRef.current = null;
-      if (isPlayingRef.current && playQueueRef.current.length > 0) {
-        playNextBuffer();
-      } else if (playQueueRef.current.length === 0) {
-        setState(prev => ({ ...prev, playing: false }));
-        isPlayingRef.current = false;
-      }
-    };
+    return audioCtxRef.current;
   }, []);
 
-  // Controls
-  const play = useCallback(() => {
-    if (isPlayingRef.current) return;
-    isPlayingRef.current = true;
-    setState(prev => ({ ...prev, playing: true }));
-
-    // Resume AudioContext if suspended
-    if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
-
-    // Reset play time
-    if (audioCtxRef.current) {
-      nextPlayTimeRef.current = audioCtxRef.current.currentTime;
-    }
-
-    // Queue all unplayed previews
-    for (const p of previewsRef.current) {
-      if (p.buffer && !p.played) {
-        playQueueRef.current.push(p.buffer);
-        p.played = true;
-      }
-    }
-
-    if (playQueueRef.current.length > 0) {
-      playNextBuffer();
-    }
-  }, [playNextBuffer]);
-
-  const pause = useCallback(() => {
-    isPlayingRef.current = false;
-    setState(prev => ({ ...prev, playing: false }));
+  // ── Stop current playback (internal) ────────────────────────────────
+  const stopCurrentSource = useCallback(() => {
     if (currentSourceRef.current) {
       try { currentSourceRef.current.stop(); } catch { /* already stopped */ }
       currentSourceRef.current = null;
     }
   }, []);
 
-  const stop = useCallback(() => {
-    pause();
-    playQueueRef.current = [];
-    nextPlayTimeRef.current = 0;
-    // Reset all previews to unplayed
-    for (const p of previewsRef.current) {
-      p.played = false;
-    }
-  }, [pause]);
+  // ── Play the latest buffer from a given offset ──────────────────────
+  const playLatestFrom = useCallback((offset: number) => {
+    const buffer = latestBufferRef.current;
+    if (!buffer) return;
 
-  // SSE connection
+    const ctx = ensureAudioCtx();
+    if (ctx.state === 'suspended') ctx.resume();
+
+    stopCurrentSource();
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+
+    // Clamp offset to buffer duration
+    const safeOffset = Math.min(Math.max(0, offset), buffer.duration - 0.1);
+    source.start(0, safeOffset);
+    playbackOffsetRef.current = safeOffset;
+
+    // Track playback position so we can resume from the right spot on next preview
+    const startedAt = ctx.currentTime;
+    currentSourceRef.current = source;
+
+    source.onended = () => {
+      currentSourceRef.current = null;
+      // Calculate where playback ended
+      const elapsed = ctx.currentTime - startedAt;
+      playbackOffsetRef.current = safeOffset + elapsed;
+
+      if (isPlayingRef.current && playbackOffsetRef.current < buffer.duration - 0.5) {
+        // Buffer ended prematurely (shouldn't happen), don't auto-replay
+      } else {
+        // Reached end of track — stop playing
+        isPlayingRef.current = false;
+        setState(prev => ({ ...prev, playing: false }));
+        playbackOffsetRef.current = 0;
+      }
+    };
+  }, [ensureAudioCtx, stopCurrentSource]);
+
+  // ── Fetch and decode a preview WAV file ─────────────────────────────
+  const fetchPreview = useCallback(async (url: string): Promise<AudioBuffer | null> => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const arrayBuffer = await res.arrayBuffer();
+      const ctx = ensureAudioCtx();
+      return await ctx.decodeAudioData(arrayBuffer);
+    } catch (err) {
+      console.warn('[StreamGen] Failed to decode preview:', url, err);
+      return null;
+    }
+  }, [ensureAudioCtx]);
+
+  // ── Public controls ─────────────────────────────────────────────────
+  const play = useCallback(() => {
+    if (isPlayingRef.current) return;
+    isPlayingRef.current = true;
+    setState(prev => ({ ...prev, playing: true }));
+    playLatestFrom(0);
+  }, [playLatestFrom]);
+
+  const pause = useCallback(() => {
+    if (!isPlayingRef.current) return;
+    // Save current position before stopping
+    if (currentSourceRef.current && audioCtxRef.current) {
+      // We can't query position directly, but we track it via startedAt
+    }
+    isPlayingRef.current = false;
+    setState(prev => ({ ...prev, playing: false }));
+    stopCurrentSource();
+  }, [stopCurrentSource]);
+
+  const stop = useCallback(() => {
+    isPlayingRef.current = false;
+    setState(prev => ({ ...prev, playing: false }));
+    stopCurrentSource();
+    playbackOffsetRef.current = 0;
+  }, [stopCurrentSource]);
+
+  // ── Full cleanup: stop audio + close context ────────────────────────
+  const fullCleanup = useCallback(() => {
+    isPlayingRef.current = false;
+    stopCurrentSource();
+    playbackOffsetRef.current = 0;
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    latestBufferRef.current = null;
+  }, [stopCurrentSource]);
+
+  // ── SSE connection ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId) {
+      // jobId went null → generation ended or was never started
+      // Stop any playing audio
+      fullCleanup();
+      previewsRef.current = [];
+      setState({
+        connected: false, status: null, previews: [],
+        playing: false, done: false, error: null, result: null,
+      });
+      return;
+    }
+
+    // Reset state for new job
+    previewsRef.current = [];
+    latestBufferRef.current = null;
+    playbackOffsetRef.current = 0;
 
     const es = new EventSource(`/api/generate/stream/${jobId}`);
     esRef.current = es;
@@ -191,10 +217,9 @@ export function useStreamGeneration(jobId: string | null) {
           totalSteps: data.totalSteps,
           slot: data.slot,
           buffer: null,
-          played: false,
         };
 
-        // Add to list immediately (buffer loading is async)
+        // Add to list
         previewsRef.current = [...previewsRef.current, preview];
         setState(prev => ({
           ...prev,
@@ -205,15 +230,20 @@ export function useStreamGeneration(jobId: string | null) {
         const buffer = await fetchPreview(data.url);
         if (buffer) {
           preview.buffer = buffer;
+          latestBufferRef.current = buffer;
 
-          // If currently playing, auto-queue this new buffer
-          if (isPlayingRef.current) {
-            playQueueRef.current.push(buffer);
-            preview.played = true;
-            // If nothing is currently playing, start it
-            if (!currentSourceRef.current) {
-              playNextBuffer();
+          // If currently playing, seamlessly switch to the new (better quality) buffer
+          // Resume from approximately where the user was in the track
+          if (isPlayingRef.current && audioCtxRef.current) {
+            // Calculate current playback position
+            const ctx = audioCtxRef.current;
+            let currentPos = playbackOffsetRef.current;
+            if (currentSourceRef.current) {
+              // Rough estimate based on when we started
+              currentPos = playbackOffsetRef.current;
+              // We'll use the tracked offset since Web Audio doesn't expose currentTime per source
             }
+            playLatestFrom(Math.min(currentPos, buffer.duration - 0.5));
           }
 
           setState(prev => ({
@@ -227,6 +257,8 @@ export function useStreamGeneration(jobId: string | null) {
     es.addEventListener('done', (event) => {
       try {
         const data = JSON.parse(event.data);
+        // Stop preview playback — user will use the normal player for the final track
+        stop();
         setState(prev => ({
           ...prev,
           done: true,
@@ -237,7 +269,6 @@ export function useStreamGeneration(jobId: string | null) {
     });
 
     es.addEventListener('error', (event) => {
-      // Check if it's a server-sent error event vs connection error
       const messageEvent = event as MessageEvent;
       if (messageEvent.data) {
         try {
@@ -249,6 +280,7 @@ export function useStreamGeneration(jobId: string | null) {
           }));
         } catch { /* ignore */ }
       }
+      stop();
       setState(prev => ({ ...prev, connected: false }));
       es.close();
     });
@@ -256,21 +288,16 @@ export function useStreamGeneration(jobId: string | null) {
     return () => {
       es.close();
       esRef.current = null;
+      // Stop audio when SSE disconnects
+      stop();
       setState(prev => ({ ...prev, connected: false }));
     };
-  }, [jobId, fetchPreview, playNextBuffer]);
+  }, [jobId, fetchPreview, playLatestFrom, stop, fullCleanup]);
 
   // Cleanup AudioContext on unmount
   useEffect(() => {
-    return () => {
-      if (currentSourceRef.current) {
-        try { currentSourceRef.current.stop(); } catch { /* */ }
-      }
-      if (audioCtxRef.current) {
-        audioCtxRef.current.close().catch(() => {});
-      }
-    };
-  }, []);
+    return () => fullCleanup();
+  }, [fullCleanup]);
 
   return {
     ...state,

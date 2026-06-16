@@ -141,7 +141,7 @@ export const StreamPlayer: React.FC<StreamPlayerProps> = ({
         {/* Preview count */}
         <div className="flex items-center gap-3">
           <span className="text-[10px] text-zinc-500 font-mono">
-            {loadedCount}/{previews.length} chunks
+            {loadedCount}/{previews.length} previews
           </span>
 
           {/* Error indicator */}
