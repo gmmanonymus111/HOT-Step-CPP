@@ -9,8 +9,29 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { modelApi } from '../../services/api';
 import { formatDitModel, formatLmModel, formatVaeModel, formatEmbeddingModel, getDitModelDescription, getLmModelDescription, getVaeModelDescription } from './modelLabels';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
-import { ModelSelect } from './ModelSelect';
+import { ModelSelect, getModelFormat } from './ModelSelect';
 import type { AceModels } from '../../types';
+
+type ModelFormat = 'gguf' | 'safetensors' | 'onnx';
+const FORMAT_ORDER: ModelFormat[] = ['gguf', 'safetensors', 'onnx'];
+const FORMAT_LABELS: Record<ModelFormat, string> = { gguf: 'GGUF', safetensors: 'SafeTensors', onnx: 'ONNX' };
+const FORMAT_FILTER_KEY = 'model-format-filter';
+
+function loadFormatFilter(): Record<ModelFormat, boolean> {
+  const allOn = { gguf: true, safetensors: true, onnx: true };
+  try {
+    const raw = localStorage.getItem(FORMAT_FILTER_KEY);
+    if (!raw) return allOn;
+    const parsed = JSON.parse(raw);
+    return {
+      gguf: parsed.gguf !== false,
+      safetensors: parsed.safetensors !== false,
+      onnx: parsed.onnx !== false,
+    };
+  } catch {
+    return allOn;
+  }
+}
 
 export const ModelsDropdown: React.FC = () => {
   const gp = useGlobalParams();
@@ -51,8 +72,51 @@ export const ModelsDropdown: React.FC = () => {
   const vaeModels = models?.models?.vae || [];
   const embeddingModels = models?.models?.embedding || [];
 
+  // Format-type filter (gguf / safetensors / onnx). Persisted across sessions.
+  // Only affects which options the dropdowns show — not auto-selection, so a
+  // selected model stays selected even when its format is filtered out.
+  const [formatFilter, setFormatFilter] = useState<Record<ModelFormat, boolean>>(loadFormatFilter);
+  useEffect(() => {
+    try { localStorage.setItem(FORMAT_FILTER_KEY, JSON.stringify(formatFilter)); } catch { /* ignore */ }
+  }, [formatFilter]);
+
+  // Only surface chips for formats that actually exist across the available models.
+  const presentFormats = new Set<ModelFormat>(
+    [...ditModels, ...lmModels, ...vaeModels, ...embeddingModels].map(getModelFormat)
+  );
+  const chipFormats = FORMAT_ORDER.filter((f) => presentFormats.has(f));
+
+  const byFormat = (list: string[]) => list.filter((m) => formatFilter[getModelFormat(m)]);
+  const toggleFormat = (f: ModelFormat) =>
+    setFormatFilter((prev) => ({ ...prev, [f]: !prev[f] }));
+
   return (
     <div className="space-y-3">
+      {/* Format-type filter — toggles which model formats appear in the dropdowns */}
+      {chipFormats.length > 1 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mr-0.5">Format</span>
+          {chipFormats.map((f) => {
+            const active = formatFilter[f];
+            return (
+              <button
+                key={f}
+                type="button"
+                onClick={() => toggleFormat(f)}
+                aria-pressed={active}
+                title={active ? `Hide ${FORMAT_LABELS[f]} models` : `Show ${FORMAT_LABELS[f]} models`}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide border transition-colors
+                  ${active
+                    ? 'bg-pink-500/15 text-pink-400 border-pink-500/30'
+                    : 'bg-transparent text-zinc-500 border-zinc-300 dark:border-white/10 hover:text-zinc-400'}`}
+              >
+                {FORMAT_LABELS[f]}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* DiT Model */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('models.ditModel')}</label>
@@ -60,7 +124,7 @@ export const ModelsDropdown: React.FC = () => {
           id="dit-model-select"
           value={gp.ditModel}
           onChange={gp.setDitModel}
-          options={ditModels}
+          options={byFormat(ditModels)}
           formatLabel={formatDitModel}
           placeholder={t('common.loading')}
         />
@@ -76,7 +140,7 @@ export const ModelsDropdown: React.FC = () => {
           id="lm-model-select"
           value={gp.lmModel}
           onChange={gp.setLmModel}
-          options={lmModels}
+          options={byFormat(lmModels)}
           formatLabel={formatLmModel}
           placeholder={t('common.loading')}
         />
@@ -93,7 +157,7 @@ export const ModelsDropdown: React.FC = () => {
             id="vae-model-select"
             value={gp.vaeModel}
             onChange={gp.setVaeModel}
-            options={vaeModels}
+            options={byFormat(vaeModels)}
             formatLabel={formatVaeModel}
             placeholder={t('common.loading')}
           />
@@ -111,7 +175,7 @@ export const ModelsDropdown: React.FC = () => {
             id="embedding-model-select"
             value={gp.embeddingModel}
             onChange={gp.setEmbeddingModel}
-            options={embeddingModels}
+            options={byFormat(embeddingModels)}
             formatLabel={formatEmbeddingModel}
             placeholder={t('common.loading')}
           />

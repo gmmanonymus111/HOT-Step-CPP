@@ -5,7 +5,7 @@
 // navigation for accessibility.
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { ChevronDown, Check } from 'lucide-react';
+import { ChevronDown, Check, Search } from 'lucide-react';
 
 /** Detect model format from the raw model name/path.
  *  ONNX detection: .onnx extension OR known ONNX directory name patterns
@@ -73,8 +73,17 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [focusIdx, setFocusIdx] = useState(-1);
+  const [query, setQuery] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Text-filtered options: case-insensitive substring match against the raw
+  // model name and its formatted label.
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? options.filter((o) => o.toLowerCase().includes(q) || formatLabel(o).toLowerCase().includes(q))
+    : options;
 
   // Close on click outside
   useEffect(() => {
@@ -88,6 +97,17 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  // On open: reset the query and focus the filter input. On close: clear query.
+  useEffect(() => {
+    if (open) {
+      setQuery('');
+      setFocusIdx(Math.max(0, options.indexOf(value)));
+      const t = setTimeout(() => inputRef.current?.focus(), 0);
+      return () => clearTimeout(t);
+    }
+    setQuery('');
+  }, [open]);
+
   // Scroll focused item into view
   useEffect(() => {
     if (!open || focusIdx < 0 || !listRef.current) return;
@@ -95,30 +115,33 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
     el?.scrollIntoView({ block: 'nearest' });
   }, [focusIdx, open]);
 
-  const handleKeyDown = useCallback(
+  // Trigger-button keys: only used to open the dropdown.
+  const handleTriggerKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (!open) {
-        if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          setOpen(true);
-          setFocusIdx(Math.max(0, options.indexOf(value)));
-        }
-        return;
+      if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        setOpen(true);
       }
+    },
+    [open]
+  );
+
+  // Filter-input keys: navigate + select within the filtered list.
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault();
-          setFocusIdx((i) => Math.min(i + 1, options.length - 1));
+          setFocusIdx((i) => Math.min(i + 1, filtered.length - 1));
           break;
         case 'ArrowUp':
           e.preventDefault();
           setFocusIdx((i) => Math.max(i - 1, 0));
           break;
         case 'Enter':
-        case ' ':
           e.preventDefault();
-          if (focusIdx >= 0 && focusIdx < options.length) {
-            onChange(options[focusIdx]);
+          if (focusIdx >= 0 && focusIdx < filtered.length) {
+            onChange(filtered[focusIdx]);
             setOpen(false);
           }
           break;
@@ -128,7 +151,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
           break;
       }
     },
-    [open, focusIdx, options, value, onChange]
+    [focusIdx, filtered, onChange]
   );
 
   const selectedFormat = value ? getModelFormat(value) : null;
@@ -138,11 +161,8 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
       {/* Trigger button */}
       <button
         type="button"
-        onClick={() => {
-          setOpen(!open);
-          if (!open) setFocusIdx(Math.max(0, options.indexOf(value)));
-        }}
-        onKeyDown={handleKeyDown}
+        onClick={() => setOpen(!open)}
+        onKeyDown={handleTriggerKeyDown}
         className="w-full flex items-center gap-2 px-3 py-2 rounded-xl
                    bg-zinc-100 dark:bg-zinc-800
                    border border-zinc-300 dark:border-white/10
@@ -165,43 +185,67 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
         />
       </button>
 
-      {/* Dropdown list */}
-      {open && options.length > 0 && (
+      {/* Dropdown panel: filter box + scrollable list */}
+      {open && (
         <div
-          ref={listRef}
-          className="absolute z-50 mt-1 w-full max-h-60 overflow-auto rounded-xl
+          className="absolute z-50 mt-1 w-full rounded-xl
                      bg-white dark:bg-zinc-800
                      border border-zinc-200 dark:border-white/10
-                     shadow-lg shadow-black/20
-                     py-1"
-          role="listbox"
+                     shadow-lg shadow-black/20"
         >
-          {options.map((opt, i) => {
-            const fmt = getModelFormat(opt);
-            const selected = opt === value;
-            const focused = i === focusIdx;
-            return (
-              <button
-                key={opt}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                onClick={() => {
-                  onChange(opt);
-                  setOpen(false);
-                }}
-                onMouseEnter={() => setFocusIdx(i)}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors
-                  ${focused ? 'bg-pink-500/10 dark:bg-pink-500/15' : ''}
-                  ${selected ? 'text-pink-400' : 'text-zinc-700 dark:text-zinc-200'}
-                  hover:bg-pink-500/10 dark:hover:bg-pink-500/15`}
-              >
-                <FormatBadge format={fmt} />
-                <span className="truncate flex-1">{formatLabel(opt)}</span>
-                {selected && <Check size={14} className="shrink-0 text-pink-400" />}
-              </button>
-            );
-          })}
+          {/* Text filter */}
+          <div className="p-1.5 border-b border-zinc-200 dark:border-white/10">
+            <div className="relative">
+              <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={(e) => { setQuery(e.target.value); setFocusIdx(0); }}
+                onKeyDown={handleInputKeyDown}
+                placeholder="Filter models…"
+                className="w-full pl-7 pr-2 py-1.5 rounded-lg
+                           bg-zinc-100 dark:bg-zinc-900
+                           border border-zinc-200 dark:border-white/10
+                           text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-400
+                           outline-none focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20"
+              />
+            </div>
+          </div>
+
+          {/* Filtered list */}
+          <div ref={listRef} className="max-h-56 overflow-auto py-1" role="listbox">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-sm text-zinc-400">No models match.</div>
+            ) : (
+              filtered.map((opt, i) => {
+                const fmt = getModelFormat(opt);
+                const selected = opt === value;
+                const focused = i === focusIdx;
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    onClick={() => {
+                      onChange(opt);
+                      setOpen(false);
+                    }}
+                    onMouseEnter={() => setFocusIdx(i)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors
+                      ${focused ? 'bg-pink-500/10 dark:bg-pink-500/15' : ''}
+                      ${selected ? 'text-pink-400' : 'text-zinc-700 dark:text-zinc-200'}
+                      hover:bg-pink-500/10 dark:hover:bg-pink-500/15`}
+                  >
+                    <FormatBadge format={fmt} />
+                    <span className="truncate flex-1">{formatLabel(opt)}</span>
+                    {selected && <Check size={14} className="shrink-0 text-pink-400" />}
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>
