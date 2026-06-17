@@ -1,0 +1,324 @@
+# .github/workflows/cache-warm.yml — Warm the engine build cache on master
+#
+# Why this exists:
+#   GitHub Actions caches are scoped by ref. A cache saved during a tag run
+#   (refs/tags/vX) is NOT restorable by a different tag run — only caches on the
+#   DEFAULT BRANCH (master) are visible to every run, including release tags.
+#   Since each release is a new tag, release.yml could never reuse the previous
+#   release's CUDA build cache → it recompiled all of CUDA (~1.5h) every time.
+#
+#   This workflow builds the engine ON MASTER (per variant) and lets actions/cache
+#   save the build dir under the SAME keys release.yml uses. Release tag runs then
+#   restore that master cache and — thanks to the GGML submodule mtime restore —
+#   skip the CUDA compile entirely.
+#
+#   It only runs when the cache key inputs change (engine/ggml, CMakeLists) plus
+#   manual dispatch (use that for the first warm). It stops after the engine
+#   build — no packaging, no release.
+
+name: Cache Warm
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'engine/ggml'
+      - 'engine/CMakeLists.txt'
+      - '.github/workflows/cache-warm.yml'
+
+concurrency:
+  group: cache-warm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ORT_VERSION: '1.25.1'
+
+jobs:
+  # ── Windows (must match release.yml build-windows: runner, deps, flags, keys) ──
+  warm-windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cuda13.1, cuda12.8, vulkan, cpu]
+        include:
+          - variant: cuda13.1
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          - variant: vulkan
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
+          - variant: cpu
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+              -DHOT_STEP_STATIC_RUNTIME=ON
+            cuda_version: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0   # full history for the timestamp restore
+
+      - name: Init required submodules
+        shell: bash
+        run: |
+          git submodule update --init engine/ggml
+          git submodule update --init engine/vendor/vst3sdk
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: 'network'
+
+      - name: Download Vulkan SDK runtime (for glslc)
+        if: matrix.variant == 'vulkan'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: latest
+          cache: true
+
+      - name: Save glslc binary
+        if: matrix.variant == 'vulkan'
+        shell: bash
+        run: |
+          mkdir -p /tmp/glslc-save
+          cp "$VULKAN_SDK/Bin/glslc.exe" /tmp/glslc-save/glslc.exe
+
+      - name: Install Vulkan SDK (headers + loader)
+        if: matrix.variant == 'vulkan'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers
+          vulkan-use-cache: true
+
+      - name: Restore glslc into dev SDK
+        if: matrix.variant == 'vulkan'
+        shell: bash
+        run: |
+          mkdir -p "$VULKAN_SDK/bin"
+          cp /tmp/glslc-save/glslc.exe "$VULKAN_SDK/bin/"
+          echo "$VULKAN_SDK/bin" >> $GITHUB_PATH
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache ONNX Runtime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: engine/deps/onnxruntime
+          key: ort-win-x64-gpu-${{ env.ORT_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ortUrl = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}.zip"
+          $ortZip = "$env:RUNNER_TEMP\ort.zip"
+          Invoke-WebRequest -Uri $ortUrl -OutFile $ortZip -UseBasicParsing
+          New-Item -ItemType Directory -Force engine/deps | Out-Null
+          Expand-Archive -Path $ortZip -DestinationPath engine/deps -Force
+          Move-Item "engine/deps/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}" "engine/deps/onnxruntime"
+
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          key: cmake-windows-2022-${{ matrix.variant }}-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-windows-2022-${{ matrix.variant }}-
+
+      - name: Restore source file timestamps
+        shell: bash
+        run: |
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
+          if [ -e engine/ggml/.git ]; then
+            git -C engine/ggml log --pretty=format:%at --name-only | \
+              awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+              while IFS=' ' read -r ts file; do
+                f="engine/ggml/$file"
+                [ -f "$f" ] && python3 -c "import os; os.utime('$f', ($ts, $ts))" 2>/dev/null
+              done
+            echo "Restored git timestamps for engine/ggml submodule (CUDA sources)"
+          fi
+
+      - name: Build C++ engine
+        shell: pwsh
+        run: |
+          $buildDir = "engine/build"
+          New-Item -ItemType Directory -Force $buildDir | Out-Null
+          if ("${{ matrix.variant }}" -eq "vulkan") {
+            $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+            if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force }
+          }
+          Push-Location $buildDir
+          $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
+          cmake .. @cmakeArgs
+          cmake --build . -j $env:NUMBER_OF_PROCESSORS
+          Pop-Location
+          $aceServer = "engine/build/bin/ace-server.exe"
+          if (-not (Test-Path $aceServer)) { $aceServer = "engine/build/ace-server.exe" }
+          if (-not (Test-Path $aceServer)) { throw "Build failed: ace-server.exe not found" }
+          Write-Host "Engine build complete — cache will be saved for release reuse"
+
+  # ── Linux (must match release.yml build-linux: runner, deps, flags, keys) ──
+  warm-linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cuda13.1, cuda12.8, vulkan, cpu]
+        include:
+          - variant: cuda13.1
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          - variant: vulkan
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
+          - variant: cpu
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=OFF
+            cuda_version: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Init required submodules
+        run: |
+          git submodule update --init engine/ggml
+          git submodule update --init engine/vendor/vst3sdk
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: 'network'
+
+      - name: Install Vulkan SDK (headers + loader)
+        if: matrix.variant == 'vulkan'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Cache ONNX Runtime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: engine/deps/onnxruntime
+          key: ort-linux-x64-gpu-${{ env.ORT_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}.tgz"
+          mkdir -p engine/deps
+          curl -sL "$ORT_URL" | tar -xz -C engine/deps
+          mv "engine/deps/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}" engine/deps/onnxruntime
+
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          key: cmake-linux-${{ matrix.variant }}-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-linux-${{ matrix.variant }}-
+
+      - name: Restore source file timestamps
+        run: |
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
+          if [ -e engine/ggml/.git ]; then
+            git -C engine/ggml log --pretty=format:%at --name-only | \
+              awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+              while IFS=' ' read -r ts file; do
+                f="engine/ggml/$file"
+                [ -f "$f" ] && python3 -c "import os; os.utime('$f', ($ts, $ts))" 2>/dev/null
+              done
+            echo "Restored git timestamps for engine/ggml submodule (CUDA sources)"
+          fi
+
+      - name: Build C++ engine
+        run: |
+          mkdir -p engine/build && cd engine/build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${{ matrix.cmake_flags }}
+          cmake --build . -j $(nproc)
+          if [ ! -f ace-server ]; then
+            echo "Build failed: ace-server not found"
+            exit 1
+          fi
+          echo "Engine build complete — cache will be saved for release reuse"
