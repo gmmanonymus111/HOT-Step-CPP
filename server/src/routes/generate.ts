@@ -559,9 +559,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       !!job.params.spectralLifterEnabled ||
       !!job.params.masteringEnabled
     );
-    const synthFormat = (anyPpActive || (job.params.masteringEnabled && job.params.masteringReference)) ? 'wav32' : 'wav16';
+    // Song Builder: force wav32 so the engine SKIPS peak-normalization. wav16
+    // peak-normalizes the whole canvas to ~0 dBFS each pass, so appending a
+    // louder section scales the entire (bit-exact preserved) canvas down — older
+    // sections get progressively quieter. wav32 keeps absolute levels stable.
+    const isBuilder = job.params.source === 'builder';
+    const synthFormat = (anyPpActive || isBuilder || (job.params.masteringEnabled && job.params.masteringReference)) ? 'wav32' : 'wav16';
     if (synthFormat === 'wav32') {
-      logGeneration(job.id, 'INFO', '[Synth Phase] Using wav32 (raw float) for post-processing — normalization deferred');
+      logGeneration(job.id, 'INFO', `[Synth Phase] Using wav32 (raw float) — normalization deferred${isBuilder ? ' (builder: stable levels across sections)' : ''}`);
     }
 
     // LRC: auto-enable synchronized lyric timestamps for non-instrumental tracks
