@@ -46,7 +46,7 @@ LAUNCH.bat → Node server (Express :3001)
 - **Never `git add -A`** (re-adds gitignored dirs: `.agents/`, `checkpoints/`, `node_modules/`, etc.). **Never `git add -f`** on gitignored paths. Stage explicit paths.
 - **Push requires explicit user approval — always ask first.**
 - Commit to local git **often** (data has been lost before to uncommitted files).
-- Tag releases after a successful feature: `v1.5-<feature-name>`.
+- **Releases:** push a `vX.Y.Z` tag → the `Release` workflow builds all platforms and drafts a GitHub Release. **Any pushed `v*` tag triggers a build** — use a `-CI-Test` suffix for throwaway compile checks, and don't push local feature tags matching `v*`. Full process + gotchas: [docs/RELEASING.md](docs/RELEASING.md).
 - Use `gh` CLI for GitHub ops (authenticated as `scragnog`).
 
 ## Upstream sync (fork hooks that break silently)
@@ -90,6 +90,7 @@ Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable
 | Engine internals, CLI, request JSON, generation modes | [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) |
 | Writing a Lua plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
 | Build / install / releases | [README.md](README.md) |
+| Cutting & publishing a release (agent runbook) | [docs/RELEASING.md](docs/RELEASING.md) |
 | Internal design/investigation docs (perf, adapters, upstream sync, feature designs) | `docs/plans/` *(gitignored, local-only)* |
 | In-app assistant behaviour/KB | [server/src/data/assistant-knowledge.md](server/src/data/assistant-knowledge.md) |
 
