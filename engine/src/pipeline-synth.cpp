@@ -346,6 +346,23 @@ static void apply_outpainting_padding(const AceSynth *   ctx,
     s.left_pad_sec = lpad;
 
     if (src_latents && src_T_latent > 0) {
+        // Even on the fast latent context path, populate s.padded_src from the
+        // source PCM (when provided) so the post-decode waveform splice can
+        // restore bit-exact preserved audio. Without this, repeated repaint
+        // passes (Song Builder) re-derive preserved regions through the VAE each
+        // time, compounding generation loss across earlier sections.
+        if (src_audio && src_len > 0) {
+            int lpad_s       = (int) (lpad * 48000.0f);
+            int rpad_s       = (int) (rpad * 48000.0f);
+            int padded_total = src_len + lpad_s + rpad_s;
+            s.padded_src.resize((size_t) padded_total * 2);
+            if (lpad_s > 0 || rpad_s > 0) {
+                memset(s.padded_src.data(), 0, s.padded_src.size() * sizeof(float));
+            }
+            memcpy(s.padded_src.data() + (size_t) lpad_s * 2, src_audio, (size_t) src_len * 2 * sizeof(float));
+            fprintf(stderr, "[Outpaint] latent path: padded_src populated from src PCM (%.1fs) for waveform splice\n",
+                    (float) padded_total / 48000.0f);
+        }
         if (lpad <= 0.0f && rpad <= 0.0f) {
             return;
         }
