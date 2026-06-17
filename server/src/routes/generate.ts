@@ -465,6 +465,23 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       srcLatentBuf = loadSourceLatent(job.params.sourceLatentUrl as string, log);
     }
 
+    // ── Structural seed latent (Song Builder repeated sections) ──
+    // Slice the tail (seedSeconds) of the seed section's cumulative latent —
+    // that tail IS the original section's own content. The engine biases the
+    // repaint region's init noise toward it (seed_strength) so the new section
+    // follows the original's harmonic shape.
+    let seedLatentBuf: Buffer | undefined;
+    if (job.params.seedLatentUrl && Number(job.params.seedStrength) > 0) {
+      const full = loadSourceLatent(job.params.seedLatentUrl as string, log);
+      if (full) {
+        const secs = Number(job.params.seedSeconds) || 0;
+        const frames = Math.max(1, Math.round(secs * 25));
+        const bytes = frames * 256;
+        seedLatentBuf = (secs > 0 && bytes < full.length) ? full.subarray(full.length - bytes) : full;
+        log('INFO', `[Seed] Seed latent: ${Math.round(seedLatentBuf.length / 256)} frames (strength=${job.params.seedStrength})`);
+      }
+    }
+
     // ── Tempo/pitch pre-processing (cover source audio) ──────
     if (srcAudioBuf) {
       srcAudioBuf = applyTempoAndPitch(srcAudioBuf, job.params.tempoScale, job.params.pitchShift, log);
@@ -792,15 +809,16 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       // Submit single request to /synth
       const synthTrackStart = performance.now();
       let synthJobId: string;
-      if (srcAudioBuf || refAudioBuf || srcLatentBuf || refLatentBuf) {
+      if (srcAudioBuf || refAudioBuf || srcLatentBuf || refLatentBuf || seedLatentBuf) {
         const parts = [
           srcAudioBuf ? 'src_audio' : '',
           refAudioBuf ? 'timbre_ref' : '',
           srcLatentBuf ? 'src_latents' : '',
           refLatentBuf ? 'ref_latents' : '',
+          seedLatentBuf ? 'seed_latents' : '',
         ].filter(Boolean).join('+');
         logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: MULTIPART submission (${parts})`);
-        synthJobId = await aceClient.submitSynthMultipart(synthReq, srcAudioBuf, refAudioBuf, srcLatentBuf, refLatentBuf, synthFormat, coResident);
+        synthJobId = await aceClient.submitSynthMultipart(synthReq, srcAudioBuf, refAudioBuf, srcLatentBuf, refLatentBuf, synthFormat, coResident, seedLatentBuf);
       } else {
         logGeneration(job.id, 'INFO', `[Synth Phase] Track ${trackIdx + 1}: plain JSON submission`);
         synthJobId = await aceClient.submitSynth(synthReq, synthFormat, coResident);

@@ -100,6 +100,10 @@ export const SongBuilder: React.FC = () => {
   // point for prepend (content before it is regenerated). null = default (very end
   // for append, very start for prepend). Captured from the global play bar playhead.
   const [clipPoint, setClipPoint] = useState<number | null>(null);
+  // Structural seed: bias this section toward an earlier section's harmonic shape
+  // (e.g. repeat a chorus's chords with new lyrics). null = free generation.
+  const [seedSectionId, setSeedSectionId] = useState<string | null>(null);
+  const [seedStrength, setSeedStrength] = useState(0.4);
   // Off by default: intermediate sections skip the mastering/PP chain entirely
   // and only run it on the finished track. Opt in for a per-section preview.
   const [previewMastering, setPreviewMastering] = useState(false);
@@ -167,7 +171,7 @@ export const SongBuilder: React.FC = () => {
 
   // A clip point is only meaningful against the current head + direction — reset
   // it whenever either changes so a stale point can't leak into a new extension.
-  useEffect(() => { setClipPoint(null); }, [head?.id, direction]);
+  useEffect(() => { setClipPoint(null); setSeedSectionId(null); }, [head?.id, direction]);
 
   // ── Project open / create / delete ──
   const openProject = useCallback(async (id: string) => {
@@ -345,6 +349,17 @@ export const SongBuilder: React.FC = () => {
         const audio = (headSong as any).audioUrl || (headSong as any).audio_url;
         if (latent) params.sourceLatentUrl = latent;
         if (audio) params.sourceAudioUrl = audio;
+
+        // Structural seed: bias this section toward an earlier section's chords.
+        if (seedSectionId && seedStrength > 0) {
+          const seedSec = timeline.find(s => s.id === seedSectionId);
+          const seedLatent = (seedSec?.chosen as any)?.latentUrl || (seedSec?.chosen as any)?.latent_url;
+          if (seedSec && seedLatent) {
+            params.seedLatentUrl = seedLatent;
+            params.seedSeconds = seedSec.section_length;
+            params.seedStrength = seedStrength;
+          }
+        }
       }
 
       const n = Math.max(1, project.variant_count || 4);
@@ -374,7 +389,7 @@ export const SongBuilder: React.FC = () => {
       showToast(`Generation failed: ${e.message}`);
       setIsGenerating(false);
     }
-  }, [token, project, direction, headSong, effHeadDuration, gp, nextLabel, nextLyrics, effectiveLength, cumulativeLyrics, previewMastering, transitionOverlap, clipPoint]);
+  }, [token, project, direction, headSong, effHeadDuration, gp, nextLabel, nextLyrics, effectiveLength, cumulativeLyrics, previewMastering, transitionOverlap, clipPoint, seedSectionId, seedStrength, timeline]);
 
   // Poll all variant jobs; append each finished song to the section's candidate
   // list as it lands (streaming), then mark 'ready' when the last one finishes.
@@ -866,6 +881,40 @@ export const SongBuilder: React.FC = () => {
                     ? 'Scrub the bar to where the intro should meet the song — anything before it becomes lead-in.'
                     : 'Scrub the bar to where the next section should start — anything after it is replaced.'}
                 </p>
+              </div>
+            )}
+
+            {/* Structural seed — follow an earlier section's chords/feel */}
+            {direction !== 'first' && timeline.length > 0 && (
+              <div className="mb-3 rounded-lg border border-white/10 bg-black/20 p-2.5">
+                <label className="block text-[11px] text-zinc-400 mb-1.5">Match a section's feel (chords / structure)</label>
+                <select
+                  value={seedSectionId ?? ''}
+                  onChange={e => setSeedSectionId(e.target.value || null)}
+                  className="w-full px-2 py-1.5 rounded-lg bg-black/20 border border-white/10 text-sm text-white focus:outline-none focus:border-violet-500"
+                >
+                  <option value="">None (free generation)</option>
+                  {timeline.map((s, i) => {
+                    const hasLatent = !!((s.chosen as any)?.latentUrl || (s.chosen as any)?.latent_url);
+                    return (
+                      <option key={s.id} value={s.id} disabled={!hasLatent}>
+                        #{i + 1} {s.label || 'Section'} ({sectionLenLabel(s)}){hasLatent ? '' : ' — no latent'}
+                      </option>
+                    );
+                  })}
+                </select>
+                {seedSectionId && (
+                  <>
+                    <div className="flex items-center gap-3 mt-2">
+                      <span className="text-[11px] text-zinc-400 whitespace-nowrap">Strength</span>
+                      <input type="range" min={0.1} max={0.9} step={0.05} value={seedStrength} onChange={e => setSeedStrength(Number(e.target.value))} className="flex-1 accent-violet-500" />
+                      <span className="text-[11px] text-violet-300 w-9 text-right">{seedStrength.toFixed(2)}</span>
+                    </div>
+                    <p className="text-[10px] text-zinc-600 mt-1.5">
+                      Biases this section toward the selected one's harmonic shape, then diverges with your lyrics. Higher = closer to the original. Tip: match the bar count for best alignment. Experimental.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 

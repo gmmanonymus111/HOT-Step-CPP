@@ -1194,6 +1194,32 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 }
 
 int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
+    // ── HOT-Step: structural seed for repeated sections (Song Builder) ──────
+    // Bias the repaint region's initial noise toward a reference latent (an
+    // earlier section) so a repeated section follows its harmonic shape. Only
+    // the repaint zone is touched; the post-gen splice still preserves the rest.
+    if (s.is_repaint && g_hotstep_params.seed_strength > 0.0f &&
+        !g_hotstep_params.seed_latents.empty() && s.repaint_t1 > s.repaint_t0 &&
+        (int) s.noise.size() >= batch_n * s.T * 64) {
+        const std::vector<float> & seed = g_hotstep_params.seed_latents;
+        const int   Oc     = 64;
+        const int   seed_T = (int) (seed.size() / Oc);
+        float       w      = g_hotstep_params.seed_strength > 1.0f ? 1.0f : g_hotstep_params.seed_strength;
+        const int   region = s.repaint_t1 - s.repaint_t0;
+        for (int b = 0; b < batch_n; b++) {
+            for (int r = 0; r < region; r++) {
+                const int t = s.repaint_t0 + r;
+                if (t < 0 || t >= s.T) continue;
+                const int sf = (r < seed_T) ? r : (seed_T > 0 ? seed_T - 1 : 0);
+                for (int ch = 0; ch < Oc; ch++) {
+                    const size_t idx = ((size_t) b * s.T + t) * Oc + ch;
+                    s.noise[idx] = (1.0f - w) * s.noise[idx] + w * seed[(size_t) sf * Oc + ch];
+                }
+            }
+        }
+        fprintf(stderr, "[Seed] Biased repaint region [%d,%d) toward %d seed frames (w=%.2f)\n",
+                s.repaint_t0, s.repaint_t1, seed_T, w);
+    }
 #ifdef HOT_STEP_TRT
     // TRT path: if DiT model is ONNX (file or directory), use TensorRT acceleration
     if (dit_ends_with_onnx(ctx->dit_key.path.c_str())) {

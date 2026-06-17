@@ -65,6 +65,7 @@ export function translateParams(params: any): AceRequest {
   if (params.coverNoiseMethod) req.cover_noise_method = params.coverNoiseMethod;
   if (params.repaintingStart !== undefined) req.repainting_start = params.repaintingStart;
   if (params.repaintingEnd !== undefined) req.repainting_end = params.repaintingEnd;
+  if (params.seedStrength !== undefined) req.seed_strength = params.seedStrength;
   if (params.trackName) req.track = params.trackName;
 
   // CoT

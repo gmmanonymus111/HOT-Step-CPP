@@ -63,6 +63,7 @@ export interface AceRequest {
   cover_noise_method?: string;
   repainting_start?: number;
   repainting_end?: number;
+  seed_strength?: number;
   task_type?: string;
   track?: string;
   infer_method?: string;
@@ -326,6 +327,7 @@ export const aceClient = {
     refLatents?: Buffer,
     format: string = 'wav16',
     keepLoaded = false,
+    seedLatents?: Buffer,
   ): Promise<string> {
     const params = new URLSearchParams();
     if (format !== 'mp3') params.set('format', format);
@@ -368,6 +370,11 @@ export const aceClient = {
     // Reference latents part (raw float32 — replaces VAE encode of timbre ref)
     if (refLatents) {
       addPart('ref_latents', refLatents, 'application/octet-stream', 'reference.latent');
+    }
+
+    // Seed latents part (raw float32 — structural seed for repeated sections)
+    if (seedLatents) {
+      addPart('seed_latents', seedLatents, 'application/octet-stream', 'seed.latent');
     }
 
     parts.push(Buffer.from(`--${boundary}--\r\n`));

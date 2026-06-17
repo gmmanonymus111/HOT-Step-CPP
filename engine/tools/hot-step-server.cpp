@@ -585,6 +585,10 @@ struct ServerFields {
     float       denoise_mix       = 0.25f;
     // Lua plugin params: {"pluginName:key": "value", ...}
     std::unordered_map<std::string, std::string> plugin_params;
+    // Structural seed for repeated sections (Song Builder). seed_strength from
+    // the request JSON; seed_latents from the multipart "seed_latents" part.
+    float              seed_strength = 0.0f;
+    std::vector<float> seed_latents;
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
@@ -637,6 +641,10 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     }
     if ((v = yyjson_obj_get(obj, "apg_norm_threshold")) && yyjson_is_num(v)) {
         sf->apg_norm_threshold = (float) yyjson_get_real(v);
+    }
+    // Structural seed strength (Song Builder repeated sections)
+    if ((v = yyjson_obj_get(obj, "seed_strength")) && yyjson_is_num(v)) {
+        sf->seed_strength = (float) yyjson_get_real(v);
     }
     // STORK solver params
     if ((v = yyjson_obj_get(obj, "stork_substeps")) && yyjson_is_int(v)) {
@@ -1078,6 +1086,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.cfg_cutoff_ratio      = sf.cfg_cutoff_ratio;
     g_hotstep_params.cache_ratio           = sf.cache_ratio;
     g_hotstep_params.plugin_params         = sf.plugin_params;
+    g_hotstep_params.seed_strength         = sf.seed_strength;
+    g_hotstep_params.seed_latents          = sf.seed_latents;
     fprintf(stderr, "[Server] HOT-Step params: solver=%s, guidance=%s, scheduler=%s\n",
             sf.solver_name.c_str(), sf.guidance_mode.c_str(),
             sf.scheduler.empty() ? "(default)" : sf.scheduler.c_str());
@@ -1429,6 +1439,22 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
                 memcpy(ref_latents, file.content.data(), file.content.size());
                 fprintf(stderr, "[Server] Reference latents: T=%d (%.2fs @ 25Hz)\n",
                         ref_T_latent, (float)ref_T_latent / 25.0f);
+            }
+        }
+
+        // Structural seed latents (raw float32) — bias the repaint region's init
+        // noise toward an earlier section (Song Builder repeated sections).
+        if (req.form.has_file("seed_latents")) {
+            auto file = req.form.get_file("seed_latents");
+            if (!file.content.empty()) {
+                if (file.content.size() % (64 * sizeof(float)) != 0) {
+                    json_error(res, 400, "seed_latents size must be a multiple of 256 bytes (64 * float32)");
+                    return;
+                }
+                int seed_T = (int)(file.content.size() / (64 * sizeof(float)));
+                const float * sp = reinterpret_cast<const float *>(file.content.data());
+                sf.seed_latents.assign(sp, sp + (size_t) seed_T * 64);
+                fprintf(stderr, "[Server] Seed latents: T=%d (%.2fs @ 25Hz)\n", seed_T, (float)seed_T / 25.0f);
             }
         }
 

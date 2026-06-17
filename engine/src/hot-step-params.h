@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Per-group adapter scale multipliers. Applied on top of the global adapter_scale.
 struct AdapterGroupScales {
@@ -118,6 +119,13 @@ struct HotStepParams {
     // Key format: "pluginName:paramKey", value is string representation.
     // Populated from the JSON request's plugin_params object.
     std::unordered_map<std::string, std::string> plugin_params;
+
+    // Structural seed for repeated sections (Song Builder). When a repaint
+    // extension wants to follow an earlier section's harmonic shape, the server
+    // sends that section's clean VAE latents here; the repaint region's initial
+    // noise is biased toward them by seed_strength (0 = off). Raw f32 [T, 64].
+    std::vector<float> seed_latents;
+    float              seed_strength = 0.0f;
 };
 
 // Single-worker-thread global. Set in hot-step-server.cpp before
