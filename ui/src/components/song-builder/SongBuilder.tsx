@@ -305,11 +305,11 @@ export const SongBuilder: React.FC = () => {
       // sections never use it, so under keep-loaded it shouldn't hog VRAM. Only
       // Song Builder sets this; other generation modes are unaffected.
       params.evictLm = direction !== 'first';
-      // Low-VRAM knobs (Song Builder only): smaller VAE tiles cut the decode
-      // peak; split CFG halves DiT activation memory (~2x DiT time). Both trade
-      // a little speed for a lot less VRAM as the canvas grows.
+      // Low-VRAM (Song Builder only): smaller VAE tiles cut the decode peak
+      // (measured ~7GB -> ~2GB) at negligible cost. (Split-CFG was tested and
+      // dropped — it didn't reduce DiT memory under STORM/post-step guidance but
+      // ~2x'd DiT time. The batch_cfg override stays wired for other configs.)
       params.vaeChunk = 256;
-      params.batchCfg = false;
       // 2. Bypass the whole cosmetic post-processing chain for intermediate
       //    sections — mastering/PP-VAE/spectral/LUFS run only on the finished
       //    track (or when the user opts into a per-section preview). The timbre
