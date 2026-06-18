@@ -290,9 +290,17 @@ export const SongBuilder: React.FC = () => {
       };
 
       // ── Builder pipeline tuning ──────────────────────────────────────────
-      // 1. Keep models resident across every variant and every section — no
-      //    load/free churn between generations (sets keep_loaded=1 engine-side).
-      params.coResident = true;
+      // 1. Respect the user's "Keep Models in VRAM" setting — do NOT force it.
+      //    Forcing keep-loaded (engine EVICT_NEVER) made models accumulate across
+      //    sections and model/sampler changes (the LM stays resident after the
+      //    text2music first section even though repaints don't need it), climbing
+      //    VRAM until exhaustion → paging → severe slowdown. With the setting off
+      //    (default) the engine uses EVICT_STRICT: one GPU module at a time, low
+      //    VRAM, load/unload like acestep.cpp.
+      params.coResident = (() => {
+        try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').coResident === true; }
+        catch { return false; }
+      })();
       // 2. Bypass the whole cosmetic post-processing chain for intermediate
       //    sections — mastering/PP-VAE/spectral/LUFS run only on the finished
       //    track (or when the user opts into a per-section preview). The timbre
