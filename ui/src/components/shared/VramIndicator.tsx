@@ -169,8 +169,20 @@ export const VramIndicator: React.FC<VramIndicatorProps> = ({
             </div>
           )}
 
+          {loaded && loaded.length > 0 && (() => {
+            const weights = loaded.reduce((a, m) => a + m.mb, 0);
+            const other = Math.max(0, vram.used_mb - weights);
+            return (
+              <div className="flex items-center gap-2 px-1 py-1 mt-0.5 border-t border-black/5 dark:border-white/5">
+                <span className="text-[11px] text-zinc-500 flex-1">Compute + buffers</span>
+                <span className="text-[10px] font-mono text-zinc-500">{(other / 1024).toFixed(1)} GB</span>
+                <span className="w-5 flex-shrink-0" />
+              </div>
+            );
+          })()}
+
           <div className="text-[10px] text-zinc-500 px-1 pt-1.5 mt-1 border-t border-black/5 dark:border-white/5">
-            Unloaded models reload automatically when next needed.
+            Weights are listed above; the rest is activations/CUDA (not unloadable). Unloaded models reload when next needed.
           </div>
         </div>,
         document.body,
