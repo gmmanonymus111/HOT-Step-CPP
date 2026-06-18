@@ -67,6 +67,8 @@ export function translateParams(params: any): AceRequest {
   if (params.repaintingEnd !== undefined) req.repainting_end = params.repaintingEnd;
   if (params.seedStrength !== undefined) req.seed_strength = params.seedStrength;
   if (params.evictLm) req.evict_lm = true;
+  if (params.vaeChunk) req.vae_chunk = params.vaeChunk;
+  if (params.batchCfg !== undefined) req.batch_cfg = params.batchCfg ? 1 : 0;
   if (params.trackName) req.track = params.trackName;
 
   // CoT

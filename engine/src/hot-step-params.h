@@ -126,6 +126,12 @@ struct HotStepParams {
     // noise is biased toward them by seed_strength (0 = off). Raw f32 [T, 64].
     std::vector<float> seed_latents;
     float              seed_strength = 0.0f;
+
+    // Per-request VRAM knobs (Song Builder / low-VRAM). Override the load-time
+    // synth params for this request only. 0 / -1 = use the loaded default.
+    int vae_chunk_override = 0;   // >0: VAE tile size (smaller = less VAE peak)
+    int batch_cfg_override = -1;  // 0: split CFG into 2 forwards (half DiT mem,
+                                  //    ~2x DiT time); 1: batch; -1: default
 };
 
 // Single-worker-thread global. Set in hot-step-server.cpp before

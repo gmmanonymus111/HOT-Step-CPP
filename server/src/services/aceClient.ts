@@ -65,6 +65,8 @@ export interface AceRequest {
   repainting_end?: number;
   seed_strength?: number;
   evict_lm?: boolean;
+  vae_chunk?: number;
+  batch_cfg?: number;
   task_type?: string;
   track?: string;
   infer_method?: string;

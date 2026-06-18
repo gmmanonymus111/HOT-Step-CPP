@@ -592,6 +592,9 @@ struct ServerFields {
     // Song Builder: free the one-shot LM before this synth (repaint sections
     // never use it). Only Song Builder sets this; other modes leave it false.
     bool               evict_lm = false;
+    // Per-request VRAM knobs (Song Builder / low-VRAM). 0 / -1 = loaded default.
+    int                vae_chunk = 0;   // >0: VAE tile size override
+    int                batch_cfg = -1;  // 0: split CFG, 1: batch, -1: default
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
@@ -652,6 +655,13 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     // Song Builder: evict the LM before synth (repaint sections don't use it)
     if ((v = yyjson_obj_get(obj, "evict_lm")) && yyjson_is_bool(v)) {
         sf->evict_lm = yyjson_get_bool(v);
+    }
+    // Per-request VRAM knobs (Song Builder / low-VRAM)
+    if ((v = yyjson_obj_get(obj, "vae_chunk")) && yyjson_is_int(v)) {
+        sf->vae_chunk = (int) yyjson_get_int(v);
+    }
+    if ((v = yyjson_obj_get(obj, "batch_cfg")) && yyjson_is_int(v)) {
+        sf->batch_cfg = (int) yyjson_get_int(v);
     }
     // STORK solver params
     if ((v = yyjson_obj_get(obj, "stork_substeps")) && yyjson_is_int(v)) {
@@ -1103,6 +1113,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.plugin_params         = sf.plugin_params;
     g_hotstep_params.seed_strength         = sf.seed_strength;
     g_hotstep_params.seed_latents          = sf.seed_latents;
+    g_hotstep_params.vae_chunk_override    = sf.vae_chunk;
+    g_hotstep_params.batch_cfg_override    = sf.batch_cfg;
     fprintf(stderr, "[Server] HOT-Step params: solver=%s, guidance=%s, scheduler=%s\n",
             sf.solver_name.c_str(), sf.guidance_mode.c_str(),
             sf.scheduler.empty() ? "(default)" : sf.scheduler.c_str());

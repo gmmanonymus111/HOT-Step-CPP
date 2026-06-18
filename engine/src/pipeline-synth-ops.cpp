@@ -1412,13 +1412,17 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
         }
 
         s.timer.reset();
+        // Per-request CFG-batching override: split into two forwards (half the
+        // DiT activation memory, ~2x DiT time) when batch_cfg_override == 0.
+        const bool ubc = g_hotstep_params.batch_cfg_override >= 0
+                             ? (g_hotstep_params.batch_cfg_override != 0) : ctx->params.use_batch_cfg;
         int dit_rc = dit_ggml_generate(
             dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
             s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
             s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
             s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
             s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
-            ctx->params.use_batch_cfg,
+            ubc,
             s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
         if (dit_rc != 0) {
             return -1;
@@ -1551,12 +1555,15 @@ int ops_vae_decode(const AceSynth * ctx,
 
         s.timer.reset();
         int T_audio;
+        // Per-request VAE tile-size override (smaller = lower VAE-decode peak).
+        const int vchunk = g_hotstep_params.vae_chunk_override > 0
+                               ? g_hotstep_params.vae_chunk_override : ctx->params.vae_chunk;
         if (use_ort) {
             T_audio = vae_ort_decode_tiled(vae_ort, dit_out, T_latent, audio.data(), T_audio_max,
-                                            ctx->params.vae_chunk, ctx->params.vae_overlap);
+                                            vchunk, ctx->params.vae_overlap);
         } else {
             T_audio = vae_ggml_decode_tiled(vae_ggml, dit_out, T_latent, audio.data(), T_audio_max,
-                                            ctx->params.vae_chunk, ctx->params.vae_overlap, cancel, cancel_data);
+                                            vchunk, ctx->params.vae_overlap, cancel, cancel_data);
         }
         if (T_audio < 0) {
             if (cancel && cancel(cancel_data)) {
