@@ -301,6 +301,10 @@ export const SongBuilder: React.FC = () => {
         try { return JSON.parse(localStorage.getItem('ace-settings') || '{}').coResident === true; }
         catch { return false; }
       })();
+      // Free the one-shot LM once past the text2music first section — repaint
+      // sections never use it, so under keep-loaded it shouldn't hog VRAM. Only
+      // Song Builder sets this; other generation modes are unaffected.
+      params.evictLm = direction !== 'first';
       // 2. Bypass the whole cosmetic post-processing chain for intermediate
       //    sections — mastering/PP-VAE/spectral/LUFS run only on the finished
       //    track (or when the user opts into a per-section preview). The timbre

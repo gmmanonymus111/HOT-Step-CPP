@@ -137,6 +137,13 @@ DetokGGML *  store_require_fsq_detok(ModelStore * s, const ModelKey & k);
 // must not be used: in EVICT_STRICT it may be unloaded immediately.
 void store_release(ModelStore * s, void * handle);
 
+// Force-evict the LM GPU module if it is resident and unreferenced, regardless
+// of policy. Used by Song Builder: after its text2music first section every
+// later (repaint) section skips the LM, so under EVICT_NEVER (keep-loaded) it
+// would otherwise sit in VRAM for the whole session. No-op if the LM is not
+// loaded or is currently in use. Does NOT affect any other module.
+void store_evict_lm(ModelStore * s);
+
 // CPU-resident accessors. Loaded on first call, kept forever, never evicted.
 // All small (a few MB total). Return NULL on load failure.
 BPETokenizer *  store_bpe(ModelStore * s, const char * lm_path);

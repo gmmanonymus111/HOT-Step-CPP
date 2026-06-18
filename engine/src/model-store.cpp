@@ -12,6 +12,8 @@
 
 #include "model-store.h"
 
+#include <cstring>
+
 #include "config-json.h"
 #include "gguf-weights.h"
 #include "silence-latent.h"
@@ -144,6 +146,30 @@ static void evict_all_except(ModelStore * s, const ModelKey & keep) {
         s->handle_to_key.erase(e.ptr);
         e.deleter(e.ptr);
         it = s->gpu.erase(it);
+    }
+}
+
+// Public: force-evict the LM (label "LM") regardless of policy. Targeted so it
+// frees nothing else — every other module stays exactly as it was. Used only by
+// Song Builder (via the per-request evict_lm flag); the normal flow never calls
+// this, so other generation modes are unaffected.
+void store_evict_lm(ModelStore * s) {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    for (auto it = s->gpu.begin(); it != s->gpu.end();) {
+        GpuEntry & e = it->second;
+        if (e.label && std::strcmp(e.label, "LM") == 0) {
+            if (e.refcount > 0) {
+                fprintf(stderr, "[Store] evict_lm requested but LM in use (refcount=%d), skipping\n", e.refcount);
+                ++it;
+                continue;
+            }
+            fprintf(stderr, "[Store] Evict LM on request (%.1f MB freed)\n", (float) e.bytes / (1024.0f * 1024.0f));
+            s->handle_to_key.erase(e.ptr);
+            e.deleter(e.ptr);
+            it = s->gpu.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

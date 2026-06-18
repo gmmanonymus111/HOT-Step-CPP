@@ -589,6 +589,9 @@ struct ServerFields {
     // the request JSON; seed_latents from the multipart "seed_latents" part.
     float              seed_strength = 0.0f;
     std::vector<float> seed_latents;
+    // Song Builder: free the one-shot LM before this synth (repaint sections
+    // never use it). Only Song Builder sets this; other modes leave it false.
+    bool               evict_lm = false;
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
@@ -645,6 +648,10 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     // Structural seed strength (Song Builder repeated sections)
     if ((v = yyjson_obj_get(obj, "seed_strength")) && yyjson_is_num(v)) {
         sf->seed_strength = (float) yyjson_get_real(v);
+    }
+    // Song Builder: evict the LM before synth (repaint sections don't use it)
+    if ((v = yyjson_obj_get(obj, "evict_lm")) && yyjson_is_bool(v)) {
+        sf->evict_lm = yyjson_get_bool(v);
     }
     // STORK solver params
     if ((v = yyjson_obj_get(obj, "stork_substeps")) && yyjson_is_int(v)) {
@@ -1059,6 +1066,14 @@ static void synth_worker(std::shared_ptr<Job>    job,
     if (req_keep_loaded && !g_keep_loaded) {
         g_keep_loaded = true;
         store_set_policy(g_store, EVICT_NEVER);
+    }
+
+    // HOT-Step: Song Builder frees the one-shot LM before loading the synth
+    // pipeline — its repaint sections never use the LM, so under keep-loaded it
+    // would otherwise sit in VRAM all session. Targeted (LM only); only Song
+    // Builder sets evict_lm, so other generation modes are unaffected.
+    if (sf.evict_lm) {
+        store_evict_lm(g_store);
     }
 
     // HOT-Step sideband: push custom params to global BEFORE synth load.

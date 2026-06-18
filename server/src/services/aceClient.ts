@@ -64,6 +64,7 @@ export interface AceRequest {
   repainting_start?: number;
   repainting_end?: number;
   seed_strength?: number;
+  evict_lm?: boolean;
   task_type?: string;
   track?: string;
   infer_method?: string;
