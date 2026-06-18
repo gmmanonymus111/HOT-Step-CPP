@@ -1,16 +1,24 @@
-// VramIndicator.tsx — Standalone GPU VRAM usage display
+// VramIndicator.tsx — GPU VRAM usage display + manual model-unload dropdown
 //
-// Polls /api/logs/vram every 5 seconds. Shows used/total GB with a
-// color-coded progress bar (green → yellow → red).
-// Used in both the GlobalParamBar and TerminalPanel.
+// Polls /api/logs/vram every 5 seconds for the used/total bar. On hover it
+// opens a dropdown listing the GPU modules currently resident in the engine
+// (LM / DiT / VAE / encoders …) with a per-module unload button — a manual
+// fallback to free VRAM at any time. In-use modules are disabled; under
+// keep-loaded an unloaded module simply reloads on next use, so it's safe.
 
-import React, { useState, useEffect } from 'react';
-import { Cpu } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Cpu, X, Loader2 } from 'lucide-react';
 
 interface VramInfo {
   used_mb: number;
   total_mb: number;
   free_mb: number;
+}
+
+interface LoadedModel {
+  label: string;
+  mb: number;
+  in_use: boolean;
 }
 
 interface VramIndicatorProps {
@@ -25,6 +33,9 @@ export const VramIndicator: React.FC<VramIndicatorProps> = ({
   compact = false,
 }) => {
   const [vram, setVram] = useState<VramInfo | null>(null);
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState<LoadedModel[] | null>(null);
+  const [unloading, setUnloading] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchVram = async () => {
@@ -41,6 +52,38 @@ export const VramIndicator: React.FC<VramIndicatorProps> = ({
     return () => clearInterval(interval);
   }, [pollInterval]);
 
+  const fetchLoaded = useCallback(async () => {
+    try {
+      const res = await fetch('/api/logs/models-loaded');
+      if (res.ok) {
+        const d = await res.json();
+        setLoaded(Array.isArray(d.loaded) ? d.loaded : []);
+      } else setLoaded([]);
+    } catch { setLoaded([]); }
+  }, []);
+
+  // While the dropdown is open, fetch the resident-model list and refresh it.
+  useEffect(() => {
+    if (!open) return;
+    fetchLoaded();
+    const iv = setInterval(fetchLoaded, 2000);
+    return () => clearInterval(iv);
+  }, [open, fetchLoaded]);
+
+  const unload = useCallback(async (label: string) => {
+    setUnloading(label);
+    try {
+      await fetch('/api/logs/models-unload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      });
+      await fetchLoaded();
+    } catch { /* ignore */ } finally {
+      setUnloading(null);
+    }
+  }, [fetchLoaded]);
+
   if (!vram || vram.total_mb <= 0) return null;
 
   const percent = Math.round((vram.used_mb / vram.total_mb) * 100);
@@ -48,20 +91,67 @@ export const VramIndicator: React.FC<VramIndicatorProps> = ({
   const colorBg = percent > 90 ? 'bg-red-500' : percent > 70 ? 'bg-yellow-500' : 'bg-emerald-500';
 
   return (
-    <div className="flex items-center gap-1.5">
-      <Cpu size={compact ? 10 : 11} className="text-zinc-500 flex-shrink-0" />
-      <div className="flex items-center gap-1">
-        {!compact && <span className="text-[10px] text-zinc-500">VRAM</span>}
-        <span className={`text-[10px] font-mono font-medium ${colorText}`}>
-          {(vram.used_mb / 1024).toFixed(1)}/{(vram.total_mb / 1024).toFixed(1)}
-        </span>
-        <div className="w-10 h-1 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-500 ${colorBg}`}
-            style={{ width: `${percent}%` }}
-          />
+    <div
+      className="relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <div className="flex items-center gap-1.5 cursor-default">
+        <Cpu size={compact ? 10 : 11} className="text-zinc-500 flex-shrink-0" />
+        <div className="flex items-center gap-1">
+          {!compact && <span className="text-[10px] text-zinc-500">VRAM</span>}
+          <span className={`text-[10px] font-mono font-medium ${colorText}`}>
+            {(vram.used_mb / 1024).toFixed(1)}/{(vram.total_mb / 1024).toFixed(1)}
+          </span>
+          <div className="w-10 h-1 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${colorBg}`}
+              style={{ width: `${percent}%` }}
+            />
+          </div>
         </div>
       </div>
+
+      {open && (
+        <div className="absolute right-0 top-full pt-1.5 z-50">
+          <div className="w-60 rounded-lg border border-white/10 bg-white dark:bg-zinc-900 shadow-xl p-2">
+            <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-black/5 dark:border-white/5">
+              <span className="text-[10px] uppercase tracking-wide text-zinc-500">Loaded models</span>
+              <span className="text-[10px] font-mono text-zinc-500">{(vram.used_mb / 1024).toFixed(1)} GB used</span>
+            </div>
+
+            {loaded === null ? (
+              <div className="text-[11px] text-zinc-500 px-1 py-2 flex items-center gap-1.5">
+                <Loader2 size={11} className="animate-spin" /> Loading…
+              </div>
+            ) : loaded.length === 0 ? (
+              <div className="text-[11px] text-zinc-500 px-1 py-2">No models resident in VRAM.</div>
+            ) : (
+              <div className="space-y-0.5">
+                {loaded.map(m => (
+                  <div key={m.label} className="flex items-center gap-2 px-1 py-1 rounded hover:bg-black/5 dark:hover:bg-white/5">
+                    <span className="text-[11px] text-zinc-800 dark:text-white flex-1 truncate">{m.label}</span>
+                    {m.in_use && <span className="text-[9px] text-amber-500 uppercase">in use</span>}
+                    <span className="text-[10px] text-zinc-500 font-mono">{(m.mb / 1024).toFixed(1)} GB</span>
+                    <button
+                      onClick={() => unload(m.label)}
+                      disabled={m.in_use || unloading === m.label}
+                      title={m.in_use ? "In use — can't unload right now" : `Unload ${m.label}`}
+                      className="w-5 h-5 rounded flex items-center justify-center text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:hover:text-zinc-500 disabled:hover:bg-transparent"
+                    >
+                      {unloading === m.label ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="text-[10px] text-zinc-500 px-1 pt-1.5 mt-1 border-t border-black/5 dark:border-white/5">
+              Unloaded models reload automatically when next needed.
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

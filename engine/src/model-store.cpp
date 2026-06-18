@@ -149,27 +149,43 @@ static void evict_all_except(ModelStore * s, const ModelKey & keep) {
     }
 }
 
-// Public: force-evict the LM (label "LM") regardless of policy. Targeted so it
-// frees nothing else — every other module stays exactly as it was. Used only by
-// Song Builder (via the per-request evict_lm flag); the normal flow never calls
-// this, so other generation modes are unaffected.
-void store_evict_lm(ModelStore * s) {
+// Public: force-evict a resident GPU module by label, regardless of policy.
+// Targeted — frees nothing else; in-use (refcount>0) modules are skipped. Used
+// by Song Builder (LM only) and the manual-unload UI. Under keep-loaded the
+// module just reloads on next use, so this never breaks an in-flight pipeline.
+bool store_evict_label(ModelStore * s, const char * label) {
+    if (!label) return false;
     std::lock_guard<std::mutex> lock(s->mtx);
+    bool freed = false;
     for (auto it = s->gpu.begin(); it != s->gpu.end();) {
         GpuEntry & e = it->second;
-        if (e.label && std::strcmp(e.label, "LM") == 0) {
+        if (e.label && std::strcmp(e.label, label) == 0) {
             if (e.refcount > 0) {
-                fprintf(stderr, "[Store] evict_lm requested but LM in use (refcount=%d), skipping\n", e.refcount);
+                fprintf(stderr, "[Store] unload %s requested but in use (refcount=%d), skipping\n", label, e.refcount);
                 ++it;
                 continue;
             }
-            fprintf(stderr, "[Store] Evict LM on request (%.1f MB freed)\n", (float) e.bytes / (1024.0f * 1024.0f));
+            fprintf(stderr, "[Store] Unload %s (%.1f MB freed)\n", e.label, (float) e.bytes / (1024.0f * 1024.0f));
             s->handle_to_key.erase(e.ptr);
             e.deleter(e.ptr);
-            it = s->gpu.erase(it);
+            it    = s->gpu.erase(it);
+            freed = true;
         } else {
             ++it;
         }
+    }
+    return freed;
+}
+
+// Song Builder convenience wrapper.
+void store_evict_lm(ModelStore * s) { store_evict_label(s, "LM"); }
+
+void store_list_loaded(ModelStore * s, StoreLoadedCb cb, void * ud) {
+    if (!cb) return;
+    std::lock_guard<std::mutex> lock(s->mtx);
+    for (const auto & kv : s->gpu) {
+        const GpuEntry & e = kv.second;
+        cb(e.label ? e.label : "?", e.bytes, e.refcount, ud);
     }
 }
 

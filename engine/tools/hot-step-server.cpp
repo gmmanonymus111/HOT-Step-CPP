@@ -2644,6 +2644,46 @@ int main(int argc, char ** argv) {
         res.set_content("{\"used_mb\":0,\"total_mb\":0,\"free_mb\":0}", "application/json");
 #endif
     });
+
+    // List currently-resident GPU modules (manual-unload UI).
+    svr.Get("/models/loaded", [](const httplib::Request &, httplib::Response & res) {
+        struct Acc { std::string json; bool first = true; } acc;
+        store_list_loaded(g_store,
+            [](const char * label, size_t bytes, int refcount, void * ud) {
+                Acc * a = static_cast<Acc *>(ud);
+                char  buf[256];
+                snprintf(buf, sizeof(buf), "%s{\"label\":\"%s\",\"mb\":%.0f,\"in_use\":%s}",
+                         a->first ? "" : ",", label, (double) bytes / (1024.0 * 1024.0),
+                         refcount > 0 ? "true" : "false");
+                a->json += buf;
+                a->first = false;
+            },
+            &acc);
+        res.set_content("{\"loaded\":[" + acc.json + "]}", "application/json");
+    });
+
+    // Manually unload one resident module by label. In-use modules are skipped;
+    // under keep-loaded the module reloads on next use, so this is safe anytime.
+    svr.Post("/models/unload", [](const httplib::Request & req, httplib::Response & res) {
+        yyjson_doc * doc   = yyjson_read(req.body.c_str(), req.body.size(), 0);
+        const char * label = nullptr;
+        if (doc) {
+            yyjson_val * root = yyjson_doc_get_root(doc);
+            yyjson_val * v    = root ? yyjson_obj_get(root, "label") : nullptr;
+            if (v && yyjson_is_str(v)) label = yyjson_get_str(v);
+        }
+        if (!label || !*label) {
+            if (doc) yyjson_doc_free(doc);
+            json_error(res, 400, "missing 'label'");
+            return;
+        }
+        bool freed = store_evict_label(g_store, label);
+        char buf[160];
+        snprintf(buf, sizeof(buf), "{\"unloaded\":%s,\"label\":\"%s\"}", freed ? "true" : "false", label);
+        res.set_content(buf, "application/json");
+        if (doc) yyjson_doc_free(doc);
+    });
+
     // job system endpoints
     svr.Get("/job", [](const httplib::Request & req, httplib::Response & res) {
         if (!req.has_param("id")) {

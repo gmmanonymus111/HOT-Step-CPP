@@ -114,4 +114,34 @@ router.get('/vram', async (_req: Request, res: Response) => {
   }
 });
 
+// ── Loaded models proxy: GET /api/logs/models-loaded ──────────────────
+// Lists the GPU modules currently resident in the engine (for the manual
+// unload dropdown on the VRAM indicator).
+router.get('/models-loaded', async (_req: Request, res: Response) => {
+  try {
+    const resp = await fetch(`${config.aceServer.url}/models/loaded`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) { res.json({ loaded: [] }); return; }
+    res.json(await resp.json());
+  } catch {
+    res.json({ loaded: [] });
+  }
+});
+
+// ── Manual unload proxy: POST /api/logs/models-unload { label } ───────
+router.post('/models-unload', async (req: Request, res: Response) => {
+  try {
+    const resp = await fetch(`${config.aceServer.url}/models/unload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: req.body?.label }),
+      signal: AbortSignal.timeout(5000),
+    });
+    res.status(resp.status).json(await resp.json().catch(() => ({})));
+  } catch {
+    res.status(502).json({ error: 'ace-server unreachable' });
+  }
+});
+
 export default router;

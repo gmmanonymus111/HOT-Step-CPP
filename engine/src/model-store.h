@@ -144,6 +144,18 @@ void store_release(ModelStore * s, void * handle);
 // loaded or is currently in use. Does NOT affect any other module.
 void store_evict_lm(ModelStore * s);
 
+// Enumerate currently-resident GPU modules (for the manual-unload UI). cb is
+// invoked once per loaded module with its label, resident weight bytes, and
+// refcount (>0 means in use right now).
+typedef void (*StoreLoadedCb)(const char * label, size_t bytes, int refcount, void * ud);
+void store_list_loaded(ModelStore * s, StoreLoadedCb cb, void * ud);
+
+// Force-evict a resident GPU module by label ("LM", "DiT", "VAE-Dec", ...) if it
+// is unreferenced, regardless of policy. Returns true if something was freed.
+// In-use modules (refcount > 0) are skipped. Frees nothing else. Under keep-
+// loaded the module simply reloads on next use.
+bool store_evict_label(ModelStore * s, const char * label);
+
 // CPU-resident accessors. Loaded on first call, kept forever, never evicted.
 // All small (a few MB total). Return NULL on load failure.
 BPETokenizer *  store_bpe(ModelStore * s, const char * lm_path);
