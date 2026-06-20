@@ -21,20 +21,7 @@ import type { Generation, AlbumPreset } from '../services/lireekApi';
 import { addToPlaylist } from '../components/lyric-studio/playlistStore';
 import type { GenerationParams } from '../types';
 import { resolveDuration } from '../utils/estimateDuration';
-
-/** Read the generation timeout (minutes) from localStorage settings.
- *  Falls back to 30 minutes if unset or unparsable. */
-function _getTimeoutMinutes(): number {
-  try {
-    const raw = localStorage.getItem('ace-settings');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const val = parsed.generationTimeoutMinutes;
-      if (typeof val === 'number' && val >= 10 && val <= 120) return val;
-    }
-  } catch { /* ignore parse errors */ }
-  return 30;
-}
+import { createGenerationTimer, getGenerationTimeoutMinutes } from '../utils/generationTimer';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -550,17 +537,19 @@ export async function enqueueSimpleGen(
     item.stage = 'Queued…';
     _emit(true);
 
-    // Poll until done
-    const startTime = Date.now();
+    // Poll until done. Timer ignores server-queue wait — only counts real
+    // generation time so deep queues don't inflate elapsed / trip the timeout.
+    const timer = createGenerationTimer();
     while (true) {
       await new Promise(r => setTimeout(r, 1500));
       try {
         const status = await generateApi.status(res.jobId);
+        const t = timer.tick(status.status);
         item.progress = status.progress !== undefined
           ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
           : undefined;
         item.stage = status.stage || 'Generating…';
-        item.elapsed = Math.round((Date.now() - startTime) / 1000);
+        item.elapsed = t.elapsed;
         _emit();  // progress tick — debounced persistence
 
         if (status.status === 'succeeded') {
@@ -597,10 +586,10 @@ export async function enqueueSimpleGen(
         if (status.status === 'failed' || status.status === 'cancelled') {
           throw new Error(status.error || (status.status === 'cancelled' ? 'Cancelled' : 'Generation failed'));
         }
-        // Safety: configurable timeout (default 30 min)
-        const timeoutMs = _getTimeoutMinutes() * 60 * 1000;
-        if (Date.now() - startTime > timeoutMs) {
-          throw new Error(`Generation timed out after ${_getTimeoutMinutes()} minutes`);
+        // Safety: configurable timeout (default 30 min), measured from
+        // generation start — queue wait does not count.
+        if (t.timedOut) {
+          throw new Error(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
         }
       } catch (e) {
         if ((e as Error).message.includes('failed') || (e as Error).message.includes('timed out') || (e as Error).message.includes('Cancelled')) {
@@ -897,19 +886,21 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
 async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<void> {
   const jobId = item.jobId!;
   item.stage = 'Generating audio…';
-  const startTime = item.elapsed ? Date.now() - item.elapsed * 1000 : Date.now();
-  const timeoutMs = _getTimeoutMinutes() * 60 * 1000;
+  // Resume the clock from any persisted elapsed (reconnect after reload);
+  // a fresh item starts counting only once the engine picks the job up.
+  const timer = createGenerationTimer({ resumeElapsedSec: item.elapsed });
   _emit(true);
 
   while (true) {
     await new Promise(r => setTimeout(r, 2500));
     try {
       const status = await generateApi.status(jobId);
+      const t = timer.tick(status.status);
       item.progress = status.progress !== undefined
         ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
         : undefined;
       item.stage = status.stage || 'Generating…';
-      item.elapsed = Math.round((Date.now() - startTime) / 1000);
+      item.elapsed = t.elapsed;
       _emit();  // progress tick — debounced persistence
 
       if (status.status === 'succeeded') {
@@ -935,9 +926,10 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
       }
       if (status.status === 'failed' || status.status === 'cancelled') throw new Error(status.error || (status.status === 'cancelled' ? 'Cancelled' : 'Generation failed'));
 
-      // Safety: configurable timeout (default 30 min)
-      if (Date.now() - startTime > timeoutMs) {
-        throw new Error(`Generation timed out after ${_getTimeoutMinutes()} minutes`);
+      // Safety: configurable timeout (default 30 min), measured from
+      // generation start — queue wait does not count.
+      if (t.timedOut) {
+        throw new Error(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
       }
     } catch (e) {
       const msg = (e as Error).message;

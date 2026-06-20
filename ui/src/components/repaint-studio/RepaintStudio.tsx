@@ -10,6 +10,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useGlobalParamsStore } from '../../context/GlobalParamsContext';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { generateApi, songApi } from '../../services/api';
+import { createGenerationTimer, getGenerationTimeoutMinutes } from '../../utils/generationTimer';
 import { fetchLrc } from '../../utils/lrcUtils';
 import { RepaintWaveform } from './RepaintWaveform';
 import { RegionLyricsEditor } from './RegionLyricsEditor';
@@ -243,10 +244,12 @@ export const RepaintStudio: React.FC = () => {
   const pollJob = (jobId: string, qId: string) => {
     setGenProgress(0);
     setGenStage('Queued...');
-    const startTime = Date.now();
+    // Clock ignores server-queue wait — only real generation time counts.
+    const timer = createGenerationTimer();
     const iv = setInterval(async () => {
       try {
         const s = await generateApi.status(jobId);
+        const t = timer.tick(s.status);
         const rawProg = s.progress;
         const pct = rawProg != null
           ? Math.min(100, Math.max(0, Math.round(rawProg > 1 ? rawProg : rawProg * 100)))
@@ -257,8 +260,20 @@ export const RepaintStudio: React.FC = () => {
         updateManualQueueItem(qId, {
           progress: pct,
           stage: s.stage || 'Generating...',
-          elapsed: Math.round((Date.now() - startTime) / 1000),
+          elapsed: t.elapsed,
         });
+
+        if (t.timedOut) {
+          clearInterval(iv);
+          setIsGenerating(false);
+          setActiveJobId(null);
+          setQueueItemId(null);
+          setGenProgress(0);
+          setGenStage('');
+          showToast(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
+          failManualQueueItem(qId, 'Generation timed out');
+          return;
+        }
 
         if (s.status === 'succeeded') {
           clearInterval(iv);
@@ -291,7 +306,10 @@ export const RepaintStudio: React.FC = () => {
         }
       } catch {}
     }, 2000);
-    setTimeout(() => clearInterval(iv), 1_800_000);
+    // Absolute backstop so polling can't run forever if the job wedges in the
+    // queue / server goes unreachable. Generous so it never pre-empts the
+    // generation-start timer above. (timer.timedOut is the functional timeout.)
+    setTimeout(() => clearInterval(iv), (getGenerationTimeoutMinutes() + 30) * 60_000);
   };
 
   const handleCancel = async () => {

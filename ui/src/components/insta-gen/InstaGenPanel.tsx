@@ -27,6 +27,7 @@ import {
   type InspireProvider,
 } from '../../services/inspireApi';
 import { generateApi, songApi } from '../../services/api';
+import { createGenerationTimer, getGenerationTimeoutMinutes } from '../../utils/generationTimer';
 import {
   addManualQueueItem,
   updateManualQueueItem,
@@ -354,18 +355,19 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
         const res = await generateApi.submit(enrichedParams as any, capturedToken);
         updateManualQueueItem(queueId, { jobId: res.jobId, stage: 'Generating audio…' });
 
-        // Poll until done
-        const startTime = Date.now();
+        // Poll until done — clock ignores server-queue wait.
+        const timer = createGenerationTimer();
         while (true) {
           await new Promise(r => setTimeout(r, 1500));
           const status = await generateApi.status(res.jobId);
+          const t = timer.tick(status.status);
           const progress = status.progress !== undefined
             ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
             : undefined;
           updateManualQueueItem(queueId, {
             progress,
             stage: status.stage || 'Generating…',
-            elapsed: Math.round((Date.now() - startTime) / 1000),
+            elapsed: t.elapsed,
           });
 
           if (status.status === 'succeeded') {
@@ -388,6 +390,10 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
           }
           if (status.status === 'failed' || status.status === 'cancelled') {
             failManualQueueItem(queueId, status.error || 'Generation failed');
+            break;
+          }
+          if (t.timedOut) {
+            failManualQueueItem(queueId, `Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
             break;
           }
         }
@@ -499,18 +505,19 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
             const res = await generateApi.submit(enrichedParams as any, capturedToken);
             updateManualQueueItem(queueId, { jobId: res.jobId, stage: 'Generating audio…' });
 
-            // Poll until done
-            const startTime = Date.now();
+            // Poll until done — clock ignores server-queue wait.
+            const timer = createGenerationTimer();
             while (true) {
               await new Promise(r => setTimeout(r, 1500));
               const status = await generateApi.status(res.jobId);
+              const t = timer.tick(status.status);
               const progress = status.progress !== undefined
                 ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
                 : undefined;
               updateManualQueueItem(queueId, {
                 progress,
                 stage: status.stage || 'Generating…',
-                elapsed: Math.round((Date.now() - startTime) / 1000),
+                elapsed: t.elapsed,
               });
 
               if (status.status === 'succeeded') {
@@ -533,8 +540,8 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
               if (status.status === 'failed' || status.status === 'cancelled') {
                 throw new Error(status.error || 'Generation failed');
               }
-              if (Date.now() - startTime > 30 * 60 * 1000) {
-                throw new Error('Generation timed out');
+              if (t.timedOut) {
+                throw new Error(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
               }
             }
           }
@@ -600,18 +607,19 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
         const res = await generateApi.submit(enrichedParams as any, capturedToken);
         updateManualQueueItem(queueId, { jobId: res.jobId, stage: 'Generating audio…' });
 
-        // Step 5: Poll until done
-        const startTime = Date.now();
+        // Step 5: Poll until done — clock ignores server-queue wait.
+        const timer = createGenerationTimer();
         while (true) {
           await new Promise(r => setTimeout(r, 1500));
           const status = await generateApi.status(res.jobId);
+          const t = timer.tick(status.status);
           const progress = status.progress !== undefined
             ? Math.min(100, Math.max(0, (status.progress > 1 ? status.progress / 100 : status.progress) * 100))
             : undefined;
           updateManualQueueItem(queueId, {
             progress,
             stage: status.stage || 'Generating…',
-            elapsed: Math.round((Date.now() - startTime) / 1000),
+            elapsed: t.elapsed,
           });
 
           if (status.status === 'succeeded') {
@@ -635,8 +643,8 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
           if (status.status === 'failed' || status.status === 'cancelled') {
             throw new Error(status.error || 'Generation failed');
           }
-          if (Date.now() - startTime > 30 * 60 * 1000) {
-            throw new Error('Generation timed out');
+          if (t.timedOut) {
+            throw new Error(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
           }
         }
       } catch (err: any) {
