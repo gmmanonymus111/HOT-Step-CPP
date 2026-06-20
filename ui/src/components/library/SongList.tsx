@@ -7,7 +7,7 @@ import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
   Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
   LayoutGrid, List as ListIcon, Table2, ArrowLeftRight, Upload, Mic2, Loader2,
-  Copy, Check, Columns3, ChevronLeft, ChevronRight,
+  Check, Columns3, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
@@ -16,6 +16,7 @@ import { songToTrack } from '../../stores/playbackStore';
 import { useABCompareSelector, setTrackA, setTrackB, playAB, openModal as openABModal, clear as clearAB } from '../../stores/abCompareStore';
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 import { downloadAll } from '../../utils/downloadTrack';
+import { HoverFullText } from '../shared/HoverFullText';
 
 // ── Source filter definitions ────────────────────────────────────────────────
 
@@ -1333,70 +1334,9 @@ const TableTitleCell: React.FC<{
 };
 
 // ── Style cell — truncated, with a hover tooltip showing the full text + copy ──
-const TableStyleCell: React.FC<{ text: string }> = ({ text }) => {
-  const [open, setOpen] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
-  const [pos, setPos] = React.useState<{ left: number; top: number; width: number } | null>(null);
-  const ref = React.useRef<HTMLSpanElement>(null);
-  const hideTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const hasText = !!text && text.trim() !== '' && text !== '—';
-
-  const cancelHide = () => { if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } };
-  const scheduleHide = () => { cancelHide(); hideTimer.current = setTimeout(() => { setOpen(false); setCopied(false); }, 140); };
-  const show = () => {
-    cancelHide();
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({ left: r.left, top: r.bottom + 4, width: r.width });
-    setOpen(true);
-  };
-  React.useEffect(() => () => cancelHide(), []);
-
-  const copy = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    navigator.clipboard?.writeText(text).then(() => {
-      setCopied(true);
-      cancelHide();
-      hideTimer.current = setTimeout(() => { setOpen(false); setCopied(false); }, 1200);
-    }).catch(() => {});
-  };
-
-  return (
-    <>
-      <span
-        ref={ref}
-        className="text-zinc-500 truncate block"
-        onMouseEnter={hasText ? show : undefined}
-        onMouseLeave={hasText ? scheduleHide : undefined}
-      >
-        {text}
-      </span>
-      {open && hasText && pos && ReactDOM.createPortal(
-        <div
-          className="fixed z-[9999] p-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 shadow-xl text-xs text-zinc-700 dark:text-zinc-200"
-          style={{ left: pos.left, top: pos.top, maxWidth: 420, minWidth: Math.min(Math.max(pos.width, 200), 420) }}
-          onMouseEnter={cancelHide}
-          onMouseLeave={scheduleHide}
-          onClick={e => e.stopPropagation()}
-        >
-          <div className="flex items-start gap-2">
-            <span className="whitespace-pre-wrap break-words leading-relaxed flex-1 max-h-60 overflow-y-auto">{text}</span>
-            <button
-              onClick={copy}
-              className="flex-shrink-0 p-1 rounded text-zinc-500 hover:text-zinc-800 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
-              title="Copy to clipboard"
-            >
-              {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
-            </button>
-          </div>
-        </div>,
-        document.body,
-      )}
-    </>
-  );
-};
+const TableStyleCell: React.FC<{ text: string }> = ({ text }) => (
+  <HoverFullText text={text} className="text-zinc-500 truncate block" />
+);
 
 // ── SongTable — Table view with resizable columns ────────────────────────────
 

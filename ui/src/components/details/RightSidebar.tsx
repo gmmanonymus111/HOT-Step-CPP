@@ -5,6 +5,7 @@ import React from 'react';
 import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
+import { HoverFullText } from '../shared/HoverFullText';
 
 interface RightSidebarProps {
   song: Song;
@@ -109,7 +110,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
             </div>
           )}
           {song.style && (
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 line-clamp-2">{song.style}</p>
+            <HoverFullText
+              as="p"
+              text={song.style}
+              className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 line-clamp-2 cursor-help"
+            />
           )}
         </div>
 
