@@ -1,12 +1,13 @@
 // SongList.tsx — Song library display with bulk selection + source filtering
 // Ported from hot-step-9000 visual design with Tailwind.
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
   Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
   LayoutGrid, List as ListIcon, Table2, ArrowLeftRight, Upload, Mic2, Loader2,
+  Copy, Check, Columns3, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
@@ -18,7 +19,7 @@ import { downloadAll } from '../../utils/downloadTrack';
 
 // ── Source filter definitions ────────────────────────────────────────────────
 
-type SourceFilter = 'all' | 'create' | 'insta-gen' | 'lyric-studio' | 'cover-studio';
+type SourceFilter = 'all' | 'create' | 'insta-gen' | 'lyric-studio' | 'cover-studio' | 'repaint' | 'stem-builder' | 'builder';
 
 const SOURCE_FILTERS: { id: SourceFilter; label: string; color: string }[] = [
   { id: 'all',           label: 'All',           color: 'text-zinc-700 dark:text-zinc-300 bg-white/10 border-zinc-300 dark:border-white/10' },
@@ -26,10 +27,30 @@ const SOURCE_FILTERS: { id: SourceFilter; label: string; color: string }[] = [
   { id: 'insta-gen',     label: 'Auto-Gen',      color: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/25' },
   { id: 'lyric-studio',  label: 'Lyric Studio',  color: 'text-pink-300 bg-pink-500/15 border-pink-500/25' },
   { id: 'cover-studio',  label: 'Cover Studio',  color: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
+  { id: 'repaint',       label: 'Repaint',       color: 'text-amber-300 bg-amber-500/15 border-amber-500/25' },
+  { id: 'stem-builder',  label: 'Stem Build',    color: 'text-emerald-300 bg-emerald-500/15 border-emerald-500/25' },
+  { id: 'builder',       label: 'Song Builder',  color: 'text-indigo-300 bg-indigo-500/15 border-indigo-500/25' },
 ];
 
 function getSongSource(song: Song): string {
   return (song.generationParams as any)?.source || (song.generation_params as any)?.source || 'create';
+}
+
+// ── Pagination ───────────────────────────────────────────────────────────────
+const PAGE_SIZE_KEY = 'hs-library-pageSize';
+const PAGE_SIZE_OPTIONS: (number | 'all')[] = [20, 40, 60, 80, 100, 'all'];
+
+function loadPageSize(): number | 'all' {
+  try {
+    const v = localStorage.getItem(PAGE_SIZE_KEY);
+    if (v === 'all') return 'all';
+    const n = v ? parseInt(v, 10) : NaN;
+    if ((PAGE_SIZE_OPTIONS as (number | string)[]).includes(n)) return n;
+  } catch { /* ignore */ }
+  return 40;
+}
+function savePageSize(v: number | 'all') {
+  try { localStorage.setItem(PAGE_SIZE_KEY, String(v)); } catch { /* ignore */ }
 }
 
 /**
@@ -127,6 +148,57 @@ const PortalMenu: React.FC<PortalMenuProps> = ({ anchorRef, onClose, children })
 
 // ── Component ────────────────────────────────────────────────────────────────
 
+// ── Reusable pagination controls (rendered top + bottom) ─────────────────────
+const PaginationControls: React.FC<{
+  pageSize: number | 'all';
+  page: number;
+  totalPages: number;
+  onChangePageSize: (v: number | 'all') => void;
+  onPage: (updater: (p: number) => number) => void;
+}> = ({ pageSize, page, totalPages, onChangePageSize, onPage }) => (
+  <div className="flex items-center gap-3 text-xs">
+    <div className="flex items-center gap-1.5">
+      <span className="text-zinc-500">Per page</span>
+      <div className="flex items-center rounded-lg border border-zinc-200 dark:border-white/10 overflow-hidden">
+        {PAGE_SIZE_OPTIONS.map(opt => (
+          <button
+            key={String(opt)}
+            onClick={() => onChangePageSize(opt)}
+            className={`px-2.5 py-1 transition-colors ${
+              pageSize === opt
+                ? 'bg-pink-500/20 text-pink-400'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+            }`}
+          >
+            {opt === 'all' ? 'All' : opt}
+          </button>
+        ))}
+      </div>
+    </div>
+    {pageSize !== 'all' && totalPages > 1 && (
+      <div className="flex items-center gap-2 text-zinc-500">
+        <button
+          onClick={() => onPage(p => Math.max(1, p - 1))}
+          disabled={page <= 1}
+          className="p-1 rounded hover:text-zinc-300 hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          title="Previous page"
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <span className="tabular-nums whitespace-nowrap">Page {page} / {totalPages}</span>
+        <button
+          onClick={() => onPage(p => Math.min(totalPages, p + 1))}
+          disabled={page >= totalPages}
+          className="p-1 rounded hover:text-zinc-300 hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          title="Next page"
+        >
+          <ChevronRight size={16} />
+        </button>
+      </div>
+    )}
+  </div>
+);
+
 interface SongListProps {
   songs: Song[];
   currentSongId?: string;
@@ -178,16 +250,38 @@ export const SongList: React.FC<SongListProps> = ({
     return songs.filter(s => getSongSource(s) === sourceFilter);
   }, [songs, sourceFilter]);
 
-  // Count songs per source for filter badges
+  // Count songs per source for filter badges. Keys are derived from
+  // SOURCE_FILTERS so adding a new source can't drift out of sync.
   const sourceCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: songs.length, create: 0, 'insta-gen': 0, 'lyric-studio': 0, 'cover-studio': 0 };
+    const counts: Record<string, number> = { all: songs.length };
+    for (const f of SOURCE_FILTERS) if (f.id !== 'all') counts[f.id] = 0;
     for (const s of songs) {
       const src = getSongSource(s);
-      if (src in counts) counts[src]++;
-      else counts.create++; // default to create for untagged
+      if (src in counts && src !== 'all') counts[src]++;
+      else counts.create++; // default to create for untagged / unknown
     }
     return counts;
   }, [songs]);
+
+  // ── Pagination ─────────────────────────────────────────────────────────────
+  const [pageSize, setPageSizeState] = useState<number | 'all'>(() => loadPageSize());
+  const [page, setPage] = useState(1);
+  const changePageSize = useCallback((v: number | 'all') => {
+    setPageSizeState(v); savePageSize(v); setPage(1);
+  }, []);
+
+  const totalPages = pageSize === 'all' ? 1 : Math.max(1, Math.ceil(filteredSongs.length / pageSize));
+  // Reset to page 1 when the filter changes; clamp if the list shrinks.
+  useEffect(() => { setPage(1); }, [sourceFilter]);
+  useEffect(() => { setPage(p => Math.min(p, totalPages)); }, [totalPages]);
+
+  const pagedSongs = useMemo(() => {
+    if (pageSize === 'all') return filteredSongs;
+    const start = (page - 1) * pageSize;
+    return filteredSongs.slice(start, start + pageSize);
+  }, [filteredSongs, page, pageSize]);
+
+  const paginationProps = { pageSize, page, totalPages, onChangePageSize: changePageSize, onPage: setPage };
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds(prev => {
@@ -427,10 +521,17 @@ export const SongList: React.FC<SongListProps> = ({
         </div>
       )}
 
+      {/* Top pagination — grid/list (table view renders it inline beside Columns) */}
+      {activeViewMode !== 'table' && filteredSongs.length > 0 && (
+        <div className="flex justify-end mb-3">
+          <PaginationControls {...paginationProps} />
+        </div>
+      )}
+
       {/* Grid View */}
       {activeViewMode === 'grid' && filteredSongs.length > 0 && (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
-          {filteredSongs.map(song => (
+          {pagedSongs.map(song => (
             <SongCard
               key={song.id}
               song={song}
@@ -456,7 +557,7 @@ export const SongList: React.FC<SongListProps> = ({
       {/* List View */}
       {activeViewMode === 'list' && filteredSongs.length > 0 && (
         <div className="space-y-1">
-          {filteredSongs.map(song => (
+          {pagedSongs.map(song => (
             <SongItem
               key={song.id}
               song={song}
@@ -483,7 +584,7 @@ export const SongList: React.FC<SongListProps> = ({
       {/* Table View */}
       {activeViewMode === 'table' && filteredSongs.length > 0 && (
         <SongTable
-          songs={filteredSongs}
+          songs={pagedSongs}
           currentSongId={currentSongId}
           isPlaying={isPlaying}
           selectionMode={selectionMode}
@@ -498,7 +599,15 @@ export const SongList: React.FC<SongListProps> = ({
           showSourceBadge={showFilters && sourceFilter === 'all'}
           abTrackAId={abTrackAId}
           abTrackBId={abTrackBId}
+          topRight={<PaginationControls {...paginationProps} />}
         />
+      )}
+
+      {/* Bottom pagination bar */}
+      {filteredSongs.length > 0 && (
+        <div className="flex justify-end mt-4 pt-3 border-t border-zinc-200 dark:border-white/5">
+          <PaginationControls {...paginationProps} />
+        </div>
       )}
     </div>
   );
@@ -1223,6 +1332,72 @@ const TableTitleCell: React.FC<{
   );
 };
 
+// ── Style cell — truncated, with a hover tooltip showing the full text + copy ──
+const TableStyleCell: React.FC<{ text: string }> = ({ text }) => {
+  const [open, setOpen] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
+  const [pos, setPos] = React.useState<{ left: number; top: number; width: number } | null>(null);
+  const ref = React.useRef<HTMLSpanElement>(null);
+  const hideTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const hasText = !!text && text.trim() !== '' && text !== '—';
+
+  const cancelHide = () => { if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } };
+  const scheduleHide = () => { cancelHide(); hideTimer.current = setTimeout(() => { setOpen(false); setCopied(false); }, 140); };
+  const show = () => {
+    cancelHide();
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ left: r.left, top: r.bottom + 4, width: r.width });
+    setOpen(true);
+  };
+  React.useEffect(() => () => cancelHide(), []);
+
+  const copy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      cancelHide();
+      hideTimer.current = setTimeout(() => { setOpen(false); setCopied(false); }, 1200);
+    }).catch(() => {});
+  };
+
+  return (
+    <>
+      <span
+        ref={ref}
+        className="text-zinc-500 truncate block"
+        onMouseEnter={hasText ? show : undefined}
+        onMouseLeave={hasText ? scheduleHide : undefined}
+      >
+        {text}
+      </span>
+      {open && hasText && pos && ReactDOM.createPortal(
+        <div
+          className="fixed z-[9999] p-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 shadow-xl text-xs text-zinc-700 dark:text-zinc-200"
+          style={{ left: pos.left, top: pos.top, maxWidth: 420, minWidth: Math.min(Math.max(pos.width, 200), 420) }}
+          onMouseEnter={cancelHide}
+          onMouseLeave={scheduleHide}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex items-start gap-2">
+            <span className="whitespace-pre-wrap break-words leading-relaxed flex-1 max-h-60 overflow-y-auto">{text}</span>
+            <button
+              onClick={copy}
+              className="flex-shrink-0 p-1 rounded text-zinc-500 hover:text-zinc-800 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+              title="Copy to clipboard"
+            >
+              {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+};
+
 // ── SongTable — Table view with resizable columns ────────────────────────────
 
 interface SongTableProps {
@@ -1241,17 +1416,23 @@ interface SongTableProps {
   showSourceBadge?: boolean;
   abTrackAId?: string | null;
   abTrackBId?: string | null;
+  /** Rendered on the right of the Columns toolbar row (e.g. pagination). */
+  topRight?: React.ReactNode;
 }
 
 const SOURCE_BADGE_MAP: Record<string, { label: string; cls: string }> = {
   'insta-gen': { label: 'Auto-Gen', cls: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/25' },
   'lyric-studio': { label: 'Lyric', cls: 'text-pink-300 bg-pink-500/15 border-pink-500/25' },
   'cover-studio': { label: 'Cover', cls: 'text-cyan-300 bg-cyan-500/15 border-cyan-500/25' },
+  'repaint': { label: 'Repaint', cls: 'text-amber-300 bg-amber-500/15 border-amber-500/25' },
+  'stem-builder': { label: 'Stem', cls: 'text-emerald-300 bg-emerald-500/15 border-emerald-500/25' },
+  'builder': { label: 'Builder', cls: 'text-indigo-300 bg-indigo-500/15 border-indigo-500/25' },
 };
 
-// Column definitions — id, label, default width, min width, alignment
+// Column definitions — id, label, default width, min width, alignment.
+// defaultHidden = not shown until the user enables it via the Columns menu.
 type ColAlign = 'left' | 'center' | 'right';
-interface ColDef { id: string; label: string; defaultW: number; minW: number; align: ColAlign; resizable: boolean }
+interface ColDef { id: string; label: string; defaultW: number; minW: number; align: ColAlign; resizable: boolean; defaultHidden?: boolean }
 
 const BASE_COLS: ColDef[] = [
   { id: 'thumb',   label: '',        defaultW: 40,  minW: 32,  align: 'left', resizable: false },
@@ -1263,11 +1444,36 @@ const BASE_COLS: ColDef[] = [
   { id: 'quality', label: 'Quality', defaultW: 70,  minW: 50,  align: 'left', resizable: true },
   { id: 'time',    label: 'Time',    defaultW: 56,  minW: 44,  align: 'left', resizable: true },
   { id: 'date',    label: 'Date',    defaultW: 80,  minW: 50,  align: 'left', resizable: true },
-  { id: 'actions', label: '',        defaultW: 80,  minW: 60,  align: 'left', resizable: false },
+  // ── Generation data (hidden by default; enable via Columns menu) ──
+  { id: 'seed',      label: 'Seed',      defaultW: 96,  minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'steps',     label: 'Steps',     defaultW: 56,  minW: 44, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'cfg',       label: 'CFG',       defaultW: 56,  minW: 44, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'shift',     label: 'Shift',     defaultW: 56,  minW: 44, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'solver',    label: 'Solver',    defaultW: 110, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'scheduler', label: 'Scheduler', defaultW: 110, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'guidanceMode', label: 'Guidance', defaultW: 100, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'lora',      label: 'LoRA',      defaultW: 130, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'loraScale', label: 'LoRA Scale', defaultW: 80, minW: 50, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'lm',        label: 'LM Model',  defaultW: 120, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'vae',       label: 'VAE',       defaultW: 110, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'timesig',   label: 'Time Sig',  defaultW: 68,  minW: 48, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'lang',      label: 'Lang',      defaultW: 60,  minW: 44, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'task',      label: 'Task',      defaultW: 100, minW: 60, align: 'left', resizable: true, defaultHidden: true },
+  { id: 'instrumental', label: 'Instr.', defaultW: 60, minW: 48, align: 'center', resizable: true, defaultHidden: true },
+  { id: 'mastered',  label: 'Mastered',  defaultW: 76,  minW: 56, align: 'center', resizable: true, defaultHidden: true },
+  { id: 'seedType',  label: 'Seed Type', defaultW: 80,  minW: 56, align: 'left', resizable: true, defaultHidden: true },
+  // Holds up to 5 action buttons (edit/download/delete/A/B). Must be wide
+  // enough that the fixed-layout <td overflow-hidden> never clips them — the
+  // column is non-resizable so the user can't widen it manually (#58).
+  { id: 'actions', label: 'Actions', defaultW: 132, minW: 132, align: 'right', resizable: false },
 ];
 
 const SOURCE_COL: ColDef = { id: 'source', label: 'Source', defaultW: 80, minW: 50, align: 'left', resizable: true };
 const SELECT_COL: ColDef = { id: 'select', label: '', defaultW: 32, minW: 32, align: 'left', resizable: false };
+// Flexible spacer inserted before the actions column. It carries no width of
+// its own and absorbs all leftover table width, which pins `actions` to the
+// right edge while the resizable middle columns share the space between (#58).
+const SPACER_COL: ColDef = { id: 'spacer', label: '', defaultW: 0, minW: 0, align: 'left', resizable: false };
 
 const STORAGE_KEY = 'hs-table-colWidths';
 
@@ -1279,25 +1485,73 @@ function saveColWidths(w: Record<string, number>) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(w)); } catch { /* ignore */ }
 }
 
+// ── Column visibility (user-customizable columns) ────────────────────────────
+const COL_VIS_KEY = 'hs-table-colVisibility';
+// Structural columns the user can't hide — the table needs them to function.
+const MANDATORY_COLS = new Set(['select', 'thumb', 'title', 'spacer', 'actions']);
+
+function loadColVisibility(): Record<string, boolean> {
+  try { const v = localStorage.getItem(COL_VIS_KEY); return v ? JSON.parse(v) : {}; } catch { return {}; }
+}
+function saveColVisibility(v: Record<string, boolean>) {
+  try { localStorage.setItem(COL_VIS_KEY, JSON.stringify(v)); } catch { /* ignore */ }
+}
+
+/** Whether a column shows when the user hasn't explicitly toggled it. */
+function colDefaultVisible(id: string): boolean {
+  if (MANDATORY_COLS.has(id)) return true;
+  if (id === 'source') return true; // shown whenever the source column applies
+  return !BASE_COLS.find(c => c.id === id)?.defaultHidden;
+}
+
+/** Filename without path or model extension — for LoRA / LM / VAE cells. */
+function baseName(p?: string): string {
+  if (!p) return '';
+  const file = p.replace(/\\/g, '/').split('/').pop() || '';
+  return file.replace(/\.(safetensors|gguf|ckpt|pt|onnx|bin)$/i, '');
+}
+
 const SongTable: React.FC<SongTableProps> = ({
   songs, currentSongId, isPlaying, selectionMode, selectedIds, onToggleSelect,
   onPlay, onSelect, onDelete, onReuse, onDownload, onRename, showSourceBadge,
-  abTrackAId, abTrackBId,
+  abTrackAId, abTrackBId, topRight,
 }) => {
   const { t } = useTranslation();
   const { isDisguised, disguiseTitle } = useDisguiseMode();
 
-  // Build column list based on current flags
+  // Persisted per-column visibility (default visible). Mandatory cols ignore it.
+  const [colVisible, setColVisible] = useState<Record<string, boolean>>(() => loadColVisibility());
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const isColVisible = (id: string) => MANDATORY_COLS.has(id) || (colVisible[id] ?? colDefaultVisible(id));
+  const toggleCol = (id: string) => setColVisible(prev => {
+    const cur = prev[id] ?? colDefaultVisible(id);
+    const next = { ...prev, [id]: !cur };
+    saveColVisibility(next);
+    return next;
+  });
+
+  // Columns the user can show/hide (Source only exists in the unfiltered view).
+  const toggleableCols = useMemo(() => {
+    const ids = BASE_COLS.filter(c => !MANDATORY_COLS.has(c.id)).map(c => ({ id: c.id, label: c.label }));
+    if (showSourceBadge) ids.splice(1, 0, { id: 'source', label: 'Source' }); // after Style
+    return ids;
+  }, [showSourceBadge]);
+
+  // Build column list based on current flags + visibility
   const columns = useMemo(() => {
     const cols: ColDef[] = [];
     if (selectionMode) cols.push(SELECT_COL);
-    // Insert base cols, injecting source col after style if needed
+    // Insert base cols, injecting source col after style if needed, and a
+    // flexible spacer just before actions so actions hugs the right edge.
     for (const c of BASE_COLS) {
+      if (c.id === 'actions') cols.push(SPACER_COL);
+      if (!isColVisible(c.id)) continue;
       cols.push(c);
-      if (c.id === 'style' && showSourceBadge) cols.push(SOURCE_COL);
+      if (c.id === 'style' && showSourceBadge && isColVisible('source')) cols.push(SOURCE_COL);
     }
     return cols;
-  }, [selectionMode, showSourceBadge]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionMode, showSourceBadge, colVisible]);
 
   // Persisted column widths
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
@@ -1358,15 +1612,51 @@ const SongTable: React.FC<SongTableProps> = ({
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
-  // Sum of all column pixel widths — table uses this as its exact width
-  const totalW = columns.reduce((s, c) => s + getW(c.id), 0);
+  // Sum of fixed column widths (spacer is flexible, contributes nothing).
+  // Used as the table's min width so it scrolls once the fixed columns no
+  // longer fit; otherwise the table fills 100% and the spacer takes the slack.
+  const totalW = columns.reduce((s, c) => s + (c.id === 'spacer' ? 0 : getW(c.id)), 0);
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/5">
-      <table className="text-xs" style={{ tableLayout: 'fixed', width: totalW }}>
+    <div>
+      {/* Toolbar: Columns menu (left) + pagination / extras (right) */}
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="relative">
+          <button
+            onClick={() => setColMenuOpen(o => !o)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-white/5 transition-colors"
+            title="Choose columns"
+          >
+            <Columns3 size={13} /> Columns
+          </button>
+          {colMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setColMenuOpen(false)} />
+              <div className="absolute left-0 top-full mt-1 z-50 min-w-[180px] max-h-80 overflow-y-auto py-1 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 shadow-xl">
+                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Show columns</div>
+                {toggleableCols.map(c => (
+                  <button
+                    key={c.id}
+                    onClick={() => toggleCol(c.id)}
+                    className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                  >
+                    {isColVisible(c.id)
+                      ? <CheckSquare size={14} className="text-pink-400 flex-shrink-0" />
+                      : <Square size={14} className="text-zinc-500 flex-shrink-0" />}
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        {topRight && <div className="flex-shrink-0">{topRight}</div>}
+      </div>
+      <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/5">
+      <table className="text-xs" style={{ tableLayout: 'fixed', width: '100%', minWidth: totalW }}>
         <colgroup>
           {columns.map(c => (
-            <col key={c.id} style={{ width: getW(c.id) }} />
+            <col key={c.id} style={{ width: c.id === 'spacer' ? 'auto' : getW(c.id) }} />
           ))}
         </colgroup>
         <thead>
@@ -1376,6 +1666,12 @@ const SongTable: React.FC<SongTableProps> = ({
                 key={c.id}
                 className={`relative px-2 py-2.5 font-semibold select-none ${
                   c.align === 'center' ? 'text-center' : c.align === 'right' ? 'text-right' : ''
+                } ${
+                  // Actions is a frozen column — pinned to the right edge, always
+                  // visible regardless of how the other columns are sized/scrolled (#58).
+                  c.id === 'actions'
+                    ? 'sticky right-0 z-20 bg-zinc-100 dark:bg-zinc-800 border-l border-zinc-200 dark:border-white/10'
+                    : ''
                 }`}
               >
                 {c.label}
@@ -1401,6 +1697,10 @@ const SongTable: React.FC<SongTableProps> = ({
             const modelShort = model ? model.split('/').pop()?.replace(/\.gguf$/, '').substring(0, 16) : '';
             const src = (gp as any)?.source || 'create';
             const badge = SOURCE_BADGE_MAP[src];
+            const loraName = baseName(gp?.loraPath);
+            const lmName = baseName(gp?.lmModel);
+            const vaeName = baseName(gp?.vaeModel);
+            const isMastered = !!(song.masteredAudioUrl || song.mastered_audio_url);
 
             // Build cell map
             const cells: Record<string, React.ReactNode> = {
@@ -1432,7 +1732,7 @@ const SongTable: React.FC<SongTableProps> = ({
               ),
 
               title: <TableTitleCell song={song} isActive={isActive} onRename={onRename ? (newTitle) => onRename(song, newTitle) : undefined} disguiseTitle={disguiseTitle} />,
-              style: <span className="text-zinc-500 truncate block">{isDisguised ? '—' : (song.style || song.caption || '—')}</span>,
+              style: <TableStyleCell text={isDisguised ? '—' : (song.style || song.caption || '—')} />,
               source: badge ? <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>{badge.label}</span> : null,
               bpm: <span className="text-zinc-500 font-mono">{bpm || '—'}</span>,
               key: <span className="text-zinc-500">{keyScale || '—'}</span>,
@@ -1440,8 +1740,26 @@ const SongTable: React.FC<SongTableProps> = ({
               quality: <QualityBadge song={song} />,
               time: <span className="text-zinc-500 font-mono">{formatDuration(song.duration)}</span>,
               date: <span className="text-zinc-600">{formatDate(song.created_at || song.createdAt)}</span>,
+              // ── Generation data (hidden by default) ──
+              seed: <span className="text-zinc-500 font-mono truncate block">{gp?.seed ?? '—'}</span>,
+              steps: <span className="text-zinc-500 font-mono">{gp?.inferenceSteps ?? '—'}</span>,
+              cfg: <span className="text-zinc-500 font-mono">{gp?.guidanceScale ?? '—'}</span>,
+              shift: <span className="text-zinc-500 font-mono">{gp?.shift ?? '—'}</span>,
+              solver: <span className="text-zinc-500 truncate block" title={gp?.inferMethod || ''}>{gp?.inferMethod || '—'}</span>,
+              scheduler: <span className="text-zinc-500 truncate block" title={gp?.scheduler || ''}>{gp?.scheduler || '—'}</span>,
+              guidanceMode: <span className="text-zinc-500 truncate block" title={gp?.guidanceMode || ''}>{gp?.guidanceMode || '—'}</span>,
+              lora: <span className="text-zinc-500 truncate block" title={gp?.loraPath || ''}>{loraName || '—'}</span>,
+              loraScale: <span className="text-zinc-500 font-mono">{loraName && gp?.loraScale != null ? gp.loraScale : '—'}</span>,
+              lm: <span className="text-zinc-500 truncate block" title={gp?.lmModel || ''}>{lmName || '—'}</span>,
+              vae: <span className="text-zinc-500 truncate block" title={gp?.vaeModel || ''}>{vaeName || '—'}</span>,
+              timesig: <span className="text-zinc-500 font-mono">{gp?.timeSignature || song.time_signature || '—'}</span>,
+              lang: <span className="text-zinc-500">{gp?.vocalLanguage || '—'}</span>,
+              task: <span className="text-zinc-500 truncate block" title={gp?.taskType || ''}>{gp?.taskType || '—'}</span>,
+              instrumental: <span className="text-zinc-500">{gp?.instrumental ? 'Yes' : (gp?.instrumental === false ? 'No' : '—')}</span>,
+              mastered: isMastered ? <Check size={13} className="text-emerald-400 inline" /> : <span className="text-zinc-600">—</span>,
+              seedType: <span className="text-zinc-500">{gp?.randomSeed === true ? 'Random' : (gp?.randomSeed === false ? 'Fixed' : '—')}</span>,
               actions: (
-                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex items-center justify-end gap-0.5 flex-nowrap flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                   {onReuse && (
                     <button onClick={(e) => { e.stopPropagation(); onReuse(song); }}
                       className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.edit')}>
@@ -1489,6 +1807,12 @@ const SongTable: React.FC<SongTableProps> = ({
                     key={c.id}
                     className={`px-2 py-2 overflow-hidden ${
                       c.align === 'center' ? 'text-center' : c.align === 'right' ? 'text-right' : ''
+                    } ${
+                      // Frozen actions column — opaque bg (matches the transparent
+                      // default row) so scrolled cells slide cleanly underneath (#58).
+                      c.id === 'actions'
+                        ? 'sticky right-0 z-10 bg-white dark:bg-zinc-950 group-hover:bg-zinc-50 dark:group-hover:bg-zinc-900 border-l border-zinc-200 dark:border-white/10'
+                        : ''
                     }`}
                   >
                     {cells[c.id]}
@@ -1499,6 +1823,7 @@ const SongTable: React.FC<SongTableProps> = ({
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 };
