@@ -282,32 +282,34 @@ export const ArtistSettingsPanel: React.FC<ArtistSettingsPanelProps> = (props) =
 
       <div className="border-t border-zinc-200 dark:border-white/5" />
 
-      {/* Generate */}
-      {isGenerating ? (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-cyan-400 font-medium">{genStage || 'Generating...'}</span>
-            <span className="text-zinc-500 font-mono">{genProgress}%</span>
+      {/* Generate — progress for the running cover (if any) + an always-available
+          queue button so the user can stack several covers (#62). */}
+      <div className="space-y-2">
+        {isGenerating && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-cyan-400 font-medium">{genStage || 'Generating...'}</span>
+              <span className="text-zinc-500 font-mono">{genProgress}%</span>
+            </div>
+            <div className="w-full h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-cyan-500 to-teal-500 transition-all duration-500 rounded-full"
+                style={{ width: `${genProgress}%` }} />
+            </div>
+            <button onClick={onCancel}
+              className="w-full py-1.5 rounded-xl text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors">
+              {t('common.cancel')}
+            </button>
           </div>
-          <div className="w-full h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-cyan-500 to-teal-500 transition-all duration-500 rounded-full"
-              style={{ width: `${genProgress}%` }} />
-          </div>
-          <button onClick={onCancel}
-            className="w-full py-2 rounded-xl text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors">
-            {t('common.cancel')}
-          </button>
-        </div>
-      ) : (
+        )}
         <button onClick={onGenerate} disabled={!canGenerate}
           className={`w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl text-sm font-bold transition-all duration-300 shadow-lg
             ${canGenerate
               ? 'bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white shadow-cyan-500/20 hover:shadow-cyan-400/30 hover:scale-[1.02]'
               : 'bg-zinc-200 dark:bg-white/5 text-zinc-600 dark:text-zinc-400 cursor-not-allowed shadow-none'}`}>
           <Disc3 className="w-4 h-4" />
-          {t('cover.generateCover')}
+          {isGenerating ? t('cover.addToQueue', 'Add to Queue') : t('cover.generateCover')}
         </button>
-      )}
+      </div>
     </div>
   );
 };

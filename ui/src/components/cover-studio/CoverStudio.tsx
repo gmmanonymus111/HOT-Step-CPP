@@ -30,6 +30,25 @@ import {
 import type { LatentMetadata } from '../shared/LatentImport';
 import { loadSelections, saveSelections } from '../lyric-studio/ProviderSelector';
 
+// ── Serial cover-generation queue ────────────────────────────────────────────
+// Lets the user stack multiple cover generations (different settings) without
+// waiting — same pattern as InstaGen's queue. Jobs run one at a time; the engine
+// serializes anyway, this keeps the client-side recombine→submit→poll ordered.
+const _coverQueue: Array<() => Promise<void>> = [];
+let _coverRunning = false;
+function enqueueCoverJob(fn: () => Promise<void>) {
+  _coverQueue.push(fn);
+  if (!_coverRunning) _drainCoverQueue();
+}
+async function _drainCoverQueue() {
+  _coverRunning = true;
+  while (_coverQueue.length > 0) {
+    const job = _coverQueue.shift()!;
+    try { await job(); } catch { /* each job handles its own errors */ }
+  }
+  _coverRunning = false;
+}
+
 export const CoverStudio: React.FC = () => {
   const { t } = useTranslation();
   const { token } = useAuth();
@@ -353,11 +372,28 @@ export const CoverStudio: React.FC = () => {
   };
 
   // ── Generation ──
-  const handleGenerate = async () => {
+  const handleGenerate = () => {
     if (!token || !sourceAudioUrl) { showToast(t('cover.missingSrcOrLyrics')); return; }
     if (!instrumental && !lyrics.trim()) { showToast('Enter lyrics or enable Instrumental mode'); return; }
+
+    // Show a queue item immediately ("Queued…" if a cover is already running),
+    // then enqueue the work so the user can stack more without waiting (#62).
+    const coverTitle = songArtist
+      ? `${songTitle || 'Cover'} (${songArtist} Cover)`
+      : (songTitle || 'Cover');
+    const qId = addManualQueueItem({
+      title: coverTitle,
+      artistName: artists.find(a => a.id === selectedArtistId)?.name || '',
+      caption: artistCaption || '',
+    });
+    updateManualQueueItem(qId, { stage: _coverRunning ? 'Queued…' : 'Preparing…' });
     setIsGenerating(true);
-    try {
+    showToast(t('cover.genStarted'));
+
+    // The closure snapshots the current settings, so each queued cover keeps
+    // the params it was submitted with.
+    enqueueCoverJob(async () => {
+      try {
       // Step 0: If advanced mode with stems, auto-recombine before generation
       let effectiveSourceUrl = sourceAudioUrl;
       if (advancedMode && sepStems && sepStems.length > 0 && sepJobId) {
@@ -456,34 +492,34 @@ export const CoverStudio: React.FC = () => {
       }
 
       const res = await generateApi.submit(params as any, token);
-      const jobId = res.jobId;
-      showToast(t('cover.genStarted'));
-      setActiveJobId(jobId);
-
-      // Add to shared queue store so the sidebar Queue panel shows progress
-      const coverTitle = songArtist
-        ? `${songTitle || 'Cover'} (${songArtist} Cover)`
-        : (songTitle || 'Cover');
-      const qId = addManualQueueItem({
-        title: coverTitle,
-        artistName: selectedArtist?.name || '',
-        caption: params.style as string || '',
-      });
-      setQueueItemId(qId);
-      updateManualQueueItem(qId, { jobId });
-
-      pollJob(jobId, qId);
-    } catch (err: any) { showToast(`Generation failed: ${err.message}`); setIsGenerating(false); }
+      updateManualQueueItem(qId, { jobId: res.jobId });
+      await pollJobAsync(res.jobId, qId);
+      } catch (err: any) {
+        failManualQueueItem(qId, err.message || 'Generation failed');
+      } finally {
+        // Reset the inline progress only once the whole queue has drained.
+        if (_coverQueue.length === 0) {
+          setIsGenerating(false);
+          setActiveJobId(null);
+          setGenProgress(0);
+          setGenStage('');
+        }
+      }
+    });
   };
 
-  const pollJob = (jobId: string, qId: string) => {
+  // Poll a single cover job to completion. Resolves on any terminal state so
+  // the serial queue can advance to the next cover. Updates the inline progress
+  // (safe — jobs run one at a time) and the per-job queue item.
+  const pollJobAsync = (jobId: string, qId: string): Promise<void> => new Promise<void>((resolve) => {
+    setActiveJobId(jobId); setQueueItemId(qId);
     setGenProgress(0); setGenStage('Queued...');
     // Clock ignores server-queue wait — only real generation time counts.
     const timer = createGenerationTimer();
     const iv = setInterval(async () => {
       try {
         const s = await generateApi.status(jobId);
-        const t = timer.tick(s.status);
+        const tk = timer.tick(s.status);
         // Server sends 0-100; normalise to 0-100 for display
         const rawProg = s.progress;
         const pct = rawProg != null
@@ -496,51 +532,47 @@ export const CoverStudio: React.FC = () => {
         updateManualQueueItem(qId, {
           progress: pct,
           stage: s.stage || 'Generating...',
-          elapsed: t.elapsed,
+          elapsed: tk.elapsed,
         });
 
-        if (t.timedOut) {
-          clearInterval(iv); setIsGenerating(false); setActiveJobId(null); setQueueItemId(null);
-          setGenProgress(0); setGenStage('');
+        if (tk.timedOut) {
+          clearInterval(iv);
           showToast(`Generation timed out after ${getGenerationTimeoutMinutes()} minutes`);
           failManualQueueItem(qId, 'Generation timed out');
+          resolve();
           return;
         }
 
         if (s.status === 'succeeded') {
           clearInterval(iv); setGenProgress(100); setGenStage('Complete!');
-          setIsGenerating(false); setActiveJobId(null); setQueueItemId(null);
           setRefreshTrigger(p => p + 1); showToast(t('cover.coverGenerated'));
-          setTimeout(() => { setGenProgress(0); setGenStage(''); }, 3000);
 
           // Complete queue item with audio data
-          const audioUrl = s.result?.audioUrls?.[0] || '';
-          const songId = s.result?.songIds?.[0];
-          const masteredUrl = s.result?.masteredAudioUrl;
           completeManualQueueItem(qId, {
-            audioUrl,
-            songId,
-            masteredAudioUrl: masteredUrl,
+            audioUrl: s.result?.audioUrls?.[0] || '',
+            songId: s.result?.songIds?.[0],
+            masteredAudioUrl: s.result?.masteredAudioUrl,
             audioDuration: s.result?.duration,
           });
-        } else if (s.status === 'failed') {
-          clearInterval(iv); setIsGenerating(false); setActiveJobId(null); setQueueItemId(null);
-          setGenProgress(0); setGenStage('');
+          resolve();
+        } else if (s.status === 'failed' || s.status === 'cancelled') {
+          clearInterval(iv);
           showToast(`Failed: ${s.error || 'Unknown error'}`);
-          failManualQueueItem(qId, s.error || 'Unknown error');
+          failManualQueueItem(qId, s.error || (s.status === 'cancelled' ? 'Cancelled' : 'Unknown error'));
+          resolve();
         }
-      } catch {}
+      } catch { /* transient poll error — keep polling */ }
     }, 2000);
-    // Absolute backstop so polling can't run forever if the job wedges in the
-    // queue / server goes unreachable. Generous so it never pre-empts the
-    // generation-start timer above. (timer.timedOut is the functional timeout.)
-    setTimeout(() => clearInterval(iv), (getGenerationTimeoutMinutes() + 30) * 60_000);
-  };
+    // Absolute backstop so a wedged job can't block the queue forever. Generous
+    // so it never pre-empts the generation-start timer above.
+    setTimeout(() => { clearInterval(iv); resolve(); }, (getGenerationTimeoutMinutes() + 30) * 60_000);
+  });
 
+  // Cancel the currently-running cover. The poll sees the cancelled status,
+  // resolves, and the queue advances to the next item.
   const handleCancel = async () => {
     if (activeJobId) { try { await generateApi.cancel(activeJobId); } catch {} }
     if (queueItemId) failManualQueueItem(queueItemId, 'Cancelled by user');
-    setIsGenerating(false); setActiveJobId(null); setQueueItemId(null); setGenProgress(0); setGenStage('');
   };
 
   const handleClearSource = () => {
@@ -559,7 +591,8 @@ export const CoverStudio: React.FC = () => {
     setArtistCaption('');
   };
 
-  const canGenerate = !!sourceAudioUrl && (!!lyrics.trim() || instrumental) && !isGenerating;
+  // Always allow queuing another cover — covers stack and run one at a time (#62).
+  const canGenerate = !!sourceAudioUrl && (!!lyrics.trim() || instrumental);
 
   // ── SuperSep handlers ──
   const handleSeparate = useCallback(async () => {
