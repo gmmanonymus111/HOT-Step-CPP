@@ -301,6 +301,21 @@ if(TRT_ENABLED)
     message(STATUS "[TRT] DiT TRT acceleration: ENABLED")
 endif()
 
+# acestep-core compiles as plain C++ (not nvcc), but pipeline-synth.cpp includes
+# <cuda_runtime.h> for VRAM instrumentation whenever GGML_USE_CUDA is defined
+# (propagated from ggml). The host compiler needs the CUDA Toolkit include path
+# explicitly on EVERY CUDA build — Linux g++ and Windows MSVC (under Ninja) both
+# fail to find it otherwise. (The TRT block above also adds this, but only when
+# TRT is enabled, so plain CUDA release builds were missing it.)
+if(GGML_CUDA)
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        target_include_directories(acestep-core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+        target_link_libraries(acestep-core PUBLIC CUDA::cudart)
+        message(STATUS "[CUDA] acestep-core include: ${CUDAToolkit_INCLUDE_DIRS}")
+    endif()
+endif()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TRT-LLM Executor (C++ Executor API for LM inference)
 # ─────────────────────────────────────────────────────────────────────────────
