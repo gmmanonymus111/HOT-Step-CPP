@@ -68,12 +68,21 @@ if(NOT MSVC)
 endif()
 
 # CUDA architectures: cover Turing to Blackwell for distributed binaries (CI: CUDA 13.1 / 12.8).
+# The CUDA 12.8 build additionally targets legacy Pascal/Volta (see below).
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     find_package(CUDAToolkit QUIET)
     # Base arch list: Turing through Lovelace/Ada
     set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;90-real")
     if(CUDAToolkit_FOUND)
+        # Legacy GPUs — Pascal (sm_60 P100, sm_61 GTX 10xx / P40 / P4) and
+        # Volta (sm_70 V100). CUDA 12.x can still compile real SASS for these;
+        # CUDA 13.0 removed offline compilation support for them, so they go
+        # only into the cuda12.8 release variant. Real SASS is required — the
+        # 75-virtual PTX above cannot JIT backwards onto pre-Turing cards.
+        if(CUDAToolkit_VERSION VERSION_LESS "13.0")
+            list(APPEND CMAKE_CUDA_ARCHITECTURES "60-real;61-real;70-real")
+        endif()
         # Blackwell sm_120a: CUDA 12.8+
         if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
             list(APPEND CMAKE_CUDA_ARCHITECTURES "120a-real")
