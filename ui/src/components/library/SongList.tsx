@@ -7,7 +7,7 @@ import {
   Play, Pause, Trash2, RotateCcw, Music, MoreHorizontal,
   Download, CheckSquare, Square, MinusSquare, X, Pencil, ListPlus, Image,
   LayoutGrid, List as ListIcon, Table2, ArrowLeftRight, Upload, Mic2, Loader2,
-  Check, Columns3, ChevronLeft, ChevronRight,
+  Check, Columns3, ChevronLeft, ChevronRight, Disc3,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
@@ -211,6 +211,8 @@ interface SongListProps {
   onDownload?: (song: Song) => void;
   onRename?: (song: Song, newTitle: string) => void;
   onAddToPlaylist?: (song: Song) => void;
+  /** Load this track's source audio + title/lyrics/style into Cover Studio. */
+  onSendToCover?: (song: Song) => void;
   /** Show source filter tabs — true for Library page, false for Create page */
   showFilters?: boolean;
   /** Layout mode — 'list' for compact rows, 'grid' for rich cards, 'table' for data-dense */
@@ -221,7 +223,7 @@ interface SongListProps {
 
 export const SongList: React.FC<SongListProps> = ({
   songs, currentSongId, onPlay, onDelete, onBulkDelete, onSelect, onReuse, onDownload, onRename, onAddToPlaylist,
-  showFilters = true, viewMode = 'list', title = 'Library',
+  onSendToCover, showFilters = true, viewMode = 'list', title = 'Library',
 }) => {
   const { t } = useTranslation();
   const isPlaying = usePlaybackSelector(s => s.isPlaying);
@@ -548,6 +550,7 @@ export const SongList: React.FC<SongListProps> = ({
               onDownload={() => onDownload?.(song)}
               onRename={onRename ? (newTitle) => onRename(song, newTitle) : undefined}
               onAddToPlaylist={onAddToPlaylist ? () => onAddToPlaylist(song) : undefined}
+              onSendToCover={onSendToCover ? () => onSendToCover(song) : undefined}
               abTrackAId={abTrackAId}
               abTrackBId={abTrackBId}
             />
@@ -574,6 +577,7 @@ export const SongList: React.FC<SongListProps> = ({
               onDownload={() => onDownload?.(song)}
               onRename={onRename ? (newTitle) => onRename(song, newTitle) : undefined}
               onAddToPlaylist={onAddToPlaylist ? () => onAddToPlaylist(song) : undefined}
+              onSendToCover={onSendToCover ? () => onSendToCover(song) : undefined}
               showSourceBadge={showFilters && sourceFilter === 'all'}
               abTrackAId={abTrackAId}
               abTrackBId={abTrackBId}
@@ -597,6 +601,7 @@ export const SongList: React.FC<SongListProps> = ({
           onReuse={onReuse}
           onDownload={onDownload}
           onRename={onRename}
+          onSendToCover={onSendToCover}
           showSourceBadge={showFilters && sourceFilter === 'all'}
           abTrackAId={abTrackAId}
           abTrackBId={abTrackBId}
@@ -712,6 +717,7 @@ interface SongItemProps {
   onDownload?: () => void;
   onRename?: (newTitle: string) => void;
   onAddToPlaylist?: () => void;
+  onSendToCover?: () => void;
   showSourceBadge?: boolean;
   abTrackAId?: string | null;
   abTrackBId?: string | null;
@@ -719,7 +725,7 @@ interface SongItemProps {
 
 const SongItem: React.FC<SongItemProps> = ({
   song, isActive, isPlaying, selectionMode, isSelected, onToggleSelect,
-  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onAddToPlaylist, showSourceBadge,
+  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onAddToPlaylist, onSendToCover, showSourceBadge,
   abTrackAId, abTrackBId,
 }) => {
   const { t } = useTranslation();
@@ -918,6 +924,14 @@ const SongItem: React.FC<SongItemProps> = ({
                     <Download size={14} /> {t('library.download')}
                   </button>
                 )}
+                {onSendToCover && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSendToCover(); setShowMenu(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                  >
+                    <Disc3 size={14} /> {t('library.sendToCover', 'Send to Cover Studio')}
+                  </button>
+                )}
                 <button
                   onClick={(e) => { e.stopPropagation(); onDelete(); setShowMenu(false); }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
@@ -1018,13 +1032,14 @@ interface SongCardProps {
   onDownload?: () => void;
   onRename?: (newTitle: string) => void;
   onAddToPlaylist?: () => void;
+  onSendToCover?: () => void;
   abTrackAId?: string | null;
   abTrackBId?: string | null;
 }
 
 const SongCard: React.FC<SongCardProps> = ({
   song, isActive, isPlaying, selectionMode, isSelected, onToggleSelect,
-  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onAddToPlaylist,
+  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onAddToPlaylist, onSendToCover,
   abTrackAId: _abTrackAId, abTrackBId: _abTrackBId,
 }) => {
   const { t } = useTranslation();
@@ -1162,6 +1177,12 @@ const SongCard: React.FC<SongCardProps> = ({
                   <button onClick={(e) => { e.stopPropagation(); onDownload(); setShowMenu(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-white/5 hover:text-white transition-colors">
                     <Download size={12} /> {t('library.download')}
+                  </button>
+                )}
+                {onSendToCover && (
+                  <button onClick={(e) => { e.stopPropagation(); onSendToCover(); setShowMenu(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cyan-400 hover:bg-cyan-500/10 transition-colors">
+                    <Disc3 size={12} /> {t('library.sendToCover', 'Send to Cover Studio')}
                   </button>
                 )}
                 <button onClick={(e) => { e.stopPropagation(); onDelete(); setShowMenu(false); }}
@@ -1353,6 +1374,7 @@ interface SongTableProps {
   onReuse?: (song: Song) => void;
   onDownload?: (song: Song) => void;
   onRename?: (song: Song, newTitle: string) => void;
+  onSendToCover?: (song: Song) => void;
   showSourceBadge?: boolean;
   abTrackAId?: string | null;
   abTrackBId?: string | null;
@@ -1405,7 +1427,7 @@ const BASE_COLS: ColDef[] = [
   // Holds up to 5 action buttons (edit/download/delete/A/B). Must be wide
   // enough that the fixed-layout <td overflow-hidden> never clips them — the
   // column is non-resizable so the user can't widen it manually (#58).
-  { id: 'actions', label: 'Actions', defaultW: 132, minW: 132, align: 'right', resizable: false },
+  { id: 'actions', label: 'Actions', defaultW: 158, minW: 158, align: 'right', resizable: false },
 ];
 
 const SOURCE_COL: ColDef = { id: 'source', label: 'Source', defaultW: 80, minW: 50, align: 'left', resizable: true };
@@ -1453,7 +1475,7 @@ function baseName(p?: string): string {
 
 const SongTable: React.FC<SongTableProps> = ({
   songs, currentSongId, isPlaying, selectionMode, selectedIds, onToggleSelect,
-  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, showSourceBadge,
+  onPlay, onSelect, onDelete, onReuse, onDownload, onRename, onSendToCover, showSourceBadge,
   abTrackAId, abTrackBId, topRight,
 }) => {
   const { t } = useTranslation();
@@ -1710,6 +1732,12 @@ const SongTable: React.FC<SongTableProps> = ({
                     <button onClick={(e) => { e.stopPropagation(); onDownload(song); }}
                       className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors" title={t('library.download')}>
                       <Download size={12} />
+                    </button>
+                  )}
+                  {onSendToCover && (
+                    <button onClick={(e) => { e.stopPropagation(); onSendToCover(song); }}
+                      className="p-1 rounded text-zinc-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors" title={t('library.sendToCover', 'Send to Cover Studio')}>
+                      <Disc3 size={12} />
                     </button>
                   )}
                   <button onClick={(e) => { e.stopPropagation(); onDelete(song); }}

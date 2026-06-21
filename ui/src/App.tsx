@@ -558,6 +558,13 @@ const AppContent: React.FC = () => {
     navigateTo('create');
   }, [navigateTo]);
 
+  // Send-to-Cover handler — loads a library track into Cover Studio (#61)
+  const [coverSource, setCoverSource] = useState<{ song: Song; timestamp: number } | null>(null);
+  const handleSendToCover = useCallback((song: Song) => {
+    setCoverSource({ song, timestamp: Date.now() });
+    navigateTo('cover-studio');
+  }, [navigateTo]);
+
   // Song update handler
   const handleSongUpdate = useCallback((updatedSong: Song) => {
     setSongs(prev => prev.map(s => s.id === updatedSong.id ? updatedSong : s));
@@ -660,7 +667,7 @@ const AppContent: React.FC = () => {
     if (activeView === 'cover-studio') {
       return (
         <DiscoPulseWrapper hue={DISCO.activity} className="flex-1 overflow-hidden">
-          <CoverStudio />
+          <CoverStudio coverSource={coverSource} />
         </DiscoPulseWrapper>
       );
     }
@@ -747,7 +754,7 @@ const AppContent: React.FC = () => {
               onDelete={handleDelete}
               onBulkDelete={handleBulkDelete}
               onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
-              onReuse={handleReuse}
+              onReuse={handleReuse} onSendToCover={handleSendToCover}
               onDownload={handleDownload}
               onRename={handleRename}
               showFilters={false}
@@ -839,7 +846,7 @@ const AppContent: React.FC = () => {
                 <RightSidebar
                   song={selectedSong}
                   onClose={() => setShowRightSidebar(false)}
-                  onReuse={handleReuse}
+                  onReuse={handleReuse} onSendToCover={handleSendToCover}
                   onDelete={handleDelete}
                   onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                   isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}
@@ -864,7 +871,7 @@ const AppContent: React.FC = () => {
               onDelete={handleDelete}
               onBulkDelete={handleBulkDelete}
               onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
-              onReuse={handleReuse}
+              onReuse={handleReuse} onSendToCover={handleSendToCover}
               onDownload={handleDownload}
               onRename={handleRename}
               onAddToPlaylist={(song) => {
@@ -918,7 +925,7 @@ const AppContent: React.FC = () => {
                 <RightSidebar
                   song={selectedSong}
                   onClose={() => setShowRightSidebar(false)}
-                  onReuse={handleReuse}
+                  onReuse={handleReuse} onSendToCover={handleSendToCover}
                   onDelete={handleDelete}
                   onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                   isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}
@@ -980,7 +987,7 @@ const AppContent: React.FC = () => {
             onDelete={handleDelete}
             onBulkDelete={handleBulkDelete}
             onSelect={(s) => { setSelectedSong(s); setShowRightSidebar(true); }}
-            onReuse={handleReuse}
+            onReuse={handleReuse} onSendToCover={handleSendToCover}
             onDownload={handleDownload}
             onRename={handleRename}
             showFilters={false}
@@ -1072,7 +1079,7 @@ const AppContent: React.FC = () => {
               <RightSidebar
                 song={selectedSong}
                 onClose={() => setShowRightSidebar(false)}
-                onReuse={handleReuse}
+                onReuse={handleReuse} onSendToCover={handleSendToCover}
                 onDelete={handleDelete}
                 onPlay={(song) => playFromList(songToTrack(song), songs.map(songToTrack), 'library')}
                 isPlaying={isPlaying && currentTrack?.id === selectedSong?.id}

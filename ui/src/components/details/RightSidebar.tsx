@@ -2,7 +2,7 @@
 // Ported from hot-step-9000's RightSidebar, simplified for current feature set.
 
 import React from 'react';
-import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil, Disc3 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 import { HoverFullText } from '../shared/HoverFullText';
@@ -16,6 +16,7 @@ interface RightSidebarProps {
   isPlaying: boolean;
   onDownload?: (song: Song) => void;
   onRename?: (song: Song, newTitle: string) => void;
+  onSendToCover?: (song: Song) => void;
 }
 
 export const RightSidebar: React.FC<RightSidebarProps> = ({
@@ -27,6 +28,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   isPlaying,
   onDownload,
   onRename,
+  onSendToCover,
 }) => {
   const { t } = useTranslation();
   const gp = song.generationParams;
@@ -148,6 +150,15 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
               title={t('details.download')}
             >
               <Download size={16} />
+            </button>
+          )}
+          {onSendToCover && (
+            <button
+              onClick={() => onSendToCover(song)}
+              className="p-2.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-cyan-100 dark:hover:bg-cyan-900/50 text-zinc-700 dark:text-zinc-300 hover:text-cyan-400 transition-colors"
+              title={t('library.sendToCover', 'Send to Cover Studio')}
+            >
+              <Disc3 size={16} />
             </button>
           )}
           {gp && (

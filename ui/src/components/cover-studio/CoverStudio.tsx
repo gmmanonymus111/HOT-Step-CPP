@@ -1,6 +1,7 @@
 // CoverStudio.tsx — Main Cover Studio orchestrator
 // Composes: SourcePanel, ArtistSettingsPanel, ActivitySidebar
 import React, { useState, useEffect, useCallback } from 'react';
+import type { Song } from '../../types';
 import { Search, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
@@ -36,6 +37,9 @@ import { loadSelections, saveSelections } from '../lyric-studio/ProviderSelector
 // serializes anyway, this keeps the client-side recombine→submit→poll ordered.
 const _coverQueue: Array<() => Promise<void>> = [];
 let _coverRunning = false;
+// Survives Cover Studio remounts (it unmounts when you leave the tab) so a
+// previously-sent library track isn't re-applied every time you revisit (#61).
+let _lastConsumedCoverTs = 0;
 function enqueueCoverJob(fn: () => Promise<void>) {
   _coverQueue.push(fn);
   if (!_coverRunning) _drainCoverQueue();
@@ -49,7 +53,12 @@ async function _drainCoverQueue() {
   _coverRunning = false;
 }
 
-export const CoverStudio: React.FC = () => {
+interface CoverStudioProps {
+  /** A library track to load as the cover source (from "Send to Cover Studio", #61). */
+  coverSource?: { song: Song; timestamp: number } | null;
+}
+
+export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
   const { t } = useTranslation();
   const { token } = useAuth();
   const gp = useGlobalParamsStore();
@@ -168,6 +177,57 @@ export const CoverStudio: React.FC = () => {
   useEffect(() => { persist('sepLevel', sepLevel); }, [sepLevel]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
+
+  // ── "Send to Cover Studio" — load a library track as the cover source (#61) ──
+  useEffect(() => {
+    if (!coverSource || coverSource.timestamp === _lastConsumedCoverTs) return;
+    _lastConsumedCoverTs = coverSource.timestamp;
+    const s = coverSource.song;
+    const gpData: any = s.generationParams || s.generation_params || {};
+    const audioUrl = s.audioUrl || s.audio_url || '';
+
+    // Source audio — reuse the track's server URL directly (loadSourceAudio
+    // resolves /audio/ paths server-side), so no re-upload is needed.
+    setSourceAudioUrl(audioUrl);
+    setSourceFileName(s.title || 'Library track');
+    setMetadata({
+      artist: s.artistName || '', title: s.title || '', album: '',
+      duration: typeof s.duration === 'number' ? s.duration : null,
+    });
+
+    // Text + style descriptions
+    setSongTitle(s.title || '');
+    if (s.artistName) setSongArtist(s.artistName);
+    setLyrics(s.lyrics || gpData.lyrics || '');
+    setArtistCaption(s.style || s.caption || gpData.caption || '');
+
+    // Instrumental / vocal intent
+    const lyr = (s.lyrics || gpData.lyrics || '').trim().toLowerCase();
+    setInstrumental(gpData.instrumental === true || lyr === '' || lyr === '[instrumental]');
+
+    // Reset transforms/overrides from any previous source
+    setBpmCorrection(1); setKeyOverride(null); setBpmOverride(null);
+    setTempoScale(1.0); setPitchShift(0);
+
+    // BPM/key — (A) use the track's stored metadata, else (B) analyze the source.
+    const storedBpm = s.bpm ?? gpData.bpm;
+    const storedKey = s.key_scale || gpData.keyScale;
+    if (storedBpm && storedKey) {
+      setAnalysis({ bpm: Number(storedBpm), key: String(storedKey), scale: String(storedKey).split(' ')[1] });
+    } else if (audioUrl) {
+      setIsAnalyzing(true);
+      fetch('/api/analyze', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioUrl }),
+      })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => { if (d) setAnalysis({ bpm: d.bpm || 120, key: `${d.key || 'C'} ${d.scale || 'major'}`, scale: d.scale }); })
+        .catch(() => { /* leave defaults; user can override BPM/key manually */ })
+        .finally(() => setIsAnalyzing(false));
+    }
+    showToast(t('cover.loadedFromLibrary', 'Loaded source from library'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coverSource?.timestamp]);
 
   // ── Load artists on mount ──
   useEffect(() => {
