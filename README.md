@@ -4,6 +4,9 @@ A feature-rich UI for [acestep.cpp](https://github.com/ServeurpersoCom/acestep.c
 
 Describe a song with a text caption and lyrics, and get stereo 48kHz audio generated entirely on your local hardware. No cloud, no API keys, no subscriptions.
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/scragnog)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-scragnog-FFD21E?style=for-the-badge)](https://huggingface.co/scragnog)
+
 > ### 🧱 New: Song Builder *(in development — try it out!)*
 > Build a song **section by section**, Udio-style. Generate an intro, then generate several options for the next section (verse, pre-chorus, chorus…), audition them, pick your favourite, and extend — one piece at a time. You can prepend an intro after the fact, set per-section lyrics and bar counts, choose where each section attaches, and even seed a repeated section from an earlier one to follow its chords.
 >
@@ -544,3 +547,11 @@ The engine component (`engine/`) is licensed under MIT. See [engine/LICENSE](eng
 > ### 💜 Special Thanks
 >
 > A heartfelt thank you to **Alexander Allan ([MDMAchine](https://github.com/MDMAchine))** for his ongoing and generous contributions to HOT-Step — from the STORM solver and MD Audio Tiled Core postprocess plugins to the real-time VST3 monitoring UX (chain presets, live monitor transport, pause/resume/restart) and a slew of JUCE VST3 hosting crash fixes in the engine. Your work has made this project meaningfully better. 🙏
+
+---
+
+## ⭐ Star History
+
+If HOT-Step is useful to you, consider giving it a star — it really helps!
+
+[![Star History Chart](https://api.star-history.com/svg?repos=scragnog/HOT-Step-CPP&type=Date)](https://star-history.com/#scragnog/HOT-Step-CPP&Date)
