@@ -199,6 +199,12 @@ jobs:
           # don't break configure. Matches release.yml.
           Get-ChildItem -Path $buildDir -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
+          # Pull any future-dated mtimes back to now so ninja doesn't loop
+          # "build.ninja still dirty ... system time is not set". Matches release.yml.
+          $now = Get-Date
+          Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt $now } |
+            ForEach-Object { try { $_.LastWriteTime = $now } catch {} }
           Push-Location $buildDir
           $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
           cmake .. @cmakeArgs
@@ -338,6 +344,9 @@ jobs:
           # Drop every CMakeCache.txt (top-level + nested ExternalProjects) so a
           # restored cache's dead ninja path doesn't break configure. Matches release.yml.
           find . -name CMakeCache.txt -delete 2>/dev/null || true
+          # Pull any future-dated mtimes back to now so ninja doesn't loop
+          # "build.ninja still dirty ... system time is not set". Matches release.yml.
+          find . -type f -newermt 'now' -exec touch -d 'now' {} + 2>/dev/null || true
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             ${{ matrix.cmake_flags }}

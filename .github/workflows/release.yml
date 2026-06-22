@@ -33,7 +33,7 @@ jobs:
     # (host_config.h: "Only the versions between 2017 and 2022 are supported").
     runs-on: windows-2022
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
@@ -250,6 +250,15 @@ jobs:
           Get-ChildItem -Path $buildDir -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
           Write-Host "Cleared stale CMakeCache.txt files"
+
+          # A cache written by a runner whose clock was slightly ahead leaves
+          # files with future mtimes; ninja then loops "build.ninja still dirty
+          # ... system time is not set" (hit in the vulkan-shaders-gen
+          # ExternalProject). Pull any future-dated mtimes back to now.
+          $now = Get-Date
+          Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt $now } |
+            ForEach-Object { try { $_.LastWriteTime = $now } catch {} }
 
           Push-Location $buildDir
           $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
@@ -747,7 +756,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04   # 22.04 for wider glibc compatibility across distros
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
@@ -914,6 +923,12 @@ jobs:
           # configure re-detects the current run's ninja; cached object files
           # remain for an incremental compile.
           find . -name CMakeCache.txt -delete 2>/dev/null || true
+          # A cache written by a runner whose clock was slightly ahead leaves
+          # files with future mtimes; ninja then loops "build.ninja still dirty
+          # ... system time is not set" (hit in the vulkan-shaders-gen
+          # ExternalProject). Pull any future-dated mtimes back to now — cheap,
+          # and preserves the relative ordering cached objects rely on.
+          find . -type f -newermt 'now' -exec touch -d 'now' {} + 2>/dev/null || true
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             ${{ matrix.cmake_flags }}
