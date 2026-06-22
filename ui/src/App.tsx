@@ -26,6 +26,7 @@ import { TrimControls } from './components/player/TrimControls';
 import { SpectrumAnalyzer } from './components/player/SpectrumAnalyzer';
 import { RightSidebar } from './components/details/RightSidebar';
 import { MetadataEditorModal } from './components/details/MetadataEditorModal';
+import { CoverArtPromptModal } from './components/library/CoverArtPromptModal';
 import { Toast, type ToastType } from './components/shared/Toast';
 import { ConfirmDialog } from './components/shared/ConfirmDialog';
 import { downloadTrack } from './utils/downloadTrack';
@@ -1408,6 +1409,9 @@ const AppContent: React.FC = () => {
       />
 
       <ABCompareModal />
+
+      {/* Per-track cover art prompt modal (#67) — single instance, driven by window events */}
+      <CoverArtPromptModal />
 
       {metadataEditSong && token && (
         <MetadataEditorModal

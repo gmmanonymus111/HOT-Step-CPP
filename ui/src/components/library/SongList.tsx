@@ -17,6 +17,7 @@ import { useABCompareSelector, setTrackA, setTrackB, playAB, openModal as openAB
 import { useDisguiseMode } from '../../hooks/useDisguiseMode';
 import { downloadAll } from '../../utils/downloadTrack';
 import { HoverFullText } from '../shared/HoverFullText';
+import { openCoverArtPrompt } from './CoverArtPromptModal';
 
 // ── Source filter definitions ────────────────────────────────────────────────
 
@@ -55,53 +56,13 @@ function savePageSize(v: number | 'all') {
 }
 
 /**
- * Trigger cover art generation for a song, poll until complete,
- * then dispatch a CustomEvent so App.tsx can update the song list.
+ * Manual per-track cover art (#67): open the prompt modal so the user can edit
+ * the prompt before generating. The modal handles generation + polling and
+ * dispatches `cover-art-updated` when done. Auto-generate-after-creation is a
+ * separate server-side path and is unaffected.
  */
 function triggerCoverArtGeneration(song: Song): void {
-  const params = song.generationParams || song.generation_params as any;
-  fetch('/api/cover-art/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      songId: song.id,
-      title: song.title || '',
-      style: song.style || params?.style || '',
-      lyrics: song.lyrics || params?.lyrics || '',
-      subject: song.cover_art_subject || params?.coverArtSubject || params?.subject || '',
-    }),
-  }).then(async r => {
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      console.error('[CoverArt] Generate failed:', d);
-      return;
-    }
-    const { jobId } = await r.json();
-    console.log('[CoverArt] Generation started for', song.title || song.id);
-
-    // Poll job status until succeeded/failed
-    const poll = setInterval(async () => {
-      try {
-        const jr = await fetch(`/api/cover-art/generate/${jobId}`);
-        if (!jr.ok) return;
-        const job = await jr.json();
-        if (job.status === 'succeeded') {
-          clearInterval(poll);
-          console.log('[CoverArt] Cover ready:', job.result?.coverUrl);
-          // Notify App.tsx to update the song in state
-          window.dispatchEvent(new CustomEvent('cover-art-updated', {
-            detail: { songId: song.id, coverUrl: job.result?.coverUrl },
-          }));
-        } else if (job.status === 'failed') {
-          clearInterval(poll);
-          console.error('[CoverArt] Generation failed:', job.error);
-        }
-      } catch { /* network error — keep polling */ }
-    }, 2000);
-
-    // Safety: stop polling after 5 minutes
-    setTimeout(() => clearInterval(poll), 300_000);
-  }).catch(err => console.error('[CoverArt]', err));
+  openCoverArtPrompt(song);
 }
 
 // ── Portal Menu ──────────────────────────────────────────────────────────────

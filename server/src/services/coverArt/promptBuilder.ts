@@ -87,6 +87,12 @@ export interface CoverArtPromptOpts {
   style?: string;
   lyrics?: string;
   subject?: string;
+  /**
+   * Fully user-authored prompt. When present (non-empty), it is used VERBATIM
+   * as the positive prompt — all auto-assembly (subject/genre/art-direction) is
+   * skipped. Set by the per-track "Generate Cover Art" prompt modal (#67).
+   */
+  prompt?: string;
 }
 
 /**
@@ -98,6 +104,11 @@ export interface CoverArtPromptOpts {
  * positive prompt. We describe only visual scenes and moods.
  */
 export function buildCoverArtPrompt(opts: CoverArtPromptOpts): string {
+  // User-authored prompt wins outright — used exactly as typed (#67).
+  if (opts.prompt?.trim()) {
+    return opts.prompt.trim();
+  }
+
   const parts: string[] = [];
 
   if (opts.subject?.trim()) {

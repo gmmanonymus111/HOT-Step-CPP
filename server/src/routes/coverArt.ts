@@ -10,6 +10,7 @@
 import { Router } from 'express';
 import { getUserId } from './auth.js';
 import { generateCoverArt, getCoverArtReadiness, type CoverArtResult } from '../services/coverArt/coverArtService.js';
+import { buildCoverArtPrompt } from '../services/coverArt/promptBuilder.js';
 import { coverArtDownloader } from '../services/coverArt/coverArtDownloader.js';
 
 const router = Router();
@@ -110,13 +111,30 @@ router.get('/download/progress', (req, res) => {
   });
 });
 
+// ── POST /prompt-preview — Build the auto-assembled prompt (no generation) ──
+//
+// Used by the per-track "Generate Cover Art" modal (#67) to pre-fill the
+// editable textarea with exactly what the engine would generate by default,
+// so the user can tweak it instead of starting from scratch.
+
+router.post('/prompt-preview', (req, res) => {
+  const { title, style, lyrics, subject } = req.body || {};
+  const prompt = buildCoverArtPrompt({
+    title: title || '',
+    style: style || '',
+    lyrics: lyrics || '',
+    subject: subject || '',
+  });
+  res.json({ prompt });
+});
+
 // ── POST /generate — Generate cover art for a song ──────────────────────
 
 router.post('/generate', async (req, res) => {
   // No auth required — this is a local-only app and context menu
   // calls this endpoint without auth headers.
 
-  const { songId, title, style, lyrics, subject } = req.body;
+  const { songId, title, style, lyrics, subject, prompt } = req.body;
   if (!songId) {
     res.status(400).json({ error: 'songId is required' });
     return;
@@ -155,6 +173,7 @@ router.post('/generate', async (req, res) => {
       style: style || '',
       lyrics: lyrics || '',
       subject: subject || '',
+      prompt: prompt || '',
     });
     job.status = 'succeeded';
     job.result = result;

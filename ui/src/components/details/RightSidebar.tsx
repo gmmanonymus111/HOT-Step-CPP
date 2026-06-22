@@ -2,10 +2,11 @@
 // Ported from hot-step-9000's RightSidebar, simplified for current feature set.
 
 import React from 'react';
-import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil, Disc3, Tags } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, Trash2, Music, Clock, Hash, Gauge, Download, Upload, Cpu, Terminal, Settings2, Zap, Radio, Activity, Layers, Sparkles, SlidersHorizontal, Pencil, Disc3, Tags, Image as ImageIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Song } from '../../types';
 import { HoverFullText } from '../shared/HoverFullText';
+import { openCoverArtPrompt } from '../library/CoverArtPromptModal';
 
 interface RightSidebarProps {
   song: Song;
@@ -154,6 +155,15 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
               <Download size={16} />
             </button>
           )}
+          <button
+            onClick={() => openCoverArtPrompt(song)}
+            className="p-2.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-pink-100 dark:hover:bg-pink-900/50 text-zinc-700 dark:text-zinc-300 hover:text-pink-400 transition-colors"
+            title={(song.coverUrl || song.cover_url)
+              ? t('coverArt.regenerateTitle', 'Regenerate Cover Art')
+              : t('coverArt.generateTitle', 'Generate Cover Art')}
+          >
+            <ImageIcon size={16} />
+          </button>
           {onSendToCover && (
             <button
               onClick={() => onSendToCover(song)}
