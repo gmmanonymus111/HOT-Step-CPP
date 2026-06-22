@@ -33,7 +33,7 @@ jobs:
     # (host_config.h: "Only the versions between 2017 and 2022 are supported").
     runs-on: windows-2022
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
@@ -763,7 +763,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04   # 22.04 for wider glibc compatibility across distros
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
