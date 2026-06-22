@@ -75,13 +75,21 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # Base arch list: Turing through Lovelace/Ada
     set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;90-real")
     if(CUDAToolkit_FOUND)
-        # Legacy GPUs — Pascal (sm_60 P100, sm_61 GTX 10xx / P40 / P4) and
-        # Volta (sm_70 V100). CUDA 12.x can still compile real SASS for these;
-        # CUDA 13.0 removed offline compilation support for them, so they go
-        # only into the cuda12.8 release variant. Real SASS is required — the
-        # 75-virtual PTX above cannot JIT backwards onto pre-Turing cards.
+        # Legacy GPUs — Pascal only (sm_60 P100, sm_61 GTX 10xx / P40 / P4).
+        # CUDA 12.x can still compile real SASS for these; CUDA 13.0 removed
+        # offline compilation support, so they go only into the cuda12.8 variant.
+        # Real SASS is required — the 75-virtual PTX above can't JIT backwards
+        # onto pre-Turing cards.
+        #
+        # NOTE: Volta (sm_70) is deliberately EXCLUDED. ggml's mma-based MMQ and
+        # flash-attention kernels have no device code for sm_70 (they need
+        # Turing+), so a sm_70 build crashes on Volta. Worse, sm_70 SASS is
+        # binary-compatible upward to Turing (sm_75), so the driver loads it on
+        # 75 cards in preference to JIT-ing the compute_75 PTX — which regressed
+        # all Turing users on the cuda12.8 bundle in v1.1.1 (#63). Pascal (major
+        # 6) is unaffected since Turing can't load major-6 SASS.
         if(CUDAToolkit_VERSION VERSION_LESS "13.0")
-            list(APPEND CMAKE_CUDA_ARCHITECTURES "60-real;61-real;70-real")
+            list(APPEND CMAKE_CUDA_ARCHITECTURES "60-real;61-real")
         endif()
         # Blackwell sm_120a: CUDA 12.8+
         if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
@@ -92,6 +100,16 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
             list(APPEND CMAKE_CUDA_ARCHITECTURES "121a-real")
         endif()
     endif()
+endif()
+
+# Disable flash attention (cuda12-volta variant). ggml's mma flash-attention has
+# no device code for Volta (sm_70); with this defined the engine takes the manual
+# attention path instead. Pair with -DGGML_CUDA_FORCE_CUBLAS=ON (ggml) which
+# likewise replaces the mma MMQ kernels. See engine/src/hot-step-build-flags.h.
+option(HOT_STEP_DISABLE_FA "Disable flash attention (Volta / pre-Turing GPUs)" OFF)
+if(HOT_STEP_DISABLE_FA)
+    add_compile_definitions(HOT_STEP_DISABLE_FA)
+    message(STATUS "[HOT-Step] Flash attention DISABLED (HOT_STEP_DISABLE_FA)")
 endif()
 
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags

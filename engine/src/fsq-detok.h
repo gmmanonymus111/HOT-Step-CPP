@@ -10,6 +10,7 @@
 
 #pragma once
 #include "qwen3-enc.h"
+#include "hot-step-build-flags.h"
 #include "weight-source.h"
 
 // FSQ constants
@@ -73,7 +74,7 @@ static bool detok_ggml_load(DetokGGML * m, const char * gguf_path) {
     BackendPair bp    = backend_init("Detokenizer");
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
-    m->use_flash_attn = bp.has_gpu;
+    m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;
 
     // Detect format: .gguf → GGUF path, directory → safetensors path
     bool is_st = !ends_with_gguf(gguf_path);

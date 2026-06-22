@@ -13,6 +13,7 @@
 
 #pragma once
 #include "qwen3-enc.h"
+#include "hot-step-build-flags.h"
 #include "weight-source.h"
 
 // Lyric/Timbre encoder configs
@@ -90,7 +91,7 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 8192);
-    m->use_flash_attn = bp.has_gpu;
+    m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;
     m->clamp_fp16     = false;
 
     m->lyric_cfg  = qwen3_lyric_config();

@@ -5,6 +5,7 @@
 
 #include "pipeline-lm.h"
 
+#include "hot-step-build-flags.h"
 #include "bpe.h"
 #include "metadata-fsm.h"
 #include "model-store.h"
@@ -1072,7 +1073,7 @@ void ace_lm_default_params(AceLmParams * p) {
     p->max_seq          = 8192;
     p->max_batch        = 1;
     p->use_fsm          = true;
-    p->use_fa           = true;
+    p->use_fa           = !HOT_STEP_FA_DISABLED;
     p->use_batch_cfg    = true;
     p->clamp_fp16       = false;
     p->draft_model_path = NULL;

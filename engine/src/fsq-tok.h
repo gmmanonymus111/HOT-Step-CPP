@@ -13,6 +13,7 @@
 
 #pragma once
 #include "fsq-detok.h"
+#include "hot-step-build-flags.h"
 #include "qwen3-enc.h"
 #include "weight-source.h"
 
@@ -68,7 +69,7 @@ static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
     BackendPair bp    = backend_init("Tokenizer");
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
-    m->use_flash_attn = bp.has_gpu;
+    m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;
 
     // Same Qwen3 config as detokenizer (2 layers, H=2048)
     m->cfg.n_layers          = 2;

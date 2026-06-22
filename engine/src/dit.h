@@ -9,6 +9,7 @@
 //                conv_transpose_1d, add, mul, scale, view, reshape, permute.
 
 #include "adapter-merge.h"
+#include "hot-step-build-flags.h"
 #include "adapter-runtime.h"
 #include "backend.h"
 #include "config-json.h"
@@ -307,7 +308,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 8192);
-    m->use_flash_attn = bp.has_gpu;
+    m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;
 
     // Detect format: .gguf → GGUF path, directory → safetensors path
     bool is_st = !dit_ends_with_gguf(path);
