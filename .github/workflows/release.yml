@@ -1188,6 +1188,8 @@ jobs:
             SIZE=$(du -h "$f" | awk '{print $1}')
             if echo "$NAME" | grep -q "win.*cuda13"; then
               echo "| Windows | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*cuda12-volta"; then
+              echo "| Windows | CUDA 12 (Volta only — Tesla V100, sm_70) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "win.*cuda12"; then
               echo "| Windows | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "win.*vulkan"; then
@@ -1196,6 +1198,8 @@ jobs:
               echo "| Windows | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "linux.*cuda13"; then
               echo "| Linux | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda12-volta"; then
+              echo "| Linux | CUDA 12 (Volta only — Tesla V100, sm_70) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "linux.*cuda12"; then
               echo "| Linux | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
             elif echo "$NAME" | grep -q "linux.*vulkan"; then
