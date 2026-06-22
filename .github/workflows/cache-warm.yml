@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [cuda13.1, cuda12.8, vulkan, cpu]
+        variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
           - variant: cuda13.1
             cmake_flags: >-
@@ -56,6 +56,17 @@ jobs:
               -DGGML_BACKEND_DL=ON
               -DHOT_STEP_STATIC_RUNTIME=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          # Keep the Volta bundle's cache warm too (must match release.yml flags).
+          - variant: cuda12-volta
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+              -DGGML_CUDA_FORCE_CUBLAS=ON
+              -DHOT_STEP_DISABLE_FA=ON
+              -DCMAKE_CUDA_ARCHITECTURES=70-real
             cuda_version: '12.8.1'
           - variant: vulkan
             cmake_flags: >-
@@ -204,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [cuda13.1, cuda12.8, vulkan, cpu]
+        variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
           - variant: cuda13.1
             cmake_flags: >-
@@ -217,6 +228,16 @@ jobs:
               -DGGML_CUDA=ON -DGGML_VULKAN=OFF
               -DGGML_BACKEND_DL=ON
               -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          # Keep the Volta bundle's cache warm too (must match release.yml flags).
+          - variant: cuda12-volta
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+              -DGGML_CUDA_FORCE_CUBLAS=ON
+              -DHOT_STEP_DISABLE_FA=ON
+              -DCMAKE_CUDA_ARCHITECTURES=70-real
             cuda_version: '12.8.1'
           - variant: vulkan
             cmake_flags: >-
