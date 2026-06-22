@@ -205,6 +205,10 @@ jobs:
           Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -gt $now } |
             ForEach-Object { try { $_.LastWriteTime = $now } catch {} }
+          # Nuke the vulkan-shaders-gen ExternalProject prefix so it rebuilds
+          # clean (avoids the "build.ninja still dirty" loop). Matches release.yml.
+          Get-ChildItem -Path $buildDir -Recurse -Directory -Filter 'vulkan-shaders-gen-prefix' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           Push-Location $buildDir
           $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
           cmake .. @cmakeArgs
@@ -347,6 +351,9 @@ jobs:
           # Pull any future-dated mtimes back to now so ninja doesn't loop
           # "build.ninja still dirty ... system time is not set". Matches release.yml.
           find . -type f -newermt 'now' -exec touch -d 'now' {} + 2>/dev/null || true
+          # Nuke the vulkan-shaders-gen ExternalProject prefix so it rebuilds
+          # clean (avoids the "build.ninja still dirty" loop). Matches release.yml.
+          find . -type d -name 'vulkan-shaders-gen-prefix' -exec rm -rf {} + 2>/dev/null || true
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             ${{ matrix.cmake_flags }}

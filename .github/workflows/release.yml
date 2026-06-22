@@ -33,7 +33,7 @@ jobs:
     # (host_config.h: "Only the versions between 2017 and 2022 are supported").
     runs-on: windows-2022
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
@@ -259,6 +259,13 @@ jobs:
           Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -gt $now } |
             ForEach-Object { try { $_.LastWriteTime = $now } catch {} }
+
+          # The vulkan-shaders-gen ExternalProject sub-build gets stuck in a
+          # "build.ninja still dirty after 100 tries" loop when restored from
+          # cache. Nuke just that prefix so it reconfigures clean — only the
+          # shader generator (seconds to rebuild); object caches are untouched.
+          Get-ChildItem -Path $buildDir -Recurse -Directory -Filter 'vulkan-shaders-gen-prefix' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
           Push-Location $buildDir
           $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
@@ -756,7 +763,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04   # 22.04 for wider glibc compatibility across distros
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
         include:
@@ -929,6 +936,12 @@ jobs:
           # ExternalProject). Pull any future-dated mtimes back to now — cheap,
           # and preserves the relative ordering cached objects rely on.
           find . -type f -newermt 'now' -exec touch -d 'now' {} + 2>/dev/null || true
+          # The vulkan-shaders-gen ExternalProject sub-build gets stuck in a
+          # "build.ninja still dirty after 100 tries" loop when restored from
+          # cache. Nuke just that prefix so it reconfigures clean — it's only
+          # the shader generator (seconds to rebuild); the expensive ggml/acestep
+          # object caches are untouched. No-op for non-vulkan variants.
+          find . -type d -name 'vulkan-shaders-gen-prefix' -exec rm -rf {} + 2>/dev/null || true
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             ${{ matrix.cmake_flags }}
