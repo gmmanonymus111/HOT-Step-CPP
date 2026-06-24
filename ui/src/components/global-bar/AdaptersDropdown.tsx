@@ -3,14 +3,16 @@
 // Adapted from create/AdaptersAccordion.tsx to read from GlobalParamsContext.
 // Self-contained with Simple and Advanced modes, file browser, group scales.
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FolderOpen, X, Tag, Search, Circle, ChevronDown, RotateCcw } from 'lucide-react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { usePersistedState } from '../../hooks/usePersistedState';
-import { adapterApi } from '../../services/api';
+import { adapterApi, modelApi } from '../../services/api';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
 import { Slider } from '../shared/Slider';
+import { ModelSelect, getModelFormat } from './ModelSelect';
+import { formatDitModel } from './modelLabels';
 import { DEFAULT_SETTINGS, type AppSettings } from '../settings/SettingsPanel';
 import type { AdapterFile } from '../../types';
 
@@ -48,6 +50,12 @@ export const AdaptersDropdown: React.FC = () => {
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [ditModels, setDitModels] = useState<string[]>([]);
+
+  // DiT model list for the basin re-base "home base" selector.
+  useEffect(() => {
+    modelApi.list().then(m => setDitModels(m?.models?.dit || [])).catch(() => {});
+  }, []);
 
   const fileBrowserMode = gp.advancedAdapters ? 'folder' as const : 'file' as const;
   const triggerWord = deriveTriggerWord(gp.adapter);
@@ -286,6 +294,46 @@ export const AdaptersDropdown: React.FC = () => {
                 : 'Merges adapter at F32 precision. Best quality, fast inference, but uses more VRAM during synthesis.'}
             </p>
           </div>
+
+          {/* Basin re-base (cross-base adapter support) — merge mode only.
+              Home base must be a SafeTensors model (nudge reads F32 weights), so
+              the selector is filtered to safetensors DiT models only. */}
+          {gp.adapterMode === 'merge' && (
+            <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Basin Re-base</span>
+                  {gp.rebaseSource && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Re-base active" />}
+                </div>
+                {gp.rebaseSource && (
+                  <button type="button" onClick={() => gp.setRebaseSource('')}
+                    className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
+                    Off
+                  </button>
+                )}
+              </div>
+              <label className="block text-[10px] text-zinc-500">Adapter trained on (home base)</label>
+              <ModelSelect
+                id="rebase-source-select"
+                value={gp.rebaseSource}
+                onChange={gp.setRebaseSource}
+                options={ditModels.filter(m => getModelFormat(m) === 'safetensors')}
+                formatLabel={formatDitModel}
+                placeholder="Off — apply adapter as-is"
+              />
+              {gp.rebaseSource && (
+                <>
+                  <Slider label="Re-base Strength (β)" value={gp.rebaseBeta}
+                    onChange={gp.setRebaseBeta} min={0} max={1} step={0.05} showInput />
+                  <p className="text-[10px] text-zinc-600">
+                    Nudges the loaded base toward the adapter's home base so a heavy cross-base adapter
+                    stays coherent at full strength. β=1 = home-base behavior; lower keeps more of the
+                    loaded base's character.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Group Scales */}
           <button

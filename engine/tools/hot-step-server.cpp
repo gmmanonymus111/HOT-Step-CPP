@@ -568,6 +568,9 @@ struct ServerFields {
     float       temporal_smoothing = 0.13f;
     AdapterGroupScales group_scales;  // per-group adapter scale multipliers
     std::string adapter_mode;         // "merge" (default, F32 promoted) or "runtime"
+    // Basin re-base: nudge adapted weights toward the adapter's training base S.
+    std::string rebase_source = "";   // absolute path to S (resolved by Node server)
+    float       rebase_beta   = 0.0f; // 0 = off
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
@@ -640,6 +643,12 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     }
     if ((v = yyjson_obj_get(obj, "adapter_mode")) && yyjson_is_str(v)) {
         sf->adapter_mode = yyjson_get_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "rebase_source")) && yyjson_is_str(v)) {
+        sf->rebase_source = yyjson_get_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "rebase_beta")) && yyjson_is_num(v)) {
+        sf->rebase_beta = yyjson_is_real(v) ? (float) yyjson_get_real(v) : (float) yyjson_get_int(v);
     }
     // APG tuning
     if ((v = yyjson_obj_get(obj, "apg_momentum")) && yyjson_is_num(v)) {
@@ -1101,6 +1110,23 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.temporal_smoothing  = sf.temporal_smoothing;
     g_hotstep_params.adapter_group_scales = sf.group_scales;
     g_hotstep_params.adapter_mode         = sf.adapter_mode;
+    // Basin re-base: sf.rebase_source is a DiT model NAME (same ids as the model
+    // selector); resolve it to its on-disk path. Must be a safetensors model dir
+    // (or model.safetensors) for the nudge to read F32 weights — GGUF-only sources
+    // fail st_open in adapter_merge and the nudge is skipped with a warning.
+    g_hotstep_params.rebase_beta   = sf.rebase_beta;
+    g_hotstep_params.rebase_source = "";
+    if (!sf.rebase_source.empty() && sf.rebase_beta != 0.0f) {
+        const ModelEntry * rb = registry_find(g_registry.dit, sf.rebase_source.c_str());
+        if (rb) {
+            g_hotstep_params.rebase_source = rb->path;
+            fprintf(stderr, "[Server] Basin re-base: source=%s (%s), beta=%.2f\n",
+                    sf.rebase_source.c_str(), rb->path.c_str(), sf.rebase_beta);
+        } else {
+            fprintf(stderr, "[Server] WARNING: basin re-base source model not found: %s (skipping nudge)\n",
+                    sf.rebase_source.c_str());
+        }
+    }
     g_hotstep_params.dcw_enabled          = sf.dcw_enabled;
     g_hotstep_params.dcw_mode             = sf.dcw_mode;
     g_hotstep_params.dcw_scaler           = sf.dcw_scaler;

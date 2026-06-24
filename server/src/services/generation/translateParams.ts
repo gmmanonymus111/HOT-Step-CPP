@@ -83,6 +83,12 @@ export function translateParams(params: any): AceRequest {
   if (params.loraScale !== undefined) req.adapter_scale = params.loraScale;
   if (params.adapterGroupScales) req.adapter_group_scales = params.adapterGroupScales;
   if (params.adapterMode) req.adapter_mode = params.adapterMode;
+  // Basin re-base: rebaseSource is a DiT model NAME (engine resolves to its path).
+  // Only meaningful alongside an adapter; engine ignores it otherwise.
+  if (params.loraPath && params.rebaseSource && params.rebaseBeta) {
+    req.rebase_source = params.rebaseSource;
+    req.rebase_beta = params.rebaseBeta;
+  }
 
   // Trigger word
   if (params.triggerWord && params.triggerPlacement && params.loraPath) {

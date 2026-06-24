@@ -71,6 +71,34 @@ static bool adapter_to_f32(const void * src, float * dst, int64_t n, const std::
     return true;
 }
 
+// Basin re-base: fetch the source-base (training base S) weight for gguf_name as
+// F32 into `out`, returning a pointer when usable. Only 2D linear weights with a
+// matching element count are nudged; conv/pre-permuted tensors (proj_in/out) and
+// shape mismatches are skipped (return nullptr) so the delta path is unaffected.
+static const float * adapter_rebase_fetch(const STFile * rebase_src, float rebase_beta,
+                                          const char * gguf_name, int64_t ne0, int64_t ne1,
+                                          std::vector<float> & out) {
+    if (!rebase_src || rebase_beta == 0.0f) {
+        return nullptr;
+    }
+    const STEntry * se = st_find(*rebase_src, gguf_name);
+    if (!se || se->n_dims > 2) {
+        return nullptr;
+    }
+    int64_t snel = 1;
+    for (int d = 0; d < se->n_dims; d++) {
+        snel *= se->shape[d];
+    }
+    if (snel != ne0 * ne1) {
+        return nullptr;
+    }
+    out.resize((size_t) (ne0 * ne1));
+    if (!adapter_to_f32(st_data(*rebase_src, *se), out.data(), ne0 * ne1, se->dtype)) {
+        return nullptr;
+    }
+    return out.data();
+}
+
 // Map a LoRA safetensors key to the GGUF base tensor name.
 //
 // Supported key formats (all map to GGUF "decoder.layers.0.self_attn.q_proj.weight"):
@@ -425,7 +453,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
                                      ggml_backend_t                                                    backend,
                                      const char *                                                      gguf_name,
                                      const std::function<adapter_delta_build(struct ggml_context *)> & build_delta,
-                                     bool                                                              promote_f32 = false) {
+                                     bool                                                              promote_f32 = false,
+                                     const float *                                                     rebase_f32 = nullptr,
+                                     float                                                             rebase_beta = 0.0f) {
     // torch.finfo(torch.bfloat16).eps, used verbatim in LyCORIS apply_weight_decompose
     const float eps = 7.8125e-3f;
 
@@ -482,6 +512,15 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         }
         traits->to_float(base_ptr, base_f32.data(), nel);
 
+        // Basin re-base nudge: move the base toward the adapter's training base S
+        // before the delta is added. base <- base + beta*(S - base) = (1-beta)*base + beta*S.
+        // This lands the heavy adapter back in the weight basin it was trained in.
+        if (rebase_f32 && rebase_beta != 0.0f) {
+            for (size_t i = 0; i < (size_t) nel; i++) {
+                base_f32[i] += rebase_beta * (rebase_f32[i] - base_f32[i]);
+            }
+        }
+
         // Step 3: merge on host — base + delta (with user_scale and DoRA if present)
         if (!ds) {
             // plain: merged = base + user_scale * delta
@@ -533,6 +572,16 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 
     struct ggml_tensor * tbase_native = ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
     struct ggml_tensor * tbase_f32    = ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+
+    // Basin re-base nudge: blend the base toward the adapter's training base S
+    // before the delta is added. tbase_f32 <- tbase_f32 + beta*(S - tbase_f32).
+    // Everything downstream (delta add, DoRA, requant) operates on the nudged base.
+    struct ggml_tensor * trebase = nullptr;
+    if (rebase_f32 && rebase_beta != 0.0f) {
+        trebase                    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1);
+        struct ggml_tensor * tdiff = ggml_sub(ctx, trebase, tbase_f32);
+        tbase_f32                  = ggml_add(ctx, tbase_f32, ggml_scale(ctx, tdiff, rebase_beta));
+    }
 
     // DoRA scale vector, one F32 per output row when dora_scale is set
     struct ggml_tensor * tds = ds ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, ne1) : NULL;
@@ -594,6 +643,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
     if (tds) {
         ggml_backend_tensor_set(tds, ds, 0, (size_t) ne1 * sizeof(float));
+    }
+    if (trebase) {
+        ggml_backend_tensor_set(trebase, rebase_f32, 0, (size_t) nel * sizeof(float));
     }
     // caller-owned uploads for adapter factors
     db.upload();
@@ -675,7 +727,9 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
                                const std::string & cfg_dir,
                                float               scale,
                                ggml_backend_t      backend,
-                               bool                promote_f32 = false) {
+                               bool                promote_f32 = false,
+                               const STFile *      rebase_src = nullptr,
+                               float               rebase_beta = 0.0f) {
     int alpha_cfg = adapter_read_alpha(cfg_dir.c_str());
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
@@ -857,8 +911,11 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
             return db;
         };
 
+        std::vector<float> rebase_buf;
+        const float *      rebase_ptr = adapter_rebase_fetch(rebase_src, rebase_beta, gguf_name.c_str(), ne0, ne1, rebase_buf);
+
         if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, nullptr, 1.0f, backend,
-                                      gguf_name.c_str(), build, promote_f32)) {
+                                      gguf_name.c_str(), build, promote_f32, rebase_ptr, rebase_beta)) {
             skipped++;
             continue;
         }
@@ -913,7 +970,9 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
                                const STFile &    st,
                                float             user_scale,
                                ggml_backend_t    backend,
-                               bool              promote_f32 = false) {
+                               bool              promote_f32 = false,
+                               const STFile *    rebase_src = nullptr,
+                               float             rebase_beta = 0.0f) {
     // group the per module tensors by LyCORIS prefix. Each module has either
     // w2 alone (monolithic) or w2_a + w2_b (factorized), never both.
     struct LoKrEntry {
@@ -967,6 +1026,7 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
     int skipped    = 0;
     int dora_count = 0;
     int mono_count = 0;
+    int nudged     = 0;
 
     for (const auto & kv : modules) {
         const std::string & lyc_prefix = kv.first;
@@ -1218,8 +1278,11 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
             return db;
         };
 
+        std::vector<float> rebase_buf;
+        const float *      rebase_ptr = adapter_rebase_fetch(rebase_src, rebase_beta, gguf_name.c_str(), ne0, ne1, rebase_buf);
+
         if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, effective_user_scale, backend,
-                                      gguf_name.c_str(), build, promote_f32)) {
+                                      gguf_name.c_str(), build, promote_f32, rebase_ptr, rebase_beta)) {
             skipped++;
             continue;
         }
@@ -1229,6 +1292,9 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
         if (!has_factor) {
             mono_count++;
         }
+        if (rebase_ptr) {
+            nudged++;
+        }
         merged++;
     }
 
@@ -1236,6 +1302,9 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
     fprintf(stderr,
             "[Adapter] LoKr merged %d modules (%d factorized, %d monolithic, %d with DoRA, skipped %d), scale=%.2f\n",
             merged, merged - mono_count, mono_count, dora_count, skipped, user_scale);
+    if (rebase_src && rebase_beta != 0.0f) {
+        fprintf(stderr, "[Adapter] Basin re-base: nudged %d tensors toward training base, beta=%.2f\n", nudged, rebase_beta);
+    }
     fprintf(stderr, "[Adapter] Group scales: self_attn=%.2f, cross_attn=%.2f, mlp=%.2f, cond_embed=%.2f, time_embed=%.2f, proj_in=%.2f\n",
             gs2.self_attn, gs2.cross_attn, gs2.mlp, gs2.cond_embed, gs2.time_embed, gs2.proj_in);
     return merged > 0;
@@ -1262,7 +1331,9 @@ static bool adapter_merge(WeightCtx *          wctx,
                           const char *         adapter_path,
                           float                scale,
                           ggml_backend_t       backend,
-                          bool                 promote_f32 = true) {
+                          bool                 promote_f32 = true,
+                          const char *         rebase_source = nullptr,
+                          float                rebase_beta = 0.0f) {
     std::string sf_path;
     std::string cfg_dir;
 
@@ -1302,13 +1373,34 @@ static bool adapter_merge(WeightCtx *          wctx,
         return false;
     }
 
-    bool ok;
-    if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, ws, st, scale, backend, promote_f32);
-    } else {
-        ok = adapter_merge_lora(wctx, ws, st, cfg_dir, scale, backend, promote_f32);
+    // Basin re-base: open the adapter's training base S (a safetensors model dir
+    // or model.safetensors). Only its adapter-targeted linear weights are read.
+    STFile         rebase_st = {};
+    const STFile * rebase_ptr = nullptr;
+    if (rebase_source && rebase_source[0] && rebase_beta != 0.0f) {
+        std::string rb_path = rebase_source;
+        struct stat rsb;
+        if (stat(rb_path.c_str(), &rsb) == 0 && S_ISDIR(rsb.st_mode)) {
+            rb_path += "/model.safetensors";
+        }
+        if (st_open(&rebase_st, rb_path.c_str())) {
+            rebase_ptr = &rebase_st;
+        } else {
+            fprintf(stderr, "[Adapter] WARNING: basin re-base source unreadable: %s (continuing without nudge)\n",
+                    rb_path.c_str());
+        }
     }
 
+    bool ok;
+    if (adapter_detect_lokr(st)) {
+        ok = adapter_merge_lokr(wctx, ws, st, scale, backend, promote_f32, rebase_ptr, rebase_beta);
+    } else {
+        ok = adapter_merge_lora(wctx, ws, st, cfg_dir, scale, backend, promote_f32, rebase_ptr, rebase_beta);
+    }
+
+    if (rebase_ptr) {
+        st_close(&rebase_st);
+    }
     st_close(&st);
     return ok;
 }

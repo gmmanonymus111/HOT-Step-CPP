@@ -59,6 +59,9 @@ struct ModelKeyHash {
             hash_f(k.adapter_group_scales.cross_attn);
             hash_f(k.adapter_group_scales.mlp);
             hash_f(k.adapter_group_scales.cond_embed);
+            // basin re-base: distinct (source, beta) must cache as distinct merges.
+            h ^= std::hash<std::string>{}(k.rebase_source) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            hash_f(k.rebase_beta);
         }
         return h;
     }
@@ -78,7 +81,9 @@ struct ModelKeyEq {
                 && a.adapter_group_scales.self_attn  == b.adapter_group_scales.self_attn
                 && a.adapter_group_scales.cross_attn == b.adapter_group_scales.cross_attn
                 && a.adapter_group_scales.mlp        == b.adapter_group_scales.mlp
-                && a.adapter_group_scales.cond_embed == b.adapter_group_scales.cond_embed;
+                && a.adapter_group_scales.cond_embed == b.adapter_group_scales.cond_embed
+                && a.rebase_source == b.rebase_source
+                && a.rebase_beta   == b.rebase_beta;
         }
         return true;
     }
@@ -444,7 +449,8 @@ DiTGGML * store_require_dit(ModelStore * s, const ModelKey & k) {
     Timer        t;
     DiTGGML *    m       = new DiTGGML();
     const char * adapter = k.adapter_path.empty() ? nullptr : k.adapter_path.c_str();
-    if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale)) {
+    const char * rebase  = k.rebase_source.empty() ? nullptr : k.rebase_source.c_str();
+    if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale, rebase, k.rebase_beta)) {
         // Retry once after a brief delay — CUDA context may need time to release
         // resources after a model eviction (common during XL↔base swaps).
         fprintf(stderr, "[Store] DiT load failed, retrying in 500ms (possible CUDA context issue)...\n");
@@ -457,7 +463,7 @@ DiTGGML * store_require_dit(ModelStore * s, const ModelKey & k) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
         m = new DiTGGML();
-        if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale)) {
+        if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale, rebase, k.rebase_beta)) {
             fprintf(stderr, "[Store] DiT load FAILED on retry. GPU context may be corrupted.\n");
             delete m;
             return nullptr;

@@ -90,6 +90,11 @@ struct ModelKey {
     std::string adapter_path;   // "" when no adapter
     float       adapter_scale;  // 1.0f default, significant when adapter_path is set
     AdapterGroupScales adapter_group_scales;  // per-group scale multipliers baked into merged weights
+    // Basin re-base: nudge adapted weights toward the base the adapter was trained
+    // on (S) before merging, by beta*(S - T). Lets a heavy adapter trained on one
+    // DiT base work on a sibling base. "" / 0.0f = off. Baked into merged weights.
+    std::string rebase_source;  // path to S (safetensors model dir or model.safetensors)
+    float       rebase_beta;    // 0.0f default = no nudge
 };
 
 enum EvictPolicy {

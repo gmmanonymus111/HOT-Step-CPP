@@ -32,6 +32,9 @@ export interface GlobalParams {
   adapterMode: string; setAdapterMode: (v: string) => void;
   adapterGroupScales: AdapterGroupScales;
   setAdapterGroupScales: (v: AdapterGroupScales) => void;
+  // Basin re-base (cross-base adapter support)
+  rebaseSource: string; setRebaseSource: (v: string) => void;
+  rebaseBeta: number; setRebaseBeta: (v: number) => void;
   adapterFolder: string; setAdapterFolder: (v: string) => void;
   advancedAdapters: boolean; setAdvancedAdapters: (v: boolean) => void;
   adaptersOpen: boolean; setAdaptersOpen: (v: boolean) => void;

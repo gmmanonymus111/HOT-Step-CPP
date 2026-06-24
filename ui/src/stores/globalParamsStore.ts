@@ -49,6 +49,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   adapterGroupScales: readKey("hs-adapterGroupScales", {
     self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0,
   }),
+  // Basin re-base: nudge a cross-base adapter into the basin of the model it was
+  // trained on. rebaseSource = DiT model name (the adapter's "home base").
+  // Merge mode only. Remembered across sessions.
+  rebaseSource: readKey("hs-rebaseSource", ''),
+  rebaseBeta: readKey("hs-rebaseBeta", 0.75),
   adapterFolder: readKey("hs-adapterFolder", ''),
   advancedAdapters: readKey("hs-advancedAdapters", false),
   adaptersOpen: readKey("hs-adaptersOpen", false),
@@ -158,6 +163,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setAdapterScale: (v: any) => { set({ adapterScale: v }); writeKey("hs-adapterScale", v); },
   setAdapterMode: (v: any) => { set({ adapterMode: v }); writeKey("hs-adapterMode", v); },
   setAdapterGroupScales: (v: any) => { set({ adapterGroupScales: v }); writeKey("hs-adapterGroupScales", v); },
+  setRebaseSource: (v: any) => { set({ rebaseSource: v }); writeKey("hs-rebaseSource", v); },
+  setRebaseBeta: (v: any) => { set({ rebaseBeta: v }); writeKey("hs-rebaseBeta", v); },
   setAdapterFolder: (v: any) => { set({ adapterFolder: v }); writeKey("hs-adapterFolder", v); },
   setAdvancedAdapters: (v: any) => { set({ advancedAdapters: v }); writeKey("hs-advancedAdapters", v); },
   setAdaptersOpen: (v: any) => { set({ adaptersOpen: v }); writeKey("hs-adaptersOpen", v); },
@@ -287,6 +294,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       loraPath: s.adapter, loraScale: s.adapterScale,
       adapterGroupScales: s.adapter ? s.adapterGroupScales : undefined,
       adapterMode: s.adapter ? s.adapterMode : 'merge',
+      // Basin re-base: only sent with an adapter in merge mode and a chosen source.
+      rebaseSource: (s.adapter && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseSource : undefined,
+      rebaseBeta: (s.adapter && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseBeta : undefined,
       triggerWord: triggerWord || undefined,
       triggerPlacement: triggerWord ? settings.triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,

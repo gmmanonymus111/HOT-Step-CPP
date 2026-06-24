@@ -168,6 +168,14 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     ctx->dit_key.adapter_path         = params->adapter_path ? params->adapter_path : "";
     ctx->dit_key.adapter_scale        = params->adapter_scale;
     ctx->dit_key.adapter_group_scales = g_hotstep_params.adapter_group_scales;
+    // Basin re-base: only meaningful with an adapter, and only in merge mode.
+    if (!ctx->dit_key.adapter_path.empty() && g_hotstep_params.adapter_mode != "runtime") {
+        ctx->dit_key.rebase_source = g_hotstep_params.rebase_source;
+        ctx->dit_key.rebase_beta   = g_hotstep_params.rebase_beta;
+    } else {
+        ctx->dit_key.rebase_source = "";
+        ctx->dit_key.rebase_beta   = 0.0f;
+    }
 
     ctx->vae_enc_key.kind = MODEL_VAE_ENC;
     ctx->vae_enc_key.path = params->vae_path;

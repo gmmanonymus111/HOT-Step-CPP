@@ -86,6 +86,14 @@ struct HotStepParams {
     // merge stores merged weights as F32 to avoid catastrophic BF16 cancellation.
     std::string adapter_mode = "merge";
 
+    // Basin re-base: nudge adapted weights toward the base the adapter was trained
+    // on (S) before merging, by beta*(S - T). Lets a heavy adapter trained on one
+    // DiT base behave on a sibling base. rebase_source is an absolute path to S
+    // (safetensors model dir or model.safetensors), resolved by the Node server.
+    // Empty / 0.0f = off. merge mode only.
+    std::string rebase_source = "";
+    float       rebase_beta   = 0.0f;
+
     // DCW (Differential Correction in Wavelet domain) — CVPR 2026
     // Training-free sampler-side correction that mitigates SNR-t bias.
     bool        dcw_enabled      = false;

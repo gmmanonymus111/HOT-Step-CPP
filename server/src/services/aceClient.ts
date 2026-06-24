@@ -89,6 +89,10 @@ export interface AceRequest {
     proj_in: number;
   };
   adapter_mode?: string;  // "merge" (default, F32 promoted) or "runtime"
+  // Basin re-base: nudge adapted weights toward the base the adapter was trained
+  // on (rebase_source = DiT model name) by rebase_beta*(S - T) before merging.
+  rebase_source?: string;
+  rebase_beta?: number;
   // Solver sub-parameters
   stork_substeps?: number;
   beat_stability?: number;

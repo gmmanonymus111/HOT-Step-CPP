@@ -301,7 +301,9 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *          wctx,
 static bool dit_ggml_load(DiTGGML *    m,
                           const char * path,
                           const char * adapter_path  = nullptr,
-                          float        adapter_scale = 1.0f) {
+                          float        adapter_scale = 1.0f,
+                          const char * rebase_source = nullptr,
+                          float        rebase_beta   = 0.0f) {
     // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
     // drift over 24 layers x 8 steps: use F32 manual attention on CPU instead.
     BackendPair bp    = backend_init("DiT");
@@ -537,7 +539,7 @@ static bool dit_ggml_load(DiTGGML *    m,
                 }
             }
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, promote_f32)) {
+            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, promote_f32, rebase_source, rebase_beta)) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
                 if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;
