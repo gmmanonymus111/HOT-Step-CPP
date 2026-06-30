@@ -541,15 +541,24 @@ static bool dit_ggml_load(DiTGGML *    m,
             Timer adapter_timer;
             // Multi-adapter stack: merge each adapter sequentially. adapter_merge
             // reads each tensor's CURRENT (post-prior-merge) value, so deltas
-            // accumulate: W <- W + s1*d1 + s2*d2 + ... (see adapter-merge.h). The
-            // basin re-base applies globally to every adapter in the stack. When
-            // the stack is empty, fall back to the single legacy adapter path.
+            // accumulate: W <- W + s1*d1 + s2*d2 + ... (see adapter-merge.h).
+            //
+            // Basin re-base is applied to the FIRST adapter only. Re-base nudges
+            // the loaded base T toward the adapter's home base S before adding the
+            // delta (base <- base + beta*(S - base)); at beta=1 that REPLACES the
+            // base with S. Re-applying it per adapter would reset the running base
+            // every merge and discard all earlier adapters (only the last would
+            // survive). So we re-base T once up front, then stack every adapter's
+            // delta on the nudged base. When the stack is empty, fall back to the
+            // single legacy adapter path.
             const std::vector<AdapterSpec> & stack = g_hotstep_params.adapters;
             bool merge_ok = false;
             if (!stack.empty()) {
                 int si = 0;
                 for (const auto & a : stack) {
-                    if (adapter_merge(&m->wctx, ws, a.path.c_str(), a.scale, m->backend, promote_f32, rebase_source, rebase_beta)) {
+                    const char * rb_src  = (si == 0) ? rebase_source : nullptr;
+                    float        rb_beta = (si == 0) ? rebase_beta   : 0.0f;
+                    if (adapter_merge(&m->wctx, ws, a.path.c_str(), a.scale, m->backend, promote_f32, rb_src, rb_beta)) {
                         merge_ok = true;
                     } else {
                         fprintf(stderr, "[Adapter] WARNING: stack adapter %d merged no tensors: %s\n", si, a.path.c_str());
