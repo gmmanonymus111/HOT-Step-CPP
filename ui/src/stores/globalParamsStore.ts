@@ -49,6 +49,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // its own scale. When non-empty it supersedes the single `adapter`. Group
   // scales, adapter mode and basin re-base apply globally to the whole stack.
   adapterStack: readKey("hs-adapterStack", [] as { path: string; scale: number }[]),
+  // Stack scaling mode:
+  //  'sum'   — each entry's `scale` is its absolute scale; the engine sums them
+  //            (can deliberately over-drive: Σ scale may exceed 1).
+  //  'blend' — each entry's `scale` is a relative weight; the effective scales
+  //            are normalised to the budget so Σ effective = adapterStackBudget,
+  //            keeping combined strength constant as adapters are added.
+  adapterStackMode: readKey("hs-adapterStackMode", 'blend'),
+  adapterStackBudget: readKey("hs-adapterStackBudget", 0.75),
   adapterMode: readKey("hs-adapterMode", 'runtime'),
   adapterGroupScales: readKey("hs-adapterGroupScales", {
     self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0,
@@ -173,12 +181,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     const next = exists ? cur.filter(a => a.path !== path) : [...cur, { path, scale }];
     set({ adapterStack: next }); writeKey("hs-adapterStack", next);
   },
-  // Set the per-adapter scale for one stack entry.
+  // Set the per-adapter scale (sum mode) or relative weight (blend mode) for one entry.
   setAdapterStackScale: (path: string, scale: number) => {
     const cur: { path: string; scale: number }[] = get().adapterStack || [];
     const next = cur.map(a => (a.path === path ? { ...a, scale } : a));
     set({ adapterStack: next }); writeKey("hs-adapterStack", next);
   },
+  setAdapterStackMode: (v: any) => { set({ adapterStackMode: v }); writeKey("hs-adapterStackMode", v); },
+  setAdapterStackBudget: (v: any) => { set({ adapterStackBudget: v }); writeKey("hs-adapterStackBudget", v); },
   setAdapterMode: (v: any) => { set({ adapterMode: v }); writeKey("hs-adapterMode", v); },
   setAdapterGroupScales: (v: any) => { set({ adapterGroupScales: v }); writeKey("hs-adapterGroupScales", v); },
   setRebaseSource: (v: any) => { set({ rebaseSource: v }); writeKey("hs-rebaseSource", v); },
@@ -308,10 +318,23 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     // single `adapter` folded into a one-element stack. `primary` drives the
     // single-adapter features (trigger word, basin re-base, group scales) which
     // remain keyed on the first adapter.
-    const stack: { path: string; scale: number }[] =
-      (s.adapterStack && s.adapterStack.length > 0)
-        ? s.adapterStack
-        : (s.adapter ? [{ path: s.adapter, scale: s.adapterScale }] : []);
+    const isStack = !!(s.adapterStack && s.adapterStack.length > 0);
+    const rawStack: { path: string; scale: number }[] = isStack
+      ? s.adapterStack
+      : (s.adapter ? [{ path: s.adapter, scale: s.adapterScale }] : []);
+
+    // Blend mode (multi-adapter stacks only): treat each entry's `scale` as a
+    // relative weight and normalise so the effective scales sum to the budget,
+    // keeping combined strength constant regardless of how many are stacked.
+    // Sum mode (and the single-adapter fallback) sends the raw scales as-is.
+    let stack = rawStack;
+    if (isStack && s.adapterStackMode === 'blend' && rawStack.length > 0) {
+      const budget = s.adapterStackBudget ?? 0.75;
+      const sumW = rawStack.reduce((acc, e) => acc + (e.scale || 0), 0);
+      stack = sumW > 0
+        ? rawStack.map(e => ({ path: e.path, scale: +(budget * (e.scale || 0) / sumW).toFixed(4) }))
+        : rawStack.map(e => ({ path: e.path, scale: +(budget / rawStack.length).toFixed(4) }));
+    }
     const primary = stack[0]?.path || '';
 
     const triggerWord: string = settings.triggerUseFilename && primary

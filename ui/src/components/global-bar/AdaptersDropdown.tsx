@@ -65,6 +65,17 @@ export const AdaptersDropdown: React.FC = () => {
   const triggerWord = deriveTriggerWord(primaryPath);
   const adapterFilename = gp.adapter ? gp.adapter.split(/[\\/]/).pop() || '' : '';
   const fileLabel = (p: string) => p.split(/[\\/]/).pop() || p;
+
+  // Blend mode: per-adapter sliders are relative weights, normalised so the
+  // effective scales sum to the combined-strength budget. effectiveScale maps a
+  // row's weight to the scale actually sent to the engine (mirrors the store).
+  const isBlend = gp.adapterStackMode === 'blend';
+  const stackWeightSum = stack.reduce((acc, e) => acc + (e.scale || 0), 0);
+  const effectiveScale = (weight: number) => {
+    if (!isBlend) return weight;
+    const budget = gp.adapterStackBudget ?? 0.75;
+    return stackWeightSum > 0 ? (budget * (weight || 0)) / stackWeightSum : budget / Math.max(1, stack.length);
+  };
   const GROUP_DEFAULTS: Record<string, number> = { self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0 };
   const allDefault = GROUP_INFO.every(g => gp.adapterGroupScales[g.key] === (GROUP_DEFAULTS[g.key] ?? 1.0));
 
@@ -213,7 +224,7 @@ export const AdaptersDropdown: React.FC = () => {
                 return (
                   <button
                     key={file.path}
-                    onClick={() => gp.toggleAdapterInStack(file.path, gp.adapterScale)}
+                    onClick={() => gp.toggleAdapterInStack(file.path, 1.0)}
                     className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
                       isActive ? 'bg-emerald-500/10 border-l-2 border-emerald-500' : 'hover:bg-white/5 border-l-2 border-transparent'
                     }`}
@@ -247,6 +258,40 @@ export const AdaptersDropdown: React.FC = () => {
                   {t('adapter.clearAll', 'Clear all')}
                 </button>
               </div>
+
+              {/* Sum / Blend toggle */}
+              <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={() => gp.setAdapterStackMode('blend')}
+                  className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    isBlend ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+                  }`}
+                >
+                  Blend
+                </button>
+                <button
+                  type="button"
+                  onClick={() => gp.setAdapterStackMode('sum')}
+                  className={`flex-1 px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    !isBlend ? 'bg-amber-600 text-white' : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+                  }`}
+                >
+                  Sum
+                </button>
+              </div>
+              <p className="text-[10px] text-zinc-600 -mt-1">
+                {isBlend
+                  ? 'Per-adapter sliders are relative weights; effective scales are normalised so they sum to the combined strength below. Keeps total strength constant as you add adapters.'
+                  : 'Per-adapter sliders are absolute scales, summed directly. Σ can exceed 1 to deliberately over-drive the stack.'}
+              </p>
+
+              {/* Combined strength budget (blend mode only) */}
+              {isBlend && (
+                <Slider label={t('adapter.combinedStrength', 'Combined Strength (Σ)')} value={gp.adapterStackBudget}
+                  onChange={gp.setAdapterStackBudget} min={0} max={4} step={0.05} showInput />
+              )}
+
               {stack.map((entry, i) => (
                 <div key={entry.path} className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5">
                   <div className="flex items-center gap-2">
@@ -254,6 +299,11 @@ export const AdaptersDropdown: React.FC = () => {
                     <span className="text-xs text-emerald-400 font-medium truncate flex-1" title={entry.path}>
                       {fileLabel(entry.path)}
                     </span>
+                    {isBlend && (
+                      <span className="text-[10px] text-zinc-500 font-mono flex-shrink-0" title="Effective scale sent to the engine">
+                        → {effectiveScale(entry.scale).toFixed(3)}
+                      </span>
+                    )}
                     <button
                       onClick={() => gp.toggleAdapterInStack(entry.path)}
                       className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
@@ -262,7 +312,7 @@ export const AdaptersDropdown: React.FC = () => {
                       <X size={12} />
                     </button>
                   </div>
-                  <Slider label={t('adapter.adapterScale', 'Adapter Scale')} value={entry.scale}
+                  <Slider label={isBlend ? t('adapter.weight', 'Weight') : t('adapter.adapterScale', 'Adapter Scale')} value={entry.scale}
                     onChange={v => gp.setAdapterStackScale(entry.path, v)} min={0} max={4} step={0.05} showInput />
                 </div>
               ))}

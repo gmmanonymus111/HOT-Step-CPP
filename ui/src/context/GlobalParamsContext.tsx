@@ -34,6 +34,9 @@ export interface GlobalParams {
   setAdapterStack: (v: { path: string; scale: number }[]) => void;
   toggleAdapterInStack: (path: string, scale?: number) => void;
   setAdapterStackScale: (path: string, scale: number) => void;
+  // Stack scaling: 'sum' (raw scales summed) or 'blend' (weights normalised to budget)
+  adapterStackMode: string; setAdapterStackMode: (v: string) => void;
+  adapterStackBudget: number; setAdapterStackBudget: (v: number) => void;
   adapterMode: string; setAdapterMode: (v: string) => void;
   adapterGroupScales: AdapterGroupScales;
   setAdapterGroupScales: (v: AdapterGroupScales) => void;
