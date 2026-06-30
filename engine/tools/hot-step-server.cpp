@@ -1047,21 +1047,34 @@ static void synth_worker(std::shared_ptr<Job>    job,
     }
     p.adapter_path      = nullptr;
     p.adapter_scale     = 1.0f;
-    if (!ace_reqs[0].adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
-        if (!adapter) {
-            // HOT-STEP: absolute-path fallback for adapters not in the registry
-            // (e.g. user provides a full path to a safetensors file)
-            static std::string abs_path_buf;
-            abs_path_buf = ace_reqs[0].adapter;
-            FILE * test = fopen(abs_path_buf.c_str(), "rb");
-            if (test) {
-                fclose(test);
-                fprintf(stderr, "[Server] Adapter absolute path: %s\n", abs_path_buf.c_str());
-                p.adapter_path  = abs_path_buf.c_str();
-                p.adapter_scale = ace_reqs[0].adapter_scale;
+    // Build the adapter stack. The multi-adapter `adapters` array supersedes the
+    // single `adapter` field; when only the single field is set we fold it into a
+    // one-element stack so merge/runtime loading takes a single code path. The
+    // resolved paths live in g_hotstep_params.adapters (read by dit_ggml_load);
+    // p.adapter_path points at the primary so the single-adapter gate stays armed.
+    g_hotstep_params.adapters.clear();
+    {
+        std::vector<AceAdapterRef> req_adapters = ace_reqs[0].adapters;
+        if (req_adapters.empty() && !ace_reqs[0].adapter.empty()) {
+            req_adapters.push_back({ ace_reqs[0].adapter, ace_reqs[0].adapter_scale });
+        }
+        for (const auto & ar : req_adapters) {
+            std::string path;
+            const AdapterEntry * adapter = registry_find_adapter(g_registry, ar.name.c_str());
+            if (adapter) {
+                path = adapter->path;
             } else {
-                fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
+                // HOT-STEP: absolute-path fallback for adapters not in the registry
+                // (e.g. user provides a full path to a safetensors file)
+                FILE * test = fopen(ar.name.c_str(), "rb");
+                if (test) {
+                    fclose(test);
+                    fprintf(stderr, "[Server] Adapter absolute path: %s\n", ar.name.c_str());
+                    path = ar.name;
+                }
+            }
+            if (path.empty()) {
+                fprintf(stderr, "[Server] Adapter not found: %s\n", ar.name.c_str());
                 free(src_interleaved);
                 free(src_latents);
                 free(ref_interleaved);
@@ -1069,15 +1082,20 @@ static void synth_worker(std::shared_ptr<Job>    job,
                 job->status.store(2);
                 return;
             }
-        } else {
-            p.adapter_path  = adapter->path.c_str();
-            p.adapter_scale = ace_reqs[0].adapter_scale;
+            g_hotstep_params.adapters.push_back({ path, ar.scale });
+        }
+        if (!g_hotstep_params.adapters.empty()) {
+            p.adapter_path  = g_hotstep_params.adapters[0].path.c_str();
+            p.adapter_scale = g_hotstep_params.adapters[0].scale;
         }
     }
     fprintf(stderr, "[Server] Text encoder: %s\n", emb_entry ? sf.emb_model.c_str() : g_registry.text_enc[0].name.c_str());
-    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s%s\n", dit_name.c_str(),
-            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str(),
+    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
+            g_hotstep_params.adapters.empty() ? "" : " Adapters=",
             (g_keep_loaded || req_keep_loaded) ? " [keep-loaded]" : "");
+    for (const auto & a : g_hotstep_params.adapters) {
+        fprintf(stderr, "[Server]   adapter: %s (scale=%.2f)\n", a.path.c_str(), a.scale);
+    }
 
     // HOT-STEP: per-request co-resident mode. Once flipped to NEVER, stays
     // that way until restart (going back to STRICT would need a full eviction
@@ -1165,8 +1183,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
     // mark the whole call as the heaviest phase: ADAPTER_PRECOMPUTE when an
     // adapter is in play (the ~17 s stall), else LOADING_DIT. The wrapper keys
     // on this to explain why a job is silent for 15+ s with no DiT step logs.
-    job_set_phase(*job, ace_reqs[0].adapter.empty() ? JobPhase::LOADING_DIT
-                                                    : JobPhase::ADAPTER_PRECOMPUTE);
+    job_set_phase(*job, g_hotstep_params.adapters.empty() ? JobPhase::LOADING_DIT
+                                                          : JobPhase::ADAPTER_PRECOMPUTE);
 
     // Wire the per-job cancel flag into the adapter precompute loops so a cancel
     // during cold start aborts in <100 ms instead of waiting for all deltas.
@@ -2116,6 +2134,11 @@ static void warm_worker(std::shared_ptr<Job> job, WarmRequest wr) {
     p.vae_path          = vae->path.c_str();
     p.adapter_path      = nullptr;
     p.adapter_scale     = 1.0f;
+    // Mirror the synth worker's stack so warm and real loads produce the same
+    // DiT cache key (the warm endpoint takes a single adapter; fold it into a
+    // one-element stack). Clearing first prevents a stale stack from a prior
+    // synth request leaking into this load.
+    g_hotstep_params.adapters.clear();
     if (!wr.adapter.empty()) {
         const AdapterEntry * adapter = registry_find_adapter(g_registry, wr.adapter.c_str());
         if (!adapter) {
@@ -2124,8 +2147,9 @@ static void warm_worker(std::shared_ptr<Job> job, WarmRequest wr) {
             job->status.store(2);
             return;
         }
-        p.adapter_path  = adapter->path.c_str();
-        p.adapter_scale = wr.adapter_scale;
+        g_hotstep_params.adapters.push_back({ adapter->path, wr.adapter_scale });
+        p.adapter_path  = g_hotstep_params.adapters[0].path.c_str();
+        p.adapter_scale = g_hotstep_params.adapters[0].scale;
     }
 
     fprintf(stderr, "[Server] warm: loading DiT=%s VAE=%s%s%s\n", dit_name.c_str(), vae_name.c_str(),

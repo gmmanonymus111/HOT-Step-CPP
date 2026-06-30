@@ -58,8 +58,13 @@ export const AdaptersDropdown: React.FC = () => {
   }, []);
 
   const fileBrowserMode = gp.advancedAdapters ? 'folder' as const : 'file' as const;
-  const triggerWord = deriveTriggerWord(gp.adapter);
+  // In advanced mode the stack drives everything; in simple mode the single adapter does.
+  const stack: { path: string; scale: number }[] = gp.adapterStack || [];
+  const primaryPath = gp.advancedAdapters ? (stack[0]?.path || '') : gp.adapter;
+  const hasAdapter = gp.advancedAdapters ? stack.length > 0 : !!gp.adapter;
+  const triggerWord = deriveTriggerWord(primaryPath);
   const adapterFilename = gp.adapter ? gp.adapter.split(/[\\/]/).pop() || '' : '';
+  const fileLabel = (p: string) => p.split(/[\\/]/).pop() || p;
   const GROUP_DEFAULTS: Record<string, number> = { self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0 };
   const allDefault = GROUP_INFO.every(g => gp.adapterGroupScales[g.key] === (GROUP_DEFAULTS[g.key] ?? 1.0));
 
@@ -204,11 +209,11 @@ export const AdaptersDropdown: React.FC = () => {
           {adapterFiles.length > 0 && (
             <div className="rounded-xl bg-zinc-50/80 dark:bg-zinc-900/50 border border-zinc-200 dark:border-white/5 overflow-hidden" style={{ maxHeight: '200px', overflowY: 'auto' }}>
               {adapterFiles.map((file) => {
-                const isActive = gp.adapter === file.path;
+                const isActive = stack.some(a => a.path === file.path);
                 return (
                   <button
                     key={file.path}
-                    onClick={() => gp.setAdapter(isActive ? '' : file.path)}
+                    onClick={() => gp.toggleAdapterInStack(file.path, gp.adapterScale)}
                     className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
                       isActive ? 'bg-emerald-500/10 border-l-2 border-emerald-500' : 'hover:bg-white/5 border-l-2 border-transparent'
                     }`}
@@ -230,21 +235,37 @@ export const AdaptersDropdown: React.FC = () => {
             </div>
           )}
 
-          {gp.adapter && (
-            <>
-              <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
-                <Circle size={8} fill="#10b981" className="text-emerald-500 flex-shrink-0" />
-                <span className="text-xs text-emerald-400 font-medium truncate flex-1" title={gp.adapter}>
-                  {adapterFilename}
+          {/* Selected stack: one row per adapter with its own scale + remove. */}
+          {stack.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">
+                  {t('adapter.adapterStack', 'Adapter Stack')} ({stack.length})
                 </span>
-                <button
-                  onClick={() => gp.setAdapter('')}
-                  className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
-                  title={t('adapter.deselectAdapter')}
-                >
-                  <X size={12} />
+                <button type="button" onClick={() => gp.setAdapterStack([])}
+                  className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
+                  {t('adapter.clearAll', 'Clear all')}
                 </button>
               </div>
+              {stack.map((entry, i) => (
+                <div key={entry.path} className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-zinc-500 flex-shrink-0">{i + 1}.</span>
+                    <span className="text-xs text-emerald-400 font-medium truncate flex-1" title={entry.path}>
+                      {fileLabel(entry.path)}
+                    </span>
+                    <button
+                      onClick={() => gp.toggleAdapterInStack(entry.path)}
+                      className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
+                      title={t('adapter.deselectAdapter')}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                  <Slider label={t('adapter.adapterScale', 'Adapter Scale')} value={entry.scale}
+                    onChange={v => gp.setAdapterStackScale(entry.path, v)} min={0} max={4} step={0.05} showInput />
+                </div>
+              ))}
 
               {settings.triggerUseFilename && triggerWord && (
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-500/10 border border-pink-500/20">
@@ -253,17 +274,19 @@ export const AdaptersDropdown: React.FC = () => {
                   <span className="text-[10px] text-zinc-500">({settings.triggerPlacement})</span>
                 </div>
               )}
-            </>
+            </div>
           )}
         </>
       )}
 
       {/* ═══ SHARED CONTROLS (when adapter selected) ═══ */}
-      {gp.adapter && (
+      {hasAdapter && (
         <>
-          {/* Adapter Scale */}
-          <Slider label="Adapter Scale" value={gp.adapterScale}
-            onChange={gp.setAdapterScale} min={0} max={4} step={0.05} showInput />
+          {/* Adapter Scale — simple mode only; the advanced stack has per-row scales */}
+          {!gp.advancedAdapters && (
+            <Slider label="Adapter Scale" value={gp.adapterScale}
+              onChange={gp.setAdapterScale} min={0} max={4} step={0.05} showInput />
+          )}
 
           {/* Loading Mode */}
           <div>
@@ -384,9 +407,25 @@ export const AdaptersDropdown: React.FC = () => {
 
 /** Summary badge for the Adapters section */
 export const AdaptersBadge: React.FC = () => {
-  const { adapter, adapterScale } = useGlobalParams();
-  const filename = adapter ? adapter.split(/[\\/]/).pop()?.replace(/\.safetensors$/i, '') || '' : '';
+  const { adapter, adapterScale, adapterStack, advancedAdapters } = useGlobalParams();
+  const stack = adapterStack || [];
+  const useStack = advancedAdapters && stack.length > 0;
+  const shortName = (p: string) => p.split(/[\\/]/).pop()?.replace(/\.safetensors$/i, '') || '';
 
+  if (useStack) {
+    const first = shortName(stack[0].path);
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+        <span className="text-[10px] text-emerald-400 font-mono truncate max-w-[120px]" title={stack.map(a => a.path).join('\n')}>
+          {first}
+        </span>
+        {stack.length > 1 && <span className="text-[10px] text-zinc-600">+{stack.length - 1}</span>}
+      </div>
+    );
+  }
+
+  const filename = adapter ? shortName(adapter) : '';
   return (
     <div className="flex items-center gap-1.5">
       {adapter ? (

@@ -805,20 +805,24 @@ static bool adapter_merge_lora(WeightCtx *            wctx,
         ggml_type data_type;
         const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
 
-        // Conv1d tensors (e.g. proj_in): see comment in LoKr path
-        if (n_dims >= 3 && pending_idx.find(base_ptr) == pending_idx.end()) {
-            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
-                auto & pc = wctx->pending[pi];
-                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
-                    ne0      = pc.tensor->ne[0];
-                    ne1      = pc.tensor->ne[1];
-                    ttype    = pc.tensor->type;
-                    base_ptr = pc.src;
-                    fprintf(stderr, "[Adapter] Conv1d %s: using pre-permuted shape [%lld, %lld] (%s)\n",
-                            gguf_name.c_str(), (long long) ne0, (long long) ne1,
-                            ggml_type_name(ttype));
-                    break;
+        // Source the base from the CURRENT pending copy by name. This makes a
+        // multi-adapter stack accumulate: each successive adapter_merge sees the
+        // previous adapter's merged result (pc->src/type already reflect any
+        // F32/BF16 promotion) and adds its delta on top. It also handles the
+        // pre-permuted Conv1d case (proj_in: 3D GGUF [P,in,H] -> staged 2D F32
+        // [in*P,H]) whose raw GGUF pointer won't match pending_idx. For the first
+        // adapter pc->src == ws.data() and pc->tensor->type == ws.type(), so this
+        // is behaviour-identical to the original single-adapter path.
+        for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+            auto & pc = wctx->pending[pi];
+            if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                if (n_dims >= 3) {
+                    ne0 = pc.tensor->ne[0];
+                    ne1 = pc.tensor->ne[1];
                 }
+                ttype    = pc.tensor->type;
+                base_ptr = pc.src;
+                break;
             }
         }
 
@@ -1070,29 +1074,28 @@ static bool adapter_merge_lokr(WeightCtx *          wctx,
         ggml_type data_type;
         const void * base_ptr = ws.data(gguf_name.c_str(), data_type);
 
-        // Conv1d tensors (e.g. proj_in) are stored as 3D in GGUF [P, in_ch, H]
-        // but dit_load_proj_in_w() pre-permutes them to 2D F32 [in_ch*P, H].
-        // The raw GGUF pointer won't match pending_idx (which indexes the permuted
-        // staging buffer), so we fall back to the PendingCopy's tensor shape.
+        // Source the base from the CURRENT pending copy by name so a multi-adapter
+        // stack accumulates (each merge sees the previous adapter's result via
+        // pc->src/type), and so the pre-permuted Conv1d case is handled. Conv1d
+        // tensors (e.g. proj_in) are stored 3D in GGUF [P, in_ch, H] but
+        // dit_load_proj_in_w() pre-permutes them to 2D F32 [in_ch*P, H]; their raw
+        // GGUF pointer won't match pending_idx, so use the PendingCopy shape. For
+        // the first adapter pc matches ws exactly, so behaviour is unchanged.
         bool is_prepermuted = false;
-        if (n_dims >= 3 && pending_idx.find(base_ptr) == pending_idx.end()) {
-            // Search for the matching PendingCopy by tensor name
-            for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
-                auto & pc = wctx->pending[pi];
-                if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
-                    // Use the permuted tensor's 2D shape and staging data pointer
-                    ne0      = pc.tensor->ne[0];
-                    ne1      = pc.tensor->ne[1];
-                    ttype    = pc.tensor->type;
-                    base_ptr = pc.src;
+        for (size_t pi = 0; pi < wctx->pending.size(); pi++) {
+            auto & pc = wctx->pending[pi];
+            if (pc.tensor && pc.tensor->name && gguf_name == pc.tensor->name) {
+                if (n_dims >= 3) {
+                    ne0            = pc.tensor->ne[0];
+                    ne1            = pc.tensor->ne[1];
                     is_prepermuted = true;
-                    fprintf(stderr, "[Adapter] Conv1d %s: using pre-permuted shape [%lld, %lld] (%s)\n",
-                            gguf_name.c_str(), (long long) ne0, (long long) ne1,
-                            ggml_type_name(ttype));
-                    break;
                 }
+                ttype    = pc.tensor->type;
+                base_ptr = pc.src;
+                break;
             }
         }
+        (void) is_prepermuted;
 
         // LoKr shapes (safetensors row major):
         //   w1 : (a, b)

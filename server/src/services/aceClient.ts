@@ -80,6 +80,11 @@ export interface AceRequest {
   emb_model?: string;
   adapter?: string;
   adapter_scale?: number;
+  /** Multi-adapter stack. When present and non-empty, supersedes the single
+   *  `adapter`/`adapter_scale`: every entry is applied with its own scale
+   *  (merged sequentially, or summed in runtime mode). Each `name` is a registry
+   *  adapter id (or absolute path) resolved by the engine. */
+  adapters?: { name: string; scale: number }[];
   adapter_group_scales?: {
     self_attn: number;
     cross_attn: number;

@@ -539,12 +539,33 @@ static bool dit_ggml_load(DiTGGML *    m,
                 }
             }
             Timer adapter_timer;
-            if (!adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, promote_f32, rebase_source, rebase_beta)) {
+            // Multi-adapter stack: merge each adapter sequentially. adapter_merge
+            // reads each tensor's CURRENT (post-prior-merge) value, so deltas
+            // accumulate: W <- W + s1*d1 + s2*d2 + ... (see adapter-merge.h). The
+            // basin re-base applies globally to every adapter in the stack. When
+            // the stack is empty, fall back to the single legacy adapter path.
+            const std::vector<AdapterSpec> & stack = g_hotstep_params.adapters;
+            bool merge_ok = false;
+            if (!stack.empty()) {
+                int si = 0;
+                for (const auto & a : stack) {
+                    if (adapter_merge(&m->wctx, ws, a.path.c_str(), a.scale, m->backend, promote_f32, rebase_source, rebase_beta)) {
+                        merge_ok = true;
+                    } else {
+                        fprintf(stderr, "[Adapter] WARNING: stack adapter %d merged no tensors: %s\n", si, a.path.c_str());
+                    }
+                    si++;
+                }
+            } else {
+                merge_ok = adapter_merge(&m->wctx, ws, adapter_path, adapter_scale, m->backend, promote_f32, rebase_source, rebase_beta);
+            }
+            if (!merge_ok) {
                 fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
                 if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
                 return false;
             }
-            fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
+            fprintf(stderr, "[Adapter] Merge time: %.1f ms (%zu adapter%s)\n", adapter_timer.ms(),
+                    stack.empty() ? (size_t) 1 : stack.size(), (stack.size() == 1) ? "" : "s");
         } else {
             fprintf(stderr, "[Adapter] mode=runtime, deferring delta precompute\n");
         }
@@ -561,11 +582,23 @@ static bool dit_ggml_load(DiTGGML *    m,
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
         if (runtime_mode) {
             Timer rt_timer;
-            if (!adapter_load_runtime(&m->lora, &m->wctx, ws, adapter_path, adapter_scale,
-                                       g_hotstep_params.adapter_group_scales, m->backend)) {
+            // Multi-adapter stack: precompute each adapter's deltas and SUM them
+            // per projection into a single delta set (constant per-step cost,
+            // VRAM flat regardless of stack depth). Empty stack => single adapter.
+            const std::vector<AdapterSpec> & stack = g_hotstep_params.adapters;
+            bool rt_ok;
+            if (!stack.empty()) {
+                rt_ok = adapter_load_runtime_stack(&m->lora, &m->wctx, ws, stack,
+                                                   g_hotstep_params.adapter_group_scales, m->backend);
+            } else {
+                rt_ok = adapter_load_runtime(&m->lora, &m->wctx, ws, adapter_path, adapter_scale,
+                                             g_hotstep_params.adapter_group_scales, m->backend);
+            }
+            if (!rt_ok) {
                 fprintf(stderr, "[Adapter-RT] WARNING: runtime adapter load failed\n");
             }
-            fprintf(stderr, "[Adapter-RT] Load time: %.1f ms\n", rt_timer.ms());
+            fprintf(stderr, "[Adapter-RT] Load time: %.1f ms (%zu adapter%s)\n", rt_timer.ms(),
+                    stack.empty() ? (size_t) 1 : stack.size(), (stack.size() == 1) ? "" : "s");
         }
     }
 

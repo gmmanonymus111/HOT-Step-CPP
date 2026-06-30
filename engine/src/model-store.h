@@ -95,6 +95,11 @@ struct ModelKey {
     // DiT base work on a sibling base. "" / 0.0f = off. Baked into merged weights.
     std::string rebase_source;  // path to S (safetensors model dir or model.safetensors)
     float       rebase_beta;    // 0.0f default = no nudge
+    // Multi-adapter stack signature (see hotstep_adapter_stack_sig). "" when no
+    // stack (single-adapter legacy keying via adapter_path/adapter_scale). When
+    // set, it encodes every stacked adapter path + scale so distinct stacks cache
+    // as distinct merged/runtime DiTs.
+    std::string adapter_stack;
 };
 
 enum EvictPolicy {

@@ -130,6 +130,26 @@ static void adapter_stage_delta(DiTLoRA * lora, DiTLoRADelta * slot,
                                  const std::string & gguf_name,
                                  int64_t ne0, int64_t ne1,
                                  std::vector<float> && delta_f32) {
+    // Multi-adapter stacking: if this projection already has a staged delta from
+    // an earlier adapter in the stack, sum into it (same base tensor => identical
+    // shape) rather than allocating a second tensor. This keeps per-step inference
+    // cost and VRAM constant regardless of how many adapters are stacked.
+    if (slot->delta != nullptr) {
+        for (auto & sd : lora->staged) {
+            if (sd.tensor == slot->delta) {
+                if (sd.f32_data.size() == delta_f32.size()) {
+                    for (size_t i = 0; i < delta_f32.size(); i++) {
+                        sd.f32_data[i] += delta_f32[i];
+                    }
+                } else {
+                    fprintf(stderr, "[Adapter-RT] WARNING: delta shape mismatch stacking %s (%zu vs %zu), skipping add\n",
+                            gguf_name.c_str(), sd.f32_data.size(), delta_f32.size());
+                }
+                return;
+            }
+        }
+        // slot->delta set but not in staged (shouldn't happen) — fall through.
+    }
     char tname[128];
     snprintf(tname, sizeof(tname), "lora_%s", gguf_name.c_str());
     slot->delta = ggml_new_tensor_2d(lora->ctx, GGML_TYPE_BF16, ne0, ne1);
@@ -545,25 +565,20 @@ static bool adapter_runtime_lokr(DiTLoRA *                  lora,
     return merged > 0;
 }
 
-// ─── Main entry point ───
+// ─── Per-file staging ───
 
-static bool adapter_load_runtime(DiTLoRA *                  lora,
-                                  WeightCtx *                wctx,
-                                  const WeightSource &       ws,
-                                  const char *               adapter_path,
-                                  float                      adapter_scale,
-                                  const AdapterGroupScales & gs,
-                                  ggml_backend_t             backend) {
-    // Estimate max deltas (24 layers × 11 projections = 264, plus non-layer weights)
-    int max_deltas = DIT_LORA_MAX_LAYERS * 11 + 32;
-    size_t ctx_size = (size_t) max_deltas * ggml_tensor_overhead() + 4096;
-    struct ggml_init_params params = { ctx_size, NULL, true };
-    lora->ctx = ggml_init(params);
-    if (!lora->ctx) {
-        fprintf(stderr, "[Adapter-RT] FATAL: failed to init lora context\n");
-        return false;
-    }
-
+// Open one adapter (PEFT dir or flat file) and STAGE its per-projection deltas
+// into lora->ctx / lora->staged. Requires lora->ctx already initialised. Does
+// not allocate the backend buffer or upload — that happens once after the whole
+// stack is staged (see adapter_load_runtime_stack). Deltas for a projection
+// already staged by an earlier adapter are summed in (adapter_stage_delta).
+static bool adapter_runtime_stage_file(DiTLoRA *                  lora,
+                                       WeightCtx *                wctx,
+                                       const WeightSource &       ws,
+                                       const char *               adapter_path,
+                                       float                      adapter_scale,
+                                       const AdapterGroupScales & gs,
+                                       ggml_backend_t             backend) {
     // Load safetensors (same logic as adapter_merge)
     std::string path_str(adapter_path);
     STFile st;
@@ -587,12 +602,10 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
     }
     if (!loaded) {
         fprintf(stderr, "[Adapter-RT] FATAL: cannot open adapter at %s\n", adapter_path);
-        ggml_free(lora->ctx);
-        lora->ctx = nullptr;
         return false;
     }
 
-    fprintf(stderr, "[Adapter-RT] Loading runtime adapter from %s\n", st_path.c_str());
+    fprintf(stderr, "[Adapter-RT] Loading runtime adapter from %s (scale=%.2f)\n", st_path.c_str(), adapter_scale);
 
     bool ok;
     if (adapter_detect_lokr(st)) {
@@ -610,11 +623,15 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
     }
 
     st_close(&st);
+    return ok;
+}
 
-    if (!ok || lora->staged.empty()) {
+// Finalise a staged stack: allocate one backend buffer for all delta tensors and
+// upload them (F32 staging -> BF16). Frees the ctx and returns false on failure.
+static bool adapter_runtime_finalize(DiTLoRA * lora, ggml_backend_t backend) {
+    if (lora->staged.empty()) {
         fprintf(stderr, "[Adapter-RT] WARNING: no deltas computed\n");
-        ggml_free(lora->ctx);
-        lora->ctx = nullptr;
+        if (lora->ctx) { ggml_free(lora->ctx); lora->ctx = nullptr; }
         return false;
     }
 
@@ -647,4 +664,68 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
     fprintf(stderr, "[Adapter-RT] Loaded %zu deltas (%.1f MB BF16) into VRAM\n",
             n_deltas, (float) total_bytes / (1024 * 1024));
     return true;
+}
+
+// ─── Main entry points ───
+
+// Multi-adapter stack: stage every adapter's deltas into one DiTLoRA, summing
+// per projection, then allocate + upload once. Per-step inference cost and VRAM
+// are independent of stack depth (deltas collapse into one set per projection).
+static bool adapter_load_runtime_stack(DiTLoRA *                       lora,
+                                       WeightCtx *                     wctx,
+                                       const WeightSource &            ws,
+                                       const std::vector<AdapterSpec> & stack,
+                                       const AdapterGroupScales &      gs,
+                                       ggml_backend_t                  backend) {
+    if (stack.empty()) {
+        fprintf(stderr, "[Adapter-RT] WARNING: empty adapter stack\n");
+        return false;
+    }
+
+    // One context sized for the union of slots. Slots are shared across adapters
+    // (deltas accumulate into the same tensor), so the per-adapter slot count
+    // bounds the total — sizing as for a single adapter is sufficient.
+    int max_deltas = DIT_LORA_MAX_LAYERS * 11 + 32;
+    size_t ctx_size = (size_t) max_deltas * ggml_tensor_overhead() + 4096;
+    struct ggml_init_params params = { ctx_size, NULL, true };
+    lora->ctx = ggml_init(params);
+    if (!lora->ctx) {
+        fprintf(stderr, "[Adapter-RT] FATAL: failed to init lora context\n");
+        return false;
+    }
+
+    int staged_ok = 0;
+    for (size_t i = 0; i < stack.size(); i++) {
+        if (adapter_runtime_stage_file(lora, wctx, ws, stack[i].path.c_str(), stack[i].scale, gs, backend)) {
+            staged_ok++;
+        } else {
+            fprintf(stderr, "[Adapter-RT] WARNING: stack adapter %zu staged no deltas: %s\n", i, stack[i].path.c_str());
+        }
+        if (adapter_cancel_requested()) {
+            fprintf(stderr, "[Adapter-RT] stack staging cancelled at adapter %zu/%zu\n", i + 1, stack.size());
+            if (lora->ctx) { ggml_free(lora->ctx); lora->ctx = nullptr; }
+            lora->staged.clear();
+            return false;
+        }
+    }
+
+    if (staged_ok == 0) {
+        if (lora->ctx) { ggml_free(lora->ctx); lora->ctx = nullptr; }
+        lora->staged.clear();
+        return false;
+    }
+
+    return adapter_runtime_finalize(lora, backend);
+}
+
+// Single-adapter convenience wrapper (legacy call site / CLI / warm).
+static bool adapter_load_runtime(DiTLoRA *                  lora,
+                                  WeightCtx *                wctx,
+                                  const WeightSource &       ws,
+                                  const char *               adapter_path,
+                                  float                      adapter_scale,
+                                  const AdapterGroupScales & gs,
+                                  ggml_backend_t             backend) {
+    std::vector<AdapterSpec> single{ AdapterSpec{ std::string(adapter_path), adapter_scale } };
+    return adapter_load_runtime_stack(lora, wctx, ws, single, gs, backend);
 }

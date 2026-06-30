@@ -133,6 +133,24 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     if ((v = yyjson_obj_get(obj, "adapter")) && yyjson_is_str(v)) {
         r->adapter = yy_str(v);
     }
+    // Multi-adapter stack: array of {name, scale} objects (or bare name strings).
+    // Supersedes the single `adapter`/`adapter_scale` when present and non-empty.
+    if ((v = yyjson_obj_get(obj, "adapters")) && yyjson_is_arr(v)) {
+        size_t       a_idx, a_max;
+        yyjson_val * a_val;
+        yyjson_arr_foreach(v, a_idx, a_max, a_val) {
+            AceAdapterRef ref;
+            if (yyjson_is_str(a_val)) {
+                ref.name = yy_str(a_val);
+            } else if (yyjson_is_obj(a_val)) {
+                yyjson_val * nv = yyjson_obj_get(a_val, "name");
+                yyjson_val * sv = yyjson_obj_get(a_val, "scale");
+                if (nv && yyjson_is_str(nv)) ref.name = yy_str(nv);
+                if (sv && yyjson_is_num(sv)) ref.scale = (float) yyjson_get_num(sv);
+            }
+            if (!ref.name.empty()) r->adapters.push_back(ref);
+        }
+    }
     if ((v = yyjson_obj_get(obj, "vae")) && yyjson_is_str(v)) {
         r->vae = yy_str(v);
     }
@@ -529,6 +547,16 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->adapter_scale != def.adapter_scale) {
         yyjson_mut_obj_add_real(doc, root, "adapter_scale", r->adapter_scale);
     }
+    if (all || !r->adapters.empty()) {
+        yyjson_mut_val * arr = yyjson_mut_arr(doc);
+        for (const auto & a : r->adapters) {
+            yyjson_mut_val * o = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, o, "name", a.name.c_str());
+            yyjson_mut_obj_add_real(doc, o, "scale", a.scale);
+            yyjson_mut_arr_append(arr, o);
+        }
+        yyjson_mut_obj_add_val(doc, root, "adapters", arr);
+    }
     if (all || r->vae != def.vae) {
         yyjson_mut_obj_add_str(doc, root, "vae", r->vae.c_str());
     }
@@ -640,6 +668,12 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (!r->adapter.empty()) {
         fprintf(f, "[Request] adapter: %s (scale=%.2f)\n", r->adapter.c_str(), r->adapter_scale);
+    }
+    if (!r->adapters.empty()) {
+        fprintf(f, "[Request] adapter stack (%zu):\n", r->adapters.size());
+        for (const auto & a : r->adapters) {
+            fprintf(f, "[Request]   - %s (scale=%.2f)\n", a.name.c_str(), a.scale);
+        }
     }
     if (!r->vae.empty()) {
         fprintf(f, "[Request] vae: %s\n", r->vae.c_str());

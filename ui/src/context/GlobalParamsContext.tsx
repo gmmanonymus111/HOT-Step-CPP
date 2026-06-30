@@ -29,6 +29,11 @@ export interface GlobalParams {
   // Adapters
   adapter: string; setAdapter: (v: string) => void;
   adapterScale: number; setAdapterScale: (v: number) => void;
+  // Multi-adapter stack: { path, scale }[] applied together (supersedes `adapter`)
+  adapterStack: { path: string; scale: number }[];
+  setAdapterStack: (v: { path: string; scale: number }[]) => void;
+  toggleAdapterInStack: (path: string, scale?: number) => void;
+  setAdapterStackScale: (path: string, scale: number) => void;
   adapterMode: string; setAdapterMode: (v: string) => void;
   adapterGroupScales: AdapterGroupScales;
   setAdapterGroupScales: (v: AdapterGroupScales) => void;

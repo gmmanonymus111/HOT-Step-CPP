@@ -131,6 +131,9 @@ export interface GenerationParams {
   // Adapter
   loraPath: string;
   loraScale: number;
+  /** Multi-adapter stack: applied together, each with its own scale. When set
+   *  (and non-empty) it supersedes the single loraPath/loraScale. */
+  loraStack?: { path: string; scale: number }[];
   adapterGroupScales?: {
     self_attn: number;
     cross_attn: number;

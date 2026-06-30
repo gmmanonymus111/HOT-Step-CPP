@@ -177,6 +177,33 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Multi-adapter stack: the `adapters` array supersedes the single `adapter`
+    // field. Fold the single field into a one-element stack so the load path is
+    // uniform. The resolved stack drives merge/runtime loading via the sideband.
+    g_hotstep_params.adapters.clear();
+    {
+        std::vector<AceAdapterRef> stack = reqs[0].adapters;
+        if (stack.empty() && adapter_entry) {
+            stack.push_back({ reqs[0].adapter, reqs[0].adapter_scale });
+        }
+        for (const auto & ar : stack) {
+            const AdapterEntry * e = registry_find_adapter(registry, ar.name.c_str());
+            std::string          path;
+            if (e) {
+                path = e->path;
+            } else {
+                FILE * t = fopen(ar.name.c_str(), "rb");
+                if (t) { fclose(t); path = ar.name; }
+            }
+            if (path.empty()) {
+                fprintf(stderr, "[Ace-Synth] FATAL: adapter '%s' not found (use --adapters <dir>)\n",
+                        ar.name.c_str());
+                return 1;
+            }
+            g_hotstep_params.adapters.push_back({ path, ar.scale });
+        }
+    }
+
     // Resolve output_format to (is_mp3, wav_fmt).
     bool      is_mp3  = true;
     WavFormat wav_fmt = WAV_S16;
@@ -190,8 +217,10 @@ int main(int argc, char ** argv) {
     params.text_encoder_path = registry.text_enc[0].path.c_str();
     params.dit_path          = dit_entry->path.c_str();
     params.vae_path          = registry.vae[0].path.c_str();
-    params.adapter_path      = adapter_entry ? adapter_entry->path.c_str() : NULL;
-    params.adapter_scale     = reqs[0].adapter_scale;
+    params.adapter_path      = g_hotstep_params.adapters.empty() ? NULL
+                                                                  : g_hotstep_params.adapters[0].path.c_str();
+    params.adapter_scale     = g_hotstep_params.adapters.empty() ? 1.0f
+                                                                 : g_hotstep_params.adapters[0].scale;
     params.use_fa            = use_fa;
     params.use_batch_cfg     = use_batch_cfg;
     params.clamp_fp16        = clamp_fp16;

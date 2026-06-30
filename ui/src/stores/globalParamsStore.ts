@@ -45,6 +45,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   embeddingModel: readKey("hs-embeddingModel", ''),
   adapter: readKey("hs-adapter", ''),
   adapterScale: readKey("hs-adapterScale", 1.0),
+  // Multi-adapter stack: a list of { path, scale } applied together, each with
+  // its own scale. When non-empty it supersedes the single `adapter`. Group
+  // scales, adapter mode and basin re-base apply globally to the whole stack.
+  adapterStack: readKey("hs-adapterStack", [] as { path: string; scale: number }[]),
   adapterMode: readKey("hs-adapterMode", 'runtime'),
   adapterGroupScales: readKey("hs-adapterGroupScales", {
     self_attn: 1.0, cross_attn: 1.0, mlp: 1.0, cond_embed: 1.0, time_embed: 0.0, proj_in: 0.0,
@@ -161,6 +165,20 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setEmbeddingModel: (v: any) => { set({ embeddingModel: v }); writeKey("hs-embeddingModel", v); },
   setAdapter: (v: any) => { set({ adapter: v }); writeKey("hs-adapter", v); },
   setAdapterScale: (v: any) => { set({ adapterScale: v }); writeKey("hs-adapterScale", v); },
+  setAdapterStack: (v: any) => { set({ adapterStack: v }); writeKey("hs-adapterStack", v); },
+  // Add/remove an adapter path from the stack (idempotent toggle).
+  toggleAdapterInStack: (path: string, scale = 1.0) => {
+    const cur: { path: string; scale: number }[] = get().adapterStack || [];
+    const exists = cur.some(a => a.path === path);
+    const next = exists ? cur.filter(a => a.path !== path) : [...cur, { path, scale }];
+    set({ adapterStack: next }); writeKey("hs-adapterStack", next);
+  },
+  // Set the per-adapter scale for one stack entry.
+  setAdapterStackScale: (path: string, scale: number) => {
+    const cur: { path: string; scale: number }[] = get().adapterStack || [];
+    const next = cur.map(a => (a.path === path ? { ...a, scale } : a));
+    set({ adapterStack: next }); writeKey("hs-adapterStack", next);
+  },
   setAdapterMode: (v: any) => { set({ adapterMode: v }); writeKey("hs-adapterMode", v); },
   setAdapterGroupScales: (v: any) => { set({ adapterGroupScales: v }); writeKey("hs-adapterGroupScales", v); },
   setRebaseSource: (v: any) => { set({ rebaseSource: v }); writeKey("hs-rebaseSource", v); },
@@ -285,18 +303,32 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   getGlobalParams: (): Partial<GenerationParams> => {
     const s = get();
     const settings: AppSettings = readKey('ace-settings', DEFAULT_SETTINGS);
-    const triggerWord: string = settings.triggerUseFilename && s.adapter
-      ? (s.adapter.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '')
+
+    // Effective adapter stack: the multi-adapter list when present, otherwise the
+    // single `adapter` folded into a one-element stack. `primary` drives the
+    // single-adapter features (trigger word, basin re-base, group scales) which
+    // remain keyed on the first adapter.
+    const stack: { path: string; scale: number }[] =
+      (s.adapterStack && s.adapterStack.length > 0)
+        ? s.adapterStack
+        : (s.adapter ? [{ path: s.adapter, scale: s.adapterScale }] : []);
+    const primary = stack[0]?.path || '';
+
+    const triggerWord: string = settings.triggerUseFilename && primary
+      ? (primary.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '')
       : '';
 
     return {
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
-      loraPath: s.adapter, loraScale: s.adapterScale,
-      adapterGroupScales: s.adapter ? s.adapterGroupScales : undefined,
-      adapterMode: s.adapter ? s.adapterMode : 'merge',
+      loraPath: primary, loraScale: stack[0]?.scale ?? 1.0,
+      // Multi-adapter stack (>1 entry) — sent alongside loraPath; the engine
+      // prefers the stack and applies each adapter with its own scale.
+      loraStack: stack.length > 0 ? stack : undefined,
+      adapterGroupScales: primary ? s.adapterGroupScales : undefined,
+      adapterMode: primary ? s.adapterMode : 'merge',
       // Basin re-base: only sent with an adapter in merge mode and a chosen source.
-      rebaseSource: (s.adapter && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseSource : undefined,
-      rebaseBeta: (s.adapter && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseBeta : undefined,
+      rebaseSource: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseSource : undefined,
+      rebaseBeta: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseBeta : undefined,
       triggerWord: triggerWord || undefined,
       triggerPlacement: triggerWord ? settings.triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,

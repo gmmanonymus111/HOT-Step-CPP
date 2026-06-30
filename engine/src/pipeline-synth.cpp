@@ -168,6 +168,9 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     ctx->dit_key.adapter_path         = params->adapter_path ? params->adapter_path : "";
     ctx->dit_key.adapter_scale        = params->adapter_scale;
     ctx->dit_key.adapter_group_scales = g_hotstep_params.adapter_group_scales;
+    // Multi-adapter stack signature: distinct stacks (paths + per-adapter scales)
+    // bake distinct weights/deltas, so they must key distinct cache entries.
+    ctx->dit_key.adapter_stack        = hotstep_adapter_stack_sig(g_hotstep_params.adapters);
     // Basin re-base: only meaningful with an adapter, and only in merge mode.
     if (!ctx->dit_key.adapter_path.empty() && g_hotstep_params.adapter_mode != "runtime") {
         ctx->dit_key.rebase_source = g_hotstep_params.rebase_source;

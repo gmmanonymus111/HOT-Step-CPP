@@ -10,6 +10,8 @@
 // synth_batch_run() call, read by hot-step-sampler.h inside dit_ggml_generate().
 // Safe because the GPU worker is single-threaded.
 
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -23,6 +25,15 @@ struct AdapterGroupScales {
     float cond_embed  = 1.0f;
     float time_embed  = 1.0f;
     float proj_in     = 1.0f;
+};
+
+// One adapter in a (possibly multi-adapter) stack. `path` is the resolved
+// absolute adapter path (flat .safetensors file or PEFT directory); `scale` is
+// this adapter's individual user-scale multiplier. Group scales and basin
+// re-base apply globally to every adapter in the stack.
+struct AdapterSpec {
+    std::string path;
+    float       scale = 1.0f;
 };
 
 // Classify a GGUF tensor name into its adapter group.
@@ -86,6 +97,13 @@ struct HotStepParams {
     // merge stores merged weights as F32 to avoid catastrophic BF16 cancellation.
     std::string adapter_mode = "merge";
 
+    // Multi-adapter stack. When non-empty, supersedes the single adapter_path
+    // passed to dit_ggml_load: every entry is applied with its own scale —
+    // merged sequentially into the base weights (merge mode) or summed into the
+    // per-projection runtime deltas (runtime mode). Empty = single-adapter legacy
+    // path. Populated by the server worker from the resolved request adapters.
+    std::vector<AdapterSpec> adapters;
+
     // Basin re-base: nudge adapted weights toward the base the adapter was trained
     // on (S) before merging, by beta*(S - T). Lets a heavy adapter trained on one
     // DiT base behave on a sibling base. rebase_source is an absolute path to S
@@ -146,4 +164,21 @@ struct HotStepParams {
 // synth_batch_run(), read in hot-step-sampler.h during dit_ggml_generate()
 // and in adapter-merge.h during adapter loading.
 inline HotStepParams g_hotstep_params;
+
+// Stable signature of a multi-adapter stack, for the DiT model cache key.
+// Encodes each adapter's path and the bit-pattern of its scale so distinct
+// stacks (or the same stack with a different per-adapter scale) map to distinct
+// cache entries. Empty stack => empty string (single-adapter legacy keying).
+static inline std::string hotstep_adapter_stack_sig(const std::vector<AdapterSpec> & adapters) {
+    std::string s;
+    for (const auto & a : adapters) {
+        uint32_t bits;
+        memcpy(&bits, &a.scale, sizeof(bits));
+        char buf[16];
+        snprintf(buf, sizeof(buf), "@%08x|", bits);
+        s += a.path;
+        s += buf;
+    }
+    return s;
+}
 

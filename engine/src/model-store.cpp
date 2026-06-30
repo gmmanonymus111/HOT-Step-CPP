@@ -62,6 +62,9 @@ struct ModelKeyHash {
             // basin re-base: distinct (source, beta) must cache as distinct merges.
             h ^= std::hash<std::string>{}(k.rebase_source) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             hash_f(k.rebase_beta);
+            // multi-adapter stack: distinct stacks (paths + per-adapter scales)
+            // bake distinct weights, so they must cache as distinct DiTs.
+            h ^= std::hash<std::string>{}(k.adapter_stack) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
     }
@@ -83,7 +86,8 @@ struct ModelKeyEq {
                 && a.adapter_group_scales.mlp        == b.adapter_group_scales.mlp
                 && a.adapter_group_scales.cond_embed == b.adapter_group_scales.cond_embed
                 && a.rebase_source == b.rebase_source
-                && a.rebase_beta   == b.rebase_beta;
+                && a.rebase_beta   == b.rebase_beta
+                && a.adapter_stack == b.adapter_stack;
         }
         return true;
     }

@@ -81,6 +81,17 @@ export function translateParams(params: any): AceRequest {
   if (params.embeddingModel) req.emb_model = params.embeddingModel;
   if (params.loraPath) req.adapter = mapPath(params.loraPath);
   if (params.loraScale !== undefined) req.adapter_scale = params.loraScale;
+  // Multi-adapter stack: when the UI supplies a list, it supersedes the single
+  // adapter — each entry is mapped to an engine path and carries its own scale.
+  // The engine merges them (or sums runtime deltas) with per-adapter scaling.
+  if (Array.isArray(params.loraStack) && params.loraStack.length > 0) {
+    req.adapters = params.loraStack
+      .filter((a: { path?: string }) => a && a.path)
+      .map((a: { path: string; scale?: number }) => ({
+        name: mapPath(a.path) as string,
+        scale: a.scale ?? 1.0,
+      }));
+  }
   if (params.adapterGroupScales) req.adapter_group_scales = params.adapterGroupScales;
   if (params.adapterMode) req.adapter_mode = params.adapterMode;
   // Basin re-base: rebaseSource is a DiT model NAME (engine resolves to its path).

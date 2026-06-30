@@ -8,6 +8,14 @@
 #include <string>
 #include <vector>
 
+// One adapter reference in a multi-adapter stack. `name` is a registry adapter
+// id (or an absolute path, resolved by the server); `scale` is its individual
+// user-scale multiplier.
+struct AceAdapterRef {
+    std::string name;
+    float       scale = 1.0f;
+};
+
 struct AceRequest {
     // text content
     std::string caption;         // ""
@@ -113,6 +121,10 @@ struct AceRequest {
     std::string lm_model;       // ""
     std::string adapter;        // ""
     float       adapter_scale;  // 1.0
+    // Multi-adapter stack. When non-empty, supersedes `adapter`/`adapter_scale`:
+    // every entry is applied with its own scale (merged or summed depending on
+    // adapter_mode). Each name is resolved against --adapters by the server.
+    std::vector<AceAdapterRef> adapters;
     std::string vae;            // ""
 
     // PP-VAE re-encode: round-trip audio through the post-processing VAE
