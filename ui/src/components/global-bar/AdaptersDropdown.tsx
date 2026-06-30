@@ -63,6 +63,9 @@ export const AdaptersDropdown: React.FC = () => {
   const primaryPath = gp.advancedAdapters ? (stack[0]?.path || '') : gp.adapter;
   const hasAdapter = gp.advancedAdapters ? stack.length > 0 : !!gp.adapter;
   const triggerWord = deriveTriggerWord(primaryPath);
+  // Every stacked adapter contributes its trigger word (matches what is injected
+  // into the caption server-side).
+  const stackTriggerWords = stack.map(e => deriveTriggerWord(e.path)).filter(Boolean).join(', ');
   const adapterFilename = gp.adapter ? gp.adapter.split(/[\\/]/).pop() || '' : '';
   const fileLabel = (p: string) => p.split(/[\\/]/).pop() || p;
 
@@ -328,10 +331,10 @@ export const AdaptersDropdown: React.FC = () => {
                 </div>
               ))}
 
-              {settings.triggerUseFilename && triggerWord && (
+              {settings.triggerUseFilename && stackTriggerWords && (
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-500/10 border border-pink-500/20">
                   <Tag size={10} className="text-pink-400 flex-shrink-0" />
-                  <span className="text-[10px] text-pink-400 font-medium">{triggerWord}</span>
+                  <span className="text-[10px] text-pink-400 font-medium">{stackTriggerWords}</span>
                   <span className="text-[10px] text-zinc-500">({settings.triggerPlacement})</span>
                 </div>
               )}

@@ -384,25 +384,39 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       // original, so the trigger word injected by translateParams gets lost.
       // This applies to both cache hits (CoT caption from cache) and fresh
       // LM results (CoT caption from engine).
-      if (job.params.triggerWord && job.params.triggerPlacement && job.params.loraPath) {
+      const triggerWords: string[] = (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length)
+        ? job.params.triggerWords
+        : (job.params.triggerWord ? [job.params.triggerWord] : []);
+      if (triggerWords.length && job.params.triggerPlacement && job.params.loraPath) {
         for (const result of lmResults) {
-          const tw = job.params.triggerWord;
           const caption = result.caption || '';
-          if (!caption.includes(tw)) {
+          if (job.params.triggerPlacement === 'replace') {
+            const tw = triggerWords.join(', ');
             const before = caption.substring(0, 80);
-            switch (job.params.triggerPlacement) {
-              case 'prepend': result.caption = caption ? `${tw}, ${caption}` : tw; break;
-              case 'append':  result.caption = caption ? `${caption}, ${tw}` : tw; break;
-              case 'replace': result.caption = tw; break;
+            result.caption = tw;
+            logGeneration(job.id, 'INFO', `[Trigger] Re-injected (replace) "${tw}" — before: "${before}…" → after: "${(result.caption || '').substring(0, 80)}…"`);
+            continue;
+          }
+          // prepend/append: only inject the triggers not already present, so
+          // multi-adapter stacks don't duplicate ones the CoT caption kept.
+          const missing = triggerWords.filter(w => !caption.includes(w));
+          if (missing.length) {
+            const tw = missing.join(', ');
+            const before = caption.substring(0, 80);
+            if (job.params.triggerPlacement === 'append') {
+              result.caption = caption ? `${caption}, ${tw}` : tw;
+            } else {
+              result.caption = caption ? `${tw}, ${caption}` : tw;
             }
             logGeneration(job.id, 'INFO', `[Trigger] Re-injected "${tw}" (${job.params.triggerPlacement}) — before: "${before}…" → after: "${(result.caption || '').substring(0, 80)}…"`);
           } else {
-            logGeneration(job.id, 'INFO', `[Trigger] Already present: "${tw}" found in caption, skipping re-injection`);
+            logGeneration(job.id, 'INFO', `[Trigger] Already present: "${triggerWords.join(', ')}" found in caption, skipping re-injection`);
           }
         }
-      } else if (job.params.triggerWord) {
+      } else if (job.params.triggerWord || (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length)) {
         // Trigger word configured but condition incomplete — log why
-        logGeneration(job.id, 'WARNING', `[Trigger] triggerWord="${job.params.triggerWord}" but placement=${job.params.triggerPlacement}, loraPath=${job.params.loraPath ? 'set' : 'MISSING'} — skipping re-injection`);
+        const tw = (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length) ? job.params.triggerWords.join(', ') : job.params.triggerWord;
+        logGeneration(job.id, 'WARNING', `[Trigger] triggerWord="${tw}" but placement=${job.params.triggerPlacement}, loraPath=${job.params.loraPath ? 'set' : 'MISSING'} — skipping re-injection`);
       }
     }
 

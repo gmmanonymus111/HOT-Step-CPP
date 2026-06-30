@@ -101,9 +101,13 @@ export function translateParams(params: any): AceRequest {
     req.rebase_beta = params.rebaseBeta;
   }
 
-  // Trigger word
-  if (params.triggerWord && params.triggerPlacement && params.loraPath) {
-    const tw = params.triggerWord;
+  // Trigger word(s): every loaded adapter contributes its trigger. triggerWords
+  // is the full list; fall back to the single triggerWord for older callers.
+  const triggerWords: string[] = (Array.isArray(params.triggerWords) && params.triggerWords.length)
+    ? params.triggerWords
+    : (params.triggerWord ? [params.triggerWord] : []);
+  if (triggerWords.length && params.triggerPlacement && params.loraPath) {
+    const tw = triggerWords.join(', ');
     const caption = req.caption || '';
     switch (params.triggerPlacement) {
       case 'prepend': req.caption = caption ? `${tw}, ${caption}` : tw; break;

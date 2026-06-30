@@ -144,8 +144,10 @@ export interface GenerationParams {
   };
   adapterMode: string;  // "merge" or "runtime"
 
-  // Trigger word (applied server-side to caption)
+  // Trigger word (applied server-side to caption). triggerWords carries every
+  // loaded adapter's trigger; triggerWord is their joined form (back-compat).
   triggerWord?: string;
+  triggerWords?: string[];
   triggerPlacement?: 'prepend' | 'append' | 'replace';
 
   // Task type

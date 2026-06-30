@@ -339,9 +339,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     }
     const primary = stack[0]?.path || '';
 
-    const triggerWord: string = settings.triggerUseFilename && primary
-      ? (primary.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '')
-      : '';
+    // Trigger words: one per loaded adapter (every adapter in the stack
+    // contributes its filename trigger, not just the first).
+    const triggerWords: string[] = settings.triggerUseFilename
+      ? stack
+          .map(e => e.path.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '')
+          .filter(Boolean)
+      : [];
+    const triggerWord = triggerWords.join(', ');
 
     return {
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
@@ -355,7 +360,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       rebaseSource: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseSource : undefined,
       rebaseBeta: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseBeta : undefined,
       triggerWord: triggerWord || undefined,
-      triggerPlacement: triggerWord ? settings.triggerPlacement : undefined,
+      triggerWords: triggerWords.length ? triggerWords : undefined,
+      triggerPlacement: triggerWords.length ? settings.triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,
       cfgCutoffRatio: s.cfgCutoffRatio < 1.0 ? s.cfgCutoffRatio : undefined,
       lmCfgCutoffRatio: s.lmCfgCutoffRatio < 1.0 ? s.lmCfgCutoffRatio : undefined,
