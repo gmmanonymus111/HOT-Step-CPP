@@ -327,8 +327,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     // relative weight and normalise so the effective scales sum to the budget,
     // keeping combined strength constant regardless of how many are stacked.
     // Sum mode (and the single-adapter fallback) sends the raw scales as-is.
+    // Blend only applies with 2+ adapters — a single adapter's strength is just
+    // its own scale, sent as-is.
     let stack = rawStack;
-    if (isStack && s.adapterStackMode === 'blend' && rawStack.length > 0) {
+    if (isStack && s.adapterStackMode === 'blend' && rawStack.length >= 2) {
       const budget = s.adapterStackBudget ?? 0.75;
       const sumW = rawStack.reduce((acc, e) => acc + (e.scale || 0), 0);
       stack = sumW > 0
