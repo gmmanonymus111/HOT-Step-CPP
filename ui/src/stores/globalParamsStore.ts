@@ -354,6 +354,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       // Multi-adapter stack (>1 entry) — sent alongside loraPath; the engine
       // prefers the stack and applies each adapter with its own scale.
       loraStack: stack.length > 0 ? stack : undefined,
+      // Stack scaling mode + budget — reused for per-section masking transforms.
+      adapterStackMode: s.adapterStackMode,
+      adapterStackBudget: s.adapterStackBudget,
       adapterGroupScales: primary ? s.adapterGroupScales : undefined,
       adapterMode: primary ? s.adapterMode : 'merge',
       // Basin re-base: only sent with an adapter in merge mode and a chosen source.

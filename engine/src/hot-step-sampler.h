@@ -124,8 +124,11 @@ static int dit_ggml_generate(DiTGGML *           model,
     fprintf(stderr, "[DiT] Batch N=%d, T=%d, S=%d, enc_S=%d%s\n", N, T, S, enc_S,
             batch_cfg ? ", CFG batched 2N" : (do_cfg ? ", CFG 2-pass" : ""));
 
-    // Graph context (generous fixed allocation, shapes are constant across steps)
-    size_t               ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
+    // Graph context (generous fixed allocation, shapes are constant across steps).
+    // Per-section masking multiplies the per-adapter LoRA nodes, so scale the node
+    // budget with the separate-adapter count (m->loras) to avoid graph overflow.
+    size_t               graph_cap = 8192 + model->loras.size() * 4096;
+    size_t               ctx_size = ggml_tensor_overhead() * graph_cap + ggml_graph_overhead_custom(graph_cap, false);
     std::vector<uint8_t> ctx_buf(ctx_size);
 
     struct ggml_init_params gparams = {
@@ -159,6 +162,10 @@ static int dit_ggml_generate(DiTGGML *           model,
             if (t) {
                 ggml_backend_sched_set_tensor_backend(model->sched, t, model->backend);
             }
+        }
+        // Per-section adapter masks (dynamically named) — force to backend too.
+        for (struct ggml_tensor * mk : model->lora_masks) {
+            if (mk) ggml_backend_sched_set_tensor_backend(model->sched, mk, model->backend);
         }
     }
     if (!ggml_backend_sched_alloc_graph(model->sched, gf)) {
@@ -245,6 +252,56 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
     }
     ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+
+    // ── Per-section adapter masks (regional LoRA) ─────────────────────────────
+    // P1: proportional frame→section map. Partition the S latent frames across the
+    // sections by their relative `size`, then each adapter's mask is that section's
+    // weight, with a short linear crossfade at boundaries. Uploaded once (static in
+    // P1); P2 will recompute mid-sampling from cross-attention alignment.
+    if (!model->lora_masks.empty() && !g_hotstep_params.adapter_sections.empty()) {
+        const auto & secs = g_hotstep_params.adapter_sections;
+        const size_t Nad  = model->lora_masks.size();
+        // Section frame boundaries (proportional to size).
+        double total = 0.0;
+        for (const auto & s : secs) total += (s.size > 0.0f ? s.size : 1.0f);
+        if (total <= 0.0) total = 1.0;
+        std::vector<int> bnd(secs.size() + 1, 0);
+        double cum = 0.0;
+        for (size_t k = 0; k < secs.size(); k++) {
+            cum += (secs[k].size > 0.0f ? secs[k].size : 1.0f);
+            bnd[k + 1] = (int) llround((double) S * cum / total);
+        }
+        bnd[secs.size()] = S;
+        auto secWeight = [&](size_t k, size_t i) -> float {
+            return (k < secs.size() && i < secs[k].weights.size()) ? secs[k].weights[i] : 0.0f;
+        };
+        // Which section each frame belongs to.
+        std::vector<int> frame_sec(S, 0);
+        for (size_t k = 0; k < secs.size(); k++)
+            for (int s = bnd[k]; s < bnd[k + 1] && s < S; s++) frame_sec[s] = (int) k;
+        const int xf = std::max(1, S / 50);  // crossfade half-width (~2% of song)
+        std::vector<float> host(S);
+        for (size_t i = 0; i < Nad; i++) {
+            for (int s = 0; s < S; s++) {
+                int    k  = frame_sec[s];
+                float  w  = secWeight((size_t) k, i);
+                // Linear crossfade near the boundary to the next/prev section.
+                if (k + 1 < (int) secs.size()) {
+                    int b = bnd[k + 1];
+                    if (s >= b - xf) {
+                        float t   = (float) (s - (b - xf)) / (float) (2 * xf);  // 0..1 across the seam
+                        t         = t < 0 ? 0 : (t > 1 ? 1 : t);
+                        float wn  = secWeight((size_t) k + 1, i);
+                        w         = w * (1.0f - t) + wn * t;
+                    }
+                }
+                host[s] = w;
+            }
+            ggml_backend_tensor_set(model->lora_masks[i], host.data(), 0, (size_t) S * sizeof(float));
+        }
+        fprintf(stderr, "[Adapter-RT] Per-section masks uploaded: %zu adapters × %d frames, %zu sections\n",
+                Nad, S, secs.size());
+    }
 
     std::vector<APGMomentumBuffer> apg_mbufs;
     std::vector<float>             null_enc_buf;

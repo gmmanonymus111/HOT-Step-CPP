@@ -121,8 +121,16 @@ struct DiTGGML {
     // Pre-allocated constant for AdaLN (1+scale) fusion
     struct ggml_tensor * scalar_one;  // [1] = 1.0f, broadcast in ggml_add
 
-    // Runtime LoRA: precomputed BF16 delta tensors applied at inference
+    // Runtime LoRA: precomputed BF16 delta tensors applied at inference.
+    // `lora` is the single summed delta set (normal multi-adapter stacking).
     DiTLoRA lora;
+    // Per-section masking (regional LoRA): one DiTLoRA per adapter, kept separate
+    // (not summed) so each can be gated by its own per-frame mask in the graph.
+    // Non-empty only when adapter_sections is active. `lora_masks` are the
+    // per-adapter [1, S, 1] mask input tensors, created per graph build and
+    // uploaded by the sampler.
+    std::vector<DiTLoRA>          loras;
+    std::vector<struct ggml_tensor *> lora_masks;
 };
 
 // Helper: check if path ends with .gguf
@@ -596,7 +604,29 @@ static bool dit_ggml_load(DiTGGML *    m,
             // VRAM flat regardless of stack depth). Empty stack => single adapter.
             const std::vector<AdapterSpec> & stack = g_hotstep_params.adapters;
             bool rt_ok;
-            if (!stack.empty()) {
+            if (!g_hotstep_params.adapter_sections.empty() && stack.size() >= 2) {
+                // Per-section masking: load each adapter into its OWN DiTLoRA
+                // (not summed) so the graph can gate each with a per-frame mask.
+                // N× VRAM vs the summed path — the price of per-section control.
+                m->loras.clear();
+                m->loras.resize(stack.size());
+                rt_ok = false;
+                for (size_t i = 0; i < stack.size(); i++) {
+                    // Load each adapter UNIT-scaled (scale 1.0): the per-frame
+                    // section mask carries the full effective scale, so baking the
+                    // stack scale into the delta too would double-scale it. Group
+                    // scales still apply (they gate weight groups, not sections).
+                    std::vector<AdapterSpec> one{ AdapterSpec{ stack[i].path, 1.0f } };
+                    if (adapter_load_runtime_stack(&m->loras[i], &m->wctx, ws, one,
+                                                   g_hotstep_params.adapter_group_scales, m->backend)) {
+                        rt_ok = true;
+                    } else {
+                        fprintf(stderr, "[Adapter-RT] WARNING: section adapter %zu loaded no deltas: %s\n",
+                                i, stack[i].path.c_str());
+                    }
+                }
+                fprintf(stderr, "[Adapter-RT] Per-section load: %zu adapters kept separate\n", m->loras.size());
+            } else if (!stack.empty()) {
                 rt_ok = adapter_load_runtime_stack(&m->lora, &m->wctx, ws, stack,
                                                    g_hotstep_params.adapter_group_scales, m->backend);
             } else {
@@ -620,6 +650,10 @@ static bool dit_ggml_load(DiTGGML *    m,
 
 static void dit_ggml_free(DiTGGML * m) {
     dit_lora_free(&m->lora);
+    for (auto & lr : m->loras) {
+        dit_lora_free(&lr);
+    }
+    m->loras.clear();
     if (m->sched) {
         ggml_backend_sched_free(m->sched);
     }

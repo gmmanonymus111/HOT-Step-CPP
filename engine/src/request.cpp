@@ -151,6 +151,26 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
             if (!ref.name.empty()) r->adapters.push_back(ref);
         }
     }
+    // Per-section adapter masking: array of { weights: [..], size: n }.
+    if ((v = yyjson_obj_get(obj, "adapter_sections")) && yyjson_is_arr(v)) {
+        size_t       s_idx, s_max;
+        yyjson_val * s_val;
+        yyjson_arr_foreach(v, s_idx, s_max, s_val) {
+            if (!yyjson_is_obj(s_val)) continue;
+            AceAdapterSection sec;
+            yyjson_val * wv = yyjson_obj_get(s_val, "weights");
+            if (wv && yyjson_is_arr(wv)) {
+                size_t       w_idx, w_max;
+                yyjson_val * w_val;
+                yyjson_arr_foreach(wv, w_idx, w_max, w_val) {
+                    if (yyjson_is_num(w_val)) sec.weights.push_back((float) yyjson_get_num(w_val));
+                }
+            }
+            yyjson_val * sz = yyjson_obj_get(s_val, "size");
+            if (sz && yyjson_is_num(sz)) sec.size = (float) yyjson_get_num(sz);
+            r->adapter_sections.push_back(sec);
+        }
+    }
     if ((v = yyjson_obj_get(obj, "vae")) && yyjson_is_str(v)) {
         r->vae = yy_str(v);
     }
@@ -556,6 +576,18 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
             yyjson_mut_arr_append(arr, o);
         }
         yyjson_mut_obj_add_val(doc, root, "adapters", arr);
+    }
+    if (all || !r->adapter_sections.empty()) {
+        yyjson_mut_val * arr = yyjson_mut_arr(doc);
+        for (const auto & sec : r->adapter_sections) {
+            yyjson_mut_val * o  = yyjson_mut_obj(doc);
+            yyjson_mut_val * wa = yyjson_mut_arr(doc);
+            for (float w : sec.weights) yyjson_mut_arr_add_real(doc, wa, w);
+            yyjson_mut_obj_add_val(doc, o, "weights", wa);
+            yyjson_mut_obj_add_real(doc, o, "size", sec.size);
+            yyjson_mut_arr_append(arr, o);
+        }
+        yyjson_mut_obj_add_val(doc, root, "adapter_sections", arr);
     }
     if (all || r->vae != def.vae) {
         yyjson_mut_obj_add_str(doc, root, "vae", r->vae.c_str());

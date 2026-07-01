@@ -1128,6 +1128,24 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.temporal_smoothing  = sf.temporal_smoothing;
     g_hotstep_params.adapter_group_scales = sf.group_scales;
     g_hotstep_params.adapter_mode         = sf.adapter_mode;
+    // Per-section adapter masking (regional LoRA). Carry the parsed sections into
+    // the sideband and force runtime mode — merge bakes weights and cannot vary
+    // per frame. Only active with a multi-adapter stack.
+    g_hotstep_params.adapter_sections.clear();
+    if (!ace_reqs[0].adapter_sections.empty() && g_hotstep_params.adapters.size() >= 2) {
+        for (const auto & s : ace_reqs[0].adapter_sections) {
+            AdapterSection sec;
+            sec.weights = s.weights;
+            sec.size    = s.size;
+            g_hotstep_params.adapter_sections.push_back(sec);
+        }
+        if (g_hotstep_params.adapter_mode != "runtime") {
+            fprintf(stderr, "[Adapter] Per-section masking active — forcing runtime mode\n");
+            g_hotstep_params.adapter_mode = "runtime";
+        }
+        fprintf(stderr, "[Adapter] Per-section masking: %zu sections over %zu adapters\n",
+                g_hotstep_params.adapter_sections.size(), g_hotstep_params.adapters.size());
+    }
     // Basin re-base: sf.rebase_source is a DiT model NAME (same ids as the model
     // selector); resolve it to its on-disk path. Must be a safetensors model dir
     // (or model.safetensors) for the nudge to read F32 weights — GGUF-only sources

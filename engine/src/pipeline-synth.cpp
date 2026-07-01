@@ -171,6 +171,13 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     // Multi-adapter stack signature: distinct stacks (paths + per-adapter scales)
     // bake distinct weights/deltas, so they must key distinct cache entries.
     ctx->dit_key.adapter_stack        = hotstep_adapter_stack_sig(g_hotstep_params.adapters);
+    // Per-section masking loads N separate per-adapter deltas instead of one
+    // summed delta, so it must cache as a distinct DiT. The section weights
+    // themselves are applied per-frame at runtime (mask upload), not baked, so
+    // they don't need to be in the key.
+    if (!g_hotstep_params.adapter_sections.empty()) {
+        ctx->dit_key.adapter_stack += "|sect";
+    }
     // Basin re-base: only meaningful with an adapter, and only in merge mode.
     if (!ctx->dit_key.adapter_path.empty() && g_hotstep_params.adapter_mode != "runtime") {
         ctx->dit_key.rebase_source = g_hotstep_params.rebase_source;

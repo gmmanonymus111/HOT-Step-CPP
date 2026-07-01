@@ -16,6 +16,16 @@ struct AceAdapterRef {
     float       scale = 1.0f;
 };
 
+// One lyric section for per-section adapter masking (regional LoRA). `weights`
+// gives the effective per-adapter scale for this section, indexed to `adapters`;
+// `size` is a relative size hint (e.g. lyric char count) for proportional
+// frame allocation. The server has already applied Sum/Blend and filled
+// uniform-blend for directive-less sections, so the engine just maps it.
+struct AceAdapterSection {
+    std::vector<float> weights;
+    float              size = 1.0f;
+};
+
 struct AceRequest {
     // text content
     std::string caption;         // ""
@@ -125,6 +135,10 @@ struct AceRequest {
     // every entry is applied with its own scale (merged or summed depending on
     // adapter_mode). Each name is resolved against --adapters by the server.
     std::vector<AceAdapterRef> adapters;
+    // Per-section adapter masking (regional LoRA). Ordered per lyric section.
+    // When non-empty, each adapter's influence varies along the song timeline
+    // per these sections. Runtime mode only. Empty = feature off.
+    std::vector<AceAdapterSection> adapter_sections;
     std::string vae;            // ""
 
     // PP-VAE re-encode: round-trip audio through the post-processing VAE

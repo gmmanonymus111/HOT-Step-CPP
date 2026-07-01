@@ -36,6 +36,15 @@ struct AdapterSpec {
     float       scale = 1.0f;
 };
 
+// One lyric section for per-section adapter masking (regional LoRA). `weights`
+// are the effective per-adapter scales for this section (indexed to the adapter
+// stack); `size` is a relative frame-allocation hint. See
+// docs/plans/per-section-adapter-masking.md.
+struct AdapterSection {
+    std::vector<float> weights;
+    float              size = 1.0f;
+};
+
 // Classify a GGUF tensor name into its adapter group.
 // Returns "self_attn", "cross_attn", "mlp", "cond_embed", "time_embed",
 // "proj_in", or "" for truly unclassified.
@@ -103,6 +112,16 @@ struct HotStepParams {
     // per-projection runtime deltas (runtime mode). Empty = single-adapter legacy
     // path. Populated by the server worker from the resolved request adapters.
     std::vector<AdapterSpec> adapters;
+
+    // Per-section adapter masking (regional LoRA). Ordered per lyric section.
+    // When non-empty (and runtime mode), each adapter's per-projection delta is
+    // gated by a per-frame mask derived from these sections, so an adapter's
+    // influence varies along the song timeline. Empty = feature off (adapters
+    // summed as usual). See docs/plans/per-section-adapter-masking.md.
+    std::vector<AdapterSection> adapter_sections;
+    // Fraction of denoising steps to run before deriving the frame→section mask
+    // from cross-attention alignment (P2); P1 ignores it (proportional map).
+    float adapter_section_align_at = 0.55f;
 
     // Basin re-base: nudge adapted weights toward the base the adapter was trained
     // on (S) before merging, by beta*(S - T). Lets a heavy adapter trained on one

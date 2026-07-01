@@ -5,6 +5,7 @@
 
 import type { AceRequest } from '../../services/aceClient.js';
 import { mapPath } from '../../services/pathMapper.js';
+import { parseAdapterSections } from './adapterSections.js';
 
 /** Translate frontend params to AceRequest format */
 export function translateParams(params: any): AceRequest {
@@ -94,6 +95,24 @@ export function translateParams(params: any): AceRequest {
   }
   if (params.adapterGroupScales) req.adapter_group_scales = params.adapterGroupScales;
   if (params.adapterMode) req.adapter_mode = params.adapterMode;
+
+  // Per-section adapter masking (regional LoRA): parse inline [Section]{k=v} directives
+  // from the lyrics into a per-section weight table, strip them from the lyrics sent to
+  // the engine, and force runtime mode (merge can't vary per-frame). Only with a 2+
+  // adapter stack; a no-directive lyric leaves everything untouched.
+  if (Array.isArray(params.loraStack) && params.loraStack.length >= 2 && req.lyrics) {
+    const parsed = parseAdapterSections(
+      req.lyrics,
+      params.loraStack,
+      params.adapterStackMode || 'blend',
+      params.adapterStackBudget ?? 0.75,
+    );
+    if (parsed.sections && parsed.sections.length > 0) {
+      req.lyrics = parsed.lyrics;
+      req.adapter_sections = parsed.sections;
+      req.adapter_mode = 'runtime';
+    }
+  }
   // Basin re-base: rebaseSource is a DiT model NAME (engine resolves to its path).
   // Only meaningful alongside an adapter; engine ignores it otherwise.
   if (params.loraPath && params.rebaseSource && params.rebaseBeta) {

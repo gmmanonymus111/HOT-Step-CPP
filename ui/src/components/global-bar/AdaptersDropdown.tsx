@@ -338,6 +338,19 @@ export const AdaptersDropdown: React.FC = () => {
                   <span className="text-[10px] text-zinc-500">({settings.triggerPlacement})</span>
                 </div>
               )}
+
+              {/* Per-section masking hint (2+ adapters) */}
+              {multiStack && (
+                <div className="px-2.5 py-2 rounded-lg bg-sky-500/5 border border-sky-500/15 space-y-1">
+                  <div className="text-[10px] font-semibold text-sky-300/80 uppercase tracking-wider">Per-section influence</div>
+                  <p className="text-[10px] text-zinc-500 leading-relaxed">
+                    Vary each adapter by lyric section — add a directive after a section header,
+                    keyed by trigger word. Forces runtime mode.
+                  </p>
+                  <pre className="text-[9px] text-zinc-400 font-mono whitespace-pre-wrap leading-snug bg-black/20 rounded p-1.5 m-0">{`[Verse]{${stackTriggerWords.split(', ').map((w, i) => `${w}=${i === 0 ? '1' : '0'}`).join('; ')}}
+[Chorus]{${stackTriggerWords.split(', ').map((w, i) => `${w}=${i === 0 ? '0' : '1'}`).join('; ')}}`}</pre>
+                </div>
+              )}
             </div>
           )}
         </>

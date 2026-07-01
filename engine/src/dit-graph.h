@@ -67,6 +67,85 @@ static struct ggml_tensor * dit_ggml_linear_bias_lora(struct ggml_context * ctx,
     return ggml_add(ctx, out, dit_ggml_f32(ctx, bias));
 }
 
+// ─── Per-section adapter masking (regional LoRA) ───
+//
+// When active, each adapter's delta is applied SEPARATELY (not summed) and gated:
+//  - frame-indexed projections (self-attn q/k/v/o, MLP, cross-attn q/o, proj_in):
+//    multiplied by that adapter's per-frame mask `masks[i]` ([1,S,1]).
+//  - token/global projections (cross-attn k/v, cond_emb): scaled by that adapter's
+//    scalar mean section weight `means[i]` (a per-frame mask can't apply — wrong axis).
+// See docs/plans/per-section-adapter-masking.md. `loras`/`masks`/`means` are all
+// indexed by adapter (same order as g_hotstep_params.adapters).
+struct DiTLoRASectionCtx {
+    const std::vector<DiTLoRA> *              loras = nullptr;
+    const std::vector<struct ggml_tensor *> * masks = nullptr;
+    const std::vector<float> *                means = nullptr;
+};
+
+// Apply a per-layer projection with LoRA. Summed path (sect==nullptr): y = W@x +
+// single_delta@x. Section path: y = W@x + Σ_i gate_i·(delta_i@x), gate = mask
+// (frame-indexed) or mean scalar (otherwise).
+static struct ggml_tensor * dit_lora_apply_layer(struct ggml_context *      ctx,
+                                                 struct ggml_tensor *       weight,
+                                                 struct ggml_tensor *       input,
+                                                 struct ggml_tensor *       single_delta,
+                                                 const DiTLoRASectionCtx *  sect,
+                                                 int                        layer_idx,
+                                                 DiTLoRADelta DiTLoRALayer::* slot,
+                                                 bool                       frame_masked) {
+    struct ggml_tensor * y = ggml_mul_mat(ctx, weight, input);
+    if (sect && sect->loras) {
+        for (size_t i = 0; i < sect->loras->size(); i++) {
+            const DiTLoRA & lr = (*sect->loras)[i];
+            if (!lr.active || layer_idx < 0 || layer_idx >= DIT_LORA_MAX_LAYERS) continue;
+            struct ggml_tensor * d = (lr.layers[layer_idx].*slot).delta;
+            if (!d) continue;
+            struct ggml_tensor * dy = ggml_mul_mat(ctx, d, input);
+            if (frame_masked) {
+                if (sect->masks && i < sect->masks->size() && (*sect->masks)[i])
+                    dy = ggml_mul(ctx, dy, (*sect->masks)[i]);
+            } else if (sect->means && i < sect->means->size()) {
+                dy = ggml_scale(ctx, dy, (*sect->means)[i]);
+            }
+            y = ggml_add(ctx, y, dy);
+        }
+    } else if (single_delta) {
+        y = ggml_add(ctx, y, ggml_mul_mat(ctx, single_delta, input));
+    }
+    return y;
+}
+
+// Apply a global (non-layer) projection delta onto an already-computed base_y.
+// slot is a DiTLoRA member (proj_in / cond_emb). frame_masked as above.
+static struct ggml_tensor * dit_lora_apply_global(struct ggml_context *      ctx,
+                                                  struct ggml_tensor *       base_y,
+                                                  struct ggml_tensor *       input,
+                                                  struct ggml_tensor *       single_delta,
+                                                  const DiTLoRASectionCtx *  sect,
+                                                  DiTLoRADelta DiTLoRA::*     slot,
+                                                  bool                       frame_masked) {
+    struct ggml_tensor * y = base_y;
+    if (sect && sect->loras) {
+        for (size_t i = 0; i < sect->loras->size(); i++) {
+            const DiTLoRA & lr = (*sect->loras)[i];
+            if (!lr.active) continue;
+            struct ggml_tensor * d = (lr.*slot).delta;
+            if (!d) continue;
+            struct ggml_tensor * dy = ggml_mul_mat(ctx, d, input);
+            if (frame_masked) {
+                if (sect->masks && i < sect->masks->size() && (*sect->masks)[i])
+                    dy = ggml_mul(ctx, dy, (*sect->masks)[i]);
+            } else if (sect->means && i < sect->means->size()) {
+                dy = ggml_scale(ctx, dy, (*sect->means)[i]);
+            }
+            y = ggml_add(ctx, y, dy);
+        }
+    } else if (single_delta) {
+        y = ggml_add(ctx, y, ggml_mul_mat(ctx, single_delta, input));
+    }
+    return y;
+}
+
 // Helper: Linear layer with bias
 static struct ggml_tensor * dit_ggml_linear_bias(struct ggml_context * ctx,
                                                  struct ggml_tensor *  weight,
@@ -177,7 +256,8 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     int                   S,
     int                   N,
     int                   layer_idx = -1,
-    DiTLoRALayer *        lora      = nullptr) {
+    DiTLoRALayer *        lora      = nullptr,
+    const DiTLoRASectionCtx * sect  = nullptr) {
     DiTGGMLConfig & c   = m->cfg;
     int             D   = c.head_dim;
     int             Nh  = c.n_heads;
@@ -199,9 +279,9 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
         k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, N, qk->nb[1], qk->nb[2], (size_t) q_dim * qk->nb[0]));
         v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
     } else {
-        q = dit_ggml_linear_lora(ctx, ly->sa_q_proj, lora ? lora->sa_q.delta : nullptr, norm_sa);
-        k = dit_ggml_linear_lora(ctx, ly->sa_k_proj, lora ? lora->sa_k.delta : nullptr, norm_sa);
-        v = dit_ggml_linear_lora(ctx, ly->sa_v_proj, lora ? lora->sa_v.delta : nullptr, norm_sa);
+        q = dit_lora_apply_layer(ctx, ly->sa_q_proj, norm_sa, lora ? lora->sa_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_q, true);
+        k = dit_lora_apply_layer(ctx, ly->sa_k_proj, norm_sa, lora ? lora->sa_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_k, true);
+        v = dit_lora_apply_layer(ctx, ly->sa_v_proj, norm_sa, lora ? lora->sa_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_v, true);
     }
 
     // 2) Reshape to heads: [Nh*D, S, N] -> [D, Nh, S, N]
@@ -260,7 +340,7 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     }
 
     // 8) O projection: [Nh*D, S, N] -> [H, S, N]
-    struct ggml_tensor * out = dit_ggml_linear_lora(ctx, ly->sa_o_proj, lora ? lora->sa_o.delta : nullptr, attn);
+    struct ggml_tensor * out = dit_lora_apply_layer(ctx, ly->sa_o_proj, attn, lora ? lora->sa_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_o, true);
     return out;
 }
 
@@ -272,7 +352,9 @@ static struct ggml_tensor * dit_ggml_build_mlp(struct ggml_context * ctx,
                                                DiTGGMLLayer *        ly,
                                                struct ggml_tensor *  norm_ffn,
                                                int                   S,
-                                               DiTLoRALayer *        lora = nullptr) {
+                                               DiTLoRALayer *        lora = nullptr,
+                                               int                   layer_idx = -1,
+                                               const DiTLoRASectionCtx * sect = nullptr) {
     struct ggml_tensor * ff;
     if (ly->gate_up) {
         // Fused: single matmul [H, 2*I] x [H, S, N] -> [2*I, S, N], then swiglu splits ne[0]
@@ -280,13 +362,13 @@ static struct ggml_tensor * dit_ggml_build_mlp(struct ggml_context * ctx,
         ff                      = ggml_swiglu(ctx, gu);
     } else {
         // Separate: two matmuls + split swiglu
-        struct ggml_tensor * gate = dit_ggml_linear_lora(ctx, ly->gate_proj, lora ? lora->gate.delta : nullptr, norm_ffn);
-        struct ggml_tensor * up   = dit_ggml_linear_lora(ctx, ly->up_proj, lora ? lora->up.delta : nullptr, norm_ffn);
+        struct ggml_tensor * gate = dit_lora_apply_layer(ctx, ly->gate_proj, norm_ffn, lora ? lora->gate.delta : nullptr, sect, layer_idx, &DiTLoRALayer::gate, true);
+        struct ggml_tensor * up   = dit_lora_apply_layer(ctx, ly->up_proj, norm_ffn, lora ? lora->up.delta : nullptr, sect, layer_idx, &DiTLoRALayer::up, true);
         ff                        = ggml_swiglu_split(ctx, gate, up);
     }
 
     // Down projection: [I, S] -> [H, S]
-    return dit_ggml_linear_lora(ctx, ly->down_proj, lora ? lora->down.delta : nullptr, ff);
+    return dit_lora_apply_layer(ctx, ly->down_proj, ff, lora ? lora->down.delta : nullptr, sect, layer_idx, &DiTLoRALayer::down, true);
 }
 
 // Build cross-attention sub-graph for a single layer.
@@ -303,7 +385,9 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
                                                       int                   S,
                                                       int                   enc_S,
                                                       int                   N,
-                                                      DiTLoRALayer *        lora = nullptr) {
+                                                      DiTLoRALayer *        lora = nullptr,
+                                                      int                   layer_idx = -1,
+                                                      const DiTLoRASectionCtx * sect = nullptr) {
     DiTGGMLConfig & c   = m->cfg;
     int             D   = c.head_dim;
     int             Nh  = c.n_heads;
@@ -331,9 +415,11 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
         k                       = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else {
-        q = dit_ggml_linear_lora(ctx, ly->ca_q_proj, lora ? lora->ca_q.delta : nullptr, norm_ca);
-        k = dit_ggml_linear_lora(ctx, ly->ca_k_proj, lora ? lora->ca_k.delta : nullptr, enc);
-        v = dit_ggml_linear_lora(ctx, ly->ca_v_proj, lora ? lora->ca_v.delta : nullptr, enc);
+        // ca_q is frame-indexed ([q_dim, S]) → per-frame mask. ca_k/ca_v come from
+        // the encoder ([kv_dim, enc_S], token-indexed) → mean-scaled, not masked.
+        q = dit_lora_apply_layer(ctx, ly->ca_q_proj, norm_ca, lora ? lora->ca_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_q, true);
+        k = dit_lora_apply_layer(ctx, ly->ca_k_proj, enc, lora ? lora->ca_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_k, false);
+        v = dit_lora_apply_layer(ctx, ly->ca_v_proj, enc, lora ? lora->ca_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_v, false);
     }
 
     // reshape to [D, heads, seq, N] then permute to [D, seq, heads, N]
@@ -364,8 +450,8 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     // Attention output: [D, Nh, S, N], reshape to [H, S, N]
     attn = ggml_reshape_3d(ctx, attn, Nh * D, S, N);
 
-    // O projection
-    return dit_ggml_linear_lora(ctx, ly->ca_o_proj, lora ? lora->ca_o.delta : nullptr, attn);
+    // O projection ([H, S], frame-indexed)
+    return dit_lora_apply_layer(ctx, ly->ca_o_proj, attn, lora ? lora->ca_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_o, true);
 }
 
 // Build one full DiT layer (AdaLN + self-attn + cross-attn + FFN + gated residuals)
@@ -386,7 +472,8 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
                                                  int                   S,
                                                  int                   enc_S,
                                                  int                   N,
-                                                 DiTLoRALayer *        lora = nullptr) {
+                                                 DiTLoRALayer *        lora = nullptr,
+                                                 const DiTLoRASectionCtx * sect = nullptr) {
     DiTGGMLConfig & c  = m->cfg;
     DiTGGMLLayer *  ly = &m->layers[layer_idx];
     int             H  = c.hidden_size;
@@ -421,7 +508,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     }
 
     // sa_mask is pre-selected by the caller (sw+padding for layer_type=0, padding-only for layer_type=1)
-    struct ggml_tensor * sa_out = dit_ggml_build_self_attn(ctx, m, ly, norm_sa, positions, sa_mask, S, N, layer_idx, lora);
+    struct ggml_tensor * sa_out = dit_ggml_build_self_attn(ctx, m, ly, norm_sa, positions, sa_mask, S, N, layer_idx, lora, sect);
 
     if (layer_idx == 0) {
         ggml_set_name(sa_out, "layer0_sa_output");
@@ -439,7 +526,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     if (enc) {
         struct ggml_tensor * norm_ca = dit_ggml_rms_norm_weighted(ctx, hidden, ly->cross_attn_norm, c.rms_norm_eps);
         struct ggml_tensor * ca_out =
-            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N, lora);
+            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N, lora, layer_idx, sect);
         hidden = ggml_add(ctx, hidden, ca_out);
     }
 
@@ -452,7 +539,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     residual                      = hidden;
     struct ggml_tensor * norm_ffn = dit_ggml_rms_norm_weighted(ctx, hidden, ly->mlp_norm, c.rms_norm_eps);
     norm_ffn                      = dit_ggml_adaln(ctx, norm_ffn, scale_ffn, shift_ffn, m->scalar_one);
-    struct ggml_tensor * ffn_out  = dit_ggml_build_mlp(ctx, m, ly, norm_ffn, S, lora);
+    struct ggml_tensor * ffn_out  = dit_ggml_build_mlp(ctx, m, ly, norm_ffn, S, lora, layer_idx, sect);
     hidden                        = dit_ggml_gated_add(ctx, residual, ffn_out, gate_ffn);
 
     return hidden;
@@ -487,7 +574,10 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     int             H = c.hidden_size;
     int             P = c.patch_size;
 
-    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
+    // Node budget scales with the separate per-adapter delta sets (per-section
+    // masking); must match the ctx sizing in the sampler.
+    size_t graph_cap = 8192 + m->loras.size() * 4096;
+    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, graph_cap, false);
 
     // Inputs
 
@@ -544,6 +634,41 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_name(ca_mask, "ca_mask");
     ggml_set_input(ca_mask);
 
+    // Per-section adapter masking setup: one [1,S,1] mask input per adapter (gates
+    // frame-indexed projections) + a size-weighted mean section weight per adapter
+    // (scales token/global projections that a per-frame mask can't apply to). Only
+    // when the section path loaded separate per-adapter deltas into m->loras.
+    m->lora_masks.clear();
+    std::vector<float> lora_means;
+    DiTLoRASectionCtx  sect_storage;
+    const DiTLoRASectionCtx * sect = nullptr;
+    const bool section_mode = (!m->loras.empty() && !g_hotstep_params.adapter_sections.empty());
+    if (section_mode) {
+        const size_t Nad = m->loras.size();
+        m->lora_masks.resize(Nad, nullptr);
+        for (size_t i = 0; i < Nad; i++) {
+            struct ggml_tensor * mk = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, S, 1);
+            char nm[32];
+            snprintf(nm, sizeof(nm), "lora_mask_%zu", i);
+            ggml_set_name(mk, nm);
+            ggml_set_input(mk);
+            m->lora_masks[i] = mk;
+        }
+        lora_means.assign(Nad, 0.0f);
+        double tot = 0.0;
+        for (const auto & s : g_hotstep_params.adapter_sections) tot += (s.size > 0.0f ? s.size : 1.0f);
+        if (tot <= 0.0) tot = 1.0;
+        for (const auto & s : g_hotstep_params.adapter_sections) {
+            const float w = (s.size > 0.0f ? s.size : 1.0f);
+            for (size_t i = 0; i < Nad && i < s.weights.size(); i++)
+                lora_means[i] += (float) (w * s.weights[i] / tot);
+        }
+        sect_storage.loras = &m->loras;
+        sect_storage.masks = &m->lora_masks;
+        sect_storage.means = &lora_means;
+        sect               = &sect_storage;
+    }
+
     // 1) Timestep embeddings
     struct ggml_tensor * tproj;
 
@@ -585,7 +710,9 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_output(input);
     struct ggml_tensor * patched = ggml_reshape_3d(ctx, input, c.in_channels * P, S, N);
     struct ggml_tensor * hidden  = dit_ggml_linear_bias(ctx, m->proj_in_w, m->proj_in_b, patched);
-    if (m->lora.active && m->lora.proj_in.delta) {
+    if (section_mode) {
+        hidden = dit_lora_apply_global(ctx, hidden, patched, nullptr, sect, &DiTLoRA::proj_in, true);
+    } else if (m->lora.active && m->lora.proj_in.delta) {
         struct ggml_tensor * dy = ggml_mul_mat(ctx, m->lora.proj_in.delta, patched);
         hidden = ggml_add(ctx, hidden, dy);
     }
@@ -594,7 +721,10 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
 
     // 3) Condition embedder: project encoder hidden states
     struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m->cond_emb_w, m->cond_emb_b, enc_hidden);
-    if (m->lora.active && m->lora.cond_emb.delta) {
+    if (section_mode) {
+        // cond_emb is token/global-indexed → mean-scaled, not per-frame masked.
+        enc = dit_lora_apply_global(ctx, enc, enc_hidden, nullptr, sect, &DiTLoRA::cond_emb, false);
+    } else if (m->lora.active && m->lora.cond_emb.delta) {
         struct ggml_tensor * dy = ggml_mul_mat(ctx, m->lora.cond_emb.delta, enc_hidden);
         enc = ggml_add(ctx, enc, dy);
     }
@@ -606,7 +736,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
         // layer_type=0 (sliding window): sa_mask_sw, layer_type=1 (full): sa_mask_pad
         struct ggml_tensor * sa_mask = (m->layers[i].layer_type == 0) ? sa_mask_sw : sa_mask_pad;
         DiTLoRALayer * lora_ly = (m->lora.active && i < DIT_LORA_MAX_LAYERS) ? &m->lora.layers[i] : nullptr;
-        hidden = dit_ggml_build_layer(ctx, m, i, hidden, tproj, enc, positions, sa_mask, ca_mask, S, enc_S, N, lora_ly);
+        hidden = dit_ggml_build_layer(ctx, m, i, hidden, tproj, enc, positions, sa_mask, ca_mask, S, enc_S, N, lora_ly, sect);
         // Debug dumps at key layers: 0, 6, 12, 18, last
         if (i == 0 || i == 6 || i == 12 || i == 18 || i == c.n_layers - 1) {
             char lname[64];

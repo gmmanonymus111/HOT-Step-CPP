@@ -134,6 +134,10 @@ export interface GenerationParams {
   /** Multi-adapter stack: applied together, each with its own scale. When set
    *  (and non-empty) it supersedes the single loraPath/loraScale. */
   loraStack?: { path: string; scale: number }[];
+  /** Stack scaling mode ('sum' | 'blend') and combined-strength budget — reused
+   *  for per-section masking weight transforms. */
+  adapterStackMode?: string;
+  adapterStackBudget?: number;
   adapterGroupScales?: {
     self_attn: number;
     cross_attn: number;
