@@ -57,6 +57,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   //            keeping combined strength constant as adapters are added.
   adapterStackMode: readKey("hs-adapterStackMode", 'blend'),
   adapterStackBudget: readKey("hs-adapterStackBudget", 0.75),
+  // Per-section masking (P2) tuning: alignment step fraction, and 0..1 regional
+  // self-attention isolation (moderate default) to stop sections inheriting the
+  // first section's voice.
+  adapterSectionAlignAt: readKey("hs-adapterSectionAlignAt", 0.55),
+  adapterSectionIsolation: readKey("hs-adapterSectionIsolation", 0.5),
   adapterMode: readKey("hs-adapterMode", 'runtime'),
   // Runtime adapter delta VRAM precision: 'bf16' (full), 'q8_0' (~½), 'q4_k' (~¼).
   // Lets many stacked adapters fit in VRAM; runtime mode only.
@@ -192,6 +197,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   },
   setAdapterStackMode: (v: any) => { set({ adapterStackMode: v }); writeKey("hs-adapterStackMode", v); },
   setAdapterStackBudget: (v: any) => { set({ adapterStackBudget: v }); writeKey("hs-adapterStackBudget", v); },
+  setAdapterSectionAlignAt: (v: any) => { set({ adapterSectionAlignAt: v }); writeKey("hs-adapterSectionAlignAt", v); },
+  setAdapterSectionIsolation: (v: any) => { set({ adapterSectionIsolation: v }); writeKey("hs-adapterSectionIsolation", v); },
   setAdapterMode: (v: any) => { set({ adapterMode: v }); writeKey("hs-adapterMode", v); },
   setAdapterRuntimeQuant: (v: any) => { set({ adapterRuntimeQuant: v }); writeKey("hs-adapterRuntimeQuant", v); },
   setAdapterGroupScales: (v: any) => { set({ adapterGroupScales: v }); writeKey("hs-adapterGroupScales", v); },
@@ -361,6 +368,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       // Stack scaling mode + budget — reused for per-section masking transforms.
       adapterStackMode: s.adapterStackMode,
       adapterStackBudget: s.adapterStackBudget,
+      // Per-section masking tuning (only meaningful with a 2+ adapter stack).
+      adapterSectionAlignAt: stack.length >= 2 ? s.adapterSectionAlignAt : undefined,
+      adapterSectionIsolation: stack.length >= 2 ? s.adapterSectionIsolation : undefined,
       adapterGroupScales: primary ? s.adapterGroupScales : undefined,
       adapterMode: primary ? s.adapterMode : 'merge',
       // Runtime delta quantization (VRAM saver) — only relevant in runtime mode.

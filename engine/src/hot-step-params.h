@@ -130,6 +130,11 @@ struct HotStepParams {
     // from cross-attention alignment (P2). <= 0 disables alignment (P1 proportional
     // map only).
     float adapter_section_align_at = 0.55f;
+    // Regional self-attention isolation (0..1): penalise attention across section
+    // boundaries so each section develops its own character instead of the model's
+    // coherence propagating the first section's voice through the whole song. 0 =
+    // off. The penalty added to cross-section self-attn logits is isolation * 8.
+    float adapter_section_isolation = 0.0f;
     // P2 token→section map: for each encoder token, which section index it belongs
     // to (or -1 for non-lyric / unmapped tokens). Length == enc_S. Built by the
     // pipeline from the lyric token texts + per-section char boundaries. When

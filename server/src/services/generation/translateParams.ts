@@ -112,6 +112,8 @@ export function translateParams(params: any): AceRequest {
       req.lyrics = parsed.lyrics;
       req.adapter_sections = parsed.sections;
       req.adapter_mode = 'runtime';
+      if (params.adapterSectionAlignAt !== undefined) req.adapter_section_align_at = params.adapterSectionAlignAt;
+      if (params.adapterSectionIsolation !== undefined) req.adapter_section_isolation = params.adapterSectionIsolation;
     }
   }
   // Basin re-base: rebaseSource is a DiT model NAME (engine resolves to its path).

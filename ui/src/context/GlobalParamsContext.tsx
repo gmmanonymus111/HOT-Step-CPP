@@ -37,6 +37,9 @@ export interface GlobalParams {
   // Stack scaling: 'sum' (raw scales summed) or 'blend' (weights normalised to budget)
   adapterStackMode: string; setAdapterStackMode: (v: string) => void;
   adapterStackBudget: number; setAdapterStackBudget: (v: number) => void;
+  // Per-section masking (P2) tuning
+  adapterSectionAlignAt: number; setAdapterSectionAlignAt: (v: number) => void;
+  adapterSectionIsolation: number; setAdapterSectionIsolation: (v: number) => void;
   adapterMode: string; setAdapterMode: (v: string) => void;
   // Runtime delta VRAM precision: 'bf16' | 'q8_0' | 'q4_k' (runtime mode only)
   adapterRuntimeQuant: string; setAdapterRuntimeQuant: (v: string) => void;

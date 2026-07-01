@@ -89,6 +89,12 @@ export interface AceRequest {
    *  entry gives the effective per-adapter scale for that section (indexed to
    *  `adapters`) and a relative size hint. Runtime mode only. */
   adapter_sections?: { weights: number[]; size: number }[];
+  /** Per-section masking: fraction of steps before deriving section boundaries from
+   *  cross-attention alignment (earlier = identity locks to sections sooner). */
+  adapter_section_align_at?: number;
+  /** Per-section masking: 0..1 regional self-attention isolation (penalise attention
+   *  across section boundaries so sections don't inherit the first section's voice). */
+  adapter_section_isolation?: number;
   adapter_group_scales?: {
     self_attn: number;
     cross_attn: number;

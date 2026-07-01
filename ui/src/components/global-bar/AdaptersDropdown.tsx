@@ -349,6 +349,21 @@ export const AdaptersDropdown: React.FC = () => {
                   </p>
                   <pre className="text-[9px] text-zinc-400 font-mono whitespace-pre-wrap leading-snug bg-black/20 rounded p-1.5 m-0">{`[Verse]{${stackTriggerWords.split(', ').map((w, i) => `${w}=${i === 0 ? '1' : '0'}`).join('; ')}}
 [Chorus]{${stackTriggerWords.split(', ').map((w, i) => `${w}=${i === 0 ? '0' : '1'}`).join('; ')}}`}</pre>
+
+                  <div className="pt-1 space-y-2">
+                    <Slider label="Section Isolation" value={gp.adapterSectionIsolation}
+                      onChange={gp.setAdapterSectionIsolation} min={0} max={1} step={0.05} showInput />
+                    <p className="text-[9px] text-zinc-500 leading-relaxed -mt-1">
+                      Stops sections inheriting the first section's voice (choruses coupling). 0 = off,
+                      higher = more independent sections but choppier transitions. ~0.5 is moderate.
+                    </p>
+                    <Slider label="Alignment Timing" value={gp.adapterSectionAlignAt}
+                      onChange={gp.setAdapterSectionAlignAt} min={0.2} max={0.85} step={0.05} showInput />
+                    <p className="text-[9px] text-zinc-500 leading-relaxed -mt-1">
+                      When section boundaries snap to the model's real timing. Earlier locks section
+                      identity sooner (less first-adapter bias); too early = fuzzier boundaries.
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
