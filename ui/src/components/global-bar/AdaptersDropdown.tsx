@@ -405,7 +405,7 @@ export const AdaptersDropdown: React.FC = () => {
                 {([
                   { v: 'bf16', label: 'Full',   sub: 'BF16' },
                   { v: 'q8_0', label: 'Q8 ½',   sub: 'Q8_0' },
-                  { v: 'q4_k', label: 'Q4 ¼',   sub: 'Q4_K' },
+                  { v: 'q4_0', label: 'Q4 ¼',   sub: 'Q4_0' },
                 ] as const).map(opt => (
                   <button
                     key={opt.v}

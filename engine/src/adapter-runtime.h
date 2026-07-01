@@ -15,10 +15,13 @@
 #include "adapter-merge.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "timer.h"
 #include "weight-source.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -131,9 +134,13 @@ static DiTLoRADelta * dit_lora_slot(DiTLoRA * lora, const std::string & gguf_nam
 // precomputed deltas cuts VRAM (~½ for Q8_0, ~¼ for Q4_K) so many stacked adapters
 // fit; quality impact is small since the base is usually already 4-bit.
 static inline ggml_type adapter_runtime_storage_type(int64_t ne0) {
+    // Q4_0 / Q8_0 both quantize per 32-block (fast, no optimisation pass — unlike
+    // Q4_K which runs a slow per-superblock search that stalls load for minutes).
     const std::string & q = g_hotstep_params.adapter_runtime_quant;
-    if (q == "q4_k" && (ne0 % 256) == 0) return GGML_TYPE_Q4_K;
-    if ((q == "q4_k" || q == "q8_0") && (ne0 % 32) == 0) return GGML_TYPE_Q8_0;
+    if ((ne0 % 32) == 0) {
+        if (q == "q4_0" || q == "q4_k") return GGML_TYPE_Q4_0;  // accept legacy "q4_k" alias
+        if (q == "q8_0")                return GGML_TYPE_Q8_0;
+    }
     return GGML_TYPE_BF16;
 }
 
@@ -659,29 +666,54 @@ static bool adapter_runtime_finalize(DiTLoRA * lora, ggml_backend_t backend) {
     }
     ggml_backend_buffer_set_usage(lora->buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Upload: quantize/convert F32 staging into each tensor's storage type
-    // (BF16 / Q8_0 / Q4_K) and set it. Each staged entry pairs its tensor pointer
-    // with its F32 data, so iteration order is irrelevant.
-    size_t total_bytes = 0;
-    int    n_quant = 0;
-    for (auto & sd : lora->staged) {
-        struct ggml_tensor * t   = sd.tensor;
-        int64_t              nel = ggml_nelements(t);
-        if (t->type == GGML_TYPE_BF16) {
-            std::vector<ggml_bf16_t> bf16((size_t) nel);
-            ggml_fp32_to_bf16_row(sd.f32_data.data(), bf16.data(), nel);
-            ggml_backend_tensor_set(t, bf16.data(), 0, (size_t) nel * sizeof(ggml_bf16_t));
-            total_bytes += (size_t) nel * sizeof(ggml_bf16_t);
-        } else {
-            int64_t          ne0 = t->ne[0], ne1 = t->ne[1];
-            size_t           nbytes = ggml_row_size(t->type, ne0) * (size_t) ne1;
-            std::vector<char> qbuf(nbytes);
-            ggml_quantize_chunk(t->type, sd.f32_data.data(), qbuf.data(), 0, ne1, ne0, nullptr);
-            ggml_backend_tensor_set(t, qbuf.data(), 0, nbytes);
-            total_bytes += nbytes;
-            n_quant++;
+    // Upload: quantize/convert each staged F32 delta into its storage type
+    // (BF16 / Q8_0 / Q4_0). Quantization is CPU-bound and per-tensor independent,
+    // so do it in PARALLEL into host buffers first, then upload serially (GPU
+    // calls must be serialized). A single-threaded pass over 360 large tensors
+    // stalls the load for many seconds; threading keeps it snappy.
+    Timer  qtimer;
+    size_t n_staged = lora->staged.size();
+    std::vector<std::vector<char>> host_bufs(n_staged);
+    std::vector<size_t>            host_nbytes(n_staged, 0);
+    auto quant_worker = [&](size_t begin, size_t end) {
+        for (size_t j = begin; j < end; j++) {
+            struct ggml_tensor * t   = lora->staged[j].tensor;
+            const float *        src = lora->staged[j].f32_data.data();
+            int64_t              nel = ggml_nelements(t);
+            if (t->type == GGML_TYPE_BF16) {
+                host_nbytes[j] = (size_t) nel * sizeof(ggml_bf16_t);
+                host_bufs[j].resize(host_nbytes[j]);
+                ggml_fp32_to_bf16_row(src, (ggml_bf16_t *) host_bufs[j].data(), nel);
+            } else {
+                int64_t ne0 = t->ne[0], ne1 = t->ne[1];
+                host_nbytes[j] = ggml_row_size(t->type, ne0) * (size_t) ne1;
+                host_bufs[j].resize(host_nbytes[j]);
+                ggml_quantize_chunk(t->type, src, host_bufs[j].data(), 0, ne1, ne0, nullptr);
+            }
         }
+    };
+    unsigned nthreads = std::thread::hardware_concurrency();
+    if (nthreads < 1) nthreads = 1;
+    if (nthreads > n_staged) nthreads = (unsigned) std::max<size_t>(1, n_staged);
+    if (nthreads <= 1 || n_staged == 0) {
+        quant_worker(0, n_staged);
+    } else {
+        std::vector<std::thread> pool;
+        size_t chunk = (n_staged + nthreads - 1) / nthreads;
+        for (unsigned ti = 0; ti < nthreads; ti++) {
+            size_t b = ti * chunk, e = std::min(n_staged, b + chunk);
+            if (b < e) pool.emplace_back(quant_worker, b, e);
+        }
+        for (auto & th : pool) th.join();
     }
+    size_t total_bytes = 0;
+    int    n_quant     = 0;
+    for (size_t j = 0; j < n_staged; j++) {
+        ggml_backend_tensor_set(lora->staged[j].tensor, host_bufs[j].data(), 0, host_nbytes[j]);
+        total_bytes += host_nbytes[j];
+        if (lora->staged[j].tensor->type != GGML_TYPE_BF16) n_quant++;
+    }
+    fprintf(stderr, "[Adapter-RT] Quantize+upload: %.1f ms (%u threads)\n", qtimer.ms(), nthreads);
 
     size_t n_deltas = lora->staged.size();
     lora->staged.clear();
