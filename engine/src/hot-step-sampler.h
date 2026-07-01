@@ -256,27 +256,6 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
     ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
 
-    // ── DIAG: per-adapter delta L2 norms (confirm the separate DiTLoRAs loaded
-    // real, non-zero deltas on the GPU). Downloads a few representative slots.
-    if (!model->loras.empty()) {
-        auto delta_l2 = [&](struct ggml_tensor * dt) -> double {
-            if (!dt) return -1.0;
-            size_t nel = (size_t) ggml_nelements(dt);
-            std::vector<ggml_bf16_t> tmp(nel);
-            ggml_backend_tensor_get(dt, tmp.data(), 0, nel * sizeof(ggml_bf16_t));
-            double s = 0.0;
-            for (size_t j = 0; j < nel; j++) { float f = ggml_bf16_to_fp32(tmp[j]); s += (double) f * f; }
-            return std::sqrt(s);
-        };
-        for (size_t i = 0; i < model->loras.size(); i++) {
-            DiTLoRA & lr = model->loras[i];
-            fprintf(stderr,
-                    "[Adapter-RT]   DIAG lora[%zu] active=%d  sa_q(L0)L2=%.3f  mlp.gate(L0)L2=%.3f  ca_v(L0)L2=%.3f  proj_in L2=%.3f\n",
-                    i, lr.active ? 1 : 0, delta_l2(lr.layers[0].sa_q.delta), delta_l2(lr.layers[0].gate.delta),
-                    delta_l2(lr.layers[0].ca_v.delta), delta_l2(lr.proj_in.delta));
-        }
-    }
-
     // ── Per-section adapter masks (regional LoRA) ─────────────────────────────
     // P1: proportional frame→section map. Partition the S latent frames across the
     // sections by their relative `size`, then each adapter's mask is that section's
