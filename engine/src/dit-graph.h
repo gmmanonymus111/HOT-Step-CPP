@@ -656,28 +656,34 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     const bool section_mode = (!m->loras.empty() && !g_hotstep_params.adapter_sections.empty());
     if (section_mode) {
         const size_t Nad = m->loras.size();
-        m->lora_masks.resize(Nad, nullptr);
-        for (size_t i = 0; i < Nad; i++) {
-            struct ggml_tensor * mk = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, S, 1);
-            char nm[32];
-            snprintf(nm, sizeof(nm), "lora_mask_%zu", i);
-            ggml_set_name(mk, nm);
-            ggml_set_input(mk);
-            m->lora_masks[i] = mk;
-        }
-        lora_means.assign(Nad, 0.0f);
-        double tot = 0.0;
-        for (const auto & s : g_hotstep_params.adapter_sections) tot += (s.size > 0.0f ? s.size : 1.0f);
-        if (tot <= 0.0) tot = 1.0;
-        for (const auto & s : g_hotstep_params.adapter_sections) {
-            const float w = (s.size > 0.0f ? s.size : 1.0f);
-            for (size_t i = 0; i < Nad && i < s.weights.size(); i++)
-                lora_means[i] += (float) (w * s.weights[i] / tot);
-        }
         sect_storage.loras = &m->loras;
-        sect_storage.masks = &m->lora_masks;
-        sect_storage.means = &lora_means;
-        sect               = &sect_storage;
+        // NOMASK debug: skip creating the mask/mean gates entirely (deltas applied
+        // unmasked). Creating input tensors that no graph op consumes leaves them
+        // without a backend buffer, and the sampler's mask upload would then hit
+        // GGML_ASSERT(buf != NULL). So only build the gates when they're used.
+        if (!g_hotstep_section_nomask) {
+            m->lora_masks.resize(Nad, nullptr);
+            for (size_t i = 0; i < Nad; i++) {
+                struct ggml_tensor * mk = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, S, 1);
+                char nm[32];
+                snprintf(nm, sizeof(nm), "lora_mask_%zu", i);
+                ggml_set_name(mk, nm);
+                ggml_set_input(mk);
+                m->lora_masks[i] = mk;
+            }
+            lora_means.assign(Nad, 0.0f);
+            double tot = 0.0;
+            for (const auto & s : g_hotstep_params.adapter_sections) tot += (s.size > 0.0f ? s.size : 1.0f);
+            if (tot <= 0.0) tot = 1.0;
+            for (const auto & s : g_hotstep_params.adapter_sections) {
+                const float w = (s.size > 0.0f ? s.size : 1.0f);
+                for (size_t i = 0; i < Nad && i < s.weights.size(); i++)
+                    lora_means[i] += (float) (w * s.weights[i] / tot);
+            }
+            sect_storage.masks = &m->lora_masks;
+            sect_storage.means = &lora_means;
+        }
+        sect = &sect_storage;
     }
 
     // 1) Timestep embeddings
