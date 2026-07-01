@@ -306,7 +306,10 @@ static int dit_ggml_generate(DiTGGML *           model,
         // ±xf frames. Smoothing gives symmetric, continuous section transitions
         // (the old trailing-only fade left a discontinuity at each section start,
         // which glitched the audio).
-        const int xf = std::max(1, S / 40);  // ~2.5% of the song each side
+        // ~0.5 s each side (S runs at ~25 latent fps). A short crossfade minimises
+        // the window where two conflicting adapters blend 50/50 (which garbles the
+        // transition); long crossfades sound like the messy global blend.
+        const int xf = std::max(3, S / 300);
         lora_mask_host.assign(Nad, std::vector<float>(S, 0.0f));
         std::vector<float> hard(S);
         for (size_t i = 0; i < Nad; i++) {
