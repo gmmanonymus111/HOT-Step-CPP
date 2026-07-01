@@ -317,7 +317,16 @@ static bool dit_ggml_load(DiTGGML *    m,
     BackendPair bp    = backend_init("DiT");
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
-    m->sched          = backend_sched_new(bp, 8192);
+    // Scheduler hash-set must hold n_nodes + n_leafs. Per-section masking loads N
+    // separate adapters (each ~360 extra delta leaf tensors) and multiplies the
+    // per-projection LoRA nodes, so scale the budget with the adapter count to
+    // match the graph node budget (dit-graph.h graph_cap). Normal single/summed
+    // loads keep the default 8192. Uses the intended stack size (m->loras isn't
+    // populated yet at this point in the load).
+    int sched_nodes = 8192;
+    if (!g_hotstep_params.adapter_sections.empty() && g_hotstep_params.adapters.size() >= 2)
+        sched_nodes = 8192 + (int) g_hotstep_params.adapters.size() * 4096;
+    m->sched          = backend_sched_new(bp, sched_nodes);
     m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;
 
     // Detect format: .gguf → GGUF path, directory → safetensors path
