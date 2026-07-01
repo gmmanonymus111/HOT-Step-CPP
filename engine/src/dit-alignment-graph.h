@@ -5,6 +5,7 @@
 // on target layers to materialize attention weights. Used by LRC Phase 3.
 
 #include "alignment-config.h"
+#include "backend.h"
 #include "dit-graph.h"
 #include "dit.h"
 #include "philox.h"
@@ -310,10 +311,15 @@ static int dit_alignment_extract(
     // Also need hidden to be computed (drives dependencies)
     ggml_build_forward_expand(gf, hidden);
 
-    // Allocate and compute
-    ggml_backend_sched_reset(dit->sched);
-    if (!ggml_backend_sched_alloc_graph(dit->sched, gf)) {
+    // Allocate and compute on a PRIVATE scheduler so we never disturb the main
+    // sampling scheduler (dit->sched). Critical for mid-sampling use (per-section
+    // masking P2): sharing dit->sched and re-allocating the main graph afterward
+    // corrupts CUDA state ("invalid argument"). Post-gen LRC use is unaffected.
+    BackendPair          align_bp{ dit->backend, dit->cpu_backend, dit->backend != dit->cpu_backend };
+    ggml_backend_sched_t align_sched = backend_sched_new(align_bp, 8192);
+    if (!ggml_backend_sched_alloc_graph(align_sched, gf)) {
         fprintf(stderr, "[Align-Extract] ERROR: graph alloc failed\n");
+        ggml_backend_sched_free(align_sched);
         ggml_free(ctx);
         return -1;
     }
@@ -353,7 +359,7 @@ static int dit_alignment_extract(
 
     // Compute
     Timer timer;
-    ggml_backend_sched_graph_compute(dit->sched, gf);
+    ggml_backend_sched_graph_compute(align_sched, gf);
     fprintf(stderr, "[Align-Extract] Graph compute: %.1f ms (%d layers)\n", timer.ms(), cfg.max_layer + 1);
 
     // Read back scores
@@ -376,6 +382,7 @@ static int dit_alignment_extract(
         }
     }
 
+    ggml_backend_sched_free(align_sched);
     ggml_free(ctx);
     fprintf(stderr, "[Align-Extract] Extracted %d/%d head scores\n", score_idx, cfg.total_heads);
     return 0;

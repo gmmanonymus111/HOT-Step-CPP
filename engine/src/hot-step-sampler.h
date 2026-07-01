@@ -347,25 +347,6 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
 
     // ── P2: alignment-driven section boundaries ───────────────────────────────
-    // Re-allocate the main graph on the scheduler (the alignment extract below
-    // resets dit->sched for its own partial graph, leaving the main graph
-    // unallocated). Same force+alloc pattern as the CFG-cutoff rebuild; the graph
-    // itself is unchanged and all inputs are re-uploaded per step.
-    auto realloc_main_graph = [&]() {
-        ggml_backend_sched_reset(model->sched);
-        if (model->backend != model->cpu_backend) {
-            const char * inames[] = { "enc_hidden", "input_latents", "t", "t_r", "positions", "sa_mask_sw", "sa_mask_pad", "ca_mask" };
-            for (const char * in : inames) {
-                struct ggml_tensor * ti = ggml_graph_get_tensor(gf, in);
-                if (ti) ggml_backend_sched_set_tensor_backend(model->sched, ti, model->backend);
-            }
-            for (struct ggml_tensor * mk : model->lora_masks)
-                if (mk) ggml_backend_sched_set_tensor_backend(model->sched, mk, model->backend);
-        }
-        if (!ggml_backend_sched_alloc_graph(model->sched, gf))
-            fprintf(stderr, "[Adapter-RT] P2: FATAL failed to re-alloc main graph after alignment\n");
-    };
-
     // Run the cross-attention alignment once at ~align_at, derive frame→section
     // from the model's real lyric→audio alignment, and rebuild the masks. Keeps
     // the P1 proportional map if disabled/failed. Called from the loop with the
@@ -392,7 +373,6 @@ static int dit_ggml_generate(DiTGGML *           model,
         int rc = dit_alignment_extract(model, acfg, x0.data(), context_latents, enc_hidden_data,
                                        T, S, enc_S, 8, scores.data());
         model->use_flash_attn = saved_fa;
-        realloc_main_graph();  // alignment reset the sched either way
         if (rc != 0) {
             fprintf(stderr, "[Adapter-RT] P2: alignment extract failed — keeping proportional map\n");
             return;
