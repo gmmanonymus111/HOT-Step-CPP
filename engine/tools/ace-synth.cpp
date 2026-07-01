@@ -5,6 +5,8 @@
 // under --models <dir> and --adapters <dir>.
 
 #include "audio-io.h"
+#include "backend.h"
+#include "ggml.h"
 #include "model-registry.h"
 #include "model-store.h"
 #include "pipeline-synth.h"
@@ -13,11 +15,115 @@
 #include "task-types.h"
 #include "version.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// ─── Per-section mask broadcast self-test (HOTSTEP_BCAST_TEST) ───────────────
+// Verifies the exact tensor ops the per-section masking relies on, on the real
+// backend, with no models. Test 1: ggml_mul([out,S,N] f32, [1,S,1] f32) — the
+// per-frame mask broadcast over the feature (ne0) and batch (ne2) dims. Test 2:
+// the real chain mul_mat(BF16 delta, f32 x) -> mul(mask). Run: set the env var
+// and invoke ace-synth (it runs the test and exits).
+static int run_bcast_selftest() {
+    BackendPair    bp      = backend_init("BcastTest");
+    ggml_backend_t backend = bp.backend;
+    fprintf(stderr, "[BcastTest] backend=%s\n", ggml_backend_name(backend));
+
+    const int64_t out = 8, S = 6, N = 2, in = 4;
+    int           fails = 0;
+
+    // Test 1: pure elementwise broadcast mul.
+    {
+        struct ggml_init_params p   = { ggml_tensor_overhead() * 16 + ggml_graph_overhead() + 4096, NULL, true };
+        struct ggml_context *   ctx = ggml_init(p);
+        struct ggml_tensor *    a    = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, out, S, N);
+        struct ggml_tensor *    mask = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, S, 1);
+        ggml_set_input(a);
+        ggml_set_input(mask);
+        struct ggml_tensor * y  = ggml_mul(ctx, a, mask);
+        struct ggml_cgraph * gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, y);
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        std::vector<float>    ad((size_t) (out * S * N), 1.0f), md((size_t) S);
+        for (int s = 0; s < S; s++) md[s] = (float) (s + 1) * 0.25f;  // distinct per frame
+        ggml_backend_tensor_set(a, ad.data(), 0, ad.size() * sizeof(float));
+        ggml_backend_tensor_set(mask, md.data(), 0, md.size() * sizeof(float));
+        ggml_backend_graph_compute(backend, gf);
+        std::vector<float> yd((size_t) (out * S * N));
+        ggml_backend_tensor_get(y, yd.data(), 0, yd.size() * sizeof(float));
+        int bad = 0;
+        for (int n = 0; n < N; n++)
+            for (int s = 0; s < S; s++)
+                for (int f = 0; f < out; f++) {
+                    float got = yd[(size_t) n * S * out + (size_t) s * out + f];
+                    if (fabsf(got - md[s]) > 1e-4f) {
+                        if (bad < 6) fprintf(stderr, "[BcastTest] T1 MISMATCH f=%d s=%d n=%d exp=%.3f got=%.3f\n", f, s, n, md[s], got);
+                        bad++;
+                    }
+                }
+        fprintf(stderr, "[BcastTest] T1 ggml_mul[out,S,N]x[1,S,1]: %s (%d/%lld bad)\n",
+                bad ? "FAIL" : "PASS", bad, (long long) (out * S * N));
+        fails += bad ? 1 : 0;
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+    }
+
+    // Test 2: real chain — mul_mat(BF16 delta[in,out], f32 x[in,S,N]) then mask.
+    {
+        struct ggml_init_params p   = { ggml_tensor_overhead() * 32 + ggml_graph_overhead() + 4096, NULL, true };
+        struct ggml_context *   ctx = ggml_init(p);
+        struct ggml_tensor *    d    = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, in, out);
+        struct ggml_tensor *    x    = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, in, S, N);
+        struct ggml_tensor *    mask = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, S, 1);
+        ggml_set_input(d);
+        ggml_set_input(x);
+        ggml_set_input(mask);
+        struct ggml_tensor * dy   = ggml_mul_mat(ctx, d, x);      // [out,S,N]
+        struct ggml_tensor * dym  = ggml_mul(ctx, dy, mask);
+        ggml_set_output(dy);
+        ggml_set_output(dym);
+        struct ggml_cgraph * gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, dym);
+        ggml_build_forward_expand(gf, dy);
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        std::vector<ggml_bf16_t> dd((size_t) (in * out));
+        for (int i = 0; i < in * out; i++) dd[i] = ggml_fp32_to_bf16(0.5f);  // all 0.5
+        std::vector<float> xd((size_t) (in * S * N), 1.0f), md((size_t) S);
+        for (int s = 0; s < S; s++) md[s] = (float) (s + 1) * 0.25f;
+        ggml_backend_tensor_set(d, dd.data(), 0, dd.size() * sizeof(ggml_bf16_t));
+        ggml_backend_tensor_set(x, xd.data(), 0, xd.size() * sizeof(float));
+        ggml_backend_tensor_set(mask, md.data(), 0, md.size() * sizeof(float));
+        ggml_backend_graph_compute(backend, gf);
+        std::vector<float> dyd((size_t) (out * S * N)), dymd((size_t) (out * S * N));
+        ggml_backend_tensor_get(dy, dyd.data(), 0, dyd.size() * sizeof(float));
+        ggml_backend_tensor_get(dym, dymd.data(), 0, dymd.size() * sizeof(float));
+        // Each dy element = sum_in(0.5 * 1.0) = in*0.5 = 2.0; masked = 2.0*md[s].
+        int bad = 0;
+        for (int n = 0; n < N; n++)
+            for (int s = 0; s < S; s++)
+                for (int f = 0; f < out; f++) {
+                    size_t idx = (size_t) n * S * out + (size_t) s * out + f;
+                    float  exp = dyd[idx] * md[s];
+                    if (fabsf(dymd[idx] - exp) > 1e-3f) {
+                        if (bad < 6) fprintf(stderr, "[BcastTest] T2 MISMATCH f=%d s=%d n=%d dy=%.3f exp=%.3f got=%.3f\n", f, s, n, dyd[idx], exp, dymd[idx]);
+                        bad++;
+                    }
+                }
+        fprintf(stderr, "[BcastTest] T2 dy=%.3f (expect 2.0); mask chain: %s (%d/%lld bad)\n",
+                dyd[0], bad ? "FAIL" : "PASS", bad, (long long) (out * S * N));
+        fails += bad ? 1 : 0;
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+    }
+
+    fprintf(stderr, "[BcastTest] RESULT: %s\n", fails ? "FAIL — broadcast is the bug" : "PASS — broadcast is fine, look elsewhere");
+    backend_release(bp.backend, bp.cpu_backend);
+    return fails ? 1 : 0;
+}
 
 static void usage(const char * prog) {
     AceSynthParams d;
@@ -51,6 +157,9 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
+    if (std::getenv("HOTSTEP_BCAST_TEST")) {
+        return run_bcast_selftest();
+    }
     if (argc < 2) {
         usage(argv[0]);
         return 1;
