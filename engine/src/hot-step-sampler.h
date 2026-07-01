@@ -281,24 +281,32 @@ static int dit_ggml_generate(DiTGGML *           model,
         std::vector<int> frame_sec(S, 0);
         for (size_t k = 0; k < secs.size(); k++)
             for (int s = bnd[k]; s < bnd[k + 1] && s < S; s++) frame_sec[s] = (int) k;
-        const int xf = std::max(1, S / 50);  // crossfade half-width (~2% of song)
+        // Crossfade: build the hard per-frame weight, then triangular-smooth it over
+        // ±xf frames. Smoothing gives symmetric, continuous section transitions
+        // (the old trailing-only fade left a discontinuity at each section start,
+        // which glitched the audio).
+        const int xf = std::max(1, S / 40);  // ~2.5% of the song each side
         lora_mask_host.assign(Nad, std::vector<float>(S, 0.0f));
+        std::vector<float> hard(S);
         for (size_t i = 0; i < Nad; i++) {
+            for (int s = 0; s < S; s++) hard[s] = secWeight((size_t) frame_sec[s], i);
+            float mn = 1e9f, mx = -1e9f, sum = 0.0f;
             for (int s = 0; s < S; s++) {
-                int   k = frame_sec[s];
-                float w = secWeight((size_t) k, i);
-                if (k + 1 < (int) secs.size()) {
-                    int b = bnd[k + 1];
-                    if (s >= b - xf) {
-                        float t  = (float) (s - (b - xf)) / (float) (2 * xf);
-                        t        = t < 0 ? 0 : (t > 1 ? 1 : t);
-                        float wn = secWeight((size_t) k + 1, i);
-                        w        = w * (1.0f - t) + wn * t;
-                    }
+                double acc = 0.0, wsum = 0.0;
+                int lo = s - xf < 0 ? 0 : s - xf;
+                int hi = s + xf >= S ? S - 1 : s + xf;
+                for (int sp = lo; sp <= hi; sp++) {
+                    double wd = (double) (xf + 1 - std::abs(sp - s));  // triangular kernel
+                    acc += hard[sp] * wd;
+                    wsum += wd;
                 }
-                lora_mask_host[i][s] = w;
+                float v            = (float) (wsum > 0 ? acc / wsum : hard[s]);
+                lora_mask_host[i][s] = v;
+                mn = v < mn ? v : mn; mx = v > mx ? v : mx; sum += v;
             }
             ggml_backend_tensor_set(model->lora_masks[i], lora_mask_host[i].data(), 0, (size_t) S * sizeof(float));
+            fprintf(stderr, "[Adapter-RT]   mask[%zu] min=%.3f max=%.3f mean=%.3f\n",
+                    i, mn, mx, sum / (float) S);
         }
         fprintf(stderr, "[Adapter-RT] Per-section masks uploaded: %zu adapters × %d frames, %zu sections\n",
                 Nad, S, secs.size());
