@@ -542,6 +542,14 @@ static int dit_ggml_generate(DiTGGML *           model,
         ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
         ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
         ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+        // Per-section adapter masks are constant GPU inputs read at every layer —
+        // same as enc_hidden, the scheduler clobbers them after each compute, so
+        // they MUST be re-uploaded every step. Uploading once left them garbage for
+        // steps 2..N, zeroing the masked adapter delta (the "nil adapter" bug).
+        for (size_t i = 0; i < model->lora_masks.size() && i < lora_mask_host.size(); i++) {
+            if (model->lora_masks[i])
+                ggml_backend_tensor_set(model->lora_masks[i], lora_mask_host[i].data(), 0, (size_t) S * sizeof(float));
+        }
 
         // Pack xt into input tensor (cond + uncond slots)
         for (int b = 0; b < N; b++) {
@@ -592,6 +600,10 @@ static int dit_ggml_generate(DiTGGML *           model,
             ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
             ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
             ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
+            for (size_t i = 0; i < model->lora_masks.size() && i < lora_mask_host.size(); i++) {
+                if (model->lora_masks[i])
+                    ggml_backend_tensor_set(model->lora_masks[i], lora_mask_host[i].data(), 0, (size_t) S * sizeof(float));
+            }
             ggml_backend_sched_graph_compute(model->sched, gf);
             ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
             for (int b = 0; b < N; b++) {
@@ -645,6 +657,10 @@ static int dit_ggml_generate(DiTGGML *           model,
                                 S * S * N_graph * sizeof(uint16_t));
         ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
                                 enc_S * S * N_graph * sizeof(uint16_t));
+        for (size_t i = 0; i < model->lora_masks.size() && i < lora_mask_host.size(); i++) {
+            if (model->lora_masks[i])
+                ggml_backend_tensor_set(model->lora_masks[i], lora_mask_host[i].data(), 0, (size_t) S * sizeof(float));
+        }
 
         // Forward pass
         ggml_backend_sched_graph_compute(model->sched, gf);
