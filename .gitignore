@@ -88,7 +88,9 @@ Thumbs.db
 # Agents & dev tooling (local only)
 .agents/
 .agent/
-.claude/
+# .claude/ is local-only EXCEPT the committed skill library
+.claude/*
+!.claude/skills/
 .gemini/
 
 # Dev-only scripts (local only, not needed by end users)
