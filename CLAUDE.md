@@ -86,6 +86,7 @@ Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable
 
 | For… | Read |
 |------|------|
+| **Any maintenance task — start here** (per-domain procedures, gotchas, distilled institutional knowledge) | [.claude/skills/README.md](.claude/skills/README.md) — 13 fact-checked skills |
 | Full feature catalogue (100+) | [FEATURES.md](FEATURES.md) |
 | Engine internals, CLI, request JSON, generation modes | [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) |
 | Writing a Lua plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
