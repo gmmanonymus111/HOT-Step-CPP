@@ -817,6 +817,14 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
     // Override adapter path from preset; scale, group scales, mode, and
     // trigger word settings are already correct from globalParams.
     params.loraPath = preset.adapter_path;
+    // loraStack supersedes loraPath in translateParams (req.adapters wins in
+    // the engine), and getGlobalParams folds even a single top-bar adapter
+    // into a stack — so the stack must be replaced too, or whatever was
+    // loaded in the top panel keeps playing instead of the preset adapter.
+    params.loraStack = [{
+      path: preset.adapter_path,
+      scale: typeof params.loraScale === 'number' ? params.loraScale : 1.0,
+    }];
 
     // Re-derive trigger word from the PRESET adapter filename (globalParams
     // has the trigger word for the GLOBAL adapter, which may differ).
@@ -824,17 +832,20 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
     const triggerSettings = settingsRaw ? JSON.parse(settingsRaw) : {};
     const useFilename = triggerSettings.triggerUseFilename === true;
     const placement = (triggerSettings.triggerPlacement as 'prepend' | 'append' | 'replace') || 'prepend';
+    // Clear the snapshot's trigger words first: translateParams prefers the
+    // plural triggerWords (derived from the global adapter stack) over the
+    // singular triggerWord set below, so stale globals must not survive.
+    delete params.triggerWord;
+    delete params.triggerWords;
+    delete params.triggerPlacement;
     if (useFilename) {
       const fileName = preset.adapter_path.replace(/\\/g, '/').split('/').pop() || '';
       const triggerWord = fileName.replace(/\.safetensors$/i, '');
       if (triggerWord) {
         params.triggerWord = triggerWord;
+        params.triggerWords = [triggerWord];
         params.triggerPlacement = placement;
       }
-    } else {
-      // Preset adapter but no filename trigger — clear any global trigger word
-      delete params.triggerWord;
-      delete params.triggerPlacement;
     }
   }
 

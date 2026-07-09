@@ -68,6 +68,12 @@ export function useAudioGeneration({ profiles, showToast: _showToast }: UseAudio
     const gps = useGlobalParamsStore.getState();
     if (preset?.adapter_path) {
       gps.setAdapter(preset.adapter_path);
+      // An Advanced-mode adapter stack supersedes the single adapter in
+      // getGlobalParams() — replace it too, otherwise the preset swap is
+      // silently ignored and the previously stacked adapters keep playing.
+      if (gps.advancedAdapters && gps.adapterStack && gps.adapterStack.length > 0) {
+        gps.setAdapterStack([{ path: preset.adapter_path, scale: gps.adapterScale ?? 1.0 }]);
+      }
       gps.setAdaptersOpen(true);
     }
 
