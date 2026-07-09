@@ -142,16 +142,17 @@ export function registerLlmRoutes(router: Router): void {
       const profile = db.getProfile(id);
       if (!profile) return res.status(404).json({ error: 'Profile not found' });
       
-      const { provider_name, model, extra_instructions, auto_save = true, user_subject } = req.body;
-      
+      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
+
       const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
       const artistId = lyricsSet?.artist_id;
       const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
 
       const generated = await llmService.generateLyricsStreaming(
-        profile.profile_data, provider_name, model, extra_instructions, 
+        profile.profile_data, provider_name, model, extra_instructions,
         usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations,
-        undefined, undefined, user_subject || undefined
+        undefined, undefined, user_subject || undefined,
+        no_think ? { noThink: true } : undefined
       );
       
       if (auto_save) {
@@ -184,8 +185,8 @@ export function registerLlmRoutes(router: Router): void {
       const profile = db.getProfile(id);
       if (!profile) throw new Error('Profile not found');
       
-      const { provider_name, model, extra_instructions, auto_save = true, user_subject } = req.body;
-      
+      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
+
       const sendSse = initSse(res);
       llmService.resetSkipThinking();
 
@@ -198,7 +199,8 @@ export function registerLlmRoutes(router: Router): void {
         usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations,
         (chunk) => sendSse('chunk', { text: chunk }),
         (phase) => sendSse('phase', { phase }),
-        user_subject || undefined
+        user_subject || undefined,
+        no_think ? { noThink: true } : undefined
       );
 
       if (auto_save) {

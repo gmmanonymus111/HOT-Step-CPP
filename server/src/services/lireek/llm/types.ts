@@ -27,6 +27,21 @@ export type ChunkCallback = (chunk: string) => void;
 export interface CallOptions {
   temperature?: number;
   top_p?: number;
+  /**
+   * Best-effort "answer without reasoning" for local thinking models.
+   * There is NO universal off-switch across runtimes, so providers layer
+   * every mechanism that is harmless where unsupported:
+   *  - `reasoning_effort: 'none'` (LM Studio — EMPIRICALLY VERIFIED 2026-07-09
+   *    on Qwen3.6: reasoning drops to zero; gemma accepts it harmlessly)
+   *  - `/no_think` soft switch appended to the system prompt (older Qwen3;
+   *    Qwen3.5+ dropped it — verified ignored on Qwen3.6)
+   *  - `chat_template_kwargs: { enable_thinking: false }` (llama.cpp server;
+   *    LM Studio ignores it — verified)
+   *  - `think: false` (Ollama native)
+   * Models with no supported mechanism still think; stripThinkingBlocks()
+   * downstream keeps the output clean either way.
+   */
+  noThink?: boolean;
   [key: string]: any;
 }
 

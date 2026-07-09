@@ -312,14 +312,14 @@ export async function startStreamBuildProfile(
 
 export async function startStreamGenerate(
   _profileId: number,
-  req: { profile_id: number; provider: string; model?: string; extra_instructions?: string; user_subject?: string },
+  req: { profile_id: number; provider: string; model?: string; extra_instructions?: string; user_subject?: string; no_think?: boolean },
   onComplete?: () => void,
 ): Promise<void> {
   resetStream('Generating lyrics…');
   try {
     await consumeSSE(
       `/api/lireek/profiles/${req.profile_id}/generate-stream`,
-      { provider_name: req.provider, model: req.model, extra_instructions: req.extra_instructions, user_subject: req.user_subject },
+      { provider_name: req.provider, model: req.model, extra_instructions: req.extra_instructions, user_subject: req.user_subject, no_think: req.no_think },
       makeCallbacks(() => onComplete?.(), (msg) => { _state.text += `\n⚠ Error: ${msg}`; _emit(); }),
     );
   } catch (err) {

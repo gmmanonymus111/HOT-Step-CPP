@@ -1,8 +1,8 @@
 // llm/lmstudio.ts — LM Studio provider
 
 import { config } from '../../../config.js';
-import { LLMProvider, readSSE } from './base.js';
-import type { ProviderInfo, ChunkCallback } from './types.js';
+import { LLMProvider, readSSE, noThinkSystemPrompt } from './base.js';
+import type { ProviderInfo, ChunkCallback, CallOptions } from './types.js';
 
 export class LMStudioProvider extends LLMProvider {
   id = 'lmstudio';
@@ -31,25 +31,47 @@ export class LMStudioProvider extends LLMProvider {
     };
   }
 
-  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback): Promise<string> {
+  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback, options?: CallOptions): Promise<string> {
     const baseUrl = config.lireek.lmstudioBaseUrl;
     const url = `${baseUrl}/chat/completions`;
     const modelName = model || (await this.getLocalModels())[0] || this.defaultModel;
-    
+
     if (!modelName) throw new Error("No models loaded in LM Studio");
 
-    const payload = {
+    const noThink = !!options?.noThink;
+    const payload: Record<string, any> = {
       model: modelName,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      messages: [
+        { role: 'system', content: noThink ? noThinkSystemPrompt(systemPrompt) : systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
       stream: !!onChunk,
     };
+    if (noThink) {
+      // Empirically verified against LM Studio + Qwen3.6 (2026-07-09): this is
+      // the field LM Studio honours — reasoning drops to zero and content is
+      // answered directly. Non-thinking models (gemma) accept it harmlessly.
+      payload.reasoning_effort = 'none';
+      // llama.cpp-style template kwarg — ignored by LM Studio today (verified),
+      // kept because it is harmless and honoured if support lands.
+      payload.chat_template_kwargs = { enable_thinking: false };
+    }
 
-    const resp = await fetch(url, {
+    const doFetch = () => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(300_000),
     });
+
+    let resp = await doFetch();
+    // If a server/model combination rejects the non-standard fields, retry
+    // once without them rather than failing the generation.
+    if (!resp.ok && noThink && resp.status === 400) {
+      delete payload.chat_template_kwargs;
+      delete payload.reasoning_effort;
+      resp = await doFetch();
+    }
 
     if (!resp.ok) throw new Error(`LM Studio error: ${resp.status} ${await resp.text()}`);
 

@@ -138,6 +138,14 @@ export interface GenerationParams {
    *  for per-section masking weight transforms. */
   adapterStackMode?: string;
   adapterStackBudget?: number;
+  /** Per-section masking: alignment-timing fraction + (dormant) isolation flag. */
+  adapterSectionAlignAt?: number;
+  adapterSectionIsolation?: boolean;
+  /** Runtime-mode delta quantization ('bf16' | 'q8_0' | 'q4_0' | aliased 'q4_k'). */
+  adapterRuntimeQuant?: string;
+  /** Basin re-base: source DiT model name + nudge strength (merge mode only). */
+  rebaseSource?: string;
+  rebaseBeta?: number;
   adapterGroupScales?: {
     self_attn: number;
     cross_attn: number;

@@ -1,8 +1,8 @@
 // llm/ollama.ts — Ollama (Local) provider
 
 import { config } from '../../../config.js';
-import { LLMProvider } from './base.js';
-import type { ProviderInfo, ChunkCallback } from './types.js';
+import { LLMProvider, noThinkSystemPrompt } from './base.js';
+import type { ProviderInfo, ChunkCallback, CallOptions } from './types.js';
 import { skipThinkingSignal } from './types.js';
 
 export class OllamaProvider extends LLMProvider {
@@ -31,21 +31,34 @@ export class OllamaProvider extends LLMProvider {
     };
   }
 
-  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback): Promise<string> {
+  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback, options?: CallOptions): Promise<string> {
     const url = `${config.lireek.ollamaBaseUrl}/api/chat`;
-    const payload = {
+    const noThink = !!options?.noThink;
+    const payload: Record<string, any> = {
       model: model || this.defaultModel,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      messages: [
+        { role: 'system', content: noThink ? noThinkSystemPrompt(systemPrompt) : systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
       stream: !!onChunk,
       options: { num_predict: 8196 }
     };
+    // Native Ollama switch for thinking models (qwen3, deepseek-r1, ...).
+    if (noThink) payload.think = false;
 
-    const resp = await fetch(url, {
+    const doFetch = () => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(300_000),
     });
+
+    let resp = await doFetch();
+    // Non-thinking models reject the `think` field — retry once without it.
+    if (!resp.ok && noThink && resp.status === 400 && 'think' in payload) {
+      delete payload.think;
+      resp = await doFetch();
+    }
 
     if (!resp.ok) throw new Error(`Ollama error: ${resp.status} ${await resp.text()}`);
 

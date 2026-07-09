@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, Pencil, Music2, Wand2, Play, Loader2, ChevronDown, ChevronRight, Send, FileText, Headphones, Sparkles } from 'lucide-react';
+import { Trash2, Pencil, Music2, Wand2, Play, Loader2, ChevronDown, ChevronRight, Send, FileText, Headphones, Sparkles, Zap } from 'lucide-react';
 import { lireekApi, streamRefine, skipThinking } from '../../services/lireekApi';
 import type { Generation, Profile } from '../../services/lireekApi';
 import { StreamingPanel } from './StreamingPanel';
@@ -38,7 +38,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
   const [refineStreamPhase, setRefineStreamPhase] = useState('');
   const [refineStreamDone, setRefineStreamDone] = useState(false);
 
-  const handleQuickGenerate = useCallback(async () => {
+  const handleQuickGenerate = useCallback(async (noThink = false) => {
     if (profiles.length === 0) {
       showToast('Build a profile first');
       return;
@@ -55,6 +55,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
             provider: generationModel.provider,
             model: generationModel.model,
             user_subject: userSubject.trim() || undefined,
+            no_think: noThink || undefined,
           },
           () => onRefresh(),
         );
@@ -133,7 +134,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
       {/* Generate controls */}
       <div className="flex items-center gap-3 flex-wrap">
         <button
-          onClick={handleQuickGenerate}
+          onClick={() => handleQuickGenerate(false)}
           disabled={generating || profiles.length === 0}
           className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
         >
@@ -148,6 +149,15 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
               {t('lyric.generateLyrics')}
             </>
           )}
+        </button>
+        <button
+          onClick={() => handleQuickGenerate(true)}
+          disabled={generating || profiles.length === 0}
+          title={t('lyric.generateNoThinkHint')}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold transition-all"
+        >
+          <Zap className="w-4 h-4" />
+          {t('lyric.generateNoThink')}
         </button>
         <div className="flex items-center gap-2">
           <label className="text-xs text-zinc-500">{t('lyric.count')}</label>

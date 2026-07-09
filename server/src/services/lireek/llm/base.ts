@@ -30,6 +30,13 @@ export abstract class LLMProvider {
   }
 }
 
+// Qwen3-family soft switch: a bare `/no_think` in the system prompt makes the
+// chat template skip the thinking block. Plain text to every other model, so
+// it is safe to send unconditionally when CallOptions.noThink is set.
+export function noThinkSystemPrompt(systemPrompt: string): string {
+  return `${systemPrompt}\n\n/no_think`;
+}
+
 export async function readSSE(
   response: Response,
   onChunk: ChunkCallback,

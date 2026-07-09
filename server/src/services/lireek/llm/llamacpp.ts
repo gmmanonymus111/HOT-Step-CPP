@@ -5,8 +5,8 @@
 // Default endpoint: http://127.0.0.1:8080/v1
 
 import { config } from '../../../config.js';
-import { LLMProvider, readSSE } from './base.js';
-import type { ProviderInfo, ChunkCallback } from './types.js';
+import { LLMProvider, readSSE, noThinkSystemPrompt } from './base.js';
+import type { ProviderInfo, ChunkCallback, CallOptions } from './types.js';
 
 export class LlamaCppProvider extends LLMProvider {
   id = 'llamacpp';
@@ -35,18 +35,25 @@ export class LlamaCppProvider extends LLMProvider {
     };
   }
 
-  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback): Promise<string> {
+  async call(systemPrompt: string, userPrompt: string, model?: string, onChunk?: ChunkCallback, options?: CallOptions): Promise<string> {
     const baseUrl = config.lireek.llamacppBaseUrl.replace(/\/+$/, '');
     const url = `${baseUrl}/chat/completions`;
     const modelName = model || (await this.getLocalModels())[0] || this.defaultModel;
 
     if (!modelName) throw new Error('No models available on llama.cpp server');
 
-    const payload = {
+    const noThink = !!options?.noThink;
+    const payload: Record<string, any> = {
       model: modelName,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      messages: [
+        { role: 'system', content: noThink ? noThinkSystemPrompt(systemPrompt) : systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
       stream: !!onChunk,
     };
+    // Officially supported by llama-server: skips the thinking block for
+    // templates that take an enable_thinking kwarg (Qwen3, GLM, ...).
+    if (noThink) payload.chat_template_kwargs = { enable_thinking: false };
 
     // 5-min timeout — prevents hung requests from blocking the generation queue
     const resp = await fetch(url, {

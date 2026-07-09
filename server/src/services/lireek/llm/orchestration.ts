@@ -8,7 +8,7 @@ import {
   TITLE_DERIVATION_PROMPT
 } from '../prompts.js';
 import type { LyricsProfile } from '../profilerService.js';
-import type { GenerationResponse, ChunkCallback } from './types.js';
+import type { GenerationResponse, ChunkCallback, CallOptions } from './types.js';
 import { getProvider } from './registry.js';
 import {
   stripThinkingBlocks, postprocessLyrics, fixSectionLabels,
@@ -75,7 +75,8 @@ async function planSongMetadata(
   providerName: string,
   modelName: string,
   onChunk?: ChunkCallback,
-  userSubject?: string
+  userSubject?: string,
+  callOptions?: CallOptions
 ): Promise<any> {
   const provider = getProvider(providerName);
   const lines: string[] = [`Artist: ${profile.artist}`];
@@ -108,7 +109,7 @@ async function planSongMetadata(
 
   const prompt = lines.join('\n');
   console.log('[LLM] Planning song metadata via', providerName, modelName);
-  const responseJsonStr = await provider.call(cacheBustPrompt(SONG_METADATA_SYSTEM_PROMPT), prompt, modelName, onChunk);
+  const responseJsonStr = await provider.call(cacheBustPrompt(SONG_METADATA_SYSTEM_PROMPT), prompt, modelName, onChunk, callOptions);
   const cleaned = stripThinkingBlocks(responseJsonStr);
   const cleanJson = cleaned.replace(/^```(?:json)?\s*|\s*```$/gm, '').trim();
   try {
@@ -265,7 +266,7 @@ export async function generateLyricsStreaming(
   usedBpms: number[] = [], usedKeys: string[] = [],
   usedTitles: string[] = [], usedDurations: number[] = [],
   onChunk?: ChunkCallback, onPhase?: (phase: string) => void,
-  userSubject?: string
+  userSubject?: string, callOptions?: CallOptions
 ): Promise<GenerationResponse> {
   const provider = getProvider(providerName);
   const effectiveModel = model || provider.defaultModel;
@@ -274,7 +275,7 @@ export async function generateLyricsStreaming(
   let metadata = { subject: '', bpm: 0, key: '', caption: '', duration: 0 };
   if (profile.song_subjects || (profile.themes && profile.themes.length) || userSubject) {
     try {
-      metadata = await planSongMetadata(profile, usedSubjects, usedBpms, usedKeys, usedDurations, providerName, effectiveModel, onChunk, userSubject);
+      metadata = await planSongMetadata(profile, usedSubjects, usedBpms, usedKeys, usedDurations, providerName, effectiveModel, onChunk, userSubject, callOptions);
       if (userSubject) metadata.subject = userSubject;
       console.log("Planned metadata:", metadata);
     } catch(e) { console.warn("Failed to plan metadata", e); }
@@ -284,7 +285,7 @@ export async function generateLyricsStreaming(
   if (metadata.subject) extraInstructions = `The song must be about: ${metadata.subject}\n\n${extraInstructions || ''}`;
   if (onPhase) onPhase("Writing lyrics…");
   const userPrompt = buildGenerationPrompt(profile, extraInstructions, metadata.duration, metadata.bpm);
-  let raw = await provider.call(cacheBustPrompt(GENERATION_SYSTEM_PROMPT), userPrompt, effectiveModel, onChunk);
+  let raw = await provider.call(cacheBustPrompt(GENERATION_SYSTEM_PROMPT), userPrompt, effectiveModel, onChunk, callOptions);
 
   raw = stripThinkingBlocks(raw);
   raw = raw.replace(/<\|[a-z_]+\|>/g, '');
@@ -329,7 +330,7 @@ export async function generateLyricsStreaming(
     }
     titleLines.push('\n--- LYRICS ---', raw, '--- END LYRICS ---');
     titleLines.push('\nChoose the best title for this song:');
-    let titleRaw = await provider.call(cacheBustPrompt(TITLE_DERIVATION_PROMPT), titleLines.join('\n'), effectiveModel, onChunk);
+    let titleRaw = await provider.call(cacheBustPrompt(TITLE_DERIVATION_PROMPT), titleLines.join('\n'), effectiveModel, onChunk, callOptions);
     titleRaw = stripThinkingBlocks(titleRaw).trim();
     titleRaw = titleRaw.replace(/^(?:Title:\s*|#\s*)/i, '').replace(/^["'`]|["'`]$/g, '').trim();
     title = titleRaw.split('\n')[0].trim();
@@ -344,7 +345,7 @@ export async function generateLyricsStreaming(
       retryLines.push(`\nThe title "${title}" is REJECTED because: ${titleIssues.join(', ')}.`);
       retryLines.push('Choose a DIFFERENT title that avoids these issues. Return ONLY the new title:');
       try {
-        let retryRaw = await provider.call(cacheBustPrompt(TITLE_DERIVATION_PROMPT), retryLines.join('\n'), effectiveModel, onChunk);
+        let retryRaw = await provider.call(cacheBustPrompt(TITLE_DERIVATION_PROMPT), retryLines.join('\n'), effectiveModel, onChunk, callOptions);
         retryRaw = stripThinkingBlocks(retryRaw).trim();
         retryRaw = retryRaw.replace(/^(?:Title:\s*|#\s*)/i, '').replace(/^["'`]|["'`]$/g, '').trim();
         const retryTitle = retryRaw.split('\n')[0].trim();
