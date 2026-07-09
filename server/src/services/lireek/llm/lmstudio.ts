@@ -55,6 +55,16 @@ export class LMStudioProvider extends LLMProvider {
       // llama.cpp-style template kwarg — ignored by LM Studio today (verified),
       // kept because it is harmless and honoured if support lands.
       payload.chat_template_kwargs = { enable_thinking: false };
+      // Qwen's OFFICIAL non-thinking sampling profile. Without thinking, low-
+      // entropy sampling degenerates into endless repetition loops ("the cord
+      // is a square / the cord is a circle" ...); presence_penalty=1.5 is
+      // Qwen's documented anti-loop knob for this mode. Explicit CallOptions
+      // values win. max_tokens bounds any residual runaway.
+      payload.temperature = options?.temperature ?? 0.7;
+      payload.top_p = options?.top_p ?? 0.8;
+      payload.top_k = 20;
+      payload.presence_penalty = 1.5;
+      payload.max_tokens = 8192;
     }
 
     const doFetch = () => fetch(url, {

@@ -44,7 +44,18 @@ export class OllamaProvider extends LLMProvider {
       options: { num_predict: 8196 }
     };
     // Native Ollama switch for thinking models (qwen3, deepseek-r1, ...).
-    if (noThink) payload.think = false;
+    if (noThink) {
+      payload.think = false;
+      // Qwen's official non-thinking sampling profile — presence_penalty=1.5
+      // is their documented guard against degenerate repetition loops.
+      payload.options = {
+        ...payload.options,
+        temperature: options?.temperature ?? 0.7,
+        top_p: options?.top_p ?? 0.8,
+        top_k: 20,
+        presence_penalty: 1.5,
+      };
+    }
 
     const doFetch = () => fetch(url, {
       method: 'POST',

@@ -53,7 +53,17 @@ export class LlamaCppProvider extends LLMProvider {
     };
     // Officially supported by llama-server: skips the thinking block for
     // templates that take an enable_thinking kwarg (Qwen3, GLM, ...).
-    if (noThink) payload.chat_template_kwargs = { enable_thinking: false };
+    if (noThink) {
+      payload.chat_template_kwargs = { enable_thinking: false };
+      // Qwen's official non-thinking sampling profile — presence_penalty=1.5
+      // is their documented guard against degenerate repetition loops in this
+      // mode. Explicit CallOptions values win; max_tokens bounds runaways.
+      payload.temperature = options?.temperature ?? 0.7;
+      payload.top_p = options?.top_p ?? 0.8;
+      payload.top_k = 20;
+      payload.presence_penalty = 1.5;
+      payload.max_tokens = 8192;
+    }
 
     // 5-min timeout — prevents hung requests from blocking the generation queue
     const resp = await fetch(url, {
