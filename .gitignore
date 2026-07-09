@@ -102,6 +102,8 @@ server/restart-loop.cmd
 benchmark-results/
 docs/plans/
 scratch/
+# Co-dev drop folder (VST plugins etc. — install locally, never commit)
+toinstall/
 
 # Release build artifacts (but keep scripts and configs)
 release/staging/
