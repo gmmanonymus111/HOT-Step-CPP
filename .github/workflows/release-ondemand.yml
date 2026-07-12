@@ -9,7 +9,7 @@
 #
 # Architecture: see docs/plans/2026-05-11-release-automation-design.md
 
-name: Release
+name: Release-Ondemand
 
 on: workflow_dispatch
 
