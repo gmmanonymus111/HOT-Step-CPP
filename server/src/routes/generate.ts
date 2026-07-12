@@ -190,13 +190,21 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
   const aceReq = translateParams(job.params);
 
-  // Write the resolved seed back into job.params so the DB stores the actual
-  // seed used — critical for reproducibility when randomSeed is true.
+  // Write the resolved seeds back into job.params so the DB stores the actual
+  // values used — critical for reproducibility when randomSeed is true, or
+  // when lmSeedFollowsDit is on (lm_seed isn't sent to the engine at all in
+  // that case — the engine ties it to seed itself — so mirror that here
+  // rather than leaving a stale/unused "fixed" value in job.params).
   if (aceReq.seed !== undefined) {
     job.params.seed = aceReq.seed;
   }
+  if (aceReq.lm_seed !== undefined) {
+    job.params.lmSeed = aceReq.lm_seed;
+  } else if (job.params.lmSeedFollowsDit !== false) {
+    job.params.lmSeed = aceReq.seed;
+  }
 
-  console.log(`[Generate] Job ${job.id} — ditModel=${job.params.ditModel || '(none)'}, synth_model=${aceReq.synth_model || '(none)'}, emb_model=${aceReq.emb_model || '(auto)'}, seed=${aceReq.seed ?? '(engine default)'}, source=${job.params.source || 'create'}`);
+  console.log(`[Generate] Job ${job.id} — ditModel=${job.params.ditModel || '(none)'}, synth_model=${aceReq.synth_model || '(none)'}, emb_model=${aceReq.emb_model || '(auto)'}, seed=${aceReq.seed ?? '(engine default)'}, lm_seed=${aceReq.lm_seed ?? `(tied to seed: ${aceReq.seed ?? 'engine default'})`}, source=${job.params.source || 'create'}`);
   const abortController = new AbortController();
 
   // Store abort controller for cancellation
