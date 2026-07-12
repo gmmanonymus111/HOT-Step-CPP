@@ -1,0 +1,1225 @@
+# .github/workflows/release.yml — Automated multi-platform release pipeline
+#
+# Triggered by: pushing a version tag (e.g. git tag v1.1.0 && git push origin v1.1.0)
+#
+# Jobs:
+#   1. build-windows (matrix: cuda13.1/cuda12.8/vulkan/cpu) — parallel Windows builds
+#   2. build-macos — Apple Silicon Metal build
+#   3. release — collect all artifacts, generate notes, create draft GitHub Release
+#
+# Architecture: see docs/plans/2026-05-11-release-automation-design.md
+
+name: Release
+
+on: workflow_dispatch
+
+permissions:
+  contents: write   # Required for gh release create
+
+env:
+  NODE_VERSION: '22.16.0'
+  ORT_VERSION: '1.25.1'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows builds (CUDA / Vulkan / CPU) — run in parallel via matrix strategy
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build-windows:
+    # Pin to windows-2022 (VS 2022). windows-latest migrated to windows-2025,
+    # whose newer MSVC (_MSC_VER >= 1950) is rejected by CUDA 12.8/13.1 nvcc
+    # (host_config.h: "Only the versions between 2017 and 2022 are supported").
+    runs-on: windows-2022
+    strategy:
+      fail-fast: true
+      matrix:
+        variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
+        include:
+          - variant: cuda13.1
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          # Volta-only build (Tesla V100, sm_70). ggml's mma flash-attention and
+          # MMQ have no sm_70 device code, so force cuBLAS and disable FA.
+          - variant: cuda12-volta
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+              -DGGML_CUDA_FORCE_CUBLAS=ON
+              -DHOT_STEP_DISABLE_FA=ON
+              -DCMAKE_CUDA_ARCHITECTURES=70-real
+            cuda_version: '12.8.1'
+          - variant: vulkan
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+              -DGGML_BACKEND_DL=ON
+              -DHOT_STEP_STATIC_RUNTIME=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
+          - variant: cpu
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=OFF
+              -DHOT_STEP_STATIC_RUNTIME=ON
+            cuda_version: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # Manual init below (vstgui4 is fragile + unneeded)
+          fetch-depth: 0      # Full history for release notes
+
+      - name: Init required submodules
+        shell: bash
+        run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
+          # Init top-level submodule (vst3sdk)
+          git submodule update --init engine/vendor/vst3sdk
+          # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      # ── SDK Setup ──────────────────────────────────────────────
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: 'network'
+
+      - name: Download Vulkan SDK runtime (for glslc)
+        if: matrix.variant == 'vulkan'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: latest
+          cache: true
+
+      - name: Save glslc binary
+        if: matrix.variant == 'vulkan'
+        shell: bash
+        run: |
+          # Save glslc from the runtime SDK before setup-vulkan-sdk overrides VULKAN_SDK
+          mkdir -p /tmp/glslc-save
+          cp "$VULKAN_SDK/Bin/glslc.exe" /tmp/glslc-save/glslc.exe
+          echo "Saved glslc from $VULKAN_SDK/Bin"
+
+      - name: Install Vulkan SDK (headers + loader)
+        if: matrix.variant == 'vulkan'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers
+          vulkan-use-cache: true
+
+      - name: Restore glslc into dev SDK
+        if: matrix.variant == 'vulkan'
+        shell: bash
+        run: |
+          # Copy saved glslc into the dev SDK's bin dir
+          mkdir -p "$VULKAN_SDK/bin"
+          cp /tmp/glslc-save/glslc.exe "$VULKAN_SDK/bin/"
+          echo "$VULKAN_SDK/bin" >> $GITHUB_PATH
+          echo "VULKAN_SDK=$VULKAN_SDK"
+          echo "glslc version: $($VULKAN_SDK/bin/glslc.exe --version)"
+          echo "--- Headers ---"
+          find "$VULKAN_SDK" -name "vulkan.h" -type f 2>/dev/null | head -3
+          echo "--- Libs ---"
+          find "$VULKAN_SDK" -name "vulkan-1*" -type f 2>/dev/null | head -3
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ── ONNX Runtime (SuperSep) ────────────────────────────────
+      - name: Cache ONNX Runtime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: engine/deps/onnxruntime
+          key: ort-win-x64-gpu-${{ env.ORT_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ortUrl = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}.zip"
+          $ortZip = "$env:RUNNER_TEMP\ort.zip"
+          Write-Host "Downloading ORT from $ortUrl"
+          Invoke-WebRequest -Uri $ortUrl -OutFile $ortZip -UseBasicParsing
+          New-Item -ItemType Directory -Force engine/deps | Out-Null
+          Expand-Archive -Path $ortZip -DestinationPath engine/deps -Force
+          Move-Item "engine/deps/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}" "engine/deps/onnxruntime"
+
+      # ── Portable Node.js ───────────────────────────────────────
+      - name: Cache portable Node.js
+        id: cache-node
+        uses: actions/cache@v4
+        with:
+          path: release/.node-cache
+          key: node-win-${{ env.NODE_VERSION }}
+
+      - name: Download portable Node.js
+        if: steps.cache-node.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $nodeUrl = "https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-win-x64.zip"
+          $nodeZip = "$env:RUNNER_TEMP\node.zip"
+          New-Item -ItemType Directory -Force release/.node-cache | Out-Null
+          Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeZip -UseBasicParsing
+          Expand-Archive -Path $nodeZip -DestinationPath release/.node-cache -Force
+
+      # ── Build Engine ───────────────────────────────────────────
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          # Runner image is part of the key: a build dir configured on one image
+          # (compiler abs-paths baked into CMakeCache) is unusable on another.
+          # windows-latest moved to windows-2025; we pin windows-2022, so the old
+          # cache must NOT be restored (stale cl.exe path → configure failure).
+          key: cmake-windows-2022-${{ matrix.variant }}-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-windows-2022-${{ matrix.variant }}-
+
+      - name: Restore source file timestamps
+        shell: bash
+        run: |
+          # actions/checkout sets all file mtimes to 'now', which makes cached
+          # build objects look stale to Ninja (source newer than object → rebuild).
+          # Restore git commit timestamps so Ninja can correctly skip unchanged files.
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
+          # GGML submodule: restore mtimes from its OWN git history. The
+          # superproject only tracks the submodule gitlink, so these files (the
+          # CUDA kernels — by far the longest compile) stayed at checkout mtime,
+          # making Ninja recompile all of CUDA every run despite the build cache.
+          if [ -e engine/ggml/.git ]; then
+            git -C engine/ggml log --pretty=format:%at --name-only | \
+              awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+              while IFS=' ' read -r ts file; do
+                f="engine/ggml/$file"
+                [ -f "$f" ] && python3 -c "import os; os.utime('$f', ($ts, $ts))" 2>/dev/null
+              done
+            echo "Restored git timestamps for engine/ggml submodule (CUDA sources)"
+          fi
+
+      - name: Build C++ engine
+        shell: pwsh
+        run: |
+          $buildDir = "engine/build"
+          New-Item -ItemType Directory -Force $buildDir | Out-Null
+          # A restored build cache may carry absolute toolchain paths that are
+          # dead in this run — the ninja binary (ephemeral _temp/<run-id> dir from
+          # lukka/get-cmake) and the Vulkan SDK. Drop every CMakeCache.txt — the
+          # top-level one AND nested ExternalProject ones (e.g. ggml's
+          # vulkan-shaders-gen) — so each configure re-detects them; cached object
+          # files remain for incremental.
+          Get-ChildItem -Path $buildDir -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleared stale CMakeCache.txt files"
+
+          # A cache written by a runner whose clock was slightly ahead leaves
+          # files with future mtimes; ninja then loops "build.ninja still dirty
+          # ... system time is not set" (hit in the vulkan-shaders-gen
+          # ExternalProject). Pull any future-dated mtimes back to now.
+          $now = Get-Date
+          Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt $now } |
+            ForEach-Object { try { $_.LastWriteTime = $now } catch {} }
+
+          # The vulkan-shaders-gen ExternalProject sub-build gets stuck in a
+          # "build.ninja still dirty after 100 tries" loop when restored from
+          # cache. Nuke just that prefix so it reconfigures clean — only the
+          # shader generator (seconds to rebuild); object caches are untouched.
+          Get-ChildItem -Path $buildDir -Recurse -Directory -Filter 'vulkan-shaders-gen-prefix' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+          Push-Location $buildDir
+          $cmakeArgs = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release") + "${{ matrix.cmake_flags }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
+          Write-Host "cmake $($cmakeArgs -join ' ')"
+          cmake .. @cmakeArgs
+          cmake --build . -j $env:NUMBER_OF_PROCESSORS
+          Pop-Location
+
+          # Verify output (Ninja puts binaries in build/ directly, not build/Release/)
+          $aceServer = "engine/build/bin/ace-server.exe"
+          if (-not (Test-Path $aceServer)) {
+            # Fallback: check directly in build/
+            $aceServer = "engine/build/ace-server.exe"
+          }
+          if (-not (Test-Path $aceServer)) {
+            throw "Build failed: ace-server.exe not found"
+          }
+          Write-Host "Engine build complete: $(Get-Item $aceServer | Select-Object -ExpandProperty Length | ForEach-Object { [math]::Round($_ / 1MB, 1) }) MB"
+
+      # ── Bundle Server ──────────────────────────────────────────
+      - name: Install server dependencies
+        shell: pwsh
+        run: |
+          Push-Location server
+          npm install --ignore-scripts
+          # ffmpeg-static's install script downloads the actual binary
+          Push-Location node_modules/ffmpeg-static
+          node install.js
+          Pop-Location
+          # Verify ffmpeg was downloaded
+          if (Test-Path "node_modules/ffmpeg-static/ffmpeg.exe") {
+            $sz = [math]::Round((Get-Item "node_modules/ffmpeg-static/ffmpeg.exe").Length / 1MB, 1)
+            Write-Host "ffmpeg.exe downloaded ($sz MB)"
+          } else {
+            Write-Host "WARNING: ffmpeg.exe not found after install script" -ForegroundColor Yellow
+          }
+          Pop-Location
+
+      - name: Rebuild better-sqlite3 for portable Node
+        shell: pwsh
+        run: |
+          $nodeExe = "release/.node-cache/node-v${{ env.NODE_VERSION }}-win-x64/node.exe"
+          Push-Location server/node_modules/better-sqlite3
+          npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch x64 --platform win32
+          Pop-Location
+
+      - name: Install esbuild
+        shell: pwsh
+        run: |
+          Push-Location release
+          npm install esbuild --save-dev
+          Pop-Location
+
+      # ── Build UI ───────────────────────────────────────────────
+      - name: Build UI
+        shell: pwsh
+        run: |
+          Push-Location ui
+          npm install
+          npx vite build
+          Pop-Location
+
+      # ── Assemble Release Package ───────────────────────────────
+      - name: Assemble release
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $variant = "${{ matrix.variant }}"
+          $dist = "release/staging"
+
+          # Clean staging
+          if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+          New-Item -ItemType Directory -Force $dist | Out-Null
+
+          # Runtime: portable Node.js
+          New-Item -ItemType Directory -Force "$dist/runtime" | Out-Null
+          Copy-Item "release/.node-cache/node-v${{ env.NODE_VERSION }}-win-x64/node.exe" "$dist/runtime/node.exe"
+
+          # Engine: binaries + DLLs
+          $engineOut = "$dist/engine"
+          New-Item -ItemType Directory -Force $engineOut | Out-Null
+          # Ninja outputs to build/ directly; VS generator outputs to build/Release/
+          $buildRelease = if (Test-Path "engine/build/Release/ace-server.exe") {
+            "engine/build/Release"
+          } elseif (Test-Path "engine/build/bin/ace-server.exe") {
+            "engine/build/bin"
+          } else {
+            "engine/build"
+          }
+          Write-Host "Engine output directory: $buildRelease"
+
+          $engineFiles = @(
+            "ace-server.exe", "mastering.exe", "mp3-codec.exe",
+            "neural-codec.exe", "vst-host.exe", "quantize.exe",
+            "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"
+          )
+
+          # Add variant-specific DLLs
+          # Note: matrix variants are 'cuda13.1', 'cuda12.8' — use prefix match, not exact
+          if ($variant -match '^cuda') { $engineFiles += "ggml-cuda.dll" }
+          if ($variant -eq 'vulkan') { $engineFiles += "ggml-vulkan.dll" }
+
+          foreach ($file in $engineFiles) {
+            $src = Join-Path $buildRelease $file
+            if (Test-Path $src) {
+              Copy-Item $src (Join-Path $engineOut $file)
+            } else {
+              Write-Warning "Missing engine file: $file"
+            }
+          }
+
+          # CPU variant DLLs (ggml-cpu-*.dll from GGML_CPU_ALL_VARIANTS)
+          Get-ChildItem (Join-Path $buildRelease "ggml-cpu-*.dll") -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $engineOut $_.Name)
+          }
+
+          # ORT DLLs (for SuperSep — all variants need onnxruntime.dll for CPU inference)
+          $ortLib = "engine/deps/onnxruntime/lib"
+          if (Test-Path $ortLib) {
+            # Core runtime — needed by all variants
+            $ortCore = Join-Path $ortLib "onnxruntime.dll"
+            if (Test-Path $ortCore) { Copy-Item $ortCore (Join-Path $engineOut "onnxruntime.dll") }
+            # CUDA providers — only needed for CUDA variant
+            if ($variant -match "^cuda") {
+              foreach ($dll in @("onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll")) {
+                $src = Join-Path $ortLib $dll
+                if (Test-Path $src) { Copy-Item $src (Join-Path $engineOut $dll) }
+              }
+            }
+          }
+
+          # Lua plugins
+          if (Test-Path "engine/plugins") {
+            Copy-Item -Recurse "engine/plugins" "$engineOut/plugins"
+          }
+          if (Test-Path "plugins") {
+            Copy-Item -Recurse "plugins" "$dist/plugins"
+          }
+
+          # MSVC Runtime DLLs (CRT + OpenMP)
+          # CI runners have multiple Redist versions — always pick the NEWEST
+          # to avoid ABI mismatches with pre-built binaries like onnxruntime.dll.
+          # CRT DLLs (vcruntime, msvcp) — all live under Microsoft.VC143.CRT
+          $msvcRedist = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'x64' -and $_.FullName -notmatch 'debug' -and $_.FullName -match 'Redist' } |
+            Sort-Object { $_.VersionInfo.FileVersionRaw } -Descending |
+            Select-Object -First 1
+          if ($msvcRedist) {
+            $msvcDir = $msvcRedist.DirectoryName
+            Write-Host "MSVC CRT Redist: $msvcDir (v$($msvcRedist.VersionInfo.FileVersion))"
+            foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll")) {
+              $src = Join-Path $msvcDir $dll
+              if (Test-Path $src) { Copy-Item $src (Join-Path $engineOut $dll) }
+            }
+          }
+          # OpenMP runtime (vcomp140.dll) — lives under Microsoft.VC143.OpenMP
+          $openmpRedist = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "vcomp140.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'x64' -and $_.FullName -notmatch 'debug' -and $_.FullName -match 'Redist' } |
+            Sort-Object { $_.VersionInfo.FileVersionRaw } -Descending |
+            Select-Object -First 1
+          if ($openmpRedist) {
+            Write-Host "MSVC OpenMP Redist: $($openmpRedist.FullName) (v$($openmpRedist.VersionInfo.FileVersion))"
+            Copy-Item $openmpRedist.FullName (Join-Path $engineOut "vcomp140.dll")
+          }
+
+          # Server
+          $serverOut = "$dist/server"
+          New-Item -ItemType Directory -Force $serverOut | Out-Null
+          # Re-run esbuild into clean staging (staging was wiped above)
+          node release/esbuild.config.mjs
+          if (-not (Test-Path "$serverOut/server.mjs")) {
+            throw "esbuild failed: server.mjs not found in $serverOut"
+          }
+          # Copy better-sqlite3 minimal package
+          $bsqlSrc = "server/node_modules/better-sqlite3"
+          $bsqlDst = "$serverOut/node_modules/better-sqlite3"
+          New-Item -ItemType Directory -Force $bsqlDst | Out-Null
+          Copy-Item "$bsqlSrc/package.json" "$bsqlDst/package.json"
+          New-Item -ItemType Directory -Force "$bsqlDst/lib" | Out-Null
+          Copy-Item -Recurse "$bsqlSrc/lib/*" "$bsqlDst/lib"
+          # Copy pre-built native addon (already rebuilt for Node 22 in earlier step)
+          New-Item -ItemType Directory -Force "$bsqlDst/build/Release" | Out-Null
+          Copy-Item "$bsqlSrc/build/Release/better_sqlite3.node" "$bsqlDst/build/Release/better_sqlite3.node"
+
+          # better-sqlite3 runtime deps
+          foreach ($dep in @("bindings", "file-uri-to-path")) {
+            $depSrc = "server/node_modules/$dep"
+            if (Test-Path $depSrc) {
+              Copy-Item -Recurse $depSrc "$serverOut/node_modules/$dep"
+            }
+          }
+
+          # ffmpeg
+          $ffmpegSrc = "server/node_modules/ffmpeg-static/ffmpeg.exe"
+          if (Test-Path $ffmpegSrc) {
+            Copy-Item $ffmpegSrc "$serverOut/ffmpeg.exe"
+          }
+
+          # Data files
+          $dataOut = "$serverOut/data"
+          New-Item -ItemType Directory -Force $dataOut | Out-Null
+          Copy-Item "server/src/data/model-registry.json" "$dataOut/model-registry.json"
+          if (Test-Path "server/src/data/assistant-knowledge.md") {
+            Copy-Item "server/src/data/assistant-knowledge.md" "$dataOut/assistant-knowledge.md"
+          }
+
+          # UI
+          if (Test-Path "ui/dist") {
+            New-Item -ItemType Directory -Force "$dist/ui" | Out-Null
+            Copy-Item -Recurse "ui/dist" "$dist/ui/dist"
+          }
+
+          # Essentia
+          if (Test-Path "Essentia") {
+            Copy-Item -Recurse "Essentia" "$dist/Essentia"
+          }
+
+          # Noise samples
+          if (Test-Path "noise_samples") {
+            Copy-Item -Recurse "noise_samples" "$dist/noise_samples"
+          }
+
+          # Empty user directories
+          New-Item -ItemType Directory -Force "$dist/models" | Out-Null
+          New-Item -ItemType Directory -Force "$dist/adapters" | Out-Null
+
+          # Build variant marker (so server knows whether CUDA runtime is needed)
+          # Both CUDA variants are 'cuda' from the server's perspective
+          $serverVariant = if ($variant -match '^cuda') { 'cuda' } else { $variant }
+          Set-Content -Path "$dist/engine/.variant" -Value $serverVariant -NoNewline
+
+          # CUDA version marker (for runtime DLL version selection)
+          if ($variant -match '^cuda') {
+            $cudaMajor = '${{ matrix.cuda_version }}'.Split('.')[0]
+            Set-Content -Path "$dist/engine/.cuda-version" -Value $cudaMajor -NoNewline
+          }
+
+          # Config and docs
+          Copy-Item ".env.example" "$dist/.env.example"
+          Copy-Item "release/HOT-Step.bat" "$dist/HOT-Step.bat"
+          Copy-Item "open-browser-if-needed.ps1" "$dist/open-browser-if-needed.ps1"
+          Copy-Item "release/README.txt" "$dist/README.txt"
+
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $variant = "${{ matrix.variant }}"
+          $zipName = "HOT-Step-CPP-v${version}-win-x64-${variant}.zip"
+          $zipPath = "release/out/$zipName"
+
+          New-Item -ItemType Directory -Force "release/out" | Out-Null
+
+          # Compress with .NET for better compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            "release/staging", $zipPath,
+            [System.IO.Compression.CompressionLevel]::Optimal, $false
+          )
+
+          $zipSize = (Get-Item $zipPath).Length
+          $zipSizeMB = [math]::Round($zipSize / 1MB, 1)
+          Write-Host "$zipName ($zipSizeMB MB)"
+
+          # SHA256
+          $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash
+          "$hash  $zipName" | Set-Content "release/out/${zipName}.sha256" -NoNewline
+          Write-Host "SHA256: $hash"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win-${{ matrix.variant }}
+          path: |
+            release/out/*.zip
+            release/out/*.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # macOS build (Apple Silicon / Metal)
+  # ─────────────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-15  # Apple Silicon — needs Xcode 16+ for std::from_chars<float>
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # Manual init below (vstgui4 is fragile + unneeded)
+          fetch-depth: 0
+
+      - name: Init required submodules
+        run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
+          # Init top-level submodule (vst3sdk)
+          git submodule update --init engine/vendor/vst3sdk
+          # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install build dependencies
+        run: brew install cmake
+
+      # ── Build Engine ───────────────────────────────────────────
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          key: cmake-macos-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-macos-
+
+      - name: Restore source file timestamps
+        run: |
+          # actions/checkout sets all file mtimes to 'now', which makes cached
+          # build objects look stale to Ninja (source newer than object → rebuild).
+          # Restore git commit timestamps so Ninja can correctly skip unchanged files.
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
+          # GGML submodule: restore mtimes from its OWN git history. The
+          # superproject only tracks the submodule gitlink, so these files (the
+          # CUDA kernels — by far the longest compile) stayed at checkout mtime,
+          # making Ninja recompile all of CUDA every run despite the build cache.
+          if [ -e engine/ggml/.git ]; then
+            git -C engine/ggml log --pretty=format:%at --name-only | \
+              awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+              while IFS=' ' read -r ts file; do
+                f="engine/ggml/$file"
+                [ -f "$f" ] && python3 -c "import os; os.utime('$f', ($ts, $ts))" 2>/dev/null
+              done
+            echo "Restored git timestamps for engine/ggml submodule (CUDA sources)"
+          fi
+
+      - name: Build C++ engine
+        run: |
+          mkdir -p engine/build && cd engine/build
+          cmake .. \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_BACKEND_DL=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release -j $(sysctl -n hw.logicalcpu)
+          echo "Engine build complete"
+          ls -la ace-server mastering mp3-codec 2>/dev/null || true
+
+      # ── Bundle Server ──────────────────────────────────────────
+      - name: Install server dependencies
+        run: |
+          cd server && npm install --ignore-scripts
+          cd node_modules/better-sqlite3 && npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch arm64 --platform darwin || npm run build-release
+          cd ../..
+          # ffmpeg-static's install script downloads the actual binary
+          cd node_modules/ffmpeg-static && node install.js && cd ../..
+          if [ -f "node_modules/ffmpeg-static/ffmpeg" ]; then
+            echo "ffmpeg downloaded ($(du -h node_modules/ffmpeg-static/ffmpeg | cut -f1))"
+          else
+            echo "WARNING: ffmpeg not found after install script"
+          fi
+          cd ..
+
+      - name: Bundle server with esbuild
+        run: |
+          cd release && npm install esbuild --save-dev
+
+      # ── Build UI ───────────────────────────────────────────────
+      - name: Build UI
+        run: |
+          cd ui && npm install && npx vite build
+
+      # ── Assemble Release Package ───────────────────────────────
+      - name: Download portable Node.js
+        run: |
+          NODE_MAC_VERSION="${{ env.NODE_VERSION }}"
+          NODE_URL="https://nodejs.org/dist/v${NODE_MAC_VERSION}/node-v${NODE_MAC_VERSION}-darwin-arm64.tar.gz"
+          mkdir -p /tmp/node-portable
+          curl -sL "$NODE_URL" | tar -xz -C /tmp/node-portable --strip-components=1
+
+      - name: Assemble release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIST="release/staging"
+          rm -rf "$DIST" && mkdir -p "$DIST"
+
+          # Runtime: portable Node.js
+          mkdir -p "$DIST/runtime/bin" "$DIST/runtime/lib"
+          cp /tmp/node-portable/bin/node "$DIST/runtime/bin/node"
+          # Copy ICU data if present (required for intl support)
+          if ls /tmp/node-portable/lib/*.dat 2>/dev/null; then
+            cp /tmp/node-portable/lib/*.dat "$DIST/runtime/lib/"
+          fi
+
+          # Engine binaries
+          mkdir -p "$DIST/engine"
+          BUILD_DIR="engine/build"
+          for bin in ace-server mastering mp3-codec neural-codec vst-host quantize; do
+            if [ -f "$BUILD_DIR/$bin" ]; then
+              cp "$BUILD_DIR/$bin" "$DIST/engine/$bin"
+            fi
+          done
+
+          # Copy any dylibs (ggml backends, Metal)
+          find "$BUILD_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$DIST/engine/" \;
+
+          # Fix rpaths for portable distribution
+          for bin in "$DIST/engine/"*; do
+            if [ -x "$bin" ] && file "$bin" | grep -q "Mach-O"; then
+              install_name_tool -add_rpath @executable_path "$bin" 2>/dev/null || true
+            fi
+          done
+
+          # Lua plugins
+          [ -d "engine/plugins" ] && cp -r engine/plugins "$DIST/engine/plugins"
+          [ -d "plugins" ] && cp -r plugins "$DIST/plugins"
+
+          # Server
+          SRVOUT="$DIST/server"
+          mkdir -p "$SRVOUT"
+          # Re-run esbuild into clean staging (staging was wiped above)
+          node release/esbuild.config.mjs
+          [ -f "$SRVOUT/server.mjs" ] || { echo "ERROR: server.mjs missing after esbuild"; exit 1; }
+          # Copy better-sqlite3
+          BSQL_SRC="server/node_modules/better-sqlite3"
+          BSQL_DST="$SRVOUT/node_modules/better-sqlite3"
+          mkdir -p "$BSQL_DST/lib" "$BSQL_DST/build/Release"
+          cp "$BSQL_SRC/package.json" "$BSQL_DST/"
+          cp -r "$BSQL_SRC/lib/"* "$BSQL_DST/lib/"
+          cp "$BSQL_SRC/build/Release/better_sqlite3.node" "$BSQL_DST/build/Release/"
+          # Runtime deps
+          for dep in bindings file-uri-to-path; do
+            [ -d "server/node_modules/$dep" ] && cp -r "server/node_modules/$dep" "$SRVOUT/node_modules/$dep"
+          done
+
+          # Data files
+          mkdir -p "$SRVOUT/data"
+          cp server/src/data/model-registry.json "$SRVOUT/data/"
+          [ -f server/src/data/assistant-knowledge.md ] && cp server/src/data/assistant-knowledge.md "$SRVOUT/data/"
+
+          # UI
+          [ -d "ui/dist" ] && mkdir -p "$DIST/ui" && cp -r ui/dist "$DIST/ui/dist"
+
+          # ffmpeg
+          FFMPEG_SRC="server/node_modules/ffmpeg-static/ffmpeg"
+          if [ -f "$FFMPEG_SRC" ]; then
+            cp "$FFMPEG_SRC" "$SRVOUT/ffmpeg"
+          fi
+
+          # Noise samples
+          [ -d "noise_samples" ] && cp -r noise_samples "$DIST/noise_samples"
+
+          # Empty user directories
+          mkdir -p "$DIST/models" "$DIST/adapters"
+
+          # Config
+          cp .env.example "$DIST/.env.example"
+
+          # Launch script
+          cat > "$DIST/HOT-Step.sh" << 'LAUNCH'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export HOT_STEP_ROOT="$DIR"
+          exec "$DIR/runtime/bin/node" "$DIR/server/server.mjs"
+          LAUNCH
+          chmod +x "$DIST/HOT-Step.sh"
+
+      - name: Package and checksum
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARNAME="HOT-Step-CPP-v${VERSION}-macOS-arm64.tar.gz"
+          mkdir -p release/out
+          tar -czf "release/out/$TARNAME" -C release/staging .
+          HASH=$(shasum -a 256 "release/out/$TARNAME" | awk '{print $1}')
+          echo "$HASH  $TARNAME" > "release/out/${TARNAME}.sha256"
+          echo "$TARNAME ($(du -h "release/out/$TARNAME" | awk '{print $1}'))"
+          echo "SHA256: $HASH"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            release/out/*.tar.gz
+            release/out/*.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Linux builds (CUDA / Vulkan / CPU) — run in parallel via matrix strategy
+  # ─────────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04   # 22.04 for wider glibc compatibility across distros
+    strategy:
+      fail-fast: true
+      matrix:
+        variant: [cuda13.1, cuda12.8, cuda12-volta, vulkan, cpu]
+        include:
+          - variant: cuda13.1
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '13.1.0'
+          - variant: cuda12.8
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: '12.8.1'
+          # Volta-only build (Tesla V100, sm_70). ggml's mma flash-attention and
+          # MMQ have no sm_70 device code, so force cuBLAS and disable FA.
+          - variant: cuda12-volta
+            cmake_flags: >-
+              -DGGML_CUDA=ON -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+              -DGGML_CUDA_FORCE_CUBLAS=ON
+              -DHOT_STEP_DISABLE_FA=ON
+              -DCMAKE_CUDA_ARCHITECTURES=70-real
+            cuda_version: '12.8.1'
+          - variant: vulkan
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=ON
+              -DGGML_BACKEND_DL=ON
+              -DGGML_CPU_ALL_VARIANTS=ON
+            cuda_version: ''
+          - variant: cpu
+            cmake_flags: >-
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+              -DGGML_BACKEND_DL=OFF
+            cuda_version: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # Manual init below (vstgui4 is fragile + unneeded)
+          fetch-depth: 0      # Full history for release notes
+
+      - name: Init required submodules
+        run: |
+          # Init ggml submodule (GGML compute backend — required for engine build)
+          git submodule update --init engine/ggml
+          # Init top-level submodule (vst3sdk)
+          git submodule update --init engine/vendor/vst3sdk
+          # Init only the VST3 sub-submodules we actually use — skip vstgui4/doc/tutorials
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      # ── SDK Setup ──────────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install CUDA Toolkit
+        if: matrix.cuda_version != ''
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: 'network'
+
+      - name: Install Vulkan SDK (headers + loader)
+        if: matrix.variant == 'vulkan'
+        run: |
+          # LunarG Vulkan SDK — provides headers, loader, AND glslc shader compiler.
+          # Ubuntu's libvulkan-dev only has headers+loader, missing glslc which GGML needs.
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ── ONNX Runtime (SuperSep) ────────────────────────────────
+      - name: Cache ONNX Runtime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: engine/deps/onnxruntime
+          key: ort-linux-x64-gpu-${{ env.ORT_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}.tgz"
+          echo "Downloading ORT from $ORT_URL"
+          mkdir -p engine/deps
+          curl -sL "$ORT_URL" | tar -xz -C engine/deps
+          mv "engine/deps/onnxruntime-linux-x64-gpu-${{ env.ORT_VERSION }}" engine/deps/onnxruntime
+
+      # ── Portable Node.js ───────────────────────────────────────
+      - name: Cache portable Node.js
+        id: cache-node
+        uses: actions/cache@v4
+        with:
+          path: release/.node-cache
+          key: node-linux-x64-${{ env.NODE_VERSION }}
+
+      - name: Download portable Node.js
+        if: steps.cache-node.outputs.cache-hit != 'true'
+        run: |
+          NODE_URL="https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-linux-x64.tar.gz"
+          mkdir -p release/.node-cache
+          curl -sL "$NODE_URL" | tar -xz -C release/.node-cache --strip-components=0
+
+      # ── Build Engine ───────────────────────────────────────────
+      - name: Install Ninja build system
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: latest
+          ninjaVersion: latest
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build
+          key: cmake-linux-${{ matrix.variant }}-${{ hashFiles('engine/ggml/**', 'engine/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-linux-${{ matrix.variant }}-
+
+      - name: Restore source file timestamps
+        run: |
+          # actions/checkout sets all file mtimes to 'now', which makes cached
+          # build objects look stale to Ninja (source newer than object → rebuild).
+          # Restore git commit timestamps so Ninja can correctly skip unchanged files.
+          git log --pretty=format:%at --name-only -- engine/ | \
+            awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+            while IFS=' ' read -r ts file; do
+              [ -f "$file" ] && python3 -c "import os; os.utime('$file', ($ts, $ts))" 2>/dev/null
+            done
+          echo "Restored git timestamps for engine/ source files"
+          # GGML submodule: restore mtimes from its OWN git history. The
+          # superproject only tracks the submodule gitlink, so these files (the
+          # CUDA kernels — by far the longest compile) stayed at checkout mtime,
+          # making Ninja recompile all of CUDA every run despite the build cache.
+          if [ -e engine/ggml/.git ]; then
+            git -C engine/ggml log --pretty=format:%at --name-only | \
+              awk '/^[0-9]+$/{t=$0;next} NF && !seen[$0]++{print t, $0}' | \
+              while IFS=' ' read -r ts file; do
+                f="engine/ggml/$file"
+                [ -f "$f" ] && python3 -c "import os; os.utime('$f', ($ts, $ts))" 2>/dev/null
+              done
+            echo "Restored git timestamps for engine/ggml submodule (CUDA sources)"
+          fi
+
+      - name: Build C++ engine
+        run: |
+          mkdir -p engine/build && cd engine/build
+          # A restored build cache may carry absolute toolchain paths (notably
+          # the ninja binary, installed to an ephemeral _temp/<run-id> dir by
+          # lukka/get-cmake). Drop every CMakeCache.txt — the top-level one AND
+          # nested ExternalProject ones (e.g. ggml's vulkan-shaders-gen) — so each
+          # configure re-detects the current run's ninja; cached object files
+          # remain for an incremental compile.
+          find . -name CMakeCache.txt -delete 2>/dev/null || true
+          # A cache written by a runner whose clock was slightly ahead leaves
+          # files with future mtimes; ninja then loops "build.ninja still dirty
+          # ... system time is not set" (hit in the vulkan-shaders-gen
+          # ExternalProject). Pull any future-dated mtimes back to now — cheap,
+          # and preserves the relative ordering cached objects rely on.
+          find . -type f -newermt 'now' -exec touch -d 'now' {} + 2>/dev/null || true
+          # The vulkan-shaders-gen ExternalProject sub-build gets stuck in a
+          # "build.ninja still dirty after 100 tries" loop when restored from
+          # cache. Nuke just that prefix so it reconfigures clean — it's only
+          # the shader generator (seconds to rebuild); the expensive ggml/acestep
+          # object caches are untouched. No-op for non-vulkan variants.
+          find . -type d -name 'vulkan-shaders-gen-prefix' -exec rm -rf {} + 2>/dev/null || true
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${{ matrix.cmake_flags }}
+          cmake --build . -j $(nproc)
+
+          # Verify output
+          if [ ! -f ace-server ]; then
+            echo "Build failed: ace-server not found"
+            exit 1
+          fi
+          echo "Engine build complete: $(du -h ace-server | awk '{print $1}')"
+
+      # ── Bundle Server ──────────────────────────────────────────
+      - name: Install server dependencies
+        run: |
+          cd server && npm install --ignore-scripts
+          cd node_modules/better-sqlite3 && npx prebuild-install --runtime node --target ${{ env.NODE_VERSION }} --arch x64 --platform linux || npm run build-release
+          cd ../..
+          # ffmpeg-static's install script downloads the actual binary
+          cd node_modules/ffmpeg-static && node install.js && cd ../..
+          if [ -f "node_modules/ffmpeg-static/ffmpeg" ]; then
+            echo "ffmpeg downloaded ($(du -h node_modules/ffmpeg-static/ffmpeg | cut -f1))"
+          else
+            echo "WARNING: ffmpeg not found after install script"
+          fi
+          cd ..
+
+      - name: Bundle server with esbuild
+        run: |
+          cd release && npm install esbuild --save-dev
+
+      # ── Build UI ───────────────────────────────────────────────
+      - name: Build UI
+        run: |
+          cd ui && npm install && npx vite build
+
+      # ── Assemble Release Package ───────────────────────────────
+      - name: Assemble release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VARIANT="${{ matrix.variant }}"
+          DIST="release/staging"
+          rm -rf "$DIST" && mkdir -p "$DIST"
+
+          # Runtime: portable Node.js
+          mkdir -p "$DIST/runtime/bin" "$DIST/runtime/lib"
+          cp "release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/bin/node" "$DIST/runtime/bin/node"
+          # Copy ICU data if present (required for intl support)
+          if ls release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/lib/*.dat 2>/dev/null; then
+            cp release/.node-cache/node-v${{ env.NODE_VERSION }}-linux-x64/lib/*.dat "$DIST/runtime/lib/"
+          fi
+
+          # Engine binaries
+          mkdir -p "$DIST/engine"
+          BUILD_DIR="engine/build"
+          for bin in ace-server mastering mp3-codec neural-codec vst-host quantize; do
+            if [ -f "$BUILD_DIR/$bin" ]; then
+              cp "$BUILD_DIR/$bin" "$DIST/engine/$bin"
+            fi
+          done
+
+          # Copy shared libraries (.so files — ggml backends, ORT)
+          find "$BUILD_DIR" -maxdepth 1 -name "*.so" -exec cp {} "$DIST/engine/" \;
+          find "$BUILD_DIR" -maxdepth 1 -name "*.so.*" -exec cp {} "$DIST/engine/" \;
+
+          # CPU variant .so files (ggml-cpu-*.so from GGML_CPU_ALL_VARIANTS)
+          find "$BUILD_DIR" -maxdepth 1 -name "ggml-cpu-*.so" -exec cp {} "$DIST/engine/" \;
+
+          # ORT .so files (for SuperSep — all variants need libonnxruntime.so for CPU inference)
+          ORT_LIB="engine/deps/onnxruntime/lib"
+          if [ -d "$ORT_LIB" ]; then
+            # Core runtime — needed by all variants
+            find "$ORT_LIB" -name "libonnxruntime.so*" -exec cp {} "$DIST/engine/" \;
+            # CUDA providers — only needed for CUDA variant
+            if [[ "$VARIANT" =~ ^cuda ]]; then
+              find "$ORT_LIB" -name "libonnxruntime_providers_shared.so" -exec cp {} "$DIST/engine/" \;
+              find "$ORT_LIB" -name "libonnxruntime_providers_cuda.so" -exec cp {} "$DIST/engine/" \;
+            fi
+          fi
+
+          # Lua plugins
+          [ -d "engine/plugins" ] && cp -r engine/plugins "$DIST/engine/plugins"
+          [ -d "plugins" ] && cp -r plugins "$DIST/plugins"
+
+          # Server
+          SRVOUT="$DIST/server"
+          mkdir -p "$SRVOUT"
+          # Re-run esbuild into clean staging (staging was wiped above)
+          node release/esbuild.config.mjs
+          [ -f "$SRVOUT/server.mjs" ] || { echo "ERROR: server.mjs missing after esbuild"; exit 1; }
+          # Copy better-sqlite3
+          BSQL_SRC="server/node_modules/better-sqlite3"
+          BSQL_DST="$SRVOUT/node_modules/better-sqlite3"
+          mkdir -p "$BSQL_DST/lib" "$BSQL_DST/build/Release"
+          cp "$BSQL_SRC/package.json" "$BSQL_DST/"
+          cp -r "$BSQL_SRC/lib/"* "$BSQL_DST/lib/"
+          cp "$BSQL_SRC/build/Release/better_sqlite3.node" "$BSQL_DST/build/Release/"
+          # Runtime deps
+          for dep in bindings file-uri-to-path; do
+            [ -d "server/node_modules/$dep" ] && cp -r "server/node_modules/$dep" "$SRVOUT/node_modules/$dep"
+          done
+
+          # Data files
+          mkdir -p "$SRVOUT/data"
+          cp server/src/data/model-registry.json "$SRVOUT/data/"
+          [ -f server/src/data/assistant-knowledge.md ] && cp server/src/data/assistant-knowledge.md "$SRVOUT/data/"
+
+          # UI
+          [ -d "ui/dist" ] && mkdir -p "$DIST/ui" && cp -r ui/dist "$DIST/ui/dist"
+
+          # ffmpeg
+          FFMPEG_SRC="server/node_modules/ffmpeg-static/ffmpeg"
+          if [ -f "$FFMPEG_SRC" ]; then
+            cp "$FFMPEG_SRC" "$SRVOUT/ffmpeg"
+          fi
+
+          # Essentia (if Linux-compatible binaries exist)
+          [ -d "Essentia" ] && cp -r Essentia "$DIST/Essentia"
+
+          # Noise samples
+          [ -d "noise_samples" ] && cp -r noise_samples "$DIST/noise_samples"
+
+          # Empty user directories
+          mkdir -p "$DIST/models" "$DIST/adapters"
+
+          # Build variant marker (so server knows whether CUDA runtime is needed)
+          # Both CUDA variants are 'cuda' from the server's perspective
+          SERVER_VARIANT=$(echo "$VARIANT" | sed 's/^cuda.*/cuda/')
+          echo -n "$SERVER_VARIANT" > "$DIST/engine/.variant"
+
+          # CUDA version marker (for runtime DLL version selection)
+          if [[ "$VARIANT" =~ ^cuda ]]; then
+            CUDA_MAJOR=$(echo '${{ matrix.cuda_version }}' | cut -d. -f1)
+            echo -n "$CUDA_MAJOR" > "$DIST/engine/.cuda-version"
+          fi
+
+          # Config and docs
+          cp .env.example "$DIST/.env.example"
+          cp release/HOT-Step.sh "$DIST/HOT-Step.sh"
+          chmod +x "$DIST/HOT-Step.sh"
+          cp release/README.txt "$DIST/README.txt"
+
+      - name: Package and checksum
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VARIANT="${{ matrix.variant }}"
+          TARNAME="HOT-Step-CPP-v${VERSION}-linux-x64-${VARIANT}.tar.gz"
+          mkdir -p release/out
+          tar -czf "release/out/$TARNAME" -C release/staging .
+          HASH=$(sha256sum "release/out/$TARNAME" | awk '{print $1}')
+          echo "$HASH  $TARNAME" > "release/out/${TARNAME}.sha256"
+          echo "$TARNAME ($(du -h "release/out/$TARNAME" | awk '{print $1}'))"
+          echo "SHA256: $HASH"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.variant }}
+          path: |
+            release/out/*.tar.gz
+            release/out/*.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Release — collect all artifacts, generate notes, create draft release
+  # ─────────────────────────────────────────────────────────────────────────
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history for release notes
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          echo "=== Release assets ==="
+          ls -lah release-assets/
+
+      - name: Generate release notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Previous tag for the changelog range. --exclude '*-*' skips hyphenated
+          # tags (e.g. v1.1.0-CI-Test, -rc) so a transient test tag can't become the
+          # "previous release" and truncate the notes to just a couple of commits.
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' "${TAG}^" 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release — no previous tag found"
+            COMMITS=$(git log --oneline "$TAG")
+          else
+            COMMITS=$(git log --oneline "${PREV_TAG}..${TAG}")
+          fi
+
+          # Build release notes
+          cat > release-notes.md << 'HEADER'
+          ## What's Changed
+          HEADER
+
+          # Features
+          FEATS=$(echo "$COMMITS" | grep -iE "^[a-f0-9]+ feat" || true)
+          if [ -n "$FEATS" ]; then
+            echo "" >> release-notes.md
+            echo "### 🎵 Features" >> release-notes.md
+            echo "$FEATS" | sed 's/^[a-f0-9]* /- /' >> release-notes.md
+          fi
+
+          # Fixes
+          FIXES=$(echo "$COMMITS" | grep -iE "^[a-f0-9]+ fix" || true)
+          if [ -n "$FIXES" ]; then
+            echo "" >> release-notes.md
+            echo "### 🔧 Fixes" >> release-notes.md
+            echo "$FIXES" | sed 's/^[a-f0-9]* /- /' >> release-notes.md
+          fi
+
+          # Other
+          OTHER=$(echo "$COMMITS" | grep -viE "^[a-f0-9]+ (feat|fix)" || true)
+          if [ -n "$OTHER" ]; then
+            echo "" >> release-notes.md
+            echo "### 📝 Other" >> release-notes.md
+            echo "$OTHER" | sed 's/^[a-f0-9]* /- /' >> release-notes.md
+          fi
+
+          # Download table
+          echo "" >> release-notes.md
+          echo "---" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "### Downloads" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "| Platform | Variant | File | Size |" >> release-notes.md
+          echo "|----------|---------|------|------|" >> release-notes.md
+
+          for f in release-assets/*.zip release-assets/*.tar.gz; do
+            [ -f "$f" ] || continue
+            NAME=$(basename "$f")
+            SIZE=$(du -h "$f" | awk '{print $1}')
+            if echo "$NAME" | grep -q "win.*cuda13"; then
+              echo "| Windows | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*cuda12-volta"; then
+              echo "| Windows | CUDA 12 (Volta only — Tesla V100, sm_70) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*cuda12"; then
+              echo "| Windows | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*vulkan"; then
+              echo "| Windows | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "win.*cpu"; then
+              echo "| Windows | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda13"; then
+              echo "| Linux | CUDA 13.1 (GPU, recommended) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda12-volta"; then
+              echo "| Linux | CUDA 12 (Volta only — Tesla V100, sm_70) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cuda12"; then
+              echo "| Linux | CUDA 12.8 (GPU, compatibility) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*vulkan"; then
+              echo "| Linux | Vulkan (GPU) | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "linux.*cpu"; then
+              echo "| Linux | CPU | \`$NAME\` | $SIZE |" >> release-notes.md
+            elif echo "$NAME" | grep -q "macOS"; then
+              echo "| macOS | Metal (Apple Silicon) | \`$NAME\` | $SIZE |" >> release-notes.md
+            fi
+          done
+
+          echo "" >> release-notes.md
+          echo "SHA256 checksums are attached to each file." >> release-notes.md
+
+          echo "=== Generated release notes ==="
+          cat release-notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --title "${{ github.ref_name }}" \
+            --notes-file release-notes.md \
+            release-assets/*
