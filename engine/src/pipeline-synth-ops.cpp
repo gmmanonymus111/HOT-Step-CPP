@@ -1546,7 +1546,9 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
             s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), /*use_sde=*/false, s.seeds.data(),
             ubc,
-            s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
+            /*repaint_src=*/nullptr, /*repaint_t0=*/0, /*repaint_t1=*/0,
+            /*repaint_injection_ratio=*/0.5f, /*repaint_crossfade_frames=*/0,
+            /*neg_enc_data=*/s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
         if (dit_rc != 0) {
             return -1;
         }
