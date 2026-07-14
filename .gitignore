@@ -13,6 +13,9 @@ server/server/data/
 # anchored to root: server/src/data/ and ui/src/data/ are tracked source
 /data/
 /models/
+# Local machine config
+/.mcp.json
+/SafeSettings.json
 *.db
 *.db-shm
 *.db-wal
