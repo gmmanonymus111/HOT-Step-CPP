@@ -50,6 +50,9 @@ void request_init(AceRequest * r) {
     r->repainting_end       = -1.0f;
     r->latent_shift         = 0.0f;
     r->latent_rescale       = 1.0f;
+    r->lss_strength         = 0.0f;
+    r->lss_var_thresh       = 0.15f;
+    r->lss_dc_remove        = true;
     r->custom_timesteps     = "";
     r->task_type            = TASK_TEXT2MUSIC;
     r->track                = "";
@@ -256,6 +259,15 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "latent_rescale")) && yyjson_is_num(v)) {
         r->latent_rescale = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lss_strength")) && yyjson_is_num(v)) {
+        r->lss_strength = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lss_var_thresh")) && yyjson_is_num(v)) {
+        r->lss_var_thresh = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lss_dc_remove")) && yyjson_is_bool(v)) {
+        r->lss_dc_remove = yyjson_get_bool(v);
     }
     if ((v = yyjson_obj_get(obj, "peak_clip")) && yyjson_is_num(v)) {
         r->peak_clip = (int) yyjson_get_num(v);
@@ -547,6 +559,15 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->latent_rescale != def.latent_rescale) {
         yyjson_mut_obj_add_real(doc, root, "latent_rescale", r->latent_rescale);
     }
+    if (all || r->lss_strength != def.lss_strength) {
+        yyjson_mut_obj_add_real(doc, root, "lss_strength", r->lss_strength);
+    }
+    if (all || r->lss_var_thresh != def.lss_var_thresh) {
+        yyjson_mut_obj_add_real(doc, root, "lss_var_thresh", r->lss_var_thresh);
+    }
+    if (all || r->lss_dc_remove != def.lss_dc_remove) {
+        yyjson_mut_obj_add_bool(doc, root, "lss_dc_remove", r->lss_dc_remove);
+    }
     if (all || r->custom_timesteps != def.custom_timesteps) {
         yyjson_mut_obj_add_str(doc, root, "custom_timesteps", r->custom_timesteps.c_str());
     }
@@ -682,6 +703,10 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (r->latent_shift != 0.0f || r->latent_rescale != 1.0f) {
         fprintf(f, "[Request] latent post: shift=%.3f rescale=%.3f\n", r->latent_shift, r->latent_rescale);
+    }
+    if (r->lss_strength > 0.0f) {
+        fprintf(f, "[Request] LSS: strength=%.2f var_thresh=%.2f dc_remove=%d\n",
+                r->lss_strength, r->lss_var_thresh, r->lss_dc_remove ? 1 : 0);
     }
     if (!r->custom_timesteps.empty()) {
         fprintf(f, "[Request] custom_timesteps: %s\n", r->custom_timesteps.c_str());

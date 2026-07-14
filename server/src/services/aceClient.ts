@@ -137,6 +137,10 @@ export interface AceRequest {
   denoise_strength?: number;   // 0.0 = off, 1.0 = max suppression
   denoise_smoothing?: number;  // 0.0 = sharp gate, 1.0 = very smooth
   denoise_mix?: number;        // 0.0 = all dry, 1.0 = all denoised
+  // LSS: Latent Spectral Suppressor (MDMAchine) — pre-VAE latent channel gate
+  lss_strength?: number;       // 0.0 = off, attenuation floor is 1-strength
+  lss_var_thresh?: number;     // relative variance threshold (default 0.15)
+  lss_dc_remove?: boolean;     // per-channel DC removal while LSS active
   // PP-VAE re-encode (spectral cleanup via post-processing VAE)
   pp_vae_reencode?: boolean;
   // LRC timestamp generation (synchronized lyrics)

@@ -184,6 +184,11 @@ export function translateParams(params: any): AceRequest {
   if (params.denoiseSmoothing !== undefined) req.denoise_smoothing = params.denoiseSmoothing;
   if (params.denoiseMix !== undefined) req.denoise_mix = params.denoiseMix;
 
+  // LSS: Latent Spectral Suppressor (pre-VAE latent channel gate)
+  if (params.lssStrength !== undefined) req.lss_strength = params.lssStrength;
+  if (params.lssVarThresh !== undefined) req.lss_var_thresh = params.lssVarThresh;
+  if (params.lssDcRemove !== undefined) req.lss_dc_remove = params.lssDcRemove;
+
   // Lua plugin dynamic params (passthrough from UI)
   if (params.pluginParams && Object.keys(params.pluginParams).length > 0) {
     req.plugin_params = params.pluginParams;

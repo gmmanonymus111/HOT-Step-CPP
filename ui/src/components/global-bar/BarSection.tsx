@@ -145,7 +145,7 @@ export const BarSection: React.FC<BarSectionProps> = ({
 interface ToggleSwitchProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
-  accentColor?: 'pink' | 'emerald' | 'sky' | 'purple' | 'amber';
+  accentColor?: 'pink' | 'emerald' | 'sky' | 'purple' | 'amber' | 'teal';
 }
 
 const TOGGLE_COLORS: Record<string, string> = {
@@ -154,6 +154,7 @@ const TOGGLE_COLORS: Record<string, string> = {
   sky: 'bg-sky-500',
   purple: 'bg-purple-500',
   amber: 'bg-amber-500',
+  teal: 'bg-teal-500',
 };
 
 export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, accentColor = 'pink' }) => {

@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 // Seed input uses local string state to avoid parseInt("-") → NaN → -1 snap-back
 import { useTranslation } from 'react-i18next';
 import { RotateCcw, ChevronDown, Music2, Upload, Trash2, Zap, Save } from 'lucide-react';
-import { useGlobalParams } from '../../context/GlobalParamsContext';
+import { useGlobalParams, useGlobalParamsStore } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
 import { formatScheduler, formatReferenceName } from './modelLabels';
@@ -29,6 +29,15 @@ export const GenerationDropdown: React.FC = () => {
   const [dcwOpen, setDcwOpen] = usePersistedState('hs-genAccordion-dcw', false);
   const [latentOpen, setLatentOpen] = usePersistedState('hs-genAccordion-latent', false);
   const [denoiserOpen, setDenoiserOpen] = usePersistedState('hs-genAccordion-denoiser', false);
+  const [lssOpen, setLssOpen] = usePersistedState('hs-genAccordion-lss', false);
+
+  // LSS params — new fields use direct store selectors (GlobalParamsContext is a legacy shim)
+  const lssStrength = useGlobalParamsStore((s: any) => s.lssStrength);
+  const lssVarThresh = useGlobalParamsStore((s: any) => s.lssVarThresh);
+  const lssDcRemove = useGlobalParamsStore((s: any) => s.lssDcRemove);
+  const setLssStrength = useGlobalParamsStore((s: any) => s.setLssStrength);
+  const setLssVarThresh = useGlobalParamsStore((s: any) => s.setLssVarThresh);
+  const setLssDcRemove = useGlobalParamsStore((s: any) => s.setLssDcRemove);
   const [autoTrimOpen, setAutoTrimOpen] = usePersistedState('hs-genAccordion-autotrim', false);
   const [perfOpen, setPerfOpen] = usePersistedState('hs-genAccordion-perf', false);
   const [timbreOpen, setTimbreOpen] = usePersistedState('hs-genAccordion-timbre', false);
@@ -733,6 +742,49 @@ export const GenerationDropdown: React.FC = () => {
               onChange={gp.setDenoiseMix} min={0} max={1} step={0.01} showInput />
             <p className="text-[10px] text-zinc-500">
               Spectral gate removes VAE fuzz after decode. Higher strength = more aggressive noise suppression.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ── LSS: Latent Spectral Suppressor (Accordion with toggle) ── */}
+      <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 transition-all overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setLssOpen(!lssOpen)}
+          className="w-full flex items-center justify-between px-3 py-2 hover:bg-teal-500/5 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <ChevronDown size={12} className={`text-teal-400 transition-transform duration-200 ${lssOpen ? 'rotate-180' : ''}`} />
+            <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+              <ToggleSwitch checked={lssStrength > 0} onChange={(on) => setLssStrength(on ? 0.65 : 0)} accentColor="teal" />
+              <span className="text-[10px] font-semibold text-teal-400 uppercase tracking-wider">LSS</span>
+            </div>
+          </div>
+          {lssStrength > 0 && (
+            <span onClick={(e) => {
+              e.stopPropagation();
+              setLssStrength(0.0);
+              setLssVarThresh(0.15);
+              setLssDcRemove(true);
+            }} className="flex items-center gap-1 text-[10px] text-teal-400 hover:text-teal-300 transition-colors cursor-pointer">
+              <RotateCcw size={10} /> Reset
+            </span>
+          )}
+        </button>
+        {lssOpen && lssStrength > 0 && (
+          <div className="px-3 pb-3 space-y-3">
+            <Slider label="Strength" value={lssStrength}
+              onChange={setLssStrength} min={0.01} max={1} step={0.01} showInput />
+            <Slider label="Var Threshold" value={lssVarThresh}
+              onChange={setLssVarThresh} min={0.01} max={0.5} step={0.01} showInput />
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-zinc-500">DC Remove</span>
+              <ToggleSwitch checked={lssDcRemove} onChange={setLssDcRemove} accentColor="teal" />
+            </div>
+            <p className="text-[10px] text-zinc-500">
+              Latent Spectral Suppressor (MDMAchine): gates quiet latent channels before VAE decode.
+              Channels below the variance threshold are attenuated toward 1&minus;strength.
             </p>
           </div>
         )}

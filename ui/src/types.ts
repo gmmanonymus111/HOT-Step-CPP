@@ -221,6 +221,11 @@ export interface GenerationParams {
   denoiseSmoothing?: number;    // 0.0 = sharp gate, 1.0 = very smooth
   denoiseMix?: number;          // 0.0 = all dry, 1.0 = all denoised
 
+  // LSS: Latent Spectral Suppressor (pre-VAE latent channel gate, MDMAchine)
+  lssStrength?: number;         // 0.0 = off; attenuation floor is 1-strength
+  lssVarThresh?: number;        // relative variance threshold (default 0.15)
+  lssDcRemove?: boolean;        // per-channel DC removal while LSS active
+
   // Duration buffer + auto-trim
   autoTrimEnabled?: boolean;    // Enable silence-detection trimming
   durationBuffer?: number;      // Extra seconds added to generation duration (default 15)

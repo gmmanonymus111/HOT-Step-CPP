@@ -98,6 +98,14 @@ struct AceRequest {
     float latent_shift;    // 0.0
     float latent_rescale;  // 1.0
 
+    // LSS: Latent Spectral Suppressor (MDMAchine / A&E Concepts).
+    // Attenuates low-variance latent channels before VAE decode; channels whose
+    // relative variance is below lss_var_thresh are scaled toward 1-lss_strength.
+    // lss_strength 0 = off (default).
+    float lss_strength;    // 0.0 = off
+    float lss_var_thresh;  // 0.15
+    bool  lss_dc_remove;   // true (per-channel DC removal, only when LSS active)
+
     // Custom flow matching schedule: comma-separated floats,
     // e.g. "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0". When non-empty,
     // overrides inference_steps and shift. The trailing endpoint is the x0

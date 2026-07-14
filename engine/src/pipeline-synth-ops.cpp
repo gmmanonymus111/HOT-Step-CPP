@@ -23,6 +23,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <system_error>
+#include <algorithm>
 #include <vector>
 
 static const int FRAMES_PER_SECOND = 25;
@@ -1620,6 +1621,44 @@ post_dit:
     return 0;
 }
 
+// ─── LSS: Latent Spectral Suppressor (MDMAchine / A&E Concepts) ─────────────
+// Per-channel variance gate on the DiT output latent, applied in-place before
+// VAE decode. Channels whose variance is below lss_var_thresh (relative to the
+// loudest channel) are attenuated linearly toward a floor of 1-lss_strength;
+// optional per-channel DC removal. No-op when lss_strength <= 0.
+static void hotstep_lss_apply(float * dit_out, int C, int T, const AceRequest & rr, int b) {
+    if (rr.lss_strength <= 0.0f || C <= 0 || T <= 0) return;
+    std::vector<float> ch_mean(C, 0.0f), ch_msq(C, 0.0f);
+    for (int c = 0; c < C; c++) {
+        for (int t = 0; t < T; t++) {
+            float v = dit_out[(size_t) c * T + t];
+            ch_mean[c] += v;
+            ch_msq[c] += v * v;
+        }
+        ch_mean[c] /= (float) T;
+        ch_msq[c] /= (float) T;
+    }
+    if (rr.lss_dc_remove) {
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < T; t++)
+                dit_out[(size_t) c * T + t] -= ch_mean[c];
+    }
+    float              max_var = 1e-8f;
+    std::vector<float> ch_var(C);
+    for (int c = 0; c < C; c++) {
+        ch_var[c] = ch_msq[c] - ch_mean[c] * ch_mean[c];
+        if (ch_var[c] > max_var) max_var = ch_var[c];
+    }
+    for (int c = 0; c < C; c++) {
+        float rel  = ch_var[c] / max_var;
+        float gain = std::min(1.0f, rel / std::max(rr.lss_var_thresh, 1e-6f));
+        gain       = gain + (1.0f - rr.lss_strength) * (1.0f - gain);
+        for (int t = 0; t < T; t++) dit_out[(size_t) c * T + t] *= gain;
+    }
+    fprintf(stderr, "[LSS Batch%d] strength=%.2f var_thresh=%.2f dc=%d C=%d T=%d\n",
+            b, rr.lss_strength, rr.lss_var_thresh, rr.lss_dc_remove ? 1 : 0, C, T);
+}
+
 int ops_vae_decode(const AceSynth * ctx,
                    int              batch_n,
                    AceAudio *       out,
@@ -1677,6 +1716,8 @@ int ops_vae_decode(const AceSynth * ctx,
 
     for (int b = 0; b < batch_n; b++) {
         float * dit_out = s.output.data() + b * s.Oc * s.T;
+
+        hotstep_lss_apply(dit_out, s.Oc, T_latent, s.rr, b);
 
         s.timer.reset();
         int T_audio;
@@ -1812,6 +1853,8 @@ int ops_vae_decode_postprocess(const AceSynth * ctx,
         }
 
         float * dit_out = s.output.data() + b * s.Oc * s.T;
+
+        hotstep_lss_apply(dit_out, s.Oc, T_latent, s.rr, b);
 
         // Build the VAE decode callback for the Lua plugin
         // This wraps vae_ggml_decode_tiled with the engine's VAE and chunk params
