@@ -368,7 +368,11 @@ function sample(xt, vt_buf, schedule, n, model_fn)
     local calib_frac = 0.12
 
     local ns        = #schedule
-    local n_steps   = ns - 1
+    -- The engine's schedule table has NO trailing 0 (unlike ComfyUI sigmas):
+    -- iterate all ns entries so the last iteration gets sigma_next = 0.0 and
+    -- the terminal branch performs the final x0 projection. With ns - 1 the
+    -- terminal branch is dead code and the output keeps ~final-sigma noise.
+    local n_steps   = ns
     if n_steps < 1 then return end
 
     local v_cache   = {}
