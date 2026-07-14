@@ -259,7 +259,7 @@ export interface GenerationParams {
   source?: string;  // 'create' | 'lyric-studio' | 'cover-studio'
 
   // Lua plugin dynamic params
-  pluginParams?: Record<string, string>;
+  pluginParams?: Record<string, string | number | boolean>;
 
   // Cover Art auto-generation
   coverArtEnabled?: boolean;

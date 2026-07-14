@@ -1623,4 +1623,279 @@ router.get('/stream/:id', (req, res) => {
   req.on('close', cleanup);
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STORM streaming (MDMAchine / A&E Concepts) — continuous slot generation.
+//
+// POST /stream opens one long chunked audio/wav response and generates synth
+// slots back-to-back (complete WAV files concatenated; the client splits on
+// RIFF headers). Slots go straight to the engine via submitSynth — no LM
+// phase, no SQLite row, no entry in the normal job queue. Live parameter
+// changes arrive via POST /control keyed by streamId (DJ mode runs two
+// parallel streams, one per deck).
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface StreamControlState {
+  guidanceScale: number;
+  lssStrength: number;
+  inferenceSteps: number;
+  duration: number;
+  bpm: number;
+  seedLock: boolean;
+  nextSeed: number | null;
+  nextPrompt: string | null;
+  nextLyrics: string | null;
+  nextBpm: number | null;
+  nextDuration: number | null;
+  baseCaption: string | null;
+  baseLyrics: string | null;
+  baseInstrumental: boolean | null;
+  streamPaused: boolean;
+  extraPluginParams: Record<string, number | string>;
+  // Live overrides — null = keep using the stream-start snapshot value
+  inferMethod: string | null;
+  scheduler: string | null;
+  guidanceMode: string | null;
+}
+
+const streamRunning = new Map<string, boolean>();
+const streamControl = new Map<string, StreamControlState>();
+/** In-flight engine job per stream so stop/disconnect can cancel promptly. */
+const streamAceJob = new Map<string, string>();
+
+function getStreamControl(streamId: string): StreamControlState {
+  let ctrl = streamControl.get(streamId);
+  if (!ctrl) {
+    ctrl = {
+      guidanceScale: 7.0, lssStrength: 0, inferenceSteps: 0, duration: 0, bpm: 0,
+      seedLock: false, nextSeed: null, nextPrompt: null, nextLyrics: null,
+      nextBpm: null, nextDuration: null, baseCaption: null, baseLyrics: null,
+      baseInstrumental: null, streamPaused: false, extraPluginParams: {},
+      inferMethod: null, scheduler: null, guidanceMode: null,
+    };
+    streamControl.set(streamId, ctrl);
+  }
+  return ctrl;
+}
+
+function stopStream(streamId: string): void {
+  streamRunning.set(streamId, false);
+  const aceJobId = streamAceJob.get(streamId);
+  if (aceJobId) {
+    aceClient.cancelJob(aceJobId).catch(() => {});
+    streamAceJob.delete(streamId);
+  }
+}
+
+/** Per-slot render watchdog — a slot stuck past this is cancelled. */
+const STREAM_SLOT_TIMEOUT_MS = 30 * 60 * 1000;
+
+// POST /api/generate/storm/stream — start a continuous stream
+router.post('/storm/stream', async (req, res) => {
+  if (!engineReady) {
+    res.status(503).json({ error: `Engine not ready: ${engineBootStatus}` });
+    return;
+  }
+  // The stream drives the engine directly; refuse while queued jobs are active
+  // so it doesn't interleave with (and stall) normal library generations.
+  const activeJobs = [...jobs.values()].filter(j =>
+    j.status === 'pending' || j.status === 'lm_running' || j.status === 'synth_running' || j.status === 'saving');
+  if (activeJobs.length > 0) {
+    res.status(409).json({ error: `${activeJobs.length} generation job(s) active — wait for the queue to drain before streaming` });
+    return;
+  }
+
+  const baseParams = req.body as Record<string, unknown>;
+  const streamId = typeof baseParams.streamId === 'string' ? baseParams.streamId : 'default';
+
+  streamRunning.set(streamId, true);
+  const ctrl = getStreamControl(streamId);
+  // Reset one-shot fields at stream start (sticky base fields persist across restarts)
+  ctrl.nextPrompt = null;
+  ctrl.nextLyrics = null;
+  ctrl.streamPaused = false;
+
+  res.setHeader('Content-Type', 'audio/wav');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  // Browser tab closed / fetch aborted without POST /stop — stop generating.
+  req.on('close', () => {
+    if (streamRunning.get(streamId)) {
+      console.log(`[STORM ${streamId}] client disconnected — stopping stream`);
+      stopStream(streamId);
+    }
+  });
+
+  const baseSeed = typeof baseParams.seed === 'number'
+    ? baseParams.seed
+    : Math.floor(Math.random() * 2147483647);
+  let slotIdx = 0;
+
+  console.log(`[STORM ${streamId}] stream started (baseSeed=${baseSeed})`);
+  pushLog(`[STORM ${streamId}] stream started`);
+
+  try {
+    while (streamRunning.get(streamId)) {
+      // Max-buffer pause gate: the client sends stream_pause=true when its
+      // playback buffer is full; we idle here (GPU free) until it drains.
+      while (ctrl.streamPaused && streamRunning.get(streamId)) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+      if (!streamRunning.get(streamId)) break;
+
+      const mergedPluginParams = {
+        ...(typeof baseParams.pluginParams === 'object' && baseParams.pluginParams !== null
+          ? baseParams.pluginParams as Record<string, unknown> : {}),
+        ...ctrl.extraPluginParams,
+      };
+
+      // NOTE: keys here must match what translateParams reads (camelCase for
+      // UI-facing params). An explicit per-slot seed also requires
+      // randomSeed=false or translateParams re-randomizes it.
+      const slotReq: Record<string, unknown> = {
+        ...baseParams,
+        randomSeed: false,
+        seed: ctrl.nextSeed !== null
+          ? ctrl.nextSeed
+          : (ctrl.seedLock ? baseSeed : baseSeed + slotIdx),
+        guidanceScale: ctrl.guidanceScale,
+        ...(ctrl.lssStrength > 0 ? { lssStrength: ctrl.lssStrength } : {}),
+        ...(ctrl.inferenceSteps > 0 ? { inferenceSteps: ctrl.inferenceSteps } : {}),
+        ...(ctrl.nextBpm !== null ? { bpm: ctrl.nextBpm } : ctrl.bpm > 0 ? { bpm: ctrl.bpm } : {}),
+        ...(ctrl.nextDuration !== null ? { duration: ctrl.nextDuration } : ctrl.duration > 0 ? { duration: ctrl.duration } : {}),
+        // Solver / scheduler / guidance live overrides — null keeps the snapshot value
+        ...(ctrl.inferMethod ? { inferMethod: ctrl.inferMethod } : {}),
+        ...(ctrl.scheduler ? { scheduler: ctrl.scheduler } : {}),
+        ...(ctrl.guidanceMode ? { guidanceMode: ctrl.guidanceMode } : {}),
+        ...(Object.keys(mergedPluginParams).length > 0 ? { pluginParams: mergedPluginParams } : {}),
+      };
+
+      // One-shot overrides (consumed after applying); Stick makes them base
+      if (ctrl.nextPrompt !== null) {
+        slotReq.caption = ctrl.nextPrompt;
+        slotReq.prompt = ctrl.nextPrompt;
+        ctrl.nextPrompt = null;
+        console.log(`[STORM ${streamId}] slot ${slotIdx}: applying queued prompt`);
+      } else if (ctrl.baseCaption !== null) {
+        slotReq.caption = ctrl.baseCaption;
+        slotReq.prompt = ctrl.baseCaption;
+      }
+      if (ctrl.nextLyrics !== null) {
+        slotReq.lyrics = ctrl.nextLyrics;
+        slotReq.instrumental = false;
+        ctrl.baseInstrumental = false;
+        ctrl.nextLyrics = null;
+        console.log(`[STORM ${streamId}] slot ${slotIdx}: lyrics applied (one-shot), instrumental off`);
+      } else if (ctrl.baseLyrics !== null) {
+        slotReq.lyrics = ctrl.baseLyrics;
+        slotReq.instrumental = false;
+      } else if (ctrl.baseInstrumental === false) {
+        slotReq.instrumental = false;
+      }
+      if (ctrl.nextSeed !== null) ctrl.nextSeed = null;
+      if (ctrl.nextBpm !== null) ctrl.nextBpm = null;
+      if (ctrl.nextDuration !== null) ctrl.nextDuration = null;
+
+      const aceReq = translateParams(slotReq);
+
+      // Inline poll — checks streamRunning every 300 ms so stop/disconnect
+      // cancels mid-render instead of waiting out the slot.
+      const synthJobId = await aceClient.submitSynth(aceReq, 'wav32');
+      streamAceJob.set(streamId, synthJobId);
+      const slotStart = Date.now();
+      let jobDone = false;
+      while (!jobDone) {
+        if (!streamRunning.get(streamId)) {
+          await aceClient.cancelJob(synthJobId).catch(() => {});
+          console.log(`[STORM ${streamId}] slot ${slotIdx}: cancelled mid-render`);
+          break;
+        }
+        if (Date.now() - slotStart > STREAM_SLOT_TIMEOUT_MS) {
+          await aceClient.cancelJob(synthJobId).catch(() => {});
+          console.warn(`[STORM ${streamId}] slot ${slotIdx}: render timeout — stopping stream`);
+          streamRunning.set(streamId, false);
+          break;
+        }
+        const status = await aceClient.pollJob(synthJobId);
+        if (status.status === 'done') { jobDone = true; break; }
+        if (status.status === 'failed' || status.status === 'cancelled') {
+          console.warn(`[STORM ${streamId}] slot ${slotIdx}: ${status.status}`);
+          break;
+        }
+        await new Promise(r => setTimeout(r, 300));
+      }
+      streamAceJob.delete(streamId);
+      if (!jobDone || !streamRunning.get(streamId)) break;
+
+      const audioRes = await aceClient.getJobResult(synthJobId);
+      if (!audioRes.ok) {
+        console.warn(`[STORM ${streamId}] slot ${slotIdx}: result fetch failed (${audioRes.status})`);
+        break;
+      }
+      const wavBuf = Buffer.from(await audioRes.arrayBuffer());
+      res.write(wavBuf);
+      slotIdx++;
+    }
+  } catch (err) {
+    console.error(`[STORM stream ${streamId}] error:`, err);
+  } finally {
+    stopStream(streamId);
+    streamControl.delete(streamId);
+    console.log(`[STORM ${streamId}] stream ended after ${slotIdx} slot(s)`);
+    pushLog(`[STORM ${streamId}] stream ended after ${slotIdx} slot(s)`);
+    res.end();
+  }
+});
+
+// POST /api/generate/storm/stop — stop a stream (cancels the in-flight slot)
+router.post('/storm/stop', (req, res) => {
+  const b = req.body as Record<string, unknown>;
+  const streamId = typeof b.streamId === 'string' ? b.streamId : 'default';
+  stopStream(streamId);
+  res.json({ ok: true });
+});
+
+// POST /api/generate/storm/control — live-mutate a stream's next-slot params
+router.post('/storm/control', (req, res) => {
+  const b = req.body as Record<string, unknown>;
+  const streamId = typeof b.streamId === 'string' ? b.streamId : 'default';
+  const ctrl = getStreamControl(streamId);
+
+  if (typeof b.guidance_scale === 'number') ctrl.guidanceScale = b.guidance_scale;
+  if (typeof b.lss_strength === 'number') ctrl.lssStrength = b.lss_strength;
+  if (typeof b.inference_steps === 'number') ctrl.inferenceSteps = b.inference_steps;
+  if (typeof b.duration === 'number') ctrl.duration = b.duration;
+  if (typeof b.bpm === 'number') ctrl.bpm = b.bpm;
+  if (typeof b.next_bpm === 'number') ctrl.nextBpm = b.next_bpm;
+  if (typeof b.next_duration === 'number') ctrl.nextDuration = b.next_duration;
+  if (typeof b.seed_lock === 'boolean') ctrl.seedLock = b.seed_lock;
+  if (typeof b.seed === 'number') ctrl.nextSeed = b.seed;
+  if (typeof b.prompt === 'string') ctrl.nextPrompt = b.prompt;
+  if (typeof b.lyrics === 'string') ctrl.nextLyrics = b.lyrics;
+  if (typeof b.stick_prompt === 'string') ctrl.baseCaption = b.stick_prompt;
+  if (b.stick_prompt === null) ctrl.baseCaption = null;
+  if (typeof b.stick_lyrics === 'string') { ctrl.baseLyrics = b.stick_lyrics; ctrl.baseInstrumental = false; }
+  if (b.stick_lyrics === null) ctrl.baseLyrics = null;
+  if (typeof b.stream_pause === 'boolean') ctrl.streamPaused = b.stream_pause;
+  if (typeof b.infer_method === 'string') ctrl.inferMethod = b.infer_method;
+  if (typeof b.scheduler === 'string') ctrl.scheduler = b.scheduler;
+  if (typeof b.guidance_mode === 'string') ctrl.guidanceMode = b.guidance_mode;
+  // Generic plugin params — numeric and string values (e.g. rk_order: 'auto')
+  if (b.plugin_params && typeof b.plugin_params === 'object') {
+    for (const [k, v] of Object.entries(b.plugin_params as Record<string, unknown>)) {
+      if (typeof v === 'number' || typeof v === 'string') ctrl.extraPluginParams[k] = v;
+    }
+  }
+
+  res.json({ ok: true, streamId });
+});
+
+// GET /api/generate/storm/control — read back a stream's live state
+router.get('/storm/control', (req, res) => {
+  const streamId = typeof req.query.streamId === 'string' ? req.query.streamId : 'default';
+  res.json({
+    running: streamRunning.get(streamId) ?? false,
+    ...getStreamControl(streamId),
+  });
+});
+
 export default router;

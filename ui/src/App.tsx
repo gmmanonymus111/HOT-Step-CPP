@@ -39,6 +39,7 @@ import { StemStudio } from './components/stem-studio/StemStudio';
 import { StemBuilder } from './components/stem-builder/StemBuilder';
 import { RepaintStudio } from './components/repaint-studio/RepaintStudio';
 import { SongBuilder } from './components/song-builder/SongBuilder';
+import { StormPage } from './components/storm/StormPage';
 import { GlobalParamBar } from './components/global-bar/GlobalParamBar';
 import { InstaGenPanel } from './components/insta-gen/InstaGenPanel';
 import { PlaylistSidebar } from './components/playlist/PlaylistSidebar';
@@ -88,6 +89,7 @@ function viewFromUrl(path = window.location.pathname): string {
   if (path.startsWith('/stem-studio')) return 'stem-studio';
   if (path.startsWith('/stem-builder')) return 'stem-builder';
   if (path.startsWith('/song-builder')) return 'song-builder';
+  if (path.startsWith('/storm')) return 'storm';
   if (path.startsWith('/repaint')) return 'repaint';
   if (path.startsWith('/library')) return 'library';
   if (path.startsWith('/settings')) return 'settings';
@@ -109,6 +111,7 @@ function urlForView(view: string): string {
   if (view === 'stem-studio') return '/stem-studio';
   if (view === 'stem-builder') return '/stem-builder';
   if (view === 'song-builder') return '/song-builder';
+  if (view === 'storm') return '/storm';
   if (view === 'repaint') return '/repaint';
   if (view === 'library') return '/library';
   if (view === 'settings') return '/settings';
@@ -286,6 +289,7 @@ const AppContent: React.FC = () => {
     terminal:     135,  // green
     player:       45,   // gold
     rightSidebar: 300,  // magenta
+    storm:        210,  // electric blue
   };
 
   // Register WaveSurfer ref objects with playback store.
@@ -690,6 +694,14 @@ const AppContent: React.FC = () => {
       return (
         <DiscoPulseWrapper hue={DISCO.assistant} className="flex-1 overflow-hidden">
           <StemBuilder />
+        </DiscoPulseWrapper>
+      );
+    }
+
+    if (activeView === 'storm') {
+      return (
+        <DiscoPulseWrapper hue={DISCO.storm} className="flex-1 overflow-hidden">
+          <StormPage onGenerate={handleGenerate} activeJobCount={activeJobCount} />
         </DiscoPulseWrapper>
       );
     }
