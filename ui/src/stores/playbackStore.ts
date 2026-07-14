@@ -111,7 +111,7 @@ export {
 
 const PREFS_KEY = 'playback-prefs';
 const TRACKLIST_KEY = 'playback-tracklist';
-const MAX_PERSISTED_TRACKS = 500;
+const MAX_PERSISTED_TRACKS = 50;
 
 // ── Persisted Preferences ────────────────────────────────────────────────────
 
@@ -170,11 +170,24 @@ function loadTrackList(): PersistedTrackList | null {
 }
 
 function saveTrackList(tl: PersistedTrackList): void {
-  const limited = {
-    ...tl,
-    trackList: tl.trackList.slice(0, MAX_PERSISTED_TRACKS),
-  };
-  localStorage.setItem(TRACKLIST_KEY, JSON.stringify(limited));
+  // Strip heavy text fields (lyrics/caption/generationParams) — URLs are cheap,
+  // and a restored list only needs to be playable, not fully hydrated.
+  const slim: PlaybackTrack[] = tl.trackList.slice(0, MAX_PERSISTED_TRACKS).map(t => ({
+    id: t.id, title: t.title, audioUrl: t.audioUrl,
+    masteredAudioUrl: t.masteredAudioUrl, kickStemUrl: t.kickStemUrl,
+    snareStemUrl: t.snareStemUrl, hihatStemUrl: t.hihatStemUrl,
+    discoDataUrl: t.discoDataUrl, artistName: t.artistName,
+    coverUrl: t.coverUrl, duration: t.duration, style: t.style,
+  }));
+  try {
+    localStorage.setItem(TRACKLIST_KEY, JSON.stringify({ ...tl, trackList: slim }));
+  } catch {
+    // QuotaExceededError — clear the key and retry with just the current track
+    try {
+      localStorage.removeItem(TRACKLIST_KEY);
+      localStorage.setItem(TRACKLIST_KEY, JSON.stringify({ ...tl, trackList: slim.slice(0, 1) }));
+    } catch { /* give up gracefully — playback still works, just won't persist */ }
+  }
 }
 
 // ── WaveSurfer Handle Registration ───────────────────────────────────────────
