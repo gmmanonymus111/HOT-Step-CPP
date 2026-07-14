@@ -439,11 +439,11 @@ export const AdaptersDropdown: React.FC = () => {
             </div>
           )}
 
-          {/* Basin re-base (cross-base adapter support) — merge mode only.
+          {/* Basin re-base (cross-base adapter support) — merge AND runtime modes
+              (runtime folds the nudge into the delta sum; per-section masking skips it).
               Home base must be a SafeTensors model (nudge reads F32 weights), so
               the selector is filtered to safetensors DiT models only. */}
-          {gp.adapterMode === 'merge' && (
-            <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 p-3 space-y-2">
+          <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Basin Re-base</span>
@@ -476,8 +476,7 @@ export const AdaptersDropdown: React.FC = () => {
                   </p>
                 </>
               )}
-            </div>
-          )}
+          </div>
 
           {/* Group Scales */}
           <button

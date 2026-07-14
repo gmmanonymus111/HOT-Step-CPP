@@ -19,7 +19,9 @@
 #include "weight-source.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -740,6 +742,117 @@ static bool adapter_runtime_finalize(DiTLoRA * lora, ggml_backend_t backend) {
     return true;
 }
 
+// ─── Basin re-base (runtime mode) ───
+//
+// Merge mode nudges the loaded base T toward the adapter's training base S
+// before adding deltas: W' = T + beta*(S - T) + sum(s_i * d_i). Runtime mode
+// never rewrites base weights, but matmul distributes over addition, so the
+// SAME output falls out of folding beta*(S - T) into the staged delta sum:
+//   y = T@x + (beta*(S - T) + sum(s_i * d_i))@x
+// Zero extra VRAM and zero extra per-step cost — the nudge rides the existing
+// delta tensors. Must run ONCE PER STACK over the FIRST adapter's staged slots
+// (merge parity: merge threads rebase into the first adapter's merge only; a
+// per-adapter nudge would multiply the base correction by the stack depth).
+//
+// S is read with adapter_rebase_fetch (2D linear, shape-matched tensors only —
+// same skips as merge). T is dequantized host-side from the still-open weight
+// source, so the nudge is exact against what actually sits on the GPU.
+static void adapter_runtime_rebase(DiTLoRA *            lora,
+                                   const WeightSource & ws,
+                                   const char *         rebase_source,
+                                   float                rebase_beta) {
+    if (!rebase_source || !rebase_source[0] || rebase_beta == 0.0f || lora->staged.empty()) {
+        return;
+    }
+
+    // Resolve a model DIRECTORY to its model.safetensors (mirrors adapter_merge)
+    std::string rb_path = rebase_source;
+    struct stat rsb;
+    if (stat(rb_path.c_str(), &rsb) == 0 && S_ISDIR(rsb.st_mode)) {
+        rb_path += "/model.safetensors";
+    }
+    STFile rebase_st = {};
+    if (!st_open(&rebase_st, rb_path.c_str())) {
+        fprintf(stderr, "[Adapter-RT] WARNING: basin re-base source unreadable: %s (continuing without nudge)\n",
+                rb_path.c_str());
+        return;
+    }
+
+    // Per-slot work is independent (S/T reads are pure mmap pointer math), so
+    // split across threads like the finalize quantizer — a single-threaded pass
+    // over ~360 large tensors adds seconds to the load.
+    Timer            rbtimer;
+    size_t           n_staged = lora->staged.size();
+    std::atomic<int> nudged{ 0 };
+    auto             rebase_worker = [&](size_t begin, size_t end) {
+        std::vector<float> sbuf, tbuf;
+        for (size_t j = begin; j < end; j++) {
+            if (adapter_cancel_requested()) {
+                return;
+            }
+            DiTLoRAStagedDelta & sd    = lora->staged[j];
+            const char *         tname = ggml_get_name(sd.tensor);
+            if (strncmp(tname, "lora_", 5) != 0) {
+                continue;  // staged tensors are named "lora_<gguf_name>"
+            }
+            const char * gguf_name = tname + 5;
+            int64_t      ne0       = sd.tensor->ne[0];
+            int64_t      ne1       = sd.tensor->ne[1];
+            int64_t      nel       = ne0 * ne1;
+            const float * s = adapter_rebase_fetch(&rebase_st, rebase_beta, gguf_name, ne0, ne1, sbuf);
+            if (!s) {
+                continue;  // not in S / conv / shape mismatch — same skips as merge
+            }
+            if ((int64_t) sd.f32_data.size() != nel) {
+                continue;
+            }
+            ggml_type    ttype = GGML_TYPE_F32;
+            const void * tdata = ws.data(gguf_name, ttype);
+            if (!tdata) {
+                continue;
+            }
+            tbuf.resize((size_t) nel);
+            if (ttype == GGML_TYPE_F32) {
+                memcpy(tbuf.data(), tdata, (size_t) nel * sizeof(float));
+            } else if (ttype == GGML_TYPE_BF16) {
+                ggml_bf16_to_fp32_row((const ggml_bf16_t *) tdata, tbuf.data(), nel);
+            } else if (ttype == GGML_TYPE_F16) {
+                ggml_fp16_to_fp32_row((const ggml_fp16_t *) tdata, tbuf.data(), nel);
+            } else {
+                const struct ggml_type_traits * traits = ggml_get_type_traits(ttype);
+                if (!traits || !traits->to_float) {
+                    fprintf(stderr, "[Adapter-RT] WARNING: no host dequant for type %d, re-base skipping %s\n",
+                            (int) ttype, gguf_name);
+                    continue;
+                }
+                traits->to_float(tdata, tbuf.data(), nel);
+            }
+            float * d = sd.f32_data.data();
+            for (int64_t i = 0; i < nel; i++) {
+                d[i] += rebase_beta * (s[i] - tbuf[i]);
+            }
+            nudged.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    unsigned nthreads = std::thread::hardware_concurrency();
+    if (nthreads < 1) nthreads = 1;
+    if (nthreads > n_staged) nthreads = (unsigned) std::max<size_t>(1, n_staged);
+    if (nthreads <= 1) {
+        rebase_worker(0, n_staged);
+    } else {
+        std::vector<std::thread> pool;
+        size_t chunk = (n_staged + nthreads - 1) / nthreads;
+        for (unsigned ti = 0; ti < nthreads; ti++) {
+            size_t b = ti * chunk, e = std::min(n_staged, b + chunk);
+            if (b < e) pool.emplace_back(rebase_worker, b, e);
+        }
+        for (auto & th : pool) th.join();
+    }
+    st_close(&rebase_st);
+    fprintf(stderr, "[Adapter-RT] Basin re-base: nudged %d/%zu deltas toward training base, beta=%.2f (%.1f ms)\n",
+            nudged.load(), n_staged, rebase_beta, rbtimer.ms());
+}
+
 // ─── Main entry points ───
 
 // Multi-adapter stack: stage every adapter's deltas into one DiTLoRA, summing
@@ -750,7 +863,9 @@ static bool adapter_load_runtime_stack(DiTLoRA *                       lora,
                                        const WeightSource &            ws,
                                        const std::vector<AdapterSpec> & stack,
                                        const AdapterGroupScales &      gs,
-                                       ggml_backend_t                  backend) {
+                                       ggml_backend_t                  backend,
+                                       const char *                    rebase_source = nullptr,
+                                       float                           rebase_beta = 0.0f) {
     if (stack.empty()) {
         fprintf(stderr, "[Adapter-RT] WARNING: empty adapter stack\n");
         return false;
@@ -781,6 +896,12 @@ static bool adapter_load_runtime_stack(DiTLoRA *                       lora,
             lora->staged.clear();
             return false;
         }
+        // Basin re-base: once per stack, over the FIRST adapter's staged slots
+        // only — later adapters sum their deltas on top, exactly matching the
+        // merge path's nudge-then-stack order (dit.h). See adapter_runtime_rebase.
+        if (i == 0) {
+            adapter_runtime_rebase(lora, ws, rebase_source, rebase_beta);
+        }
     }
 
     if (staged_ok == 0) {
@@ -799,7 +920,9 @@ static bool adapter_load_runtime(DiTLoRA *                  lora,
                                   const char *               adapter_path,
                                   float                      adapter_scale,
                                   const AdapterGroupScales & gs,
-                                  ggml_backend_t             backend) {
+                                  ggml_backend_t             backend,
+                                  const char *               rebase_source = nullptr,
+                                  float                      rebase_beta = 0.0f) {
     std::vector<AdapterSpec> single{ AdapterSpec{ std::string(adapter_path), adapter_scale } };
-    return adapter_load_runtime_stack(lora, wctx, ws, single, gs, backend);
+    return adapter_load_runtime_stack(lora, wctx, ws, single, gs, backend, rebase_source, rebase_beta);
 }

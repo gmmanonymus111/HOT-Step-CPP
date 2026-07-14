@@ -377,9 +377,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       adapterMode: primary ? s.adapterMode : 'merge',
       // Runtime delta quantization (VRAM saver) — only relevant in runtime mode.
       adapterRuntimeQuant: (primary && s.adapterMode === 'runtime') ? s.adapterRuntimeQuant : undefined,
-      // Basin re-base: only sent with an adapter in merge mode and a chosen source.
-      rebaseSource: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseSource : undefined,
-      rebaseBeta: (primary && s.adapterMode === 'merge' && s.rebaseSource) ? s.rebaseBeta : undefined,
+      // Basin re-base: only sent with an adapter and a chosen source. Works in
+      // both merge and runtime modes (runtime folds the nudge into the delta sum);
+      // the engine skips it on the per-section masking path.
+      rebaseSource: (primary && s.rebaseSource) ? s.rebaseSource : undefined,
+      rebaseBeta: (primary && s.rebaseSource) ? s.rebaseBeta : undefined,
       triggerWord: triggerWord || undefined,
       triggerWords: triggerWords.length ? triggerWords : undefined,
       triggerPlacement: triggerWords.length ? settings.triggerPlacement : undefined,

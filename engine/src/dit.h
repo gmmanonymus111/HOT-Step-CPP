@@ -619,6 +619,14 @@ static bool dit_ggml_load(DiTGGML *    m,
                 // Per-section masking: load each adapter into its OWN DiTLoRA
                 // (not summed) so the graph can gate each with a per-frame mask.
                 // N× VRAM vs the summed path — the price of per-section control.
+                //
+                // Basin re-base is NOT supported here: the nudge is an always-on
+                // base correction, but every per-section delta is gated by a
+                // per-frame mask — folding it in would fade the correction with
+                // the section weights and duplicate it once per adapter.
+                if (rebase_source && rebase_source[0] && rebase_beta != 0.0f) {
+                    fprintf(stderr, "[Adapter-RT] WARNING: basin re-base is not supported with per-section masking — skipping nudge\n");
+                }
                 m->loras.clear();
                 m->loras.resize(stack.size());
                 // ALL adapters must load — a partial stack would silently generate
@@ -640,10 +648,12 @@ static bool dit_ggml_load(DiTGGML *    m,
                 fprintf(stderr, "[Adapter-RT] Per-section load: %zu adapters kept separate\n", m->loras.size());
             } else if (!stack.empty()) {
                 rt_ok = adapter_load_runtime_stack(&m->lora, &m->wctx, ws, stack,
-                                                   g_hotstep_params.adapter_group_scales, m->backend);
+                                                   g_hotstep_params.adapter_group_scales, m->backend,
+                                                   rebase_source, rebase_beta);
             } else {
                 rt_ok = adapter_load_runtime(&m->lora, &m->wctx, ws, adapter_path, adapter_scale,
-                                             g_hotstep_params.adapter_group_scales, m->backend);
+                                             g_hotstep_params.adapter_group_scales, m->backend,
+                                             rebase_source, rebase_beta);
             }
             if (!rt_ok) {
                 // FAIL the load, matching the merge path. Returning success here

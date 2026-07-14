@@ -190,8 +190,16 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
         && g_hotstep_params.adapter_mode == "runtime") {
         ctx->dit_key.adapter_stack += "|mode:runtime";
     }
-    // Basin re-base: only meaningful with an adapter, and only in merge mode.
-    if (!ctx->dit_key.adapter_path.empty() && g_hotstep_params.adapter_mode != "runtime") {
+    // Basin re-base: only meaningful with an adapter. Supported in merge mode
+    // AND runtime mode (nudge folded into the staged delta sum) — but NOT on
+    // the per-section path, where the engine skips the nudge (masked per-frame
+    // deltas can't carry an always-on base correction); keying it there would
+    // cache identical models under distinct keys.
+    // (mirrors dit.h's section-branch condition exactly: sections + 2+ stack)
+    bool section_path = !g_hotstep_params.adapter_sections.empty() && g_hotstep_params.adapters.size() >= 2;
+    bool rebase_applies = !ctx->dit_key.adapter_path.empty()
+        && (g_hotstep_params.adapter_mode != "runtime" || !section_path);
+    if (rebase_applies) {
         ctx->dit_key.rebase_source = g_hotstep_params.rebase_source;
         ctx->dit_key.rebase_beta   = g_hotstep_params.rebase_beta;
     } else {
