@@ -388,13 +388,10 @@ static int cmd_process(const char * plugin_path, const char * input_path,
     ctx.timeSigNumerator     = 4;
     ctx.timeSigDenominator   = 4;
 
-    int pos = 0;
-    while (pos < T) {
-        int n = std::min(block_size, T - pos);
-
-        // Set up process data manually
-        float * in_bufs[2]  = { left_in + pos,       right_in + pos };
-        float * out_bufs[2] = { left_out.data() + pos, right_out.data() + pos };
+    auto process_block = [&](float * inL, float * inR, float * outL, float * outR,
+                             int n, TSamples time_samples) {
+        float * in_bufs[2]  = { inL, inR };
+        float * out_bufs[2] = { outL, outR };
 
         AudioBusBuffers input_bus;
         input_bus.numChannels = 2;
@@ -424,10 +421,39 @@ static int cmd_process(const char * plugin_path, const char * input_path,
         data.outputParameterChanges = nullptr;
         data.inputEvents         = nullptr;
         data.outputEvents        = nullptr;
-        ctx.projectTimeSamples   = pos;
+        ctx.projectTimeSamples   = time_samples;
         data.processContext      = &ctx;
 
         inst.processor->process(data);
+    };
+
+    // Warm-up pre-roll: plugins with slow envelope/RMS/auto-gain detectors
+    // (multi-second analysis windows, e.g. FidelityX) start cold and fade in
+    // over the first seconds of an offline render. DAWs don't show this — the
+    // instance is warm from playback, or the DAW renders pre-roll before the
+    // bounce point. Feed the track's opening seconds through the plugin and
+    // discard the output so detectors are converged at sample 0. Negative
+    // projectTimeSamples marks these blocks as pre-roll.
+    {
+        const int warmup = std::min(T, 10 * sr);
+        fprintf(stderr, "[vst-host] Warm-up pre-roll: %.1f sec\n", (float)warmup / sr);
+        std::vector<float> scratch_L(block_size), scratch_R(block_size);
+        int wpos = 0;
+        while (wpos < warmup) {
+            int n = std::min(block_size, warmup - wpos);
+            process_block(left_in + wpos, right_in + wpos,
+                          scratch_L.data(), scratch_R.data(),
+                          n, (TSamples)wpos - warmup);
+            wpos += n;
+        }
+    }
+
+    int pos = 0;
+    while (pos < T) {
+        int n = std::min(block_size, T - pos);
+        process_block(left_in + pos, right_in + pos,
+                      left_out.data() + pos, right_out.data() + pos,
+                      n, pos);
         pos += n;
     }
 
