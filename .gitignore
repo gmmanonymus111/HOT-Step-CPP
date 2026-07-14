@@ -104,6 +104,8 @@ docs/plans/
 scratch/
 # Co-dev drop folder (VST plugins etc. — install locally, never commit)
 toinstall/
+# Co-dev outbound folder (modified plugin copies to send back)
+tosend/
 
 # Release build artifacts (but keep scripts and configs)
 release/staging/
