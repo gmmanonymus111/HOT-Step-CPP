@@ -1,4 +1,4 @@
 UPSTREAM_REPO=acestep.cpp
-UPSTREAM_COMMIT=31cc9ea3a4b21030249ce9e4794ea2df8de46627
-SYNC_DATE=2026-04-26
-SYNC_NOTES=Full sync: lm_seed, VAE latent I/O, repaint/splice, caption lock, LM CFG fix, DCW, custom scheduler, mp3_bitrate, vae selection, JobStatus enum.
+UPSTREAM_COMMIT=9d38f00267d71f8a1d7a6d3e325476472ce09179
+SYNC_DATE=2026-07-14
+SYNC_NOTES=LM perf overhaul (graph arenas, static decode graph replay, set_rows KV, padded attn windows), snake autofuse + fused CUDA/Vulkan kernels via ggml bump to ServeurpersoCom b677b63c, K/V F16 cast before flash_attn_ext, dead full-attention padding mask removed (incl. hot-step-sampler.h), GGML_CUDA_GRAPHS default ON, cpp-httplib 0.44, WAV PCM24 fixes, locale-immune float parser. Upstream src/solvers/ NOT copied (fork has own).

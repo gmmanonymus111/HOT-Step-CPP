@@ -522,18 +522,20 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
 }
 
 // Graph building
-// Snake activation (decomposed): y = x + sin^2(a * x) * inv_b
-// Uses standard GGML ops (mul->sin->sqr->mul->add) for vanilla ggml-org compatibility.
+// Snake activation (5-op naive decomposition for backend pattern fusion)
+// y = x + sin(a * x)^2 * inv_b
 // x: [T, C], exp_a: [1, C], inv_b: [1, C] (pre-computed at load)
+// Backends pattern-match (mul -> sin -> sqr -> mul -> add) and dispatch
+// to their fused snake kernel under the hood.
 static struct ggml_tensor * vae_snake(struct ggml_context * ctx,
                                       struct ggml_tensor *  x,
                                       struct ggml_tensor *  exp_a,
                                       struct ggml_tensor *  inv_b) {
-    struct ggml_tensor * ax  = ggml_mul(ctx, x, exp_a);   // a * x  (broadcast [1,C] over [T,C])
-    struct ggml_tensor * s   = ggml_sin(ctx, ax);          // sin(a * x)
-    struct ggml_tensor * s2  = ggml_sqr(ctx, s);           // sin^2(a * x)
-    struct ggml_tensor * s2b = ggml_mul(ctx, s2, inv_b);   // sin^2(a * x) * inv_b
-    return ggml_add(ctx, x, s2b);                          // x + sin^2(a * x) * inv_b
+    struct ggml_tensor * ax = ggml_mul(ctx, x, exp_a);
+    struct ggml_tensor * s  = ggml_sin(ctx, ax);
+    struct ggml_tensor * s2 = ggml_sqr(ctx, s);
+    struct ggml_tensor * d  = ggml_mul(ctx, s2, inv_b);
+    return ggml_add(ctx, x, d);
 }
 
 // Conv1d + bias: data [T, IC] -> [T_out, OC]

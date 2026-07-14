@@ -8,7 +8,8 @@
 #include "dit-graph.h"
 #include "dit.h"
 #include "dwt-haar.h"
-#include "philox.h"
+#include "solvers/solver-registry.h"
+#include "static-graph.h"
 
 #include <cmath>
 #include <cstdio>
@@ -145,16 +146,16 @@ static int dit_ggml_generate(DiTGGML *           model,
                              int                 cover_steps    = -1,
                              bool (*cancel)(void *)             = nullptr,
                              void *          cancel_data        = nullptr,
-                             const int *     real_S             = nullptr,
                              const int *     real_enc_S         = nullptr,
                              const float *   enc_switch         = nullptr,
                              const int *     real_enc_S_switch  = nullptr,
-                             bool            use_sde            = false,
                              const int64_t * seeds              = nullptr,
                              bool            use_batch_cfg      = true,
                              float           dcw_scaler         = 0.0f,
                              float           dcw_high_scaler    = 0.0f,
-                             const char *    dcw_mode           = "low") {
+                             const char *    dcw_mode           = "low",
+                             const char *    solver_name        = "euler",
+                             int             stork_substeps     = 10) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -206,10 +207,12 @@ static int dit_ggml_generate(DiTGGML *           model,
     // buffers with intermediates. enc_hidden is read at every cross-attn layer (24x),
     // so CPU aliasing corrupts it mid-graph. With N>1 the larger buffers trigger
     // more aggressive aliasing, causing batch sample 1+ to produce noise.
+    StaticGraph dit_graph;
     ggml_backend_sched_reset(model->sched);
     if (model->backend != model->cpu_backend) {
-        const char * input_names[] = { "enc_hidden", "input_latents", "t",           "t_r",
-                                       "positions",  "sa_mask_sw",    "sa_mask_pad", "ca_mask" };
+        const char * input_names[] = {
+            "enc_hidden", "input_latents", "t", "t_r", "positions", "sa_mask_sw", "ca_mask"
+        };
         for (const char * iname : input_names) {
             struct ggml_tensor * t = ggml_graph_get_tensor(gf, iname);
             if (t) {
@@ -217,20 +220,29 @@ static int dit_ggml_generate(DiTGGML *           model,
             }
         }
     }
-    if (!ggml_backend_sched_alloc_graph(model->sched, gf)) {
+    // Persistent inputs carry both flags: gallocr allocates inputs up front and
+    // never frees an output, which keeps their slots out of the intermediate
+    // reuse pool across replays. enc_hidden is resident too; two-pass CFG and
+    // the cover switch overwrite its contents explicitly before the pass that
+    // reads them.
+    {
+        const char * resident_names[] = { "enc_hidden", "positions", "sa_mask_sw", "ca_mask" };
+        for (const char * rname : resident_names) {
+            struct ggml_tensor * t = ggml_graph_get_tensor(gf, rname);
+            if (t) {
+                ggml_set_input(t);
+                ggml_set_output(t);
+            }
+        }
+    }
+    if (!static_graph_alloc(&dit_graph, model->backend, model->sched, gf)) {
         fprintf(stderr, "[DiT] FATAL: failed to allocate graph\n");
         ggml_free(ctx);
         return -1;
     }
 
-    // CRITICAL: zero all compute buffers AFTER allocation but BEFORE setting
-    // inputs. Without this, the GPU buffer retains stale data from the
-    // previous generation (ggml aliases tensor lifetimes within the same
-    // physical buffer). When the model store keeps the DiT resident between
-    // runs (LM cache hit), stale intermediate values corrupt the computation.
-    ggml_backend_sched_clear_compute_buffers(model->sched);
-
-    // Encoder hidden states: re-uploaded per step (scheduler clobbers input buffers).
+    // Encoder hidden states: resident on a direct graph, refreshed per step on
+    // the scheduler fallback (the sched reuses input buffers as scratch).
     // When CFG batched, slots [0,N) hold real encoder states, [N,2N) hold null.
     // t_enc was declared above for backend forcing
 
@@ -247,45 +259,34 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
     ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
 
-    // Self-attention masks: per-batch, combines sliding window and padding.
+    // Self-attention sliding window mask for layer_type=0.
     // GGML flash_attn_ext mask layout: [ne0=KV_len, ne1=Q_len, 1, N_graph]
     // Linear element offset: ki + qi*ne0 + b*ne0*ne1
-    //   sa_mask_sw  [S, S, 1, N_graph]: layer_type=0 (sliding window + padding)
-    //   sa_mask_pad [S, S, 1, N_graph]: layer_type=1 (full attention, padding only)
-    // When real_S is NULL, all positions are real (mask is all 0.0).
-    struct ggml_tensor * t_sa_mask_sw  = ggml_graph_get_tensor(gf, "sa_mask_sw");
-    struct ggml_tensor * t_sa_mask_pad = ggml_graph_get_tensor(gf, "sa_mask_pad");
+    //   sa_mask_sw  [S, S, 1, N_graph]: bidirectional window |qi - ki| <= win
+    // Full-attention layers (layer_type=1) run unmasked, no tensor needed.
+    struct ggml_tensor * t_sa_mask_sw = ggml_graph_get_tensor(gf, "sa_mask_sw");
 
     int                   win = c.sliding_window;
     std::vector<uint16_t> sa_sw_data(S * S * N_graph);
-    std::vector<uint16_t> sa_pad_data(S * S * N_graph);
 
-    // Fill masks for real samples, then duplicate for uncond slots
+    // Fill mask for real samples, then duplicate for uncond slots
     for (int b = 0; b < N; b++) {
-        int rs = real_S ? real_S[b] : S;  // real sequence length for this batch element
         for (int qi = 0; qi < S; qi++) {
             for (int ki = 0; ki < S; ki++) {
-                bool real_pos = (qi < rs) && (ki < rs);
-                int  dist     = (qi > ki) ? (qi - ki) : (ki - qi);
-                bool in_win   = (win <= 0) || (S <= win) || (dist <= win);
+                int  dist   = (qi > ki) ? (qi - ki) : (ki - qi);
+                bool in_win = (win <= 0) || (S <= win) || (dist <= win);
 
                 // offset = ki + qi*S + b*S*S  (ne0=S indexed by ki, ne1=S indexed by qi)
                 int off = b * S * S + qi * S + ki;
 
-                float sw_val    = (real_pos && in_win) ? 0.0f : -INFINITY;
-                sa_sw_data[off] = ggml_fp32_to_fp16(sw_val);
-
-                float pad_val    = real_pos ? 0.0f : -INFINITY;
-                sa_pad_data[off] = ggml_fp32_to_fp16(pad_val);
+                sa_sw_data[off] = ggml_fp32_to_fp16(in_win ? 0.0f : -INFINITY);
             }
         }
         if (batch_cfg) {
             memcpy(&sa_sw_data[(N + b) * S * S], &sa_sw_data[b * S * S], S * S * sizeof(uint16_t));
-            memcpy(&sa_pad_data[(N + b) * S * S], &sa_pad_data[b * S * S], S * S * sizeof(uint16_t));
         }
     }
     ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
-    ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
 
     // Cross-attention mask: per-batch encoder padding.
     // [ne0=enc_S (KV), ne1=S (Q), 1, N_graph] blocks padding in enc_hidden.
@@ -394,29 +395,27 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
 
-    // DIAG: checksum weight buffer BEFORE denoising loop
-    {
-        size_t wbuf_size = ggml_backend_buffer_get_size(model->wctx.buffer);
-        size_t sample_n  = (wbuf_size < 4096) ? wbuf_size : 4096;
-        // Checksum first weight tensor as a proxy for weight integrity
-        struct ggml_tensor * first_w = ggml_get_first_tensor(model->wctx.ctx);
-        if (first_w) {
-            size_t nb = ggml_nbytes(first_w);
-            size_t check_n = (nb < sample_n) ? nb : sample_n;
-            std::vector<uint8_t> wsnap(check_n);
-            ggml_backend_tensor_get(first_w, wsnap.data(), 0, check_n);
-            uint64_t wsum = 0;
-            for (size_t i = 0; i < check_n; i++) { wsum += (uint64_t)wsnap[i] * (i + 1); }
-            fprintf(stderr, "[DIAG] weight_pre: tensor=%s bytes=%zu checksum=%llu\n",
-                    first_w->name, nb, (unsigned long long)wsum);
-        }
+    // Solver dispatch. solver_name is the canonical key, resolved via the registry.
+    const SolverInfo * solver_info = solver_lookup(solver_name);
+    if (!solver_info) {
+        fprintf(stderr, "[DiT] WARNING: unknown solver '%s', falling back to euler\n", solver_name);
+        solver_info = solver_lookup("euler");
     }
+    fprintf(stderr, "[DiT] Solver: %s (%d NFE/step, order %d)\n", solver_info->display_name, solver_info->nfe,
+            solver_info->order);
+
+    SolverState solver_state;
+    solver_state.seeds          = seeds;
+    solver_state.batch_n        = N;
+    solver_state.n_per          = n_per;
+    solver_state.stork_substeps = stork_substeps;
 
     // Flow matching loop
     bool switched_cover = false;
     for (int step = 0; step < num_steps; step++) {
         if (cancel && cancel(cancel_data)) {
             fprintf(stderr, "[DiT] Cancelled at step %d/%d\n", step, num_steps);
+            static_graph_release(&dit_graph, model->sched);
             ggml_free(ctx);
             return -1;
         }
@@ -454,6 +453,13 @@ static int dit_ggml_generate(DiTGGML *           model,
                     }
                 }
             }
+            // Direct graph: the per-step refresh path is off, so the swapped
+            // enc_hidden and ca_mask upload here once.
+            if (dit_graph.direct) {
+                ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+                ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                        (size_t) enc_S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
+            }
             fprintf(stderr, "[DiT] Cover: switched to non-cover context at step %d/%d\n", step, num_steps);
         }
 
@@ -465,12 +471,20 @@ static int dit_ggml_generate(DiTGGML *           model,
             ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
         }
 
-        // Re-upload constants (scheduler may reuse input buffers as scratch between computes)
-        ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
-        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+        // Scheduler fallback inputs may be reused as scratch, so they refresh
+        // every step. A direct graph pins the constants through their output
+        // flag; only enc_hidden re-uploads under two-pass CFG because the
+        // uncond pass swaps its contents.
+        if (!dit_graph.direct || (do_cfg && !batch_cfg)) {
+            ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+        }
+        if (!dit_graph.direct) {
+            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N_graph * sizeof(int32_t));
+            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
+                                    (size_t) S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                    (size_t) enc_S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
+        }
 
         // Update xt portion of input: [in_ch, T, N_graph] (context_latents pre-filled)
         // Both cond and uncond slots receive the same noisy latent
@@ -488,7 +502,7 @@ static int dit_ggml_generate(DiTGGML *           model,
         ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
 
         // Conditional forward pass
-        ggml_backend_sched_graph_compute(model->sched, gf);
+        static_graph_compute(&dit_graph, model->backend, model->sched, gf);
 
         // dump intermediate tensors on step 0 (sample 0 only for batch)
         if (step == 0 && dbg && dbg->enabled) {
@@ -575,12 +589,15 @@ static int dit_ggml_generate(DiTGGML *           model,
             if (t_tr) {
                 ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
             }
-            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
-            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
-            ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
-            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
+            if (!dit_graph.direct) {
+                ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N * sizeof(int32_t));
+                ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
+                                        (size_t) S * (size_t) S * (size_t) N * sizeof(uint16_t));
+                ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                        (size_t) enc_S * (size_t) S * (size_t) N * sizeof(uint16_t));
+            }
 
-            ggml_backend_sched_graph_compute(model->sched, gf);
+            static_graph_compute(&dit_graph, model->backend, model->sched, gf);
             ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
 
             if (dbg && dbg->enabled) {
@@ -607,32 +624,17 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // step update (all N samples)
         if (step == num_steps - 1) {
-            // final step: predict x0 (same for ODE and SDE)
+            // Final step: predict x0 directly from the velocity field.
             for (int i = 0; i < n_total; i++) {
                 output[i] = xt[i] - vt[i] * t_curr;
             }
         } else {
             float t_next = schedule[step + 1];
 
-            if (use_sde && seeds) {
-                // SDE: predict x0, re-noise with fresh Philox noise.
-                // seed offset per step gives reproducible stochastic trajectories.
-                for (int b = 0; b < N; b++) {
-                    std::vector<float> fresh(n_per);
-                    philox_randn(seeds[b] + step + 1, fresh.data(), n_per, true);
-                    for (int i = 0; i < n_per; i++) {
-                        int   idx = b * n_per + i;
-                        float x0  = xt[idx] - vt[idx] * t_curr;
-                        xt[idx]   = t_next * fresh[i] + (1.0f - t_next) * x0;
-                    }
-                }
-            } else {
-                // ODE Euler: x_{t+1} = x_t - v_t * dt
-                float dt = t_curr - t_next;
-                for (int i = 0; i < n_total; i++) {
-                    xt[i] -= vt[i] * dt;
-                }
-            }
+            // Modular solver dispatch. The solver mutates xt in place.
+            // 1 NFE solvers ignore the model_fn callback (passed empty).
+            solver_state.step_index = step;
+            solver_info->step_fn(xt.data(), vt.data(), t_curr, t_next, n_total, solver_state, {}, vt.data());
 
             // DCW: Differential Correction in Wavelet domain (CVPR 2026).
             // Sampler-side correction for SNR-t bias in flow matching.
@@ -647,7 +649,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             // ODE-only: denoised = xt_after - vt * t_next (reconstructed from
             // post-step xt, since xt_before = xt + vt * dt for Euler ODE so
             // denoised = xt_before - vt * t_curr = xt - vt * t_next).
-            bool dcw_active = (dcw_scaler > 0.0f || dcw_high_scaler > 0.0f) && !(use_sde && seeds);
+            bool dcw_active = (dcw_scaler > 0.0f || dcw_high_scaler > 0.0f) && !solver_info->injects_noise;
             if (dcw_active) {
                 int                Tl = (T + 1) / 2;
                 std::vector<float> denoised(n_per);
@@ -703,30 +705,6 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
 
         fprintf(stderr, "[DiT] Step %d/%d t=%.3f\n", step + 1, num_steps, t_curr);
-
-        // Determinism diagnostic: print xt/output checksum at key steps
-        if (step == 0 || step == num_steps / 2 || step == num_steps - 1) {
-            const float * buf = (step == num_steps - 1) ? output : xt.data();
-            double dsum = 0.0;
-            for (int i = 0; i < n_total; i++) { dsum += (double) buf[i]; }
-            fprintf(stderr, "[DIAG] dit_step%d_%s: sum=%.10f\n",
-                    step, (step == num_steps - 1) ? "x0" : "xt", dsum);
-        }
-    }
-
-    // DIAG: checksum weight buffer AFTER denoising loop
-    {
-        struct ggml_tensor * first_w = ggml_get_first_tensor(model->wctx.ctx);
-        if (first_w) {
-            size_t nb = ggml_nbytes(first_w);
-            size_t check_n = (nb < 4096) ? nb : 4096;
-            std::vector<uint8_t> wsnap(check_n);
-            ggml_backend_tensor_get(first_w, wsnap.data(), 0, check_n);
-            uint64_t wsum = 0;
-            for (size_t i = 0; i < check_n; i++) { wsum += (uint64_t)wsnap[i] * (i + 1); }
-            fprintf(stderr, "[DIAG] weight_post: tensor=%s bytes=%zu checksum=%llu\n",
-                    first_w->name, nb, (unsigned long long)wsum);
-        }
     }
 
     // Batch diagnostic: report per-sample stats to catch corruption
@@ -754,6 +732,7 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
     }
 
+    static_graph_release(&dit_graph, model->sched);
     ggml_free(ctx);
     return 0;
 }

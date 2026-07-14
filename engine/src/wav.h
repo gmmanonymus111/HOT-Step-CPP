@@ -1,12 +1,7 @@
-// wav.h: minimal WAV reader/writer
+// wav.h: minimal WAV reader
 //
-// Supported read formats:
-//   PCM16:  format=1 or EXTENSIBLE(subformat=1), 16-bit
-//   PCM24:  EXTENSIBLE(subformat=1), 24-bit
-//   F32:    format=3 or EXTENSIBLE(subformat=3), 32-bit IEEE float
-//
-// read_wav_buf: PCM16 or float32, mono/stereo, any rate -> interleaved [T, 2] float
-// write_wav:    planar [ch0: T, ch1: T] float -> PCM16 stereo WAV
+// read_wav_buf: PCM16 / PCM24 / float32, classic or WAVE_FORMAT_EXTENSIBLE,
+//               mono or stereo, any rate -> interleaved [T, 2] float
 
 #pragma once
 #include <cstdint>
@@ -78,6 +73,12 @@ static float * read_wav_buf(const uint8_t * data, size_t size, int * T_audio, in
             extensible_subformat = 0;
             if (audio_format == 0xfffe && chunk_size >= 40) {
                 extensible_subformat = wav_read_u16le(data + pos + 24);
+
+                // collapse extensible to its effective sample format
+                // 1 -> PCM int, 3 -> IEEE float
+                if (extensible_subformat == 1 || extensible_subformat == 3) {
+                    audio_format = extensible_subformat;
+                }
             }
 
             pos += (size_t) chunk_size;
@@ -109,7 +110,7 @@ static float * read_wav_buf(const uint8_t * data, size_t size, int * T_audio, in
                         audio[t * 2 + 1]      = (float) r / 32768.0f;
                     }
                 }
-            } else if (audio_format == 0xfffe && bits_per_sample == 24 && extensible_subformat == 1) {
+            } else if (audio_format == 1 && bits_per_sample == 24) {
                 n_samples = (int) (data_bytes / ((size_t) n_channels * 3));
                 audio     = (float *) malloc((size_t) n_samples * 2 * sizeof(float));
                 if (!audio) {

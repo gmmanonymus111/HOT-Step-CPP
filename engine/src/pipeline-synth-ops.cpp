@@ -45,11 +45,80 @@ static void diag_stats_f32(const char * label, const float * data, size_t n) {
             label, n, mean, rms, mn, mx, sum);
 }
 
-// CSV list parser tolerant to any whitespace around commas. Locale-immune via
-// std::from_chars (C++17 charconv) for integers. Float parsing uses strtof
-// for portability (Apple libc++ does not implement from_chars for floats).
-// Used for audio_codes (int) and custom_timesteps (float). Bails on first
-// parse error or overflow, returning the values consumed so far.
+// Locale immune scalar reader. std::from_chars handles ints on every stdlib
+// and floats on every stdlib except libc++ before v20 (AppleClang ships an
+// old libc++). There we hand roll a tiny C locale parser supporting decimal
+// and optional exponent. Returns ptr past consumed bytes, or first on parse
+// failure.
+static const char * scan_num(const char * first, const char * last, int & v) {
+    auto r = std::from_chars(first, last, v);
+    return r.ec == std::errc{} ? r.ptr : first;
+}
+
+static const char * scan_num(const char * first, const char * last, float & v) {
+#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000
+    const char * p   = first;
+    bool         neg = false;
+    if (p < last && (*p == '+' || *p == '-')) {
+        neg = (*p == '-');
+        p++;
+    }
+    double m   = 0.0;
+    bool   any = false;
+    while (p < last && *p >= '0' && *p <= '9') {
+        m   = m * 10.0 + (double) (*p - '0');
+        any = true;
+        p++;
+    }
+    if (p < last && *p == '.') {
+        p++;
+        double frac = 0.1;
+        while (p < last && *p >= '0' && *p <= '9') {
+            m += (double) (*p - '0') * frac;
+            frac *= 0.1;
+            any = true;
+            p++;
+        }
+    }
+    if (!any) {
+        return first;
+    }
+    if (p < last && (*p == 'e' || *p == 'E')) {
+        const char * eptr = p;
+        p++;
+        bool eneg = false;
+        if (p < last && (*p == '+' || *p == '-')) {
+            eneg = (*p == '-');
+            p++;
+        }
+        int  e    = 0;
+        bool eany = false;
+        while (p < last && *p >= '0' && *p <= '9') {
+            e    = e * 10 + (*p - '0');
+            eany = true;
+            p++;
+        }
+        if (!eany) {
+            p = eptr;
+        } else {
+            double scale = 1.0;
+            for (int i = 0; i < e; i++) {
+                scale *= 10.0;
+            }
+            m = eneg ? m / scale : m * scale;
+        }
+    }
+    v = (float) (neg ? -m : m);
+    return p;
+#else
+    auto r = std::from_chars(first, last, v);
+    return r.ec == std::errc{} ? r.ptr : first;
+#endif
+}
+
+// CSV list parser tolerant to any whitespace around commas. Locale immune,
+// bails on first parse error and returns the values consumed so far. Used
+// for audio_codes (int) and custom_timesteps (float).
 template <typename T> static std::vector<T> parse_csv(const std::string & s) {
     std::vector<T> out;
     const char *   first = s.data();
@@ -61,36 +130,13 @@ template <typename T> static std::vector<T> parse_csv(const std::string & s) {
         if (first == last) {
             break;
         }
-        T    v{};
-        auto r = std::from_chars(first, last, v);
-        if (r.ec != std::errc{}) {
+        T            v{};
+        const char * next = scan_num(first, last, v);
+        if (next == first) {
             break;
         }
         out.push_back(v);
-        first = r.ptr;
-    }
-    return out;
-}
-
-// Float specialization: strtof-based (Apple libc++ lacks from_chars<float>)
-template <> std::vector<float> parse_csv<float>(const std::string & s) {
-    std::vector<float> out;
-    const char *       first = s.data();
-    const char *       last  = first + s.size();
-    while (first < last) {
-        while (first < last && (*first == ',' || *first == ' ')) {
-            first++;
-        }
-        if (first == last) {
-            break;
-        }
-        char * end = nullptr;
-        float  v   = std::strtof(first, &end);
-        if (end == first) {
-            break;  // no progress — parse error
-        }
-        out.push_back(v);
-        first = end;
+        first = next;
     }
     return out;
 }
@@ -1106,8 +1152,8 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
         float * dst = s.noise.data() + b * s.Oc * s.T;
         s.seeds[b]  = reqs[b].seed;
         philox_randn(reqs[b].seed, dst, s.Oc * s.T, /*bf16_round=*/true);
-        fprintf(stderr, "[Init-Noise Batch%d] Philox noise seed=%lld, [%d, %d]%s\n", b, (long long) reqs[b].seed, s.T,
-                s.Oc, s.use_sde ? " (SDE)" : "");
+        fprintf(stderr, "[Init-Noise Batch%d] Philox noise seed=%lld, [%d, %d] solver=%s\n", b,
+                (long long) reqs[b].seed, s.T, s.Oc, s.rr.solver.c_str());
     }
 
     // cover_noise_strength: blend initial noise with clean source latents.
@@ -1177,13 +1223,6 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
     // DiT Generate
     s.output.resize(batch_n * s.Oc * s.T);
-
-    // Per-batch sequence lengths for attention padding masks.
-    // Within a synth_batch_size group, all elements share the same s.T (same codes),
-    // so s.per_S[b] = s.S for all b. The s.per_enc_S[] array has real encoder lengths
-    // from per-batch text encoding above.
-    // These become meaningful when the server/CLI batches requests with different s.T.
-    s.per_S.assign(batch_n, s.S);
 
     // Debug dumps (sample 0)
     debug_dump_2d(&s.dbg, "noise", s.noise.data(), s.T, s.Oc);
@@ -1374,8 +1413,8 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             &s_trt, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
             s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
             s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
-            s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
-            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
+            /*real_S=*/nullptr, s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
+            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), /*use_sde=*/false, s.seeds.data(),
             ctx->params.use_batch_cfg,
             s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
         if (dit_rc != 0) {
@@ -1504,8 +1543,8 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
             dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
             s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
             s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
-            s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
-            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.use_sde, s.seeds.data(),
+            s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
+            s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), /*use_sde=*/false, s.seeds.data(),
             ubc,
             s.null_cond_vec.empty() ? nullptr : s.null_cond_vec.data());
         if (dit_rc != 0) {

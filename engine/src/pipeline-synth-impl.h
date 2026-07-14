@@ -104,10 +104,7 @@ struct SynthState {
     // diffusion schedule
     std::vector<float> schedule;
 
-    // SDE mode: inject fresh noise at each denoising step (vs ODE pure integration)
-    bool use_sde;
-
-    // per-batch seeds (for reproducible SDE re-noising: seed + step offset)
+    // per-batch seeds for the SDE solver (Philox renoising at each step)
     std::vector<int64_t> seeds;
 
     // latent dimensions
@@ -150,7 +147,6 @@ struct SynthState {
     // noise + output
     std::vector<float> noise;
     std::vector<float> output;
-    std::vector<int>   per_S;
 
     // LRC alignment data (captured during text encoding, consumed by Phase 3)
     std::vector<int>         lyric_token_ids;    // raw tokenized lyric IDs (full lyric prompt)
