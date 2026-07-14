@@ -30,7 +30,7 @@ Companion to [SKILL.md](SKILL.md). Line references verified against the repo at 
 
 - `adapter_path` (primary adapter), `adapter_scale`
 - all six `adapter_group_scales` (self_attn, cross_attn, mlp, cond_embed, time_embed, proj_in — the last two were the `168dcb5` gap)
-- `rebase_source` / `rebase_beta` — **merge mode only**; explicitly cleared in runtime mode
+- `rebase_source` / `rebase_beta` — merge mode AND runtime mode (since `7aac3c2`); explicitly cleared on the runtime per-section path (sections + 2+ stack), where the engine skips the nudge
 - `adapter_stack` string = `hotstep_adapter_stack_sig(...)` (`hot-step-params.h:211` — each path + `@%08x` float-bit-pattern of its scale), then:
   - `+ "|sect"` when `adapter_sections` is non-empty (per-section loads N separate deltas — distinct DiT; the section weights themselves live in per-frame masks, not the model, so they are NOT keyed)
   - `+ "|q:<quant>"` when runtime mode and `adapter_runtime_quant != "bf16"`
@@ -62,7 +62,7 @@ Source: `docs/plans/cross-arch-adapter-conversion.md` (LOCAL-ONLY, gitignored �
 ### Cross-base (same architecture, different base weights)
 
 - **Ground truth (departing lead):** LoKR cross-base conversion to non-turbo XL bases FAILS despite ~99% weight-identity. Root cause: **basin-sensitivity** — the adapter delta lands in a different loss basin — NOT weight drift. Candidate fix: β·(S−T) basin nudge, designed but **NOT validated**.
-- The nudge IS implemented and shipped (SKILL.md Golden rule 3; `W_merged = T + β·(S−T) + scale·ΔW`). The local doc claims the XL→XL sibling-base nudge was "validated by ear" via `bake_basin_nudge.py` — this **conflicts** with the lead's handoff. Treat as unvalidated; verify by ear. 2B→2B re-base: expected to work, untested.
+- The nudge IS implemented and shipped (SKILL.md Golden rule 3; `W_merged = T + β·(S−T) + scale·ΔW`). **User-validated by ear in merge mode (2026-07-14, "works fantastically")**, resolving the earlier handoff conflict. Runtime-mode port (`7aac3c2`) folds β·(S−T) into the staged delta sum (`adapter_runtime_rebase`) — output-identical math, pending its own by-ear A/B. 2B→2B re-base: expected to work, untested.
 - Re-base is shape-preserving → does nothing cross-architecture.
 
 ### Cross-arch (XL 32 layers/2560 hidden ↔ 2B 24 layers/2048 hidden) — UNSOLVED
@@ -75,7 +75,7 @@ Source: `docs/plans/cross-arch-adapter-conversion.md` (LOCAL-ONLY, gitignored �
 
 ## 7. Status ledger
 
-**DONE / shipped:** merge + runtime modes (LoRA, LoKr, DoRA-in-merge); multi-adapter stacking (merge accumulation, runtime delta-sum, Sum/Blend UI, all trigger words injected); basin re-base (once-per-stack, merge-only); per-section masking P1 (proportional) + P2 (alignment, header-anchored token map); runtime delta quantization Q4_0/Q8_0 with parallel finalize; cooperative cancel; cache-key hardening + no-failure-caching (`168dcb5`); LM-echo rebuild fix (`8ea519b`).
+**DONE / shipped:** merge + runtime modes (LoRA, LoKr, DoRA-in-merge); multi-adapter stacking (merge accumulation, runtime delta-sum, Sum/Blend UI, all trigger words injected); basin re-base (once-per-stack, merge + runtime summed paths; not per-section); per-section masking P1 (proportional) + P2 (alignment, header-anchored token map); runtime delta quantization Q4_0/Q8_0 with parallel finalize; cooperative cancel; cache-key hardening + no-failure-caching (`168dcb5`); LM-echo rebuild fix (`8ea519b`).
 
 **REVERTED:** regional self-attn isolation (`0f3bf6d` → `ee041e1`); `adapter_section_isolation` param dormant.
 
