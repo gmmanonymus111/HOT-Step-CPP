@@ -129,7 +129,7 @@ solver = {
             key     = "memory_buffer",
             type    = "toggle",
             label   = "Memory Buffer",
-            default = true,
+            default = false,
             hint    = "Blends last 3 step outputs into the current step output. Suppresses step-to-step jitter without redirecting the trajectory. Ring buffer, zero-alloc.",
         },
         {
@@ -473,7 +473,7 @@ function step(xt, vt, t_curr, t_prev, n)
     local warmup        = math.floor(num_param(params, "warmup_steps", 2))
     local f_inertia     = bool_param(params, "inertia_engine", true)
     local inertia_a     = num_param(params, "inertia_alpha", 0.15)
-    local f_memory      = bool_param(params, "memory_buffer", true)
+    local f_memory      = bool_param(params, "memory_buffer", false)
     local mem_blend     = num_param(params, "memory_blend", 0.12)
     local f_concept     = bool_param(params, "concept_lock", true)
     local concept_power = num_param(params, "concept_sigma_power", 1.0)
