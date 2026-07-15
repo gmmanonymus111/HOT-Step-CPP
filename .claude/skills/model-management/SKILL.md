@@ -93,6 +93,16 @@ Verified in `engine/src/model-store.h:68-81` (ModelKind comments):
 - Classification is by checkpoint **directory name**: `acestep-5Hz-lm*` → LM, `acestep-v15*` → DiT, `Qwen3-Embedding*` → text-enc, and exactly `vae` → VAE (`convert.py:55-64`). Skips outputs that already exist.
 - Alternative: the engine loads safetensors checkpoint dirs **directly** (drop `<name>/` with `config.json` + `model.safetensors` into `models/`) — conversion is optional. Sharded (`model.safetensors.index.json`) and diffusers (`diffusion_pytorch_model.safetensors`) layouts supported (`engine/src/weight-source.h`, `engine/src/model-registry.h:328-375`).
 
+## Procedure: convert ComfyUI int8 DiT safetensors → Q8_0 GGUF (`engine/convert-comfy-int8.py`)
+
+For ComfyUI `comfy_quant` int8_tensorwise DiT checkpoints (int8 `.weight` + scalar F32 `.weight_scale` + `.comfy_quant` JSON tensor per layer). A per-tensor int8 grid is exactly representable in Q8_0 (every 32-block scale = the tensor scale), so weights are **repacked bit-faithfully** — no dequant/requant round trip. Needs a **donor GGUF** of the same architecture (any convert.py-produced `acestep-v15-*.gguf`) to supply `silence_latent` and the `acestep.*` config KVs, which ComfyUI files lack. Aborts on any tensor-shape mismatch vs the donor.
+
+```powershell
+python engine\convert-comfy-int8.py <comfy.safetensors> models\acestep-v15-xl-turbo-BF16.gguf models\<out>-Q8_0.gguf --name <general.name>
+```
+
+First applied 2026-07-15 to `hrktxz/ACE_Step_1.5_ComfyUI_int8_convrot` (xl_sft_turbo) → `acestep-v15-xl-sft-turbo-comfy-int8-Q8_0.gguf`; verified bit-exact read-back and a clean engine `/warm` load.
+
 ## Procedure: add a model manually
 
 1. Copy the `.gguf` into `models\` **root** (not a subfolder — golden rule 2).
@@ -158,6 +168,7 @@ Download mechanics: HuggingFace URL `https://huggingface.co/{repo}/resolve/main/
 - **VALIDATED — `/api/models` fallback shape is not a faithful mirror:** when the engine is down, Node returns buckets `{ dit, lm, vae, understand }` + `aceServerDown: true` (`models.ts:28-36`), but the live engine `/props` sends `{ lm, embedding, dit, vae }` (`ace-server.cpp:1512-1515`) — no `understand` bucket exists, and the fallback lacks `embedding`.
 - **VALIDATED — `cleanupJobs()` doc-drift:** its comment says "older than 60s" but it deletes all terminal jobs immediately, and no route calls it (`modelDownloadService.ts:341-348`).
 - **VALIDATED — speculative-decoding draft LM is DISABLED:** `ACESTEPCPP_DRAFT_LM` plumbing remains (`config.ts:117-122`) but GGML per-call overhead negated the speedup; auto-detect commented out.
+- **VALIDATED — "convrot" HF uploads may be mislabeled plain int8:** all files in `hrktxz/ACE_Step_1.5_ComfyUI_int8_convrot` (checked 2026-07-15) contain only `{"format": "int8_tensorwise"}` per-tensor-scale layers — no Hadamard rotation metadata anywhere, despite the repo name. Real ConvRot (QuaRot-style group-wise Hadamard, ComfyUI ≥0.27) would need `"convrot": true` + `convrot_groupsize` in the `.comfy_quant` JSON and runtime activation rotation. Our vendored GGML already ships FWHT kernels (CUDA/Vulkan/CPU) + `GGML_HINT_SRC0_IS_HADAMARD` (`ggml.h:444`, unused by engine code) if we ever want native support. Check the safetensors header before believing a quant-format claim.
 - **UNVALIDATED:** provenance of on-disk IQ3/IQ4 quant files (not producible by quantize.cpp — presumably made with external tooling); whether `neural-codec`/`mp3-codec` binaries take model paths (not inspected).
 
 ## Deeper reading
