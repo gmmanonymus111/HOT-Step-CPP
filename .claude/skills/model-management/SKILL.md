@@ -95,13 +95,18 @@ Verified in `engine/src/model-store.h:68-81` (ModelKind comments):
 
 ## Procedure: convert ComfyUI int8 DiT safetensors → Q8_0 GGUF (`engine/convert-comfy-int8.py`)
 
-For ComfyUI `comfy_quant` int8_tensorwise DiT checkpoints (int8 `.weight` + scalar F32 `.weight_scale` + `.comfy_quant` JSON tensor per layer). A per-tensor int8 grid is exactly representable in Q8_0 (every 32-block scale = the tensor scale), so weights are **repacked bit-faithfully** — no dequant/requant round trip. Needs a **donor GGUF** of the same architecture (any convert.py-produced `acestep-v15-*.gguf`) to supply `silence_latent` and the `acestep.*` config KVs, which ComfyUI files lack. Aborts on any tensor-shape mismatch vs the donor.
+For ComfyUI `comfy_quant` int8 DiT checkpoints (int8 `.weight` + F32 `.weight_scale` scalar or per-row + `.comfy_quant` JSON tensor per layer), including **ConvRot** files (`"convrot": true` + `convrot_groupsize`). Per-tensor and per-row int8 grids are exactly representable in Q8_0 (block scale = tensor/row scale), so weights are **repacked bit-faithfully** — no dequant/requant round trip. Needs a **donor GGUF** of the same architecture (any convert.py-produced `acestep-v15-*.gguf`) to supply `silence_latent` and the `acestep.*` config KVs, which ComfyUI files lack. Aborts on any tensor-shape mismatch vs the donor.
 
 ```powershell
-python engine\convert-comfy-int8.py <comfy.safetensors> models\acestep-v15-xl-turbo-BF16.gguf models\<out>-Q8_0.gguf --name <general.name>
+python engine\convert-comfy-int8.py <comfy.safetensors> models\<matching-donor>-BF16.gguf models\<out>-Q8_0.gguf --name <general.name>
 ```
 
-First applied 2026-07-15 to `hrktxz/ACE_Step_1.5_ComfyUI_int8_convrot` (xl_sft_turbo) → `acestep-v15-xl-sft-turbo-comfy-int8-Q8_0.gguf`; verified bit-exact read-back and a clean engine `/warm` load.
+ConvRot handling: rotated `decoder.*` weights stay rotated and are recorded in GGUF KV `acestep.convrot_map` (`name:group;...`); the engine applies the matching group-wise Hadamard rotation to that linear's activations at inference (`dit.h` load + `dit-graph.h`/`dit-alignment-graph.h`, commit 182faef). Rotated encoder/tokenizer/detokenizer weights are dequantized + **unrotated** to BF16 offline (run once per generation — not worth graph wiring). `--no-runtime-rotation` builds an all-BF16 unrotated reference GGUF of the same quantized model, used for same-seed A/B validation of the engine rotation path. **Adapter merge mode is refused on ConvRot models** (deltas are unrotated); runtime adapter mode works (deltas consume raw activations).
+
+Producing ConvRot files from a local checkpoint: `pip install convert_to_quant` (needs torch+CUDA, triton-windows) then
+`ctq -i <model.safetensors> -o <out.safetensors> --int8 --scaling_mode row --convrot --dynamic_convrot --comfy_quant --save-quant-metadata` (~35 min for a 5B XL on an RTX 5090, learned rounding included).
+
+First applied 2026-07-15: hrktxz xl_sft_turbo (plain int8) → `acestep-v15-xl-sft-turbo-comfy-int8-Q8_0.gguf`; merge-base-sft-turbo-xl-thirds self-quantized with real ConvRot → `...-convrot-Q8_0.gguf` (+ `...-convrot-ref-BF16.gguf` reference). Numerical parity: rotated-path error 0.9% vs original F32 weights; skipping rotation → ~140% (i.e. rotation is load-bearing).
 
 ## Procedure: add a model manually
 

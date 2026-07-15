@@ -128,6 +128,10 @@ def main():
     ap.add_argument("donor_gguf")
     ap.add_argument("out_gguf")
     ap.add_argument("--name", default=None, help="general.name for the output (default: derived from output filename)")
+    ap.add_argument("--no-runtime-rotation", action="store_true",
+                    help="Dequantize + unrotate EVERYTHING to BF16 (no acestep.convrot_map, no engine "
+                         "rotation needed). Numerically equivalent reference build — 2x the size; used "
+                         "to A/B-validate the engine's runtime rotation path.")
     args = ap.parse_args()
 
     name = args.name or os.path.basename(args.out_gguf).rsplit(".", 1)[0]
@@ -194,8 +198,8 @@ def main():
                     log("  FATAL: %s weight_scale has %d entries for %d rows" % (tname, scales.size, rows))
                     sys.exit(1)
 
-                keep_rotation = rot_group > 0 and tname.startswith("decoder.")
-                packable = len(shape) == 2 and cols % QK8_0 == 0
+                keep_rotation = rot_group > 0 and tname.startswith("decoder.") and not args.no_runtime_rotation
+                packable = len(shape) == 2 and cols % QK8_0 == 0 and not (rot_group > 0 and args.no_runtime_rotation)
 
                 if packable and (rot_group == 0 or keep_rotation):
                     packed = pack_q8_0(qs, row_scales)
