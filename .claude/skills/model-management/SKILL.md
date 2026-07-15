@@ -103,6 +103,8 @@ python engine\convert-comfy-int8.py <comfy.safetensors> models\<matching-donor>-
 
 ConvRot handling: rotated `decoder.*` weights stay rotated and are recorded in GGUF KV `acestep.convrot_map` (`name:group;...`); the engine applies the matching group-wise Hadamard rotation to that linear's activations at inference (`dit.h` load + `dit-graph.h`/`dit-alignment-graph.h`, commit 182faef). Rotated encoder/tokenizer/detokenizer weights are dequantized + **unrotated** to BF16 offline (run once per generation — not worth graph wiring). `--no-runtime-rotation` builds an all-BF16 unrotated reference GGUF of the same quantized model, used for same-seed A/B validation of the engine rotation path. **Adapter merge mode is refused on ConvRot models** (deltas are unrotated); runtime adapter mode works (deltas consume raw activations).
 
+**ConvRot cardinal rule — any code reading ConvRot base weights for unrotated-space math must unrotate them first** (`convrot_transform_rows` in `engine/src/convrot.h`, fast radix-4, self-inverse). Violation signature: generation "succeeds" but output is garbled full-band noise. First instance: the runtime basin re-base nudged deltas with β·(S−T) using rotated T — fixed in `adapter_runtime_rebase` (commit 22820ae) by unrotating T for `acestep.convrot_map` tensors. Audit any future weight-reader (TRT export, distills, external merge scripts) against this.
+
 Producing ConvRot files from a local checkpoint: `pip install convert_to_quant` (needs torch+CUDA, triton-windows) then
 `ctq -i <model.safetensors> -o <out.safetensors> --int8 --scaling_mode row --convrot --dynamic_convrot --comfy_quant --save-quant-metadata` (~35 min for a 5B XL on an RTX 5090, learned rounding included).
 
