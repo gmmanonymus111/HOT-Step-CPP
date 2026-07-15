@@ -40,13 +40,43 @@ static struct ggml_tensor * dit_ggml_linear(struct ggml_context * ctx,
     return ggml_mul_mat(ctx, weight, input);
 }
 
+// ─── HOT-Step ConvRot: group-wise Hadamard rotation of activations ───
+// For weights stored pre-rotated (W' = W·H per input-dim group of size g),
+// apply the matching rotation to the activation: rot(x)[grp] = H·x[grp].
+// H is symmetric orthogonal, so W'·rot(x) == W·x. g == 0 → passthrough.
+// x: [in, ...] with in % g == 0 (guaranteed by the offline converter).
+// LoRA/adapter deltas are in UNROTATED space — they must keep consuming the
+// raw input, never the rotated one.
+static struct ggml_tensor * dit_convrot_rotate(struct ggml_context * ctx,
+                                               DiTGGML *             m,
+                                               struct ggml_tensor *  x,
+                                               int                   g) {
+    if (g <= 0) {
+        return x;
+    }
+    auto it = m->convrot.hmats.find(g);
+    if (it == m->convrot.hmats.end()) {
+        return x;  // unreachable: load fails on unknown group sizes
+    }
+    if (!ggml_is_contiguous(x)) {
+        x = ggml_cont(ctx, x);
+    }
+    const int64_t        cols = ggml_nelements(x) / g;
+    struct ggml_tensor * xg   = ggml_reshape_2d(ctx, x, g, cols);
+    struct ggml_tensor * xr   = ggml_mul_mat(ctx, it->second, xg);
+    return ggml_reshape_4d(ctx, xr, x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+}
+
 // Helper: Linear layer with runtime LoRA delta
 // y = W@x + delta@x  (delta is precomputed BF16 in VRAM, or NULL)
+// base_input: ConvRot-rotated input for the base weight (NULL → use input);
+// the delta always consumes the raw input (deltas are unrotated).
 static struct ggml_tensor * dit_ggml_linear_lora(struct ggml_context * ctx,
                                                  struct ggml_tensor *  weight,
                                                  struct ggml_tensor *  delta,
-                                                 struct ggml_tensor *  input) {
-    struct ggml_tensor * y = ggml_mul_mat(ctx, weight, input);
+                                                 struct ggml_tensor *  input,
+                                                 struct ggml_tensor *  base_input = nullptr) {
+    struct ggml_tensor * y = ggml_mul_mat(ctx, weight, base_input ? base_input : input);
     if (delta) {
         struct ggml_tensor * dy = ggml_mul_mat(ctx, delta, input);
         y = ggml_add(ctx, y, dy);
@@ -59,8 +89,9 @@ static struct ggml_tensor * dit_ggml_linear_bias_lora(struct ggml_context * ctx,
                                                       struct ggml_tensor *  weight,
                                                       struct ggml_tensor *  delta,
                                                       struct ggml_tensor *  bias,
-                                                      struct ggml_tensor *  input) {
-    struct ggml_tensor * out = ggml_mul_mat(ctx, weight, input);
+                                                      struct ggml_tensor *  input,
+                                                      struct ggml_tensor *  base_input = nullptr) {
+    struct ggml_tensor * out = ggml_mul_mat(ctx, weight, base_input ? base_input : input);
     if (delta) {
         struct ggml_tensor * dy = ggml_mul_mat(ctx, delta, input);
         out = ggml_add(ctx, out, dy);
@@ -99,8 +130,11 @@ static struct ggml_tensor * dit_lora_apply_layer(struct ggml_context *      ctx,
                                                  const DiTLoRASectionCtx *  sect,
                                                  int                        layer_idx,
                                                  DiTLoRADelta DiTLoRALayer::* slot,
-                                                 bool                       frame_masked) {
-    struct ggml_tensor * y = ggml_mul_mat(ctx, weight, input);
+                                                 bool                       frame_masked,
+                                                 struct ggml_tensor *       base_input = nullptr) {
+    // base_input: ConvRot-rotated input for the base weight (NULL → input).
+    // All adapter deltas below stay on the raw input (unrotated space).
+    struct ggml_tensor * y = ggml_mul_mat(ctx, weight, base_input ? base_input : input);
     if (sect && sect->loras) {
         for (size_t i = 0; i < sect->loras->size(); i++) {
             const DiTLoRA & lr = (*sect->loras)[i];
@@ -197,6 +231,7 @@ static struct ggml_tensor * dit_ggml_gated_add(struct ggml_context * ctx,
 // t_scalar: [1] f32, returns temb [H] and *out_tproj [6H]
 // suffix: "_t" or "_r" for naming intermediate tensors
 static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
+                                                DiTGGML *             m,
                                                 DiTGGMLTembWeights *  w,
                                                 struct ggml_tensor *  t_scalar,
                                                 struct ggml_tensor ** out_tproj,
@@ -217,7 +252,8 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
     }
 
     // linear1 + silu: [256] -> [H]
-    struct ggml_tensor * h = dit_ggml_linear_bias_lora(ctx, w->linear_1_w, delta_lin1 ? delta_lin1->delta : nullptr, w->linear_1_b, sinusoidal);
+    struct ggml_tensor * h = dit_ggml_linear_bias_lora(ctx, w->linear_1_w, delta_lin1 ? delta_lin1->delta : nullptr, w->linear_1_b, sinusoidal,
+                                                       dit_convrot_rotate(ctx, m, sinusoidal, w->rot_lin1));
     {
         char name[64];
         snprintf(name, sizeof(name), "temb_lin1%s", suffix);
@@ -228,11 +264,13 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
     h = ggml_silu(ctx, h);
 
     // linear2: [H] -> [H]
-    struct ggml_tensor * temb = dit_ggml_linear_bias_lora(ctx, w->linear_2_w, delta_lin2 ? delta_lin2->delta : nullptr, w->linear_2_b, h);
+    struct ggml_tensor * temb = dit_ggml_linear_bias_lora(ctx, w->linear_2_w, delta_lin2 ? delta_lin2->delta : nullptr, w->linear_2_b, h,
+                                                          dit_convrot_rotate(ctx, m, h, w->rot_lin2));
 
     // silu + proj: [H] -> [6H]
     struct ggml_tensor * h2 = ggml_silu(ctx, temb);
-    *out_tproj              = dit_ggml_linear_bias_lora(ctx, w->time_proj_w, delta_proj ? delta_proj->delta : nullptr, w->time_proj_b, h2);
+    *out_tproj              = dit_ggml_linear_bias_lora(ctx, w->time_proj_w, delta_proj ? delta_proj->delta : nullptr, w->time_proj_b, h2,
+                                                        dit_convrot_rotate(ctx, m, h2, w->rot_proj));
 
     return temb;  // [H] (used for output adaln)
 }
@@ -275,24 +313,26 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     int             Nkv = c.n_kv_heads;
 
     // 1) QKV projections (full fused, QK partial, separate)
+    // ConvRot: q/k/v share one rotated input; adapter deltas keep raw norm_sa.
+    struct ggml_tensor * norm_sa_rot = dit_convrot_rotate(ctx, m, norm_sa, ly->rot_sa);
     struct ggml_tensor *q, *k, *v;
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
     if (ly->sa_qkv) {
-        struct ggml_tensor * qkv = dit_ggml_linear(ctx, ly->sa_qkv, norm_sa);
+        struct ggml_tensor * qkv = dit_ggml_linear(ctx, ly->sa_qkv, norm_sa_rot);
         q                        = ggml_cont(ctx, ggml_view_3d(ctx, qkv, q_dim, S, N, qkv->nb[1], qkv->nb[2], 0));
         k = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], (size_t) q_dim * qkv->nb[0]));
         v = ggml_cont(
             ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], (size_t) (q_dim + kv_dim) * qkv->nb[0]));
     } else if (ly->sa_qk) {
-        struct ggml_tensor * qk = dit_ggml_linear(ctx, ly->sa_qk, norm_sa);
+        struct ggml_tensor * qk = dit_ggml_linear(ctx, ly->sa_qk, norm_sa_rot);
         q                       = ggml_cont(ctx, ggml_view_3d(ctx, qk, q_dim, S, N, qk->nb[1], qk->nb[2], 0));
         k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, N, qk->nb[1], qk->nb[2], (size_t) q_dim * qk->nb[0]));
-        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa_rot);
     } else {
-        q = dit_lora_apply_layer(ctx, ly->sa_q_proj, norm_sa, lora ? lora->sa_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_q, true);
-        k = dit_lora_apply_layer(ctx, ly->sa_k_proj, norm_sa, lora ? lora->sa_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_k, true);
-        v = dit_lora_apply_layer(ctx, ly->sa_v_proj, norm_sa, lora ? lora->sa_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_v, true);
+        q = dit_lora_apply_layer(ctx, ly->sa_q_proj, norm_sa, lora ? lora->sa_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_q, true, norm_sa_rot);
+        k = dit_lora_apply_layer(ctx, ly->sa_k_proj, norm_sa, lora ? lora->sa_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_k, true, norm_sa_rot);
+        v = dit_lora_apply_layer(ctx, ly->sa_v_proj, norm_sa, lora ? lora->sa_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_v, true, norm_sa_rot);
     }
 
     // 2) Reshape to heads: [Nh*D, S, N] -> [D, Nh, S, N]
@@ -363,7 +403,8 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     }
 
     // 8) O projection: [Nh*D, S, N] -> [H, S, N]
-    struct ggml_tensor * out = dit_lora_apply_layer(ctx, ly->sa_o_proj, attn, lora ? lora->sa_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_o, true);
+    struct ggml_tensor * out = dit_lora_apply_layer(ctx, ly->sa_o_proj, attn, lora ? lora->sa_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::sa_o, true,
+                                                    dit_convrot_rotate(ctx, m, attn, ly->rot_sa_o));
     return out;
 }
 
@@ -379,19 +420,21 @@ static struct ggml_tensor * dit_ggml_build_mlp(struct ggml_context * ctx,
                                                int                   layer_idx = -1,
                                                const DiTLoRASectionCtx * sect = nullptr) {
     struct ggml_tensor * ff;
+    struct ggml_tensor * norm_ffn_rot = dit_convrot_rotate(ctx, m, norm_ffn, ly->rot_mlp);
     if (ly->gate_up) {
         // Fused: single matmul [H, 2*I] x [H, S, N] -> [2*I, S, N], then swiglu splits ne[0]
-        struct ggml_tensor * gu = dit_ggml_linear(ctx, ly->gate_up, norm_ffn);
+        struct ggml_tensor * gu = dit_ggml_linear(ctx, ly->gate_up, norm_ffn_rot);
         ff                      = ggml_swiglu(ctx, gu);
     } else {
         // Separate: two matmuls + split swiglu
-        struct ggml_tensor * gate = dit_lora_apply_layer(ctx, ly->gate_proj, norm_ffn, lora ? lora->gate.delta : nullptr, sect, layer_idx, &DiTLoRALayer::gate, true);
-        struct ggml_tensor * up   = dit_lora_apply_layer(ctx, ly->up_proj, norm_ffn, lora ? lora->up.delta : nullptr, sect, layer_idx, &DiTLoRALayer::up, true);
+        struct ggml_tensor * gate = dit_lora_apply_layer(ctx, ly->gate_proj, norm_ffn, lora ? lora->gate.delta : nullptr, sect, layer_idx, &DiTLoRALayer::gate, true, norm_ffn_rot);
+        struct ggml_tensor * up   = dit_lora_apply_layer(ctx, ly->up_proj, norm_ffn, lora ? lora->up.delta : nullptr, sect, layer_idx, &DiTLoRALayer::up, true, norm_ffn_rot);
         ff                        = ggml_swiglu_split(ctx, gate, up);
     }
 
     // Down projection: [I, S] -> [H, S]
-    return dit_lora_apply_layer(ctx, ly->down_proj, ff, lora ? lora->down.delta : nullptr, sect, layer_idx, &DiTLoRALayer::down, true);
+    return dit_lora_apply_layer(ctx, ly->down_proj, ff, lora ? lora->down.delta : nullptr, sect, layer_idx, &DiTLoRALayer::down, true,
+                                dit_convrot_rotate(ctx, m, ff, ly->rot_down));
 }
 
 // Build cross-attention sub-graph for a single layer.
@@ -419,6 +462,9 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     (void) positions;  // cross-attn has no RoPE
 
     // Q from hidden, KV from encoder (full fused, Q+KV partial, separate)
+    // ConvRot: rotate each input for its rotated weight; deltas keep raw inputs.
+    struct ggml_tensor * norm_ca_rot = dit_convrot_rotate(ctx, m, norm_ca, ly->rot_ca_q);
+    struct ggml_tensor * enc_rot     = dit_convrot_rotate(ctx, m, enc, ly->rot_ca_kv);
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
     struct ggml_tensor *q, *k, *v;
@@ -427,22 +473,22 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
         struct ggml_tensor * w_q  = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], q_dim, ly->ca_qkv->nb[1], 0);
         struct ggml_tensor * w_kv = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], 2 * kv_dim, ly->ca_qkv->nb[1],
                                                  (size_t) q_dim * ly->ca_qkv->nb[1]);
-        q                         = ggml_mul_mat(ctx, w_q, norm_ca);
-        struct ggml_tensor * kv   = ggml_mul_mat(ctx, w_kv, enc);
+        q                         = ggml_mul_mat(ctx, w_q, norm_ca_rot);
+        struct ggml_tensor * kv   = ggml_mul_mat(ctx, w_kv, enc_rot);
         k                         = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else if (ly->ca_kv) {
         // Q separate, K+V fused
-        q                       = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
-        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc);
+        q                       = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca_rot);
+        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc_rot);
         k                       = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else {
         // ca_q is frame-indexed ([q_dim, S]) → per-frame mask. ca_k/ca_v come from
         // the encoder ([kv_dim, enc_S], token-indexed) → mean-scaled, not masked.
-        q = dit_lora_apply_layer(ctx, ly->ca_q_proj, norm_ca, lora ? lora->ca_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_q, true);
-        k = dit_lora_apply_layer(ctx, ly->ca_k_proj, enc, lora ? lora->ca_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_k, false);
-        v = dit_lora_apply_layer(ctx, ly->ca_v_proj, enc, lora ? lora->ca_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_v, false);
+        q = dit_lora_apply_layer(ctx, ly->ca_q_proj, norm_ca, lora ? lora->ca_q.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_q, true, norm_ca_rot);
+        k = dit_lora_apply_layer(ctx, ly->ca_k_proj, enc, lora ? lora->ca_k.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_k, false, enc_rot);
+        v = dit_lora_apply_layer(ctx, ly->ca_v_proj, enc, lora ? lora->ca_v.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_v, false, enc_rot);
     }
 
     // reshape to [D, heads, seq, N] then permute to [D, seq, heads, N]
@@ -486,7 +532,8 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     attn = ggml_reshape_3d(ctx, attn, Nh * D, S, N);
 
     // O projection ([H, S], frame-indexed)
-    return dit_lora_apply_layer(ctx, ly->ca_o_proj, attn, lora ? lora->ca_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_o, true);
+    return dit_lora_apply_layer(ctx, ly->ca_o_proj, attn, lora ? lora->ca_o.delta : nullptr, sect, layer_idx, &DiTLoRALayer::ca_o, true,
+                                dit_convrot_rotate(ctx, m, attn, ly->rot_ca_o));
 }
 
 // Build one full DiT layer (AdaLN + self-attn + cross-attn + FFN + gated residuals)
@@ -712,7 +759,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
 
     {
         struct ggml_tensor * tproj_t;
-        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, &m->time_embed, t_val, &tproj_t,
+        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, m, &m->time_embed, t_val, &tproj_t,
                                                           m->lora.active ? &m->lora.time_embed_linear_1 : nullptr,
                                                           m->lora.active ? &m->lora.time_embed_linear_2 : nullptr,
                                                           m->lora.active ? &m->lora.time_embed_time_proj : nullptr,
@@ -724,7 +771,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
         // Python passes (t - t_r) to time_embed_r, not t_r directly
         // In turbo mode t = t_r, so input is 0
         struct ggml_tensor * t_diff = ggml_sub(ctx, t_val, tr_val);
-        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, &m->time_embed_r, t_diff, &tproj_r,
+        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, m, &m->time_embed_r, t_diff, &tproj_r,
                                                           m->lora.active ? &m->lora.time_embed_r_linear_1 : nullptr,
                                                           m->lora.active ? &m->lora.time_embed_r_linear_2 : nullptr,
                                                           m->lora.active ? &m->lora.time_embed_r_time_proj : nullptr,
@@ -756,7 +803,10 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_output(hidden);
 
     // 3) Condition embedder: project encoder hidden states
-    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m->cond_emb_w, m->cond_emb_b, enc_hidden);
+    // ConvRot: base weight consumes the rotated input; the LoRA delta paths
+    // below keep consuming the raw enc_hidden (deltas are unrotated).
+    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m->cond_emb_w, m->cond_emb_b,
+                                                    dit_convrot_rotate(ctx, m, enc_hidden, m->convrot.cond_emb));
     if (section_mode) {
         // cond_emb is token/global-indexed → mean-scaled, not per-frame masked.
         enc = dit_lora_apply_global(ctx, enc, enc_hidden, nullptr, sect, &DiTLoRA::cond_emb, false);

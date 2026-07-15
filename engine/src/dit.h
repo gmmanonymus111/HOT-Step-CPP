@@ -19,10 +19,13 @@
 #include "timer.h"
 #include "weight-source.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <unordered_map>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -41,6 +44,12 @@ struct DiTGGMLTembWeights {
     struct ggml_tensor * linear_2_b;   // [hidden]
     struct ggml_tensor * time_proj_w;  // [hidden, 6*hidden]
     struct ggml_tensor * time_proj_b;  // [6*hidden]
+
+    // HOT-Step ConvRot: activation-rotation group size per linear (0 = weight
+    // not rotated). See DiTGGML::convrot.
+    int rot_lin1 = 0;
+    int rot_lin2 = 0;
+    int rot_proj = 0;
 };
 
 struct DiTGGMLLayer {
@@ -77,6 +86,17 @@ struct DiTGGMLLayer {
     struct ggml_tensor * scale_shift_table;  // [hidden, 6] in ggml layout
 
     int layer_type;                          // 0=sliding, 1=full
+
+    // HOT-Step ConvRot: activation-rotation group size per linear site
+    // (0 = weight not rotated). Fused sites (qkv/qk/kv/gate_up) require a
+    // uniform group across their parts — enforced at load.
+    int rot_sa    = 0;  // self_attn q/k/v (input: norm_sa)
+    int rot_sa_o  = 0;  // self_attn o_proj (input: attn)
+    int rot_ca_q  = 0;  // cross_attn q_proj (input: norm_ca)
+    int rot_ca_kv = 0;  // cross_attn k/v_proj (input: enc)
+    int rot_ca_o  = 0;  // cross_attn o_proj (input: attn)
+    int rot_mlp   = 0;  // mlp gate/up (input: norm_ffn)
+    int rot_down  = 0;  // mlp down_proj (input: ff)
 };
 
 // Full model
@@ -131,7 +151,89 @@ struct DiTGGML {
     // uploaded by the sampler.
     std::vector<DiTLoRA>          loras;
     std::vector<struct ggml_tensor *> lora_masks;
+
+    // ─── HOT-Step ConvRot (group-wise Hadamard-rotated int8 weights) ───
+    // GGUF KV "acestep.convrot_map" ("name:group;name:group;...") marks weights
+    // stored PRE-ROTATED offline (W' = W·H per input-dim group of size G, as
+    // written by convert_to_quant --convrot and repacked by convert-comfy-int8.py).
+    // At inference the same rotation is applied to that linear's input:
+    //   y = W'·rot(x) == W·x   because H is symmetric orthogonal (H·H = I).
+    // H is ConvRot's "regular" Hadamard (H4 Kronecker powers, power-of-4 sizes)
+    // — NOT the Sylvester matrix, so ggml's FWHT fast path
+    // (GGML_HINT_SRC0_IS_HADAMARD) must NOT be hinted; rotation runs as a plain
+    // grouped mul_mat against the [G, G] matrices below.
+    struct {
+        bool active   = false;
+        int  cond_emb = 0;                            // condition_embedder group (input: enc_hidden)
+        std::map<int, struct ggml_tensor *> hmats;    // group size -> [G, G] F32
+    } convrot;
 };
+
+// ─── HOT-Step ConvRot helpers ───
+
+// Parse "tensor.name:group;tensor.name:group;..." into a name→group map.
+static void dit_convrot_parse_map(const char * s, std::unordered_map<std::string, int> & out) {
+    if (!s) return;
+    const char * p = s;
+    while (*p) {
+        const char * colon = strchr(p, ':');
+        if (!colon) break;
+        const char * semi = strchr(colon, ';');
+        std::string name(p, colon - p);
+        int         g = atoi(colon + 1);
+        if (!name.empty() && g > 0) out[name] = g;
+        if (!semi) break;
+        p = semi + 1;
+    }
+}
+
+// Build the normalized ConvRot "regular" Hadamard matrix for group size G
+// (power of 4 only): H_G = H4 ⊗ H4 ⊗ ... , scaled by 1/sqrt(G). Matches
+// convert_to_quant utils/convrot.py build_hadamard(). Row-major; H is
+// symmetric so ggml_mul_mat(H, x) applies exactly rotate_activation(x).
+// Returns nullptr if G is unsupported.
+static struct ggml_tensor * dit_convrot_build_h(WeightCtx * wctx, int G) {
+    bool pow4 = G >= 4;
+    for (int t = G; t > 1; t /= 4) {
+        if (t % 4 != 0) { pow4 = false; break; }
+    }
+    if (!pow4 || G > 4096) return nullptr;
+
+    // H4 from ConvRot Theorem 3.3: every row/col sums to 2 (no all-ones row).
+    static const float H4[16] = { 1, 1, 1, -1,   1, 1, -1, 1,   1, -1, 1, 1,   -1, 1, 1, 1 };
+
+    auto    buf  = std::make_unique<float[]>((size_t) G * G);
+    float * data = buf.get();
+    auto    tmp  = std::make_unique<float[]>((size_t) G * G);
+
+    int cur = 4;
+    memcpy(data, H4, sizeof(H4));
+    while (cur < G) {
+        int next = cur * 4;  // kron(H_cur, H4)
+        for (int i = 0; i < cur; i++) {
+            for (int j = 0; j < cur; j++) {
+                float a = data[(size_t) i * cur + j];
+                for (int k = 0; k < 4; k++) {
+                    for (int l = 0; l < 4; l++) {
+                        tmp[(size_t) (i * 4 + k) * next + (j * 4 + l)] = a * H4[k * 4 + l];
+                    }
+                }
+            }
+        }
+        memcpy(data, tmp.get(), (size_t) next * next * sizeof(float));
+        cur = next;
+    }
+    const float norm = 1.0f / sqrtf((float) G);
+    for (size_t i = 0; i < (size_t) G * G; i++) data[i] *= norm;
+
+    struct ggml_tensor * t = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, G, G);
+    char nm[32];
+    snprintf(nm, sizeof(nm), "convrot_h%d", G);
+    ggml_set_name(t, nm);
+    wctx->pending.push_back({ t, data, (size_t) G * G * sizeof(float), 0 });
+    wctx->staging.push_back(std::move(buf));
+    return t;
+}
 
 // Helper: check if path ends with .gguf
 static bool dit_ends_with_gguf(const char * path) {
@@ -388,13 +490,60 @@ static bool dit_ggml_load(DiTGGML *    m,
         return false;
     }
 
+    // HOT-Step ConvRot: optional rotation map (GGUF KV; safetensors DiTs never carry it)
+    std::unordered_map<std::string, int> rotmap;
+    if (!is_st) {
+        dit_convrot_parse_map(gf_get_str(gf, "acestep.convrot_map"), rotmap);
+    }
+    std::map<int, int> rot_sizes;  // distinct group sizes -> count
+    for (const auto & kv : rotmap) rot_sizes[kv.second]++;
+
     // tensor count: temb(6*2) + proj_in(2) + cond_emb(2) + layers(19*N) + output(4) + null_cond(1) + scalar_one(1)
-    int n_tensors = 6 * 2 + 2 + 2 + 19 * cfg.n_layers + 4 + 1 + 1;
+    int n_tensors = 6 * 2 + 2 + 2 + 19 * cfg.n_layers + 4 + 1 + 1 + (int) rot_sizes.size();
     wctx_init(&m->wctx, n_tensors);
+
+    if (!rotmap.empty()) {
+        m->convrot.active = true;
+        for (const auto & gs : rot_sizes) {
+            struct ggml_tensor * h = dit_convrot_build_h(&m->wctx, gs.first);
+            if (!h) {
+                fprintf(stderr, "[DiT] FATAL: convrot group size %d unsupported (power of 4, <= 4096 only)\n", gs.first);
+                if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
+                return false;
+            }
+            m->convrot.hmats[gs.first] = h;
+        }
+        fprintf(stderr, "[DiT] ConvRot active: %zu rotated weights, %zu group size(s)\n",
+                rotmap.size(), rot_sizes.size());
+    }
+    // group lookup for one weight name (0 = not rotated)
+    auto rotg = [&rotmap](const std::string & n) -> int {
+        auto it = rotmap.find(n);
+        return it == rotmap.end() ? 0 : it->second;
+    };
+    // group lookup for a fused site: all parts must agree (offline converter
+    // guarantees this; a mismatch means a hand-edited map — fail loudly)
+    bool rot_uniform_ok = true;
+    auto rotg_fused = [&](const std::string & a, const std::string & b, const std::string & c) -> int {
+        int ga = rotg(a), gb = rotg(b);
+        int gc = c.empty() ? gb : rotg(c);
+        if (ga != gb || gb != gc) {
+            fprintf(stderr, "[DiT] FATAL: convrot group mismatch across fused site %s (%d/%d/%d)\n",
+                    a.c_str(), ga, gb, gc);
+            rot_uniform_ok = false;
+        }
+        return ga;
+    };
 
     // Timestep embeddings
     dit_ggml_load_temb(&m->time_embed, &m->wctx, ws, "decoder.time_embed");
     dit_ggml_load_temb(&m->time_embed_r, &m->wctx, ws, "decoder.time_embed_r");
+    m->time_embed.rot_lin1   = rotg("decoder.time_embed.linear_1.weight");
+    m->time_embed.rot_lin2   = rotg("decoder.time_embed.linear_2.weight");
+    m->time_embed.rot_proj   = rotg("decoder.time_embed.time_proj.weight");
+    m->time_embed_r.rot_lin1 = rotg("decoder.time_embed_r.linear_1.weight");
+    m->time_embed_r.rot_lin2 = rotg("decoder.time_embed_r.linear_2.weight");
+    m->time_embed_r.rot_proj = rotg("decoder.time_embed_r.time_proj.weight");
 
     // proj_in: Conv1d weight [hidden, in_ch, patch_size]
     // Pre-permuted to 2D [in_ch*P, H] F32 at load time
@@ -405,6 +554,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     // condition_embedder
     m->cond_emb_w = ws_load_tensor(&m->wctx, ws, "decoder.condition_embedder.weight");
     m->cond_emb_b = ws_load_tensor_f32(&m->wctx, ws, "decoder.condition_embedder.bias");
+    m->convrot.cond_emb = rotg("decoder.condition_embedder.weight");
 
     // Layers
     for (int i = 0; i < cfg.n_layers; i++) {
@@ -521,6 +671,30 @@ static bool dit_ggml_load(DiTGGML *    m,
         ly.scale_shift_table = ws_load_tensor_f32(&m->wctx, ws, p + ".scale_shift_table");
 
         ly.layer_type = (i % 2 == 0) ? 0 : 1;  // 0=sliding, 1=full
+
+        // ConvRot per-site groups. Fused sites need one uniform group; q/k/v and
+        // gate/up share in_features so the offline converter always agrees here.
+        if (m->convrot.active) {
+            ly.rot_sa    = rotg_fused(p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
+                                      p + ".self_attn.v_proj.weight");
+            ly.rot_sa_o  = rotg(p + ".self_attn.o_proj.weight");
+            ly.rot_ca_q  = rotg(p + ".cross_attn.q_proj.weight");
+            ly.rot_ca_kv = rotg_fused(p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight", "");
+            ly.rot_ca_o  = rotg(p + ".cross_attn.o_proj.weight");
+            // full ca_qkv fusion additionally requires q == kv
+            if (ly.ca_qkv && ly.rot_ca_q != ly.rot_ca_kv) {
+                fprintf(stderr, "[DiT] FATAL: convrot group mismatch across fused ca_qkv (layer %d: %d vs %d)\n",
+                        i, ly.rot_ca_q, ly.rot_ca_kv);
+                rot_uniform_ok = false;
+            }
+            ly.rot_mlp  = rotg_fused(p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight", "");
+            ly.rot_down = rotg(p + ".mlp.down_proj.weight");
+        }
+    }
+
+    if (!rot_uniform_ok) {
+        if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
+        return false;
     }
 
     // Output
@@ -545,6 +719,14 @@ static bool dit_ggml_load(DiTGGML *    m,
     // HOT-Step: skip merge in runtime mode — runtime adapter loaded after wctx_alloc
     if (adapter_path) {
         bool runtime_mode = (g_hotstep_params.adapter_mode == "runtime");
+        // ConvRot weights live in rotated space; merge-mode deltas are unrotated
+        // and would corrupt them. Runtime mode is safe (deltas run as separate
+        // matmuls on the UNROTATED activations in the graph).
+        if (m->convrot.active && !runtime_mode) {
+            fprintf(stderr, "[Adapter] FATAL: adapter merge mode is not supported on ConvRot models — use adapter_mode=runtime\n");
+            if (is_st) { st_multi_close(&sm); } else { gf_close(&gf); }
+            return false;
+        }
         if (!runtime_mode) {
             // Auto-detect promote_f32: NVFP4/MXFP4 stay in native quant (saves ~13 GB
             // VRAM vs F32 promotion). GGML CUDA has full dequant kernels for these types

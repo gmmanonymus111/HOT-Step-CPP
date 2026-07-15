@@ -42,7 +42,9 @@ static CrossAttnWithScores dit_build_cross_attn_scored(
     int             Nh  = c.n_heads;
     int             Nkv = c.n_kv_heads;
 
-    // QKV projections (same logic as dit_ggml_build_cross_attn)
+    // QKV projections (same logic as dit_ggml_build_cross_attn, incl. ConvRot)
+    struct ggml_tensor * norm_ca_rot = dit_convrot_rotate(ctx, m, norm_ca, ly->rot_ca_q);
+    struct ggml_tensor * enc_rot     = dit_convrot_rotate(ctx, m, enc, ly->rot_ca_kv);
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
     struct ggml_tensor *q, *k, *v;
@@ -50,19 +52,19 @@ static CrossAttnWithScores dit_build_cross_attn_scored(
         struct ggml_tensor * w_q  = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], q_dim, ly->ca_qkv->nb[1], 0);
         struct ggml_tensor * w_kv = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], 2 * kv_dim, ly->ca_qkv->nb[1],
                                                  (size_t) q_dim * ly->ca_qkv->nb[1]);
-        q                         = ggml_mul_mat(ctx, w_q, norm_ca);
-        struct ggml_tensor * kv   = ggml_mul_mat(ctx, w_kv, enc);
+        q                         = ggml_mul_mat(ctx, w_q, norm_ca_rot);
+        struct ggml_tensor * kv   = ggml_mul_mat(ctx, w_kv, enc_rot);
         k = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else if (ly->ca_kv) {
-        q                       = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
-        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc);
+        q                       = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca_rot);
+        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc_rot);
         k = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else {
-        q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
-        k = dit_ggml_linear(ctx, ly->ca_k_proj, enc);
-        v = dit_ggml_linear(ctx, ly->ca_v_proj, enc);
+        q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca_rot);
+        k = dit_ggml_linear(ctx, ly->ca_k_proj, enc_rot);
+        v = dit_ggml_linear(ctx, ly->ca_v_proj, enc_rot);
     }
 
     // Reshape + permute to [D, seq, heads, N]
@@ -106,7 +108,7 @@ static CrossAttnWithScores dit_build_cross_attn_scored(
     attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
     attn = ggml_reshape_3d(ctx, attn, Nh * D, S, N);
 
-    result.attn_output = dit_ggml_linear(ctx, ly->ca_o_proj, attn);
+    result.attn_output = dit_ggml_linear(ctx, ly->ca_o_proj, dit_convrot_rotate(ctx, m, attn, ly->rot_ca_o));
     return result;
 }
 
@@ -270,10 +272,10 @@ static int dit_alignment_extract(
     struct ggml_tensor * tproj, * temb;
     {
         struct ggml_tensor * tproj_t;
-        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, &dit->time_embed, t_t, &tproj_t, nullptr, nullptr, nullptr, "_t");
+        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, dit, &dit->time_embed, t_t, &tproj_t, nullptr, nullptr, nullptr, "_t");
         struct ggml_tensor * t_diff = ggml_sub(ctx, t_t, t_tr);
         struct ggml_tensor * tproj_r;
-        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, &dit->time_embed_r, t_diff, &tproj_r, nullptr, nullptr, nullptr, "_r");
+        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, dit, &dit->time_embed_r, t_diff, &tproj_r, nullptr, nullptr, nullptr, "_r");
         temb  = ggml_add(ctx, temb_t, temb_r);
         tproj = ggml_add(ctx, tproj_t, tproj_r);
     }
@@ -282,8 +284,9 @@ static int dit_alignment_extract(
     struct ggml_tensor * patched = ggml_reshape_3d(ctx, t_input, Ic * P, S, N);
     struct ggml_tensor * hidden  = dit_ggml_linear_bias(ctx, dit->proj_in_w, dit->proj_in_b, patched);
 
-    // Condition embedder
-    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, dit->cond_emb_w, dit->cond_emb_b, t_enc);
+    // Condition embedder (ConvRot: rotated input for the rotated base weight)
+    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, dit->cond_emb_w, dit->cond_emb_b,
+                                                    dit_convrot_rotate(ctx, dit, t_enc, dit->convrot.cond_emb));
 
     // Build target layer lookup
     std::vector<std::vector<int>> layer_heads(cfg.max_layer + 1);
