@@ -23,7 +23,7 @@ import {
   HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
   type MidiStudioStatus, type MidiJobSummary, type MuscriptorModel,
 } from '../../services/midiStudioApi';
-import { PianoRoll } from './PianoRoll';
+import { MidiPlayer } from './MidiPlayer';
 
 const MODEL_INFO: Array<{ id: MuscriptorModel; params: string }> = [
   { id: 'small', params: '103M' },
@@ -515,6 +515,8 @@ export const MidiStudio: React.FC = () => {
                           )}
                         </div>
                       )}
+                      {/* live player appears as soon as transcription starts —
+                          play immediately, crossfade original <-> MIDI */}
                       {job.status === 'done' && (
                         <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
                           <CheckCircle2 size={11} />
@@ -567,7 +569,12 @@ export const MidiStudio: React.FC = () => {
                       </button>
                     </div>
                   </div>
-                  {expandedJob === job.id && job.status === 'done' && <PianoRoll jobId={job.id} />}
+                  {job.status === 'transcribing' && (
+                    <MidiPlayer key={`${job.id}-live`} jobId={job.id} sourceAudioUrl={job.sourceAudioUrl} live />
+                  )}
+                  {expandedJob === job.id && job.status === 'done' && (
+                    <MidiPlayer key={`${job.id}-done`} jobId={job.id} sourceAudioUrl={job.sourceAudioUrl} live={false} />
+                  )}
                 </div>
               );
             })}

@@ -39,6 +39,8 @@ export interface MidiJobSummary {
   id: string;
   status: 'queued' | 'transcribing' | 'done' | 'failed' | 'cancelled';
   sourceFileName: string;
+  /** URL of the original audio (for synced playback in the player) */
+  sourceAudioUrl?: string;
   songId?: string;
   model: MuscriptorModel;
   noteCount: number;
