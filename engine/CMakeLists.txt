@@ -511,6 +511,11 @@ link_ggml_backends(quantize)
 add_executable(neural-codec tools/neural-codec.cpp)
 link_ggml_backends(neural-codec)
 
+# ace-midi: MuScriptor audio->MIDI transcription (GGML port, in development —
+# docs/plans/muscriptor-cpp-port.md). Standalone tool, no acestep-core needed.
+add_executable(ace-midi tools/ace-midi.cpp)
+link_ggml_backends(ace-midi)
+
 # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
 # The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
 add_executable(mp3-codec tools/mp3-codec.cpp)
