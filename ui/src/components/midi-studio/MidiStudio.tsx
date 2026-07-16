@@ -41,6 +41,8 @@ export const MidiStudio: React.FC = () => {
   const [hfTokenInput, setHfTokenInput] = useState('');
   const [hfTokenBusy, setHfTokenBusy] = useState(false);
   const [hfTokenError, setHfTokenError] = useState('');
+  // Once a token is saved the card collapses to a slim row; "Change" reopens it
+  const [showTokenEditor, setShowTokenEditor] = useState(false);
 
   // ── Source selection ──
   const [showLibrary, setShowLibrary] = useState(false);
@@ -175,6 +177,7 @@ export const MidiStudio: React.FC = () => {
     try {
       await saveHfToken(tok);
       setHfTokenInput('');
+      if (tok.trim()) setShowTokenEditor(false);
       refreshStatus();
     } catch (err) {
       setHfTokenError(err instanceof Error ? err.message : String(err));
@@ -222,8 +225,27 @@ export const MidiStudio: React.FC = () => {
           </div>
         )}
 
-        {/* ── Hugging Face model access (weights are gated) ── */}
-        {status && (
+        {/* ── Hugging Face model access (weights are gated) ──
+             Collapses to a slim confirmation row once a token is saved. */}
+        {status && status.hfTokenSet && !showTokenEditor && (
+          <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card px-4 py-2.5 flex items-center gap-3 flex-wrap text-xs">
+            <span className="flex items-center gap-2 font-semibold text-zinc-900 dark:text-white">
+              <KeyRound size={14} className="text-purple-500 dark:text-purple-400" />
+              {t('midiStudio.hfAccessTitle')}
+            </span>
+            <span className="flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 size={12} /> {t('midiStudio.hfTokenSaved')}
+            </span>
+            <span className="flex-1" />
+            <button
+              onClick={() => setShowTokenEditor(true)}
+              className="text-zinc-500 dark:text-zinc-400 hover:text-purple-600 dark:hover:text-purple-400 hover:underline"
+            >
+              {t('midiStudio.hfChangeToken')}
+            </button>
+          </div>
+        )}
+        {status && (!status.hfTokenSet || showTokenEditor) && (
           <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4">
             <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-1 flex items-center gap-2">
               <KeyRound size={15} className="text-purple-500 dark:text-purple-400" />
@@ -413,17 +435,48 @@ export const MidiStudio: React.FC = () => {
             <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">{t('midiStudio.firstRunNote')}</p>
           </div>
 
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              onClick={handleTranscribe}
-              disabled={!canTranscribe}
-              title={!modelState?.downloaded ? t('midiStudio.modelNotDownloaded') : undefined}
-              className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-            >
-              <Piano size={16} /> {t('midiStudio.transcribe')}
-            </button>
-            {!modelState?.downloaded && !engineMissing && status && (
-              <span className="text-xs text-zinc-400 dark:text-zinc-500">{t('midiStudio.modelNotDownloaded')}</span>
+          {/* Primary action morphs with the selected model's state:
+              download weights -> downloading progress -> transcribe. */}
+          <div className="mt-4 flex items-center gap-3 flex-wrap">
+            {modelState && !modelState.downloaded ? (
+              <button
+                onClick={() => {
+                  if (modelState.downloading) return;
+                  setSubmitError('');
+                  startModelDownload(model).then(refreshStatus).catch(err =>
+                    setSubmitError(err instanceof Error ? err.message : String(err)));
+                }}
+                disabled={modelState.downloading || engineMissing}
+                className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-60 disabled:cursor-wait transition-colors flex items-center gap-2"
+              >
+                {modelState.downloading ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    {t('midiStudio.downloadingCta', {
+                      model,
+                      pct: modelState.totalBytes ? Math.round(100 * modelState.receivedBytes / modelState.totalBytes) : 0,
+                    })}
+                  </>
+                ) : (
+                  <>
+                    <Download size={16} /> {t('midiStudio.downloadCta', { model })}
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                onClick={handleTranscribe}
+                disabled={!canTranscribe}
+                className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+              >
+                <Piano size={16} /> {t('midiStudio.transcribe')}
+              </button>
+            )}
+            {modelState && !modelState.downloaded && !modelState.downloading && !status?.hfTokenSet && (
+              <span className="text-xs text-amber-600 dark:text-amber-400">{t('midiStudio.needTokenHint')}</span>
+            )}
+            {modelState?.downloaded && !sourceAudioUrl && (
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">{t('midiStudio.pickTrackHint')}</span>
             )}
             {submitError && <span className="text-xs text-red-500 dark:text-red-400">{submitError}</span>}
           </div>
