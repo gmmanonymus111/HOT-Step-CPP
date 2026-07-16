@@ -16,6 +16,7 @@
 // Later phases add: mel frontend, chunked greedy decode with KV cache +
 // prelude forcing, note-event decode, MIDI writer, JSONL streaming.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -587,6 +588,433 @@ static void decode_chunk(MidiModel * m, const std::vector<float> & prefix,
 }
 
 // ---------------------------------------------------------------------------
+// MT3 event vocabulary (tokenizer/notes.py build_event_vocab, max_shift 1001):
+// 0-2 PAD/EOS/UNK | 3-1003 shift | 1004-1131 pitch | 1132-1133 velocity |
+// 1134 tie | 1135-1264 program(0-129) | 1265-1392 drum
+// ---------------------------------------------------------------------------
+
+enum EvType { EV_SPECIAL, EV_SHIFT, EV_PITCH, EV_VELOCITY, EV_TIE, EV_PROGRAM, EV_DRUM };
+struct Ev { EvType type; int value; };
+
+static Ev vocab_decode(int id) {
+    if (id < 3)     return { EV_SPECIAL, id };
+    if (id < 1004)  return { EV_SHIFT, id - 3 };
+    if (id < 1132)  return { EV_PITCH, id - 1004 };
+    if (id < 1134)  return { EV_VELOCITY, id - 1132 };
+    if (id == 1134) return { EV_TIE, 0 };
+    if (id < 1265)  return { EV_PROGRAM, id - 1135 };
+    if (id < 1393)  return { EV_DRUM, id - 1265 };
+    return { EV_SPECIAL, 2 };
+}
+static int tok_program(int program) { return 1135 + program; }
+static int tok_pitch(int pitch) { return 1004 + pitch; }
+#define TOK_TIE 1134
+
+#define DRUM_PROGRAM 128
+#define MIN_NOTE_DUR 0.01
+#define FRAME_RATE   100
+
+// MT3_FULL_PLUS named groups: representative (first) program -> group name.
+// The model always emits the representative program of a group (mt3.py).
+static const char * instrument_for_program(int program) {
+    switch (program) {
+        case 0:  return "acoustic_piano";
+        case 2:  return "electric_piano";
+        case 8:  return "chromatic_percussion";
+        case 16: return "organ";
+        case 24: return "acoustic_guitar";
+        case 26: return "clean_electric_guitar";
+        case 29: return "distorted_electric_guitar";
+        case 32: return "acoustic_bass";
+        case 33: return "electric_bass";
+        case 40: return "violin";
+        case 41: return "viola";
+        case 42: return "cello";
+        case 43: return "contrabass";
+        case 46: return "orchestral_harp";
+        case 47: return "timpani";
+        case 48: return "string_ensemble";
+        case 50: return "synth_strings";
+        case 52: return "voice";
+        case 55: return "orchestra_hit";
+        case 56: return "trumpet";
+        case 57: return "trombone";
+        case 58: return "tuba";
+        case 60: return "french_horn";
+        case 61: return "brass_section";
+        case 64: return "soprano_and_alto_sax";
+        case 66: return "tenor_sax";
+        case 67: return "baritone_sax";
+        case 68: return "oboe";
+        case 69: return "english_horn";
+        case 70: return "bassoon";
+        case 71: return "clarinet";
+        case 72: return "flutes";
+        case 80: return "synth_lead";
+        case 88: return "synth_pad";
+        case DRUM_PROGRAM: return "drums";
+        default: return nullptr;  // caller formats "program_<n>"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OpenNoteTracker — 1:1 port of events.py:96-231, the single state machine
+// for both event decoding and prelude forcing.
+// ---------------------------------------------------------------------------
+
+struct NoteAction {
+    enum Kind { START, END, DRUM_HIT } kind;
+    int    program;  // rep program (unused for DRUM_HIT)
+    int    pitch;
+    double time;
+};
+
+struct OpenNoteTracker {
+    // (program,pitch) -> onset, insertion-ordered like a Python dict
+    std::vector<std::pair<std::pair<int, int>, double>> open;
+
+    double seek_time = 0.0, next_seek_time = -1.0;  // <0 == None
+    int    start_tick = 0, tick_state = 0;
+    int    program = -1, velocity = -1;             // -1 == None
+    bool   in_prologue = true, skip_rest = false, chunk_started = false;
+    std::vector<std::pair<int, int>> tie_set;
+
+    bool open_has(std::pair<int, int> key) const {
+        for (auto & e : open) if (e.first == key) return true;
+        return false;
+    }
+    void open_erase(std::pair<int, int> key) {
+        for (size_t i = 0; i < open.size(); i++) {
+            if (open[i].first == key) { open.erase(open.begin() + (long) i); return; }
+        }
+    }
+    bool tie_has(std::pair<int, int> key) const {
+        for (auto & e : tie_set) if (e == key) return true;
+        return false;
+    }
+
+    std::vector<NoteAction> end_all(double time) {
+        std::vector<NoteAction> a;
+        for (auto & e : open) a.push_back({ NoteAction::END, e.first.first, e.first.second, time });
+        open.clear();
+        return a;
+    }
+
+    std::vector<NoteAction> feed_boundary(double seek, double next_seek /* <0 == None */) {
+        std::vector<NoteAction> actions;
+        if (chunk_started && in_prologue) actions = end_all(seek_time);
+        seek_time      = seek;
+        next_seek_time = next_seek;
+        start_tick     = (int) llround(seek * FRAME_RATE);
+        tick_state     = start_tick;
+        program        = -1;
+        velocity       = -1;
+        in_prologue    = true;
+        skip_rest      = false;
+        tie_set.clear();
+        chunk_started  = true;
+        return actions;
+    }
+
+    std::vector<NoteAction> feed(int token) {
+        Ev event = vocab_decode(token);
+
+        if (in_prologue) {
+            if (event.type == EV_TIE) {
+                in_prologue = false;
+                velocity    = -1;
+                std::vector<NoteAction> actions;
+                std::vector<std::pair<std::pair<int, int>, double>> kept;
+                for (auto & e : open) {
+                    if (tie_has(e.first)) kept.push_back(e);
+                    else actions.push_back({ NoteAction::END, e.first.first, e.first.second, seek_time });
+                }
+                open = kept;
+                return actions;
+            }
+            if (event.type == EV_SHIFT) {
+                in_prologue = false;
+                skip_rest   = true;
+                return end_all(seek_time);
+            }
+            if (event.type == EV_PROGRAM) {
+                program = event.value;
+            } else if (event.type == EV_PITCH && program >= 0) {
+                tie_set.push_back({ program, event.value });
+            }
+            return {};
+        }
+
+        if (skip_rest) return {};
+
+        if (event.type == EV_SHIFT) {
+            if (event.value > 0) tick_state = start_tick + event.value;
+        } else if (event.type == EV_PROGRAM) {
+            program = event.value;
+        } else if (event.type == EV_VELOCITY) {
+            velocity = event.value;
+        } else if (event.type == EV_DRUM) {
+            double time = (double) tick_state / FRAME_RATE;
+            if (next_seek_time < 0 || time < next_seek_time) {
+                return { { NoteAction::DRUM_HIT, DRUM_PROGRAM, event.value, time } };
+            }
+        } else if (event.type == EV_PITCH) {
+            if (program < 0 || velocity < 0) return {};
+            double time = (double) tick_state / FRAME_RATE;
+            if (next_seek_time >= 0 && time >= next_seek_time) return {};
+            std::pair<int, int> key = { program, event.value };
+            std::vector<NoteAction> actions;
+            if (open_has(key)) {
+                open_erase(key);
+                actions.push_back({ NoteAction::END, key.first, key.second, time });
+            }
+            if (velocity > 0) {
+                open.push_back({ key, time });
+                actions.push_back({ NoteAction::START, key.first, key.second, time });
+            }
+            return actions;
+        }
+        return {};
+    }
+
+    std::vector<NoteAction> finish() {
+        if (chunk_started && in_prologue) return end_all(seek_time);
+        std::vector<NoteAction> a;
+        for (auto & e : open) a.push_back({ NoteAction::END, e.first.first, e.first.second, e.second + MIN_NOTE_DUR });
+        open.clear();
+        return a;
+    }
+
+    // sorted (program,pitch) pairs currently held open (for tie prompts)
+    std::vector<std::pair<int, int>> open_keys() const {
+        std::vector<std::pair<int, int>> ks;
+        for (auto & e : open) ks.push_back(e.first);
+        std::sort(ks.begin(), ks.end());
+        return ks;
+    }
+};
+
+// mt3.py tie_section_token_ids: program token once per run of pitches, then tie
+static std::vector<int> tie_section_tokens(const std::vector<std::pair<int, int>> & open_keys) {
+    std::vector<int> tokens;
+    int prog_state = -1;
+    for (auto & k : open_keys) {
+        if (k.first != prog_state) {
+            tokens.push_back(tok_program(k.first));
+            prog_state = k.first;
+        }
+        tokens.push_back(tok_pitch(k.second));
+    }
+    tokens.push_back(TOK_TIE);
+    return tokens;
+}
+
+// ---------------------------------------------------------------------------
+// Note assembly + cleanup (tokenizer/notes.py validate/trim) + MIDI writer
+// (utils/midi.py + note_event2midi — mido-compatible type-1 SMF)
+// ---------------------------------------------------------------------------
+
+struct MidiNote {
+    bool   is_drum;
+    int    program;   // DRUM_PROGRAM for drums
+    double onset, offset;
+    int    pitch;
+};
+
+static void sort_notes_vec(std::vector<MidiNote> & notes) {
+    std::stable_sort(notes.begin(), notes.end(), [](const MidiNote & a, const MidiNote & b) {
+        if (a.onset != b.onset) return a.onset < b.onset;
+        if (a.is_drum != b.is_drum) return !a.is_drum;
+        if (a.program != b.program) return a.program < b.program;
+        if (a.pitch != b.pitch) return a.pitch < b.pitch;
+        return a.offset < b.offset;
+    });
+}
+
+static void validate_notes_fix(std::vector<MidiNote> & notes) {
+    for (auto & n : notes) {
+        // matches validate_notes(fix=True): onset>offset -> max(offset, onset+0.01)
+        // which is always onset+0.01 in that branch; short non-drum notes padded
+        if (n.onset > n.offset) n.offset = n.onset + MIN_NOTE_DUR;
+        else if (!n.is_drum && n.offset - n.onset < 0.01) n.offset = n.onset + MIN_NOTE_DUR;
+    }
+}
+
+static std::vector<MidiNote> trim_overlapping(std::vector<MidiNote> notes) {
+    if (notes.size() <= 1) return notes;
+    // group by (program, pitch, is_drum); iterate groups in first-appearance order
+    std::vector<MidiNote> out;
+    std::vector<std::pair<std::pair<int, int>, bool>> seen;
+    for (auto & n : notes) {
+        std::pair<std::pair<int, int>, bool> ch = { { n.program, n.pitch }, n.is_drum };
+        bool dup = false;
+        for (auto & s : seen) if (s == ch) { dup = true; break; }
+        if (dup) continue;
+        seen.push_back(ch);
+
+        std::vector<MidiNote> group;
+        for (auto & g : notes) {
+            if (g.program == n.program && g.pitch == n.pitch && g.is_drum == n.is_drum) group.push_back(g);
+        }
+        std::stable_sort(group.begin(), group.end(), [](const MidiNote & a, const MidiNote & b) { return a.onset < b.onset; });
+        for (size_t i = 1; i < group.size(); i++) {
+            if (group[i - 1].offset > group[i].onset) group[i - 1].offset = group[i].onset;
+        }
+        for (auto & g : group) if (g.onset < g.offset) out.push_back(g);
+    }
+    sort_notes_vec(out);
+    return out;
+}
+
+// SMF helpers (mido-compatible byte layout, no running status)
+static void put_be32(std::vector<uint8_t> & b, uint32_t v) {
+    b.push_back((uint8_t) (v >> 24)); b.push_back((uint8_t) (v >> 16));
+    b.push_back((uint8_t) (v >> 8));  b.push_back((uint8_t) v);
+}
+static void put_varlen(std::vector<uint8_t> & b, uint32_t v) {
+    uint8_t buf[4];
+    int n = 0;
+    buf[n++] = (uint8_t) (v & 0x7f);
+    while (v >>= 7) buf[n++] = (uint8_t) ((v & 0x7f) | 0x80);
+    while (n--) b.push_back(buf[n]);
+}
+
+struct MidiEvent {  // one channel/meta message at an absolute tick
+    double time;
+    bool   is_drum;
+    int    program;   // track key
+    int    velocity;  // 1 = on, 0 = off (pre-writer semantics)
+    int    pitch;
+};
+
+// events sorted like sort_note_events: (time, is_drum, program, velocity, pitch)
+static void sort_midi_events(std::vector<MidiEvent> & evs) {
+    std::stable_sort(evs.begin(), evs.end(), [](const MidiEvent & a, const MidiEvent & b) {
+        if (a.time != b.time) return a.time < b.time;
+        if (a.is_drum != b.is_drum) return !a.is_drum;
+        if (a.program != b.program) return a.program < b.program;
+        if (a.velocity != b.velocity) return a.velocity < b.velocity;
+        return a.pitch < b.pitch;
+    });
+}
+
+// Serialize notes to a type-1 SMF (480 tpb, 120 bpm, velocity 100), matching
+// note_event2midi: per-program named tracks, channels 0-8,10-15 by first
+// appearance (overflow shares 15), drums on 9 with +0.01 s synthetic offs.
+static std::vector<uint8_t> write_midi(std::vector<MidiNote> notes) {
+    const int    TPB = 480;
+    const int    TEMPO = 500000;
+    const int    VEL = 100;
+
+    validate_notes_fix(notes);
+    notes = trim_overlapping(notes);
+
+    // note2note_event + drum offsets (writer adds them at time+0.01)
+    std::vector<MidiEvent> evs;
+    for (auto & n : notes) {
+        evs.push_back({ n.onset, n.is_drum, n.is_drum ? DRUM_PROGRAM : n.program, 1, n.pitch });
+        if (!n.is_drum) evs.push_back({ n.offset, false, n.program, 0, n.pitch });
+    }
+    sort_midi_events(evs);
+    {
+        std::vector<MidiEvent> drum_offs;
+        for (auto & e : evs) {
+            if (e.is_drum) drum_offs.push_back({ e.time + 0.01, true, DRUM_PROGRAM, 0, e.pitch });
+        }
+        for (auto & d : drum_offs) evs.push_back(d);
+        sort_midi_events(evs);
+    }
+
+    // per-program tracks
+    struct Track { std::vector<uint8_t> bytes; int last_tick = 0; int channel = 0; };
+    std::vector<int>   track_order;               // program keys, first appearance
+    std::vector<Track> tracks;
+    std::vector<int>   avail_channels;
+    for (int i = 0; i < 9; i++) avail_channels.push_back(i);
+    for (int i = 10; i < 16; i++) avail_channels.push_back(i);
+
+    auto track_for = [&](const MidiEvent & e) -> Track & {
+        int key = (e.is_drum || e.program == DRUM_PROGRAM) ? DRUM_PROGRAM : e.program;
+        for (size_t i = 0; i < track_order.size(); i++) {
+            if (track_order[i] == key) return tracks[i];
+        }
+        track_order.push_back(key);
+        tracks.emplace_back();
+        Track & t = tracks.back();
+        int gm_program;
+        std::string name;
+        if (key == DRUM_PROGRAM) {
+            t.channel  = 9;
+            gm_program = 0;
+            name       = "drums";
+        } else {
+            if (!avail_channels.empty()) {
+                t.channel = avail_channels.front();
+                avail_channels.erase(avail_channels.begin());
+            } else {
+                t.channel = 15;
+            }
+            gm_program = key;
+            const char * inm = instrument_for_program(key);
+            if (inm) {
+                name = inm;
+                for (auto & ch : name) if (ch == '_') ch = ' ';  // program_names uses spaces
+            } else {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "program %d", key);
+                name = buf;
+            }
+        }
+        // track_name meta + program_change, both at delta 0
+        put_varlen(t.bytes, 0);
+        t.bytes.push_back(0xff); t.bytes.push_back(0x03);
+        put_varlen(t.bytes, (uint32_t) name.size());
+        t.bytes.insert(t.bytes.end(), name.begin(), name.end());
+        put_varlen(t.bytes, 0);
+        t.bytes.push_back((uint8_t) (0xc0 | t.channel));
+        t.bytes.push_back((uint8_t) gm_program);
+        return t;
+    };
+
+    for (auto & e : evs) {
+        // mido second2tick + round (banker's) — nearbyint matches
+        int tick = (int) nearbyint(e.time * 1e6 / TEMPO * TPB);
+        Track & t = track_for(e);
+        int delta = tick - t.last_tick;
+        t.last_tick = tick;
+        put_varlen(t.bytes, (uint32_t) (delta < 0 ? 0 : delta));
+        t.bytes.push_back((uint8_t) ((e.velocity > 0 ? 0x90 : 0x80) | t.channel));
+        t.bytes.push_back((uint8_t) e.pitch);
+        t.bytes.push_back((uint8_t) (e.velocity > 0 ? VEL : 0));
+    }
+
+    // assemble file: meta track (set_tempo) + program tracks, each + end_of_track
+    std::vector<uint8_t> out;
+    out.insert(out.end(), { 'M', 'T', 'h', 'd' });
+    put_be32(out, 6);
+    out.push_back(0); out.push_back(1);                                  // format 1
+    uint16_t ntrks = (uint16_t) (1 + tracks.size());
+    out.push_back((uint8_t) (ntrks >> 8)); out.push_back((uint8_t) ntrks);
+    out.push_back((uint8_t) (TPB >> 8)); out.push_back((uint8_t) TPB);
+
+    auto emit_track = [&](const std::vector<uint8_t> & body) {
+        out.insert(out.end(), { 'M', 'T', 'r', 'k' });
+        put_be32(out, (uint32_t) (body.size() + 4));                     // + end_of_track
+        out.insert(out.end(), body.begin(), body.end());
+        out.insert(out.end(), { 0x00, 0xff, 0x2f, 0x00 });
+    };
+    {
+        std::vector<uint8_t> meta;
+        put_varlen(meta, 0);
+        meta.push_back(0xff); meta.push_back(0x51); meta.push_back(0x03);
+        meta.push_back((uint8_t) (TEMPO >> 16)); meta.push_back((uint8_t) (TEMPO >> 8)); meta.push_back((uint8_t) TEMPO);
+        emit_track(meta);
+    }
+    for (auto & t : tracks) emit_track(t.bytes);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Validation mode (Phase 1): logit parity vs the Python oracle
 // ---------------------------------------------------------------------------
 
@@ -656,6 +1084,121 @@ static int run_validate(MidiModel * m, const std::string & vdir, double tol) {
     return pass ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Full transcription: chunk loop + prelude forcing + event decode.
+// Emits NoteStart/NoteEnd events (indexed, instrument-named) via callbacks
+// and returns the assembled note list for the MIDI writer.
+// ---------------------------------------------------------------------------
+
+struct NoteEventOut {
+    bool   is_start;
+    int    index;       // NoteStart index / NoteEnd's start index
+    int    pitch;
+    double time;
+    int    program;     // rep program (DRUM_PROGRAM for drums)
+};
+
+struct TranscribeResult {
+    std::vector<NoteEventOut> events;
+    std::vector<MidiNote>     notes;
+};
+
+static std::string instrument_name(int program) {
+    const char * n = instrument_for_program(program);
+    if (n) return n;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "program_%d", program);
+    return buf;
+}
+
+// jsonl: stream events + progress to stdout as they decode (demo-site UX)
+static TranscribeResult transcribe_wav(MidiModel * m, const float * wav, int n_samples, bool jsonl) {
+    TranscribeResult res;
+    OpenNoteTracker  tracker;
+
+    // open (program,pitch) -> (event index, onset) for pairing + note assembly
+    std::vector<std::pair<std::pair<int, int>, std::pair<int, double>>> open_ev;
+    int next_index = 0;
+
+    auto handle_actions = [&](const std::vector<NoteAction> & actions) {
+        for (auto & a : actions) {
+            if (a.kind == NoteAction::END) {
+                std::pair<int, int> key = { a.program, a.pitch };
+                for (size_t i = 0; i < open_ev.size(); i++) {
+                    if (open_ev[i].first == key) {
+                        int    idx   = open_ev[i].second.first;
+                        double onset = open_ev[i].second.second;
+                        open_ev.erase(open_ev.begin() + (long) i);
+                        res.events.push_back({ false, idx, a.pitch, a.time, a.program });
+                        res.notes.push_back({ false, a.program, onset, a.time, a.pitch });
+                        if (jsonl) {
+                            printf("{\"type\":\"note_end\",\"index\":%d,\"time\":%.6f}\n", idx, a.time);
+                            fflush(stdout);
+                        }
+                        break;
+                    }
+                }
+            } else if (a.kind == NoteAction::START) {
+                int idx = next_index++;
+                open_ev.push_back({ { a.program, a.pitch }, { idx, a.time } });
+                res.events.push_back({ true, idx, a.pitch, a.time, a.program });
+                if (jsonl) {
+                    printf("{\"type\":\"note_start\",\"index\":%d,\"pitch\":%d,\"time\":%.6f,\"instrument\":\"%s\"}\n",
+                           idx, a.pitch, a.time, instrument_name(a.program).c_str());
+                    fflush(stdout);
+                }
+            } else {  // DRUM_HIT: instantaneous start/end pair
+                int idx = next_index++;
+                res.events.push_back({ true, idx, a.pitch, a.time, DRUM_PROGRAM });
+                res.events.push_back({ false, idx, a.pitch, a.time + MIN_NOTE_DUR, DRUM_PROGRAM });
+                res.notes.push_back({ true, DRUM_PROGRAM, a.time, a.time + MIN_NOTE_DUR, a.pitch });
+                if (jsonl) {
+                    printf("{\"type\":\"note_start\",\"index\":%d,\"pitch\":%d,\"time\":%.6f,\"instrument\":\"drums\"}\n",
+                           idx, a.pitch, a.time);
+                    printf("{\"type\":\"note_end\",\"index\":%d,\"time\":%.6f}\n", idx, a.time + MIN_NOTE_DUR);
+                    fflush(stdout);
+                }
+            }
+        }
+    };
+
+    const int n_chunks = (n_samples + MIDI_CHUNK_SAMPLES - 1) / MIDI_CHUNK_SAMPLES;
+    if (jsonl) {
+        printf("{\"type\":\"progress\",\"completed\":0,\"total\":%d}\n", n_chunks);
+        fflush(stdout);
+    }
+
+    for (int ci = 0; ci < n_chunks; ci++) {
+        double seek      = ci * 5.0;
+        double next_seek = (ci + 1 < n_chunks) ? (ci + 1) * 5.0 : -1.0;
+        int    c_samples = n_samples - ci * MIDI_CHUNK_SAMPLES;
+        if (c_samples > MIDI_CHUNK_SAMPLES) c_samples = MIDI_CHUNK_SAMPLES;
+
+        // boundary settles the tracker BEFORE the tie prompt is read
+        handle_actions(tracker.feed_boundary(seek, next_seek));
+        std::vector<int> prompt;
+        if (ci > 0) prompt = tie_section_tokens(tracker.open_keys());
+
+        std::vector<float> prefix = compute_prefix(m, wav + (size_t) ci * MIDI_CHUNK_SAMPLES, c_samples);
+
+        int64_t t0 = ggml_time_ms();
+        int     n_tok = 0;
+        decode_chunk(m, prefix, prompt, MIDI_MAX_GEN, [&](int tok) {
+            n_tok++;
+            handle_actions(tracker.feed(tok));
+        });
+        fprintf(stderr, "[ace-midi] chunk %d/%d: %d tokens, %lld ms\n",
+                ci + 1, n_chunks, n_tok, (long long) (ggml_time_ms() - t0));
+
+        if (jsonl) {
+            printf("{\"type\":\"progress\",\"completed\":%d,\"total\":%d}\n", ci + 1, n_chunks);
+            fflush(stdout);
+        }
+    }
+    handle_actions(tracker.finish());
+    return res;
+}
+
 // Phase 2 validation: C++ mel prefix vs oracle prefix.bin, then greedy
 // token-stream parity vs tokens_ref.json.
 static int run_validate_decode(MidiModel * m, const std::string & vdir) {
@@ -719,23 +1262,132 @@ static int run_validate_decode(MidiModel * m, const std::string & vdir) {
     return pass ? 0 : 1;
 }
 
+// Phase 3 validation: multi-chunk transcription (prelude forcing) — compare
+// note events vs events_ref15.json and MIDI bytes vs ref15.mid.
+static int run_validate_midi(MidiModel * m, const std::string & vdir) {
+    std::vector<float> wav = read_f32_file(vdir + "/wav15.bin");
+    TranscribeResult   res = transcribe_wav(m, wav.data(), (int) wav.size(), false);
+
+    // parse events_ref15.json (flat array of {type,index,pitch?,time,instrument?})
+    struct RefEv { bool is_start; int index; int pitch; double time; };
+    std::vector<RefEv> ref;
+    {
+        FILE * f = fopen((vdir + "/events_ref15.json").c_str(), "rb");
+        if (!f) { fprintf(stderr, "[ace-midi] cannot open events_ref15.json\n"); return 1; }
+        std::string j(1 << 22, 0);
+        size_t n = fread(j.data(), 1, j.size() - 1, f);
+        fclose(f);
+        j.resize(n);
+        const char * p = j.c_str();
+        while ((p = strstr(p, "\"type\":")) != nullptr) {
+            RefEv e = {};
+            const char * close = strchr(p, '}');
+            // json.dumps may put a space after ':' — search within the object
+            const char * ts = strstr(p, "start");
+            e.is_start = ts != nullptr && (!close || ts < close);
+            const char * q = strstr(p, "\"index\":");
+            e.index = q ? atoi(q + 8) : -1;
+            q = strstr(p, "\"pitch\":");
+            e.pitch = (q && close && q < close) ? atoi(q + 8) : -1;
+            q = strstr(p, "\"time\":");
+            e.time = q ? atof(q + 7) : -1;
+            ref.push_back(e);
+            p = close ? close : p + 1;
+        }
+    }
+
+    int mismatches = 0;
+    size_t n_cmp = res.events.size() < ref.size() ? res.events.size() : ref.size();
+    for (size_t i = 0; i < n_cmp; i++) {
+        const NoteEventOut & a = res.events[i];
+        const RefEv & b = ref[i];
+        bool ok = a.is_start == b.is_start && a.index == b.index && fabs(a.time - b.time) < 1e-5
+               && (!b.is_start || a.pitch == b.pitch);
+        if (!ok && mismatches++ < 5) {
+            printf("  event %zu: cpp{%s idx=%d pitch=%d t=%.4f} ref{%s idx=%d pitch=%d t=%.4f}\n", i,
+                   a.is_start ? "start" : "end", a.index, a.pitch, a.time,
+                   b.is_start ? "start" : "end", b.index, b.pitch, b.time);
+        }
+    }
+    printf("events: cpp=%zu ref=%zu mismatches=%d\n", res.events.size(), ref.size(), mismatches);
+
+    // MIDI byte comparison
+    std::vector<uint8_t> mid = write_midi(res.notes);
+    std::vector<uint8_t> ref_mid;
+    {
+        FILE * f = fopen((vdir + "/ref15.mid").c_str(), "rb");
+        if (!f) { fprintf(stderr, "[ace-midi] cannot open ref15.mid\n"); return 1; }
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        ref_mid.resize((size_t) sz);
+        size_t got = fread(ref_mid.data(), 1, ref_mid.size(), f);
+        fclose(f);
+        (void) got;
+    }
+    int first_byte_div = -1;
+    size_t nb = mid.size() < ref_mid.size() ? mid.size() : ref_mid.size();
+    for (size_t i = 0; i < nb; i++) {
+        if (mid[i] != ref_mid[i]) { first_byte_div = (int) i; break; }
+    }
+    printf("midi: cpp=%zu bytes ref=%zu bytes first_divergence=%d\n", mid.size(), ref_mid.size(), first_byte_div);
+    if (first_byte_div >= 0) {
+        printf("  at %d: cpp=%02x ref=%02x\n", first_byte_div, mid[first_byte_div], ref_mid[first_byte_div]);
+    }
+
+    bool pass = mismatches == 0 && res.events.size() == ref.size()
+             && first_byte_div < 0 && mid.size() == ref_mid.size();
+    printf("%s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+// Transcribe a raw f32 mono 16 kHz file to MIDI (+ optional JSONL streaming)
+static int run_transcribe_raw(MidiModel * m, const std::string & wav_path,
+                              const std::string & out_path, bool jsonl) {
+    std::vector<float> wav = read_f32_file(wav_path);
+    TranscribeResult   res = transcribe_wav(m, wav.data(), (int) wav.size(), jsonl);
+    std::vector<uint8_t> mid = write_midi(res.notes);
+    FILE * f = fopen(out_path.c_str(), "wb");
+    if (!f) {
+        fprintf(stderr, "[ace-midi] cannot write %s\n", out_path.c_str());
+        return 1;
+    }
+    fwrite(mid.data(), 1, mid.size(), f);
+    fclose(f);
+    if (jsonl) {
+        printf("{\"type\":\"done\",\"notes\":%zu,\"midi_bytes\":%zu}\n", res.notes.size(), mid.size());
+        fflush(stdout);
+    }
+    fprintf(stderr, "[ace-midi] wrote %s (%zu notes, %zu bytes)\n", out_path.c_str(), res.notes.size(), mid.size());
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char ** argv) {
-    std::string model_dir, validate_dir, validate_decode_dir;
-    double tol = 1e-3;
+    std::string model_dir, validate_dir, validate_decode_dir, validate_midi_dir;
+    std::string raw_path, out_path = "out.mid";
+    bool   jsonl = false;
+    double tol   = 1e-3;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
         else if (!strcmp(argv[i], "--validate") && i + 1 < argc) validate_dir = argv[++i];
         else if (!strcmp(argv[i], "--validate-decode") && i + 1 < argc) validate_decode_dir = argv[++i];
+        else if (!strcmp(argv[i], "--validate-midi") && i + 1 < argc) validate_midi_dir = argv[++i];
+        else if (!strcmp(argv[i], "--transcribe-raw") && i + 1 < argc) raw_path = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
+        else if (!strcmp(argv[i], "--jsonl")) jsonl = true;
         else if (!strcmp(argv[i], "--tol") && i + 1 < argc) tol = atof(argv[++i]);
     }
     if (model_dir.empty()) {
         fprintf(stderr,
-                "ace-midi (Phase 2) — MuScriptor GGML port\n"
-                "usage: ace-midi --model <dir> [--validate <dir>] [--validate-decode <dir>] [--tol <x>]\n"
-                "  <model dir>    contains model.safetensors + config.json\n"
-                "  <validate dir> oracle dumps from tools/ace-midi-validate.py\n");
+                "ace-midi (Phase 3) — MuScriptor GGML port\n"
+                "usage: ace-midi --model <dir> <mode>\n"
+                "  modes:\n"
+                "    --transcribe-raw <f32.bin> [--out out.mid] [--jsonl]   raw mono 16 kHz f32 -> MIDI\n"
+                "    --validate <dir>          logit parity vs oracle [--tol <x>]\n"
+                "    --validate-decode <dir>   mel + greedy token parity vs oracle\n"
+                "    --validate-midi <dir>     multi-chunk events + MIDI bytes vs oracle\n");
         return 2;
     }
 
@@ -743,12 +1395,10 @@ int main(int argc, char ** argv) {
     MidiModel m;
     if (!load_model(&m, model_dir)) return 1;
 
-    if (!validate_dir.empty()) {
-        return run_validate(&m, validate_dir, tol);
-    }
-    if (!validate_decode_dir.empty()) {
-        return run_validate_decode(&m, validate_decode_dir);
-    }
-    fprintf(stderr, "[ace-midi] no mode given (--validate / --validate-decode)\n");
+    if (!validate_dir.empty()) return run_validate(&m, validate_dir, tol);
+    if (!validate_decode_dir.empty()) return run_validate_decode(&m, validate_decode_dir);
+    if (!validate_midi_dir.empty()) return run_validate_midi(&m, validate_midi_dir);
+    if (!raw_path.empty()) return run_transcribe_raw(&m, raw_path, out_path, jsonl);
+    fprintf(stderr, "[ace-midi] no mode given\n");
     return 2;
 }

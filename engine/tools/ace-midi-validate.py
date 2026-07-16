@@ -38,6 +38,21 @@ def synth_wav(n: int = 80_000, sr: int = 16_000) -> torch.Tensor:
     return (wav + clicks).clamp(-1.0, 1.0)
 
 
+def synth_wav_multi(sr: int = 16_000) -> torch.Tensor:
+    """13 s / 3-chunk signal with content changes across chunk boundaries and
+    sustained tones crossing them — exercises tie prologues + prelude forcing.
+    Last chunk is partial (3 s) to exercise the mel length mask."""
+    n = 13 * sr
+    t = torch.arange(n, dtype=torch.float32) / sr
+    wav = 0.35 * torch.sin(2 * math.pi * 220.0 * t)              # sustained A3 throughout
+    seg2 = (t >= 4.0) & (t < 9.5)                                 # crosses the 5 s boundary
+    wav = wav + 0.30 * torch.sin(2 * math.pi * 329.63 * t) * seg2.float()
+    seg3 = t >= 8.0                                               # crosses the 10 s boundary
+    wav = wav + 0.25 * torch.sin(2 * math.pi * 493.88 * t) * seg3.float()
+    clicks = ((torch.arange(n) % (sr // 2)) < 32).float() * 0.4
+    return (wav + clicks).clamp(-1.0, 1.0)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", required=True)
@@ -89,6 +104,26 @@ def main() -> None:
             tokens.append(tok)
     (out / "tokens_ref.json").write_text(json.dumps(tokens))
 
+    # ── Phase 3 references: multi-chunk events + MIDI (prelude forcing on) ──
+    from muscriptor.events import NoteStartEvent, NoteEndEvent, ProgressEvent
+
+    wav15 = synth_wav_multi()
+    wav15.numpy().tofile(out / "wav15.bin")
+
+    events_json = []
+    collected = []
+    for ev in tm.transcribe((wav15.unsqueeze(0), 16_000)):
+        collected.append(ev)
+        if isinstance(ev, NoteStartEvent):
+            events_json.append({"type": "start", "index": ev.index, "pitch": ev.pitch,
+                                "time": round(ev.start_time, 6), "instrument": ev.instrument})
+        elif isinstance(ev, NoteEndEvent):
+            events_json.append({"type": "end", "index": ev.start_event_index,
+                                "time": round(ev.end_time, 6)})
+    (out / "events_ref15.json").write_text(json.dumps(events_json))
+    midi_bytes = tm.events_to_midi_bytes(iter(collected))
+    (out / "ref15.mid").write_bytes(midi_bytes)
+
     top = torch.topk(logits[0, -1], 5)
     manifest = {
         "dim": dim,
@@ -98,6 +133,9 @@ def main() -> None:
         "prefix_len": int(prefix.shape[1]),
         "wav_samples": int(wav.shape[0]),
         "greedy_tokens": len(tokens),
+        "wav15_samples": int(wav15.shape[0]),
+        "events15": len(events_json),
+        "ref15_mid_bytes": len(midi_bytes),
         "logits_top5_ids": top.indices.tolist(),
         "logits_top5_vals": [round(v, 6) for v in top.values.tolist()],
     }
