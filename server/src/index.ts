@@ -42,6 +42,7 @@ import inspireRoutes from './routes/inspire.js';
 import coverArtRoutes from './routes/coverArt.js';
 import seedsRoutes from './routes/seeds.js';
 import songBuilderRoutes from './routes/songBuilder.js';
+import midiStudioRoutes from './routes/midiStudio.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +94,7 @@ app.use('/api/inspire', inspireRoutes);
 app.use('/api/cover-art', coverArtRoutes);
 app.use('/api/seeds', seedsRoutes);
 app.use('/api/builder', songBuilderRoutes);
+app.use('/api/midi-studio', midiStudioRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {
