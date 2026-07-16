@@ -1,25 +1,26 @@
 // MidiStudio.tsx — MIDI Studio orchestrator (audio → MIDI transcription)
 //
-// Pick any track from the library (or a previously uploaded reference),
-// transcribe it to multi-instrument MIDI via MuScriptor, preview the result
-// as a piano roll, and download the .mid.
+// Pick any track from the library, transcribe it to multi-instrument MIDI,
+// preview the result as a piano roll, and download the .mid.
 //
 // Transcription is powered by MuScriptor (github.com/muscriptor/muscriptor),
 // developed by Kyutai & Mirelo — full attribution in the footer card.
+// The inference engine is being ported to native C++ (ace-midi, see
+// docs/plans/muscriptor-cpp-port.md); until it lands the server reports
+// enginePending and the transcribe action is disabled.
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Piano, FolderOpen, Search, X, Download, Trash2, Loader2, ChevronDown,
-  ChevronUp, AlertTriangle, CheckCircle2, ExternalLink, Music, KeyRound,
+  Piano, FolderOpen, Search, X, Download, Trash2, ChevronDown,
+  ChevronUp, CheckCircle2, ExternalLink, Music, KeyRound, Loader2, Hammer,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { songApi } from '../../services/api';
 import type { Song } from '../../types';
 import {
-  getMidiStatus, startSetup, submitTranscription, getMidiProgress,
-  listMidiJobs, deleteMidiJob, getMidiFileUrl, saveHfToken,
-  HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
+  getMidiStatus, submitTranscription, listMidiJobs, deleteMidiJob,
+  getMidiFileUrl, saveHfToken, HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
   type MidiStudioStatus, type MidiJobSummary, type MuscriptorModel,
 } from '../../services/midiStudioApi';
 import { PianoRoll } from './PianoRoll';
@@ -34,9 +35,7 @@ export const MidiStudio: React.FC = () => {
   const { t } = useTranslation();
   const { token } = useAuth();
 
-  // ── Environment / setup ──
   const [status, setStatus] = useState<MidiStudioStatus | null>(null);
-  const [setupError, setSetupError] = useState('');
 
   // ── HF access token (gated weights) ──
   const [hfTokenInput, setHfTokenInput] = useState('');
@@ -57,7 +56,6 @@ export const MidiStudio: React.FC = () => {
   const [jobs, setJobs] = useState<MidiJobSummary[]>([]);
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState('');
-  const pollRef = useRef<number | null>(null);
 
   const refreshStatus = useCallback(() => {
     getMidiStatus().then(setStatus).catch(() => {});
@@ -67,34 +65,6 @@ export const MidiStudio: React.FC = () => {
   }, []);
 
   useEffect(() => { refreshStatus(); refreshJobs(); }, [refreshStatus, refreshJobs]);
-
-  // Poll status while installing
-  useEffect(() => {
-    if (!status?.installing) return;
-    const iv = window.setInterval(refreshStatus, 2000);
-    return () => window.clearInterval(iv);
-  }, [status?.installing, refreshStatus]);
-
-  // Poll progress of active jobs
-  const hasActiveJobs = jobs.some(j => j.status === 'queued' || j.status === 'transcribing');
-  useEffect(() => {
-    if (!hasActiveJobs) { if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; } return; }
-    pollRef.current = window.setInterval(async () => {
-      let anyFinished = false;
-      const updated = await Promise.all(jobs.map(async (j) => {
-        if (j.status !== 'queued' && j.status !== 'transcribing') return j;
-        try {
-          const p = await getMidiProgress(j.id);
-          if (p.status === 'done' || p.status === 'failed' || p.status === 'cancelled') anyFinished = true;
-          return { ...j, status: p.status, error: p.error, gated: p.gated, progressLine: p.progressLine };
-        } catch { return j; }
-      }));
-      setJobs(updated);
-      if (anyFinished) refreshJobs();
-    }, 1500);
-    return () => { if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; } };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasActiveJobs, jobs.map(j => `${j.id}:${j.status}`).join(',')]);
 
   // Load library songs when picker opens
   useEffect(() => {
@@ -137,21 +107,11 @@ export const MidiStudio: React.FC = () => {
     }
   };
 
-  const handleSetup = async () => {
-    setSetupError('');
-    try {
-      await startSetup();
-      refreshStatus();
-    } catch (err) {
-      setSetupError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleSaveHfToken = async (token: string) => {
+  const handleSaveHfToken = async (tok: string) => {
     setHfTokenError('');
     setHfTokenBusy(true);
     try {
-      await saveHfToken(token);
+      await saveHfToken(tok);
       setHfTokenInput('');
       refreshStatus();
     } catch (err) {
@@ -170,7 +130,7 @@ export const MidiStudio: React.FC = () => {
     refreshJobs();
   };
 
-  const ready = !!status?.installed;
+  const enginePending = status?.enginePending ?? true;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -185,38 +145,13 @@ export const MidiStudio: React.FC = () => {
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">{t('midiStudio.subtitle')}</p>
         </div>
 
-        {/* ── Setup banner ── */}
-        {status && !ready && (
-          <div className="rounded-xl border border-amber-300/60 dark:border-amber-500/20 bg-amber-50 dark:bg-amber-500/5 p-4">
-            <div className="flex items-start gap-3">
-              <AlertTriangle size={18} className="text-amber-500 mt-0.5 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-zinc-900 dark:text-white">{t('midiStudio.setupTitle')}</div>
-                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                  {t('midiStudio.setupBody')}
-                  {status.pythonVersion
-                    ? <span className="text-emerald-600 dark:text-emerald-400"> {t('midiStudio.pythonFound', { version: status.pythonVersion })}</span>
-                    : <span className="text-red-500 dark:text-red-400"> {t('midiStudio.pythonMissing')}</span>}
-                </p>
-                {status.installing ? (
-                  <div className="mt-3 flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
-                    <Loader2 size={14} className="animate-spin flex-shrink-0" />
-                    <span className="font-medium">{status.installStep}</span>
-                    <span className="truncate opacity-60">{status.installLine}</span>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleSetup}
-                    disabled={!status.pythonVersion}
-                    className="mt-3 px-4 py-2 rounded-lg text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {t('midiStudio.installButton')}
-                  </button>
-                )}
-                {(setupError || status.installError) && (
-                  <div className="mt-2 text-xs text-red-500 dark:text-red-400">{setupError || status.installError}</div>
-                )}
-              </div>
+        {/* ── Engine port banner ── */}
+        {enginePending && (
+          <div className="rounded-xl border border-sky-300/60 dark:border-sky-500/20 bg-sky-50 dark:bg-sky-500/5 p-4 flex items-start gap-3">
+            <Hammer size={18} className="text-sky-500 mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+              <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-1">{t('midiStudio.portTitle')}</div>
+              {t('midiStudio.portBody')}
             </div>
           </div>
         )}
@@ -360,11 +295,13 @@ export const MidiStudio: React.FC = () => {
           <div className="mt-4 flex items-center gap-3">
             <button
               onClick={handleTranscribe}
-              disabled={!ready || !sourceAudioUrl}
+              disabled={enginePending || !sourceAudioUrl}
+              title={enginePending ? t('midiStudio.portTitle') : undefined}
               className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
             >
               <Piano size={16} /> {t('midiStudio.transcribe')}
             </button>
+            {enginePending && <span className="text-xs text-sky-600 dark:text-sky-400">{t('midiStudio.portShort')}</span>}
             {submitError && <span className="text-xs text-red-500 dark:text-red-400">{submitError}</span>}
           </div>
         </div>
@@ -376,79 +313,47 @@ export const MidiStudio: React.FC = () => {
             <div className="text-xs text-zinc-400 dark:text-zinc-500 py-2">{t('midiStudio.noJobs')}</div>
           )}
           <div className="flex flex-col gap-2">
-            {jobs.map(job => {
-              const running = job.status === 'queued' || job.status === 'transcribing';
-              const progressLine = job.progressLine;
-              return (
-                <div key={job.id} className="rounded-lg border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-black/20 px-3 py-2.5">
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{job.sourceFileName}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 capitalize flex-shrink-0">{job.model}</span>
-                      </div>
-                      {running && (
-                        <div className="flex items-center gap-1.5 mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                          <Loader2 size={11} className="animate-spin flex-shrink-0" />
-                          <span className="truncate">{progressLine || t(`midiStudio.status_${job.status}`)}</span>
-                        </div>
-                      )}
-                      {job.status === 'done' && (
-                        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
-                          <CheckCircle2 size={11} />
-                          {t('midiStudio.doneSummary', { notes: job.noteCount, seconds: Math.round(job.durationSec) })}
-                        </div>
-                      )}
-                      {job.status === 'failed' && (
-                        <>
-                          <div className="mt-0.5 text-[11px] text-red-500 dark:text-red-400 truncate">{job.error || t('midiStudio.status_failed')}</div>
-                          {job.gated && (
-                            <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
-                              <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
-                              <span>
-                                {t('midiStudio.gatedHint')}{' '}
-                                <a href={HF_MODEL_URLS[job.model]} target="_blank" rel="noreferrer" className="underline">
-                                  {t('midiStudio.gatedHintLink', { model: job.model })}
-                                </a>
-                              </span>
-                            </div>
-                          )}
-                        </>
-                      )}
+            {jobs.map(job => (
+              <div key={job.id} className="rounded-lg border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-black/20 px-3 py-2.5">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{job.sourceFileName}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 capitalize flex-shrink-0">{job.model}</span>
                     </div>
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      {job.status === 'done' && (
-                        <>
-                          <button
-                            onClick={() => setExpandedJob(e => e === job.id ? null : job.id)}
-                            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                            title={t('midiStudio.preview')}
-                          >
-                            {expandedJob === job.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                          </button>
-                          <a
-                            href={getMidiFileUrl(job.id)}
-                            className="p-1.5 rounded-md text-zinc-500 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                            title={t('midiStudio.downloadMid')}
-                            download
-                          >
-                            <Download size={15} />
-                          </a>
-                        </>
-                      )}
-                      <button
-                        onClick={() => handleDelete(job.id)}
-                        className="p-1.5 rounded-md text-zinc-500 hover:text-red-500 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                        title={running ? t('midiStudio.cancel') : t('midiStudio.delete')}
-                      >
-                        {running ? <X size={15} /> : <Trash2 size={15} />}
-                      </button>
+                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                      <CheckCircle2 size={11} />
+                      {t('midiStudio.doneSummary', { notes: job.noteCount, seconds: Math.round(job.durationSec) })}
                     </div>
                   </div>
-                  {expandedJob === job.id && job.status === 'done' && <PianoRoll jobId={job.id} />}
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button
+                      onClick={() => setExpandedJob(e => e === job.id ? null : job.id)}
+                      className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                      title={t('midiStudio.preview')}
+                    >
+                      {expandedJob === job.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                    </button>
+                    <a
+                      href={getMidiFileUrl(job.id)}
+                      className="p-1.5 rounded-md text-zinc-500 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                      title={t('midiStudio.downloadMid')}
+                      download
+                    >
+                      <Download size={15} />
+                    </a>
+                    <button
+                      onClick={() => handleDelete(job.id)}
+                      className="p-1.5 rounded-md text-zinc-500 hover:text-red-500 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                      title={t('midiStudio.delete')}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 </div>
-              );
-            })}
+                {expandedJob === job.id && <PianoRoll jobId={job.id} />}
+              </div>
+            ))}
           </div>
         </div>
 

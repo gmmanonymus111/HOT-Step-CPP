@@ -10,22 +10,10 @@ const API_BASE = '/api/midi-studio';
 export type MuscriptorModel = 'small' | 'medium' | 'large';
 
 export interface MidiStudioStatus {
-  installed: boolean;
-  installing: boolean;
-  installStep: string;
-  installLine: string;
-  installError?: string;
-  pythonVersion: string | null;
+  /** True while the native ace-midi engine port is still in development */
+  enginePending: boolean;
   hfTokenSet: boolean;
   models: MuscriptorModel[];
-}
-
-export interface MidiJobProgress {
-  status: 'queued' | 'transcribing' | 'done' | 'failed' | 'cancelled';
-  progressLine: string;
-  error?: string;
-  /** Failure looks like gated-model / HF auth trouble */
-  gated?: boolean;
 }
 
 export interface MidiJobSummary {
@@ -103,11 +91,6 @@ export async function getMidiStatus(): Promise<MidiStudioStatus> {
   return jsonOrThrow(await fetch(`${API_BASE}/status`), 'Status');
 }
 
-/** Kick off the MuScriptor venv install. Poll getMidiStatus() for progress. */
-export async function startSetup(): Promise<void> {
-  await jsonOrThrow(await fetch(`${API_BASE}/setup`, { method: 'POST' }), 'Setup');
-}
-
 /** Save (or clear, with '') the Hugging Face read token for gated weights. */
 export async function saveHfToken(token: string): Promise<void> {
   await jsonOrThrow(await fetch(`${API_BASE}/hf-token`, {
@@ -126,11 +109,6 @@ export async function submitTranscription(params: TranscribeParams): Promise<str
   });
   const data = await jsonOrThrow<{ id: string }>(res, 'Transcription');
   return data.id;
-}
-
-/** Poll a job's progress. */
-export async function getMidiProgress(jobId: string): Promise<MidiJobProgress> {
-  return jsonOrThrow(await fetch(`${API_BASE}/${jobId}/progress`), 'Progress');
 }
 
 /** Fetch the parsed note data for the piano-roll preview. */

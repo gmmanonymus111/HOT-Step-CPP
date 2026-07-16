@@ -298,15 +298,15 @@ Generatively create new instrument stems for source tracks using the DiT engine:
 
 ## MIDI Studio
 
-Audio-to-MIDI transcription of any library track, powered by [MuScriptor](https://github.com/muscriptor/muscriptor) (Kyutai & Mirelo — code MIT, model weights CC BY-NC 4.0, non-commercial):
+Audio-to-MIDI transcription of any library track, powered by [MuScriptor](https://github.com/muscriptor/muscriptor) (Kyutai & Mirelo — code MIT, model weights CC BY-NC 4.0, non-commercial). **Transcription is being ported to a native C++/GGML engine binary (`ace-midi`) — GPU-accelerated, zero Python. Until the port lands, the transcribe action is disabled; history, previews and downloads remain live.**
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Instrument Transcription** | Convert any track from the library (or an uploaded reference) into a multi-track `.mid` file — drums, bass, guitar, keys, and more, per MIDI channel. |
-| **One-Click Setup** | The server bootstraps a private Python venv (`data/muscriptor/`) and installs MuScriptor automatically — no manual Python wrangling. Requires system Python 3.10–3.12. |
-| **Model Choice** | `small` (103M, CPU-friendly), `medium` (307M), or `large` (1.4B) — weights auto-download from Hugging Face on first use. The weights are **gated**: the in-app Model Access card links to each model page to request access (free) and stores your HF read token locally. |
+| **Multi-Instrument Transcription** | Convert any track from the library into a multi-track `.mid` file — drums, bass, guitar, keys, and more (34 instrument groups + drums). *(native engine port in progress)* |
+| **Model Choice** | `small` (103M), `medium` (307M), or `large` (1.4B). The weights are **gated** on Hugging Face: the in-app Model Access card links to each model page to request access (free) and stores your HF read token locally for the download. |
+| **Live Piano Roll** *(planned with the port)* | Streaming transcription — notes appear on the piano roll and are playable in-browser while the track is still transcribing, matching the upstream demo experience. |
 | **Piano-Roll Preview** | Built-in SVG piano roll with per-channel instrument coloring and GM family legend, rendered from a native MIDI parser. |
-| **Job Queue & History** | Serialized transcription queue with live progress lines; completed transcriptions persist to `data/midi/` and survive restarts. |
+| **History** | Completed transcriptions persist to `data/midi/` and survive restarts. |
 
 ---
 
