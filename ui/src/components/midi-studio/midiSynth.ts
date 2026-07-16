@@ -55,6 +55,10 @@ export class MidiSynth {
   private active: Set<{ stop: (t: number) => void }> = new Set();
   private crossfade = 0.5;
 
+  // per-instrument-family sub-mix (mute/solo support)
+  private familyGains = new Map<string, GainNode>();
+  private familyAudible = new Map<string, boolean>();
+
   constructor() {
     this.ctx = new AudioContext();
     const comp = this.ctx.createDynamicsCompressor();
@@ -81,6 +85,25 @@ export class MidiSynth {
       this.mediaSrc = this.ctx.createMediaElementSource(el);
       this.mediaSrc.connect(this.origGain);
     }
+  }
+
+  /** Per-family output bus — lets the UI mute/solo instrument tracks. */
+  private gainForFamily(family: string): GainNode {
+    let g = this.familyGains.get(family);
+    if (!g) {
+      g = this.ctx.createGain();
+      g.gain.value = this.familyAudible.get(family) === false ? 0 : 1;
+      g.connect(this.midiGain);
+      this.familyGains.set(family, g);
+    }
+    return g;
+  }
+
+  /** Set a family's audibility (the UI computes mute/solo into a boolean). */
+  setFamilyAudible(family: string, audible: boolean): void {
+    this.familyAudible.set(family, audible);
+    const g = this.familyGains.get(family);
+    if (g) g.gain.setTargetAtTime(audible ? 1 : 0, this.ctx.currentTime, 0.02);
   }
 
   /** 0 = original only, 1 = MIDI only; equal-power blend in between. */
@@ -173,7 +196,7 @@ export class MidiSynth {
     const v = voiceForFamily(n.family);
     const dur = Math.max(0.04, Math.min(n.duration, 12));
     const g = this.ctx.createGain();
-    g.connect(this.midiGain);
+    g.connect(this.gainForFamily(n.family));
     g.gain.setValueAtTime(0, when);
     g.gain.linearRampToValueAtTime(VOICE_GAIN, when + v.attack);
     g.gain.setTargetAtTime(VOICE_GAIN * v.sustain, when + v.attack, 0.08);
@@ -202,7 +225,7 @@ export class MidiSynth {
   private playDrum(n: PlayNote, when: number): void {
     const p = n.pitch;
     const g = this.ctx.createGain();
-    g.connect(this.midiGain);
+    g.connect(this.gainForFamily(n.family));
 
     if (p === 35 || p === 36) {
       // kick: sine pitch-drop thump

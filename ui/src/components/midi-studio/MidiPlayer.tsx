@@ -47,6 +47,8 @@ export const MidiPlayer: React.FC<Props> = ({ jobId, sourceAudioUrl, live }) => 
   const [chunks, setChunks] = useState<{ done: number; total: number } | null>(null);
   const [liveDone, setLiveDone] = useState(!live);
   const [families, setFamilies] = useState<string[]>([]);
+  const [muted, setMuted] = useState<Set<string>>(new Set());
+  const [soloed, setSoloed] = useState<Set<string>>(new Set());
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -55,10 +57,29 @@ export const MidiPlayer: React.FC<Props> = ({ jobId, sourceAudioUrl, live }) => 
   const lastManualScroll = useRef(0);
   const rafRef = useRef(0);
 
+  // family audible = no solos active ? not muted : soloed
+  const applyMixer = useCallback((synth: MidiSynth, fams: string[], mutedS: Set<string>, soloS: Set<string>) => {
+    for (const f of fams) {
+      synth.setFamilyAudible(f, soloS.size > 0 ? soloS.has(f) : !mutedS.has(f));
+    }
+  }, []);
+
   const getSynth = useCallback((): MidiSynth => {
-    if (!synthRef.current) synthRef.current = new MidiSynth();
+    if (!synthRef.current) {
+      const synth = new MidiSynth();
+      // seed with everything that streamed in before first play — the synth
+      // is created lazily on the first user gesture, so notes accumulated in
+      // notesRef must be handed over here (this was the "MIDI side silent" bug)
+      synth.setAllNotes(notesRef.current);
+      synthRef.current = synth;
+    }
     return synthRef.current;
   }, []);
+
+  // keep the synth's family buses in sync with mute/solo state
+  useEffect(() => {
+    if (synthRef.current) applyMixer(synthRef.current, families, muted, soloed);
+  }, [families, muted, soloed, applyMixer]);
 
   const addNotes = useCallback((ns: PlayNote[]) => {
     if (!ns.length) return;
@@ -139,6 +160,7 @@ export const MidiPlayer: React.FC<Props> = ({ jobId, sourceAudioUrl, live }) => 
     const synth = getSynth();
     synth.attachAudio(el);
     synth.setCrossfade(crossfade / 100);
+    applyMixer(synth, families, muted, soloed);
     if (synth.playing) {
       synth.pause();
       setIsPlaying(false);
@@ -146,7 +168,22 @@ export const MidiPlayer: React.FC<Props> = ({ jobId, sourceAudioUrl, live }) => 
       await synth.play();
       setIsPlaying(true);
     }
-  }, [sourceAudioUrl, crossfade, getSynth]);
+  }, [sourceAudioUrl, crossfade, getSynth, applyMixer, families, muted, soloed]);
+
+  const toggleMute = useCallback((f: string) => {
+    setMuted(prev => {
+      const s = new Set(prev);
+      if (s.has(f)) s.delete(f); else s.add(f);
+      return s;
+    });
+  }, []);
+  const toggleSolo = useCallback((f: string) => {
+    setSoloed(prev => {
+      const s = new Set(prev);
+      if (s.has(f)) s.delete(f); else s.add(f);
+      return s;
+    });
+  }, []);
 
   const handleCrossfade = useCallback((v: number) => {
     setCrossfade(v);
@@ -277,15 +314,41 @@ export const MidiPlayer: React.FC<Props> = ({ jobId, sourceAudioUrl, live }) => 
         </span>
       </div>
 
-      {/* legend */}
+      {/* legend + per-track mute/solo (affects the MIDI side only) */}
       {families.length > 0 && (
-        <div className="flex flex-wrap gap-x-3 gap-y-1 mb-1.5">
-          {families.map(f => (
-            <span key={f} className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
-              <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ backgroundColor: familyColor(f) }} />
-              {f.replace(/_/g, ' ')}
-            </span>
-          ))}
+        <div className="flex flex-wrap gap-x-2 gap-y-1 mb-1.5">
+          {families.map(f => {
+            const isMuted = muted.has(f);
+            const isSolo = soloed.has(f);
+            const audible = soloed.size > 0 ? isSolo : !isMuted;
+            return (
+              <span
+                key={f}
+                className={`flex items-center gap-1.5 text-[11px] rounded-md px-1.5 py-0.5 border transition-colors ${
+                  isSolo
+                    ? 'border-purple-500/60 bg-purple-500/10 text-zinc-800 dark:text-zinc-200'
+                    : 'border-transparent text-zinc-600 dark:text-zinc-400'
+                } ${audible ? '' : 'opacity-45'}`}
+              >
+                <span className="w-2.5 h-2.5 rounded-sm inline-block flex-shrink-0" style={{ backgroundColor: familyColor(f) }} />
+                <span className={isMuted && soloed.size === 0 ? 'line-through' : ''}>{f.replace(/_/g, ' ')}</span>
+                <button
+                  onClick={() => toggleMute(f)}
+                  title={t('midiStudio.player.mute')}
+                  className={`w-4 h-4 rounded text-[9px] font-bold leading-none flex items-center justify-center transition-colors ${
+                    isMuted ? 'bg-red-500 text-white' : 'bg-zinc-200 dark:bg-white/10 text-zinc-500 hover:bg-zinc-300 dark:hover:bg-white/20'
+                  }`}
+                >M</button>
+                <button
+                  onClick={() => toggleSolo(f)}
+                  title={t('midiStudio.player.solo')}
+                  className={`w-4 h-4 rounded text-[9px] font-bold leading-none flex items-center justify-center transition-colors ${
+                    isSolo ? 'bg-amber-500 text-white' : 'bg-zinc-200 dark:bg-white/10 text-zinc-500 hover:bg-zinc-300 dark:hover:bg-white/20'
+                  }`}
+                >S</button>
+              </span>
+            );
+          })}
         </div>
       )}
 
