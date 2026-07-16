@@ -16,6 +16,7 @@ export interface MidiStudioStatus {
   installLine: string;
   installError?: string;
   pythonVersion: string | null;
+  hfTokenSet: boolean;
   models: MuscriptorModel[];
 }
 
@@ -23,6 +24,8 @@ export interface MidiJobProgress {
   status: 'queued' | 'transcribing' | 'done' | 'failed' | 'cancelled';
   progressLine: string;
   error?: string;
+  /** Failure looks like gated-model / HF auth trouble */
+  gated?: boolean;
 }
 
 export interface MidiJobSummary {
@@ -35,9 +38,24 @@ export interface MidiJobSummary {
   durationSec: number;
   createdAt: string;
   error?: string;
+  /** Failure looks like gated-model / HF auth trouble */
+  gated?: boolean;
   /** Last progress line — only present client-side while polling */
   progressLine?: string;
 }
+
+/**
+ * The MuScriptor weights are GATED on Hugging Face — each user must request
+ * access on the model page (free, instant after accepting the conditions)
+ * and provide a read token before the first download.
+ */
+export const HF_MODEL_URLS: Record<MuscriptorModel, string> = {
+  small: 'https://huggingface.co/MuScriptor/muscriptor-small',
+  medium: 'https://huggingface.co/MuScriptor/muscriptor-medium',
+  large: 'https://huggingface.co/MuScriptor/muscriptor-large',
+};
+
+export const HF_TOKEN_SETTINGS_URL = 'https://huggingface.co/settings/tokens';
 
 export interface MidiNote {
   pitch: number;
@@ -88,6 +106,15 @@ export async function getMidiStatus(): Promise<MidiStudioStatus> {
 /** Kick off the MuScriptor venv install. Poll getMidiStatus() for progress. */
 export async function startSetup(): Promise<void> {
   await jsonOrThrow(await fetch(`${API_BASE}/setup`, { method: 'POST' }), 'Setup');
+}
+
+/** Save (or clear, with '') the Hugging Face read token for gated weights. */
+export async function saveHfToken(token: string): Promise<void> {
+  await jsonOrThrow(await fetch(`${API_BASE}/hf-token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  }), 'Save token');
 }
 
 /** Queue a transcription job. Returns the job ID. */

@@ -304,7 +304,7 @@ Audio-to-MIDI transcription of any library track, powered by [MuScriptor](https:
 |---------|-------------|
 | **Multi-Instrument Transcription** | Convert any track from the library (or an uploaded reference) into a multi-track `.mid` file — drums, bass, guitar, keys, and more, per MIDI channel. |
 | **One-Click Setup** | The server bootstraps a private Python venv (`data/muscriptor/`) and installs MuScriptor automatically — no manual Python wrangling. Requires system Python 3.10–3.12. |
-| **Model Choice** | `small` (103M, CPU-friendly), `medium` (307M), or `large` (1.4B) — weights auto-download from Hugging Face on first use. |
+| **Model Choice** | `small` (103M, CPU-friendly), `medium` (307M), or `large` (1.4B) — weights auto-download from Hugging Face on first use. The weights are **gated**: the in-app Model Access card links to each model page to request access (free) and stores your HF read token locally. |
 | **Piano-Roll Preview** | Built-in SVG piano roll with per-channel instrument coloring and GM family legend, rendered from a native MIDI parser. |
 | **Job Queue & History** | Serialized transcription queue with live progress lines; completed transcriptions persist to `data/midi/` and survive restarts. |
 

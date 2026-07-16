@@ -9,6 +9,7 @@
 // Routes:
 //   GET    /api/midi-studio/status            — MuScriptor install status
 //   POST   /api/midi-studio/setup             — begin venv install (poll /status)
+//   POST   /api/midi-studio/hf-token          — save/clear HF token (gated weights)
 //   POST   /api/midi-studio/transcribe        — start a transcription job
 //   GET    /api/midi-studio/jobs              — list past jobs (disk-backed)
 //   GET    /api/midi-studio/:jobId/progress   — poll a running job
@@ -22,7 +23,7 @@ import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import {
-  getStatus, startInstall, isInstalled, transcribe,
+  getStatus, startInstall, isInstalled, transcribe, setHfToken, looksLikeGatedError,
   MUSCRIPTOR_MODELS, type MuscriptorModel, type TranscribeHandle,
 } from '../services/muscriptor.js';
 import { parseMidiFile } from '../services/midiParser.js';
@@ -45,6 +46,8 @@ interface MidiJob {
   model: MuscriptorModel;
   progressLine: string;
   error?: string;
+  /** Failure looks like gated-model / HF auth — UI shows access instructions */
+  gated?: boolean;
   createdAt: number;
   handle?: TranscribeHandle;
 }
@@ -129,7 +132,10 @@ async function runTranscription(job: MidiJob): Promise<void> {
     if ((job.status as string) !== 'cancelled') {
       job.status = 'failed';
       job.error = err.message || 'Unknown error';
-      console.error(`[MidiStudio] Job ${job.id}: FAILED — ${job.error}`);
+      // The MuScriptor weights are gated on Hugging Face — a 401/403 here
+      // almost always means the user hasn't requested access / set a token.
+      job.gated = looksLikeGatedError(job.error || '');
+      console.error(`[MidiStudio] Job ${job.id}: FAILED — ${job.error}${job.gated ? ' (looks like gated-model access — see MIDI Studio setup)' : ''}`);
     }
   }
 }
@@ -153,6 +159,21 @@ router.post('/setup', (_req: Request, res: Response) => {
     return;
   }
   res.json({ ok: true });
+});
+
+/**
+ * POST /hf-token — store (or clear, with empty string) the Hugging Face
+ * read token used to download the gated MuScriptor weights. Never echoed back.
+ */
+router.post('/hf-token', (req: Request, res: Response) => {
+  try {
+    const token = typeof req.body?.token === 'string' ? req.body.token : '';
+    setHfToken(token);
+    console.log(`[MidiStudio] HF token ${token.trim() ? 'saved' : 'cleared'}`);
+    res.json({ ok: true, hfTokenSet: !!token.trim() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /** POST /transcribe — queue a transcription job */
@@ -224,6 +245,7 @@ router.get('/jobs', (_req: Request, res: Response) => {
         durationSec: 0,
         createdAt: new Date(job.createdAt).toISOString(),
         error: job.error,
+        gated: job.gated,
       });
     }
     summaries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -246,7 +268,7 @@ router.get('/:jobId/progress', (req: Request, res: Response) => {
     res.status(404).json({ error: 'Job not found' });
     return;
   }
-  res.json({ status: job.status, progressLine: job.progressLine, error: job.error });
+  res.json({ status: job.status, progressLine: job.progressLine, error: job.error, gated: job.gated });
 });
 
 /** GET /:jobId/notes — parsed note data for the piano roll */

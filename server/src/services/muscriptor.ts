@@ -39,6 +39,37 @@ export function isInstalled(): boolean {
   return fs.existsSync(muscriptorBin());
 }
 
+// ── Hugging Face access token ────────────────────────────────────────────
+// The MuScriptor model weights are GATED on Hugging Face — users must
+// request access on the model page, then authenticate downloads. We store
+// an optional user-provided read token in data/muscriptor/hf_token and pass
+// it to the CLI via env. (A global `huggingface-cli login` also works, since
+// huggingface_hub reads its cached token regardless of venv.)
+
+const HF_TOKEN_PATH = path.join(MUSCRIPTOR_DIR, 'hf_token');
+
+export function getHfToken(): string | null {
+  try {
+    const t = fs.readFileSync(HF_TOKEN_PATH, 'utf-8').trim();
+    return t || null;
+  } catch { return null; }
+}
+
+export function setHfToken(token: string): void {
+  fs.mkdirSync(MUSCRIPTOR_DIR, { recursive: true });
+  const t = (token || '').trim();
+  if (!t) {
+    fs.rmSync(HF_TOKEN_PATH, { force: true });
+  } else {
+    fs.writeFileSync(HF_TOKEN_PATH, t, { encoding: 'utf-8' });
+  }
+}
+
+/** Heuristic: does this failure look like a gated-model / auth problem? */
+export function looksLikeGatedError(text: string): boolean {
+  return /gated|401|403|unauthorized|forbidden|restricted|access to model|awaiting a review|accept the conditions|not authenticated|invalid (user )?token|authentication/i.test(text);
+}
+
 // ── System Python discovery ──────────────────────────────────────────────
 
 interface PythonCandidate {
@@ -94,6 +125,7 @@ export interface MuscriptorStatus {
   installLine: string;
   installError?: string;
   pythonVersion: string | null;
+  hfTokenSet: boolean;
 }
 
 export function getStatus(): MuscriptorStatus {
@@ -104,6 +136,7 @@ export function getStatus(): MuscriptorStatus {
     installStep: installState.step,
     installLine: installState.lastLine,
     installError: installState.error,
+    hfTokenSet: getHfToken() !== null,
     // Probing system python is cheap-ish but not free; only do it when the
     // answer matters (i.e. not yet installed).
     pythonVersion: installed ? null : (findSystemPython()?.version ?? null),
@@ -200,7 +233,15 @@ export function transcribe(
 ): TranscribeHandle {
   const args = ['transcribe', audioPath, '-o', outMidPath, '--model', model];
   console.log(`[MidiStudio] Transcribe: muscriptor ${args.join(' ')}`);
-  const child = spawn(muscriptorBin(), args, { windowsHide: true });
+  // Weights are gated on HF — pass the stored token (both env names:
+  // huggingface_hub accepts HF_TOKEN, older versions HUGGING_FACE_HUB_TOKEN)
+  const hfToken = getHfToken();
+  const child = spawn(muscriptorBin(), args, {
+    windowsHide: true,
+    env: hfToken
+      ? { ...process.env, HF_TOKEN: hfToken, HUGGING_FACE_HUB_TOKEN: hfToken }
+      : undefined,
+  });
 
   const tail: string[] = [];
   let lastChunk = '';

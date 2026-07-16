@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Piano, FolderOpen, Search, X, Download, Trash2, Loader2, ChevronDown,
-  ChevronUp, AlertTriangle, CheckCircle2, ExternalLink, Music,
+  ChevronUp, AlertTriangle, CheckCircle2, ExternalLink, Music, KeyRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
@@ -18,7 +18,8 @@ import { songApi } from '../../services/api';
 import type { Song } from '../../types';
 import {
   getMidiStatus, startSetup, submitTranscription, getMidiProgress,
-  listMidiJobs, deleteMidiJob, getMidiFileUrl,
+  listMidiJobs, deleteMidiJob, getMidiFileUrl, saveHfToken,
+  HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
   type MidiStudioStatus, type MidiJobSummary, type MuscriptorModel,
 } from '../../services/midiStudioApi';
 import { PianoRoll } from './PianoRoll';
@@ -36,6 +37,11 @@ export const MidiStudio: React.FC = () => {
   // ── Environment / setup ──
   const [status, setStatus] = useState<MidiStudioStatus | null>(null);
   const [setupError, setSetupError] = useState('');
+
+  // ── HF access token (gated weights) ──
+  const [hfTokenInput, setHfTokenInput] = useState('');
+  const [hfTokenBusy, setHfTokenBusy] = useState(false);
+  const [hfTokenError, setHfTokenError] = useState('');
 
   // ── Source selection ──
   const [showLibrary, setShowLibrary] = useState(false);
@@ -80,7 +86,7 @@ export const MidiStudio: React.FC = () => {
         try {
           const p = await getMidiProgress(j.id);
           if (p.status === 'done' || p.status === 'failed' || p.status === 'cancelled') anyFinished = true;
-          return { ...j, status: p.status, error: p.error, progressLine: p.progressLine };
+          return { ...j, status: p.status, error: p.error, gated: p.gated, progressLine: p.progressLine };
         } catch { return j; }
       }));
       setJobs(updated);
@@ -141,6 +147,20 @@ export const MidiStudio: React.FC = () => {
     }
   };
 
+  const handleSaveHfToken = async (token: string) => {
+    setHfTokenError('');
+    setHfTokenBusy(true);
+    try {
+      await saveHfToken(token);
+      setHfTokenInput('');
+      refreshStatus();
+    } catch (err) {
+      setHfTokenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setHfTokenBusy(false);
+    }
+  };
+
   const handleDelete = async (jobId: string) => {
     try {
       await deleteMidiJob(jobId);
@@ -198,6 +218,61 @@ export const MidiStudio: React.FC = () => {
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* ── Hugging Face model access (weights are gated) ── */}
+        {status && (
+          <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-1 flex items-center gap-2">
+              <KeyRound size={15} className="text-purple-500 dark:text-purple-400" />
+              {t('midiStudio.hfAccessTitle')}
+              {status.hfTokenSet && (
+                <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 size={12} /> {t('midiStudio.hfTokenSaved')}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">{t('midiStudio.hfAccessBody')}</p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs">
+              {(Object.keys(HF_MODEL_URLS) as MuscriptorModel[]).map(m => (
+                <a key={m} href={HF_MODEL_URLS[m]} target="_blank" rel="noreferrer"
+                  className="flex items-center gap-1 text-purple-600 dark:text-purple-400 hover:underline capitalize">
+                  <ExternalLink size={11} /> {m}
+                </a>
+              ))}
+              <a href={HF_TOKEN_SETTINGS_URL} target="_blank" rel="noreferrer"
+                className="flex items-center gap-1 text-purple-600 dark:text-purple-400 hover:underline">
+                <ExternalLink size={11} /> {t('midiStudio.hfGetToken')}
+              </a>
+            </div>
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <input
+                type="password"
+                value={hfTokenInput}
+                onChange={e => setHfTokenInput(e.target.value)}
+                placeholder={t('midiStudio.hfTokenPlaceholder')}
+                className="flex-1 min-w-[220px] px-3 py-2 rounded-lg text-xs bg-zinc-100 dark:bg-black/30 border border-zinc-200 dark:border-white/10 text-zinc-900 dark:text-white placeholder-zinc-400 outline-none focus:border-purple-500/40"
+              />
+              <button
+                onClick={() => handleSaveHfToken(hfTokenInput)}
+                disabled={hfTokenBusy || !hfTokenInput.trim()}
+                className="px-4 py-2 rounded-lg text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {hfTokenBusy ? <Loader2 size={13} className="animate-spin" /> : t('midiStudio.hfTokenSave')}
+              </button>
+              {status.hfTokenSet && (
+                <button
+                  onClick={() => handleSaveHfToken('')}
+                  disabled={hfTokenBusy}
+                  className="px-3 py-2 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-red-500 border border-zinc-200 dark:border-white/10 transition-colors"
+                >
+                  {t('midiStudio.hfTokenClear')}
+                </button>
+              )}
+            </div>
+            {hfTokenError && <div className="mt-2 text-xs text-red-500 dark:text-red-400">{hfTokenError}</div>}
+            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">{t('midiStudio.hfTokenNote')}</p>
           </div>
         )}
 
@@ -325,7 +400,20 @@ export const MidiStudio: React.FC = () => {
                         </div>
                       )}
                       {job.status === 'failed' && (
-                        <div className="mt-0.5 text-[11px] text-red-500 dark:text-red-400 truncate">{job.error || t('midiStudio.status_failed')}</div>
+                        <>
+                          <div className="mt-0.5 text-[11px] text-red-500 dark:text-red-400 truncate">{job.error || t('midiStudio.status_failed')}</div>
+                          {job.gated && (
+                            <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
+                              <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
+                              <span>
+                                {t('midiStudio.gatedHint')}{' '}
+                                <a href={HF_MODEL_URLS[job.model]} target="_blank" rel="noreferrer" className="underline">
+                                  {t('midiStudio.gatedHintLink', { model: job.model })}
+                                </a>
+                              </span>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
