@@ -298,13 +298,13 @@ Generatively create new instrument stems for source tracks using the DiT engine:
 
 ## MIDI Studio
 
-Audio-to-MIDI transcription of any library track, powered by [MuScriptor](https://github.com/muscriptor/muscriptor) (Kyutai & Mirelo — code MIT, model weights CC BY-NC 4.0, non-commercial). **Transcription is being ported to a native C++/GGML engine binary (`ace-midi`) — GPU-accelerated, zero Python. Until the port lands, the transcribe action is disabled; history, previews and downloads remain live.**
+Audio-to-MIDI transcription on HOT-Step's **native `ace-midi` engine** — a C++/GGML port of [MuScriptor](https://github.com/muscriptor/muscriptor) (Kyutai & Mirelo — code MIT, model weights CC BY-NC 4.0, non-commercial), validated byte-for-byte against the reference implementation. GPU-accelerated (a 3.5-min track transcribes in ~50 s on an RTX 5090), zero Python.
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Instrument Transcription** | Convert any track from the library into a multi-track `.mid` file — drums, bass, guitar, keys, and more (34 instrument groups + drums). *(native engine port in progress)* |
-| **Model Choice** | `small` (103M), `medium` (307M), or `large` (1.4B). The weights are **gated** on Hugging Face: the in-app Model Access card links to each model page to request access (free) and stores your HF read token locally for the download. |
-| **Live Piano Roll** *(planned with the port)* | Streaming transcription — notes appear on the piano roll and are playable in-browser while the track is still transcribing, matching the upstream demo experience. |
+| **Multi-Instrument Transcription** | Convert any library track — or a WAV/MP3 uploaded from your PC — into a multi-track `.mid` file: drums, bass, guitar, keys, and more (34 instrument groups + drums). |
+| **Model Choice + In-App Weight Download** | `small` (103M), `medium` (307M), or `large` (1.4B). The weights are **gated** on Hugging Face: request access via the in-app links (free), save your read token, and download each model with live progress — all inside MIDI Studio. |
+| **Live Event Stream** | The engine streams note events over SSE as it transcribes (chunk progress + notes-so-far in the UI; live playable piano roll planned). |
 | **Piano-Roll Preview** | Built-in SVG piano roll with per-channel instrument coloring and GM family legend, rendered from a native MIDI parser. |
 | **History** | Completed transcriptions persist to `data/midi/` and survive restarts. |
 

@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "audio-io.h"
 #include "backend.h"
 #include "ggml.h"
 #include "safetensors.h"
@@ -1445,10 +1446,37 @@ static int run_dump_logits(MidiModel * m, const std::string & vdir, const std::s
     return 0;
 }
 
-// Transcribe a raw f32 mono 16 kHz file to MIDI (+ optional JSONL streaming)
-static int run_transcribe_raw(MidiModel * m, const std::string & wav_path,
-                              const std::string & out_path, bool jsonl) {
-    std::vector<float> wav = read_f32_file(wav_path);
+// Load WAV/MP3 (any rate, mono/stereo) as mono float32 @ 16 kHz —
+// matches the Python pipeline (channel mean + resample).
+static std::vector<float> load_audio_16k_mono(const std::string & path) {
+    int T = 0, sr = 0;
+    float * planar = audio_read(path.c_str(), &T, &sr);  // [L: T][R: T]
+    if (!planar || T <= 0) {
+        fprintf(stderr, "[ace-midi] cannot read audio: %s\n", path.c_str());
+        exit(1);
+    }
+    std::vector<float> mono((size_t) T);
+    for (int i = 0; i < T; i++) mono[i] = 0.5f * (planar[i] + planar[(size_t) T + i]);
+    free(planar);
+    if (sr != MIDI_SAMPLE_RATE) {
+        int n_out = 0;
+        float * r = audio_resample(mono.data(), T, sr, MIDI_SAMPLE_RATE, 1, &n_out);
+        if (!r || n_out <= 0) {
+            fprintf(stderr, "[ace-midi] resample %d -> %d failed\n", sr, MIDI_SAMPLE_RATE);
+            exit(1);
+        }
+        mono.assign(r, r + n_out);
+        free(r);
+    }
+    fprintf(stderr, "[ace-midi] audio: %.1f s @ %d Hz -> %zu samples @ 16 kHz\n",
+            (double) T / sr, sr, mono.size());
+    return mono;
+}
+
+// Transcribe an audio file (WAV/MP3, or raw f32 mono 16 kHz with is_raw)
+static int run_transcribe(MidiModel * m, const std::string & audio_path,
+                          const std::string & out_path, bool jsonl, bool is_raw) {
+    std::vector<float> wav = is_raw ? read_f32_file(audio_path) : load_audio_16k_mono(audio_path);
     TranscribeResult   res = transcribe_wav(m, wav.data(), (int) wav.size(), jsonl);
     std::vector<uint8_t> mid = write_midi(res.notes);
     FILE * f = fopen(out_path.c_str(), "wb");
@@ -1470,17 +1498,19 @@ static int run_transcribe_raw(MidiModel * m, const std::string & wav_path,
 
 int main(int argc, char ** argv) {
     std::string model_dir, validate_dir, validate_decode_dir, validate_midi_dir;
-    std::string raw_path, out_path = "out.mid";
+    std::string audio_path, out_path = "out.mid";
     std::string dump_dir;
     std::string device = "auto";
-    bool   jsonl = false;
-    double tol   = 1e-3;
+    bool   jsonl  = false;
+    bool   is_raw = false;
+    double tol    = 1e-3;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model_dir = argv[++i];
         else if (!strcmp(argv[i], "--validate") && i + 1 < argc) validate_dir = argv[++i];
         else if (!strcmp(argv[i], "--validate-decode") && i + 1 < argc) validate_decode_dir = argv[++i];
         else if (!strcmp(argv[i], "--validate-midi") && i + 1 < argc) validate_midi_dir = argv[++i];
-        else if (!strcmp(argv[i], "--transcribe-raw") && i + 1 < argc) raw_path = argv[++i];
+        else if (!strcmp(argv[i], "--transcribe") && i + 1 < argc) audio_path = argv[++i];
+        else if (!strcmp(argv[i], "--transcribe-raw") && i + 1 < argc) { audio_path = argv[++i]; is_raw = true; }
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc) dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--jsonl")) jsonl = true;
@@ -1492,7 +1522,8 @@ int main(int argc, char ** argv) {
                 "ace-midi (Phase 3) — MuScriptor GGML port\n"
                 "usage: ace-midi --model <dir> <mode>\n"
                 "  modes:\n"
-                "    --transcribe-raw <f32.bin> [--out out.mid] [--jsonl]   raw mono 16 kHz f32 -> MIDI\n"
+                "    --transcribe <audio.wav|mp3> [--out out.mid] [--jsonl]  audio -> MIDI\n"
+                "    --transcribe-raw <f32.bin>   same, raw mono 16 kHz f32 input\n"
                 "    --validate <dir>          logit parity vs oracle [--tol <x>]\n"
                 "    --validate-decode <dir>   mel + greedy token parity vs oracle\n"
                 "    --validate-midi <dir>     multi-chunk events + MIDI bytes vs oracle\n"
@@ -1519,7 +1550,7 @@ int main(int argc, char ** argv) {
     if (!validate_decode_dir.empty()) return run_validate_decode(&m, validate_decode_dir);
     if (!validate_midi_dir.empty()) return run_validate_midi(&m, validate_midi_dir);
     if (!dump_dir.empty()) return run_dump_logits(&m, dump_dir, out_path);
-    if (!raw_path.empty()) return run_transcribe_raw(&m, raw_path, out_path, jsonl);
+    if (!audio_path.empty()) return run_transcribe(&m, audio_path, out_path, jsonl, is_raw);
     fprintf(stderr, "[ace-midi] no mode given\n");
     return 2;
 }

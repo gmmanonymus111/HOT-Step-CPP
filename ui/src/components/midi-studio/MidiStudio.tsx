@@ -3,16 +3,15 @@
 // Pick any track from the library, transcribe it to multi-instrument MIDI,
 // preview the result as a piano roll, and download the .mid.
 //
-// Transcription is powered by MuScriptor (github.com/muscriptor/muscriptor),
-// developed by Kyutai & Mirelo — full attribution in the footer card.
-// The inference engine is being ported to native C++ (ace-midi, see
-// docs/plans/muscriptor-cpp-port.md); until it lands the server reports
-// enginePending and the transcribe action is disabled.
+// Transcription runs on the NATIVE ace-midi engine (a GGML port of
+// MuScriptor by Kyutai & Mirelo — full attribution in the footer card).
+// Model weights are gated on Hugging Face and downloaded in-app with the
+// user's read token.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Piano, FolderOpen, Search, X, Download, Trash2, ChevronDown,
-  ChevronUp, CheckCircle2, ExternalLink, Music, KeyRound, Loader2, Hammer,
+  Piano, FolderOpen, Search, X, Download, Trash2, ChevronDown, ChevronUp,
+  CheckCircle2, ExternalLink, Music, KeyRound, Loader2, AlertTriangle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
@@ -20,7 +19,8 @@ import { songApi } from '../../services/api';
 import type { Song } from '../../types';
 import {
   getMidiStatus, submitTranscription, listMidiJobs, deleteMidiJob,
-  getMidiFileUrl, saveHfToken, HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
+  getMidiFileUrl, saveHfToken, startModelDownload, getMidiProgress,
+  HF_MODEL_URLS, HF_TOKEN_SETTINGS_URL,
   type MidiStudioStatus, type MidiJobSummary, type MuscriptorModel,
 } from '../../services/midiStudioApi';
 import { PianoRoll } from './PianoRoll';
@@ -56,6 +56,7 @@ export const MidiStudio: React.FC = () => {
   const [jobs, setJobs] = useState<MidiJobSummary[]>([]);
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState('');
+  const pollRef = useRef<number | null>(null);
 
   const refreshStatus = useCallback(() => {
     getMidiStatus().then(setStatus).catch(() => {});
@@ -65,6 +66,39 @@ export const MidiStudio: React.FC = () => {
   }, []);
 
   useEffect(() => { refreshStatus(); refreshJobs(); }, [refreshStatus, refreshJobs]);
+
+  // Poll status while any model download is in flight
+  const anyDownloading = !!status && Object.values(status.models).some(ms => ms.downloading);
+  useEffect(() => {
+    if (!anyDownloading) return;
+    const iv = window.setInterval(refreshStatus, 1500);
+    return () => window.clearInterval(iv);
+  }, [anyDownloading, refreshStatus]);
+
+  // Poll progress of active transcription jobs
+  const hasActiveJobs = jobs.some(j => j.status === 'queued' || j.status === 'transcribing');
+  useEffect(() => {
+    if (!hasActiveJobs) { if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; } return; }
+    pollRef.current = window.setInterval(async () => {
+      let anyFinished = false;
+      const updated = await Promise.all(jobs.map(async (j) => {
+        if (j.status !== 'queued' && j.status !== 'transcribing') return j;
+        try {
+          const p = await getMidiProgress(j.id);
+          if (p.status === 'done' || p.status === 'failed' || p.status === 'cancelled') anyFinished = true;
+          return {
+            ...j, status: p.status, error: p.error, gated: p.gated,
+            noteCount: p.noteCount ?? j.noteCount,
+            chunksDone: p.chunksDone, chunksTotal: p.chunksTotal,
+          };
+        } catch { return j; }
+      }));
+      setJobs(updated);
+      if (anyFinished) refreshJobs();
+    }, 1500);
+    return () => { if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActiveJobs, jobs.map(j => `${j.id}:${j.status}`).join(',')]);
 
   // Load library songs when picker opens
   useEffect(() => {
@@ -90,6 +124,34 @@ export const MidiStudio: React.FC = () => {
     setShowLibrary(false);
     setSubmitError('');
   }, []);
+
+  // ── Upload a track from the user's PC (same endpoint Repaint uses) ──
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const handleFileUpload = useCallback(async (file: File) => {
+    setSubmitError('');
+    setIsUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('audio', file);
+      const res = await fetch('/api/upload/audio', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const { audio_url } = await res.json();
+      setSourceAudioUrl(audio_url);
+      setSourceName(file.name);
+      setSourceSongId(undefined);
+      setShowLibrary(false);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsUploading(false);
+    }
+  }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFileUpload(file);
+  }, [handleFileUpload]);
 
   const handleModelChange = (m: MuscriptorModel) => {
     setModel(m);
@@ -130,7 +192,11 @@ export const MidiStudio: React.FC = () => {
     refreshJobs();
   };
 
-  const enginePending = status?.enginePending ?? true;
+  const engineMissing = !!status && !status.engineAvailable;
+  const modelState = status?.models?.[model];
+  const canTranscribe = !!status?.engineAvailable && !!modelState?.downloaded && !!sourceAudioUrl && !isUploading;
+
+  const fmtGB = (b: number) => `${(b / 1e9).toFixed(2)} GB`;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -145,13 +211,13 @@ export const MidiStudio: React.FC = () => {
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">{t('midiStudio.subtitle')}</p>
         </div>
 
-        {/* ── Engine port banner ── */}
-        {enginePending && (
-          <div className="rounded-xl border border-sky-300/60 dark:border-sky-500/20 bg-sky-50 dark:bg-sky-500/5 p-4 flex items-start gap-3">
-            <Hammer size={18} className="text-sky-500 mt-0.5 flex-shrink-0" />
+        {/* ── Engine missing banner (broken install / old build) ── */}
+        {engineMissing && (
+          <div className="rounded-xl border border-red-300/60 dark:border-red-500/20 bg-red-50 dark:bg-red-500/5 p-4 flex items-start gap-3">
+            <AlertTriangle size={18} className="text-red-500 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-1">{t('midiStudio.portTitle')}</div>
-              {t('midiStudio.portBody')}
+              <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-1">{t('midiStudio.engineMissingTitle')}</div>
+              {t('midiStudio.engineMissingBody')}
             </div>
           </div>
         )}
@@ -212,10 +278,14 @@ export const MidiStudio: React.FC = () => {
         )}
 
         {/* ── New transcription ── */}
-        <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4">
+        <div
+          className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4"
+          onDragOver={e => e.preventDefault()}
+          onDrop={handleDrop}
+        >
           <div className="text-sm font-semibold text-zinc-900 dark:text-white mb-3">{t('midiStudio.newTranscription')}</div>
 
-          {/* Source picker */}
+          {/* Source picker: library track or a file from the user's PC */}
           <div className="flex items-center gap-3 flex-wrap">
             <button
               onClick={() => setShowLibrary(v => !v)}
@@ -223,6 +293,21 @@ export const MidiStudio: React.FC = () => {
             >
               <FolderOpen size={14} /> {t('midiStudio.chooseFromLibrary')}
             </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-2 bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-700 dark:text-zinc-300 disabled:opacity-50 transition-colors"
+            >
+              {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Music size={14} />}
+              {t('midiStudio.uploadFile')}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".wav,.mp3,audio/wav,audio/mpeg"
+              className="hidden"
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }}
+            />
             {sourceName ? (
               <span className="flex items-center gap-2 text-sm text-zinc-800 dark:text-zinc-200">
                 <Music size={14} className="text-purple-500 dark:text-purple-400" />
@@ -269,25 +354,61 @@ export const MidiStudio: React.FC = () => {
             </div>
           )}
 
-          {/* Model select */}
+          {/* Model select + per-model weight download */}
           <div className="mt-4">
             <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2">{t('midiStudio.model')}</div>
             <div className="flex gap-2 flex-wrap">
-              {MODEL_INFO.map(mi => (
-                <button
-                  key={mi.id}
-                  onClick={() => handleModelChange(mi.id)}
-                  className={`px-3 py-2 rounded-lg text-xs border transition-colors ${
-                    model === mi.id
-                      ? 'border-purple-500/60 bg-purple-500/10 text-purple-600 dark:text-purple-300'
-                      : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-white/20'
-                  }`}
-                >
-                  <span className="font-semibold capitalize">{mi.id}</span>
-                  <span className="opacity-60 ml-1.5">{mi.params}</span>
-                  <span className="block text-[10px] opacity-60 mt-0.5">{t(`midiStudio.model_${mi.id}`)}</span>
-                </button>
-              ))}
+              {MODEL_INFO.map(mi => {
+                const ms = status?.models?.[mi.id];
+                const pct = ms?.downloading && ms.totalBytes > 0
+                  ? Math.round(100 * ms.receivedBytes / ms.totalBytes) : 0;
+                return (
+                  <div
+                    key={mi.id}
+                    onClick={() => handleModelChange(mi.id)}
+                    className={`px-3 py-2 rounded-lg text-xs border cursor-pointer transition-colors min-w-[150px] ${
+                      model === mi.id
+                        ? 'border-purple-500/60 bg-purple-500/10 text-purple-600 dark:text-purple-300'
+                        : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-white/20'
+                    }`}
+                  >
+                    <span className="font-semibold capitalize">{mi.id}</span>
+                    <span className="opacity-60 ml-1.5">{mi.params}</span>
+                    <span className="block text-[10px] opacity-60 mt-0.5">{t(`midiStudio.model_${mi.id}`)}</span>
+                    {ms?.downloaded ? (
+                      <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 mt-1">
+                        <CheckCircle2 size={10} /> {t('midiStudio.modelReady')} ({fmtGB(ms.sizeBytes)})
+                      </span>
+                    ) : ms?.downloading ? (
+                      <span className="block mt-1">
+                        <span className="flex items-center gap-1 text-[10px] text-purple-500">
+                          <Loader2 size={10} className="animate-spin" />
+                          {t('midiStudio.downloading')} {pct}% ({fmtGB(ms.receivedBytes)}{ms.totalBytes ? ` / ${fmtGB(ms.totalBytes)}` : ''})
+                        </span>
+                        <span className="block h-1 mt-1 rounded bg-zinc-200 dark:bg-white/10 overflow-hidden">
+                          <span className="block h-full bg-purple-500 transition-all" style={{ width: `${pct}%` }} />
+                        </span>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          startModelDownload(mi.id).then(refreshStatus).catch(err =>
+                            setSubmitError(err instanceof Error ? err.message : String(err)));
+                        }}
+                        className="flex items-center gap-1 text-[10px] text-purple-600 dark:text-purple-400 hover:underline mt-1"
+                      >
+                        <Download size={10} /> {t('midiStudio.downloadModel')}
+                      </button>
+                    )}
+                    {ms?.error && !ms.downloading && (
+                      <span className="block text-[10px] text-red-500 dark:text-red-400 mt-1 max-w-[200px]">
+                        {ms.gated ? t('midiStudio.gatedHint') + ' ' : ''}{ms.error.slice(0, 120)}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">{t('midiStudio.firstRunNote')}</p>
           </div>
@@ -295,13 +416,15 @@ export const MidiStudio: React.FC = () => {
           <div className="mt-4 flex items-center gap-3">
             <button
               onClick={handleTranscribe}
-              disabled={enginePending || !sourceAudioUrl}
-              title={enginePending ? t('midiStudio.portTitle') : undefined}
+              disabled={!canTranscribe}
+              title={!modelState?.downloaded ? t('midiStudio.modelNotDownloaded') : undefined}
               className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
             >
               <Piano size={16} /> {t('midiStudio.transcribe')}
             </button>
-            {enginePending && <span className="text-xs text-sky-600 dark:text-sky-400">{t('midiStudio.portShort')}</span>}
+            {!modelState?.downloaded && !engineMissing && status && (
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">{t('midiStudio.modelNotDownloaded')}</span>
+            )}
             {submitError && <span className="text-xs text-red-500 dark:text-red-400">{submitError}</span>}
           </div>
         </div>
@@ -313,47 +436,88 @@ export const MidiStudio: React.FC = () => {
             <div className="text-xs text-zinc-400 dark:text-zinc-500 py-2">{t('midiStudio.noJobs')}</div>
           )}
           <div className="flex flex-col gap-2">
-            {jobs.map(job => (
-              <div key={job.id} className="rounded-lg border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-black/20 px-3 py-2.5">
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{job.sourceFileName}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 capitalize flex-shrink-0">{job.model}</span>
+            {jobs.map(job => {
+              const running = job.status === 'queued' || job.status === 'transcribing';
+              const pct = job.chunksTotal ? Math.round(100 * (job.chunksDone || 0) / job.chunksTotal) : 0;
+              return (
+                <div key={job.id} className="rounded-lg border border-zinc-200 dark:border-white/5 bg-zinc-50 dark:bg-black/20 px-3 py-2.5">
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{job.sourceFileName}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 capitalize flex-shrink-0">{job.model}</span>
+                      </div>
+                      {running && (
+                        <div className="mt-1">
+                          <span className="flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                            <Loader2 size={11} className="animate-spin flex-shrink-0" />
+                            {job.status === 'queued'
+                              ? t('midiStudio.statusQueued')
+                              : t('midiStudio.statusTranscribing', { done: job.chunksDone || 0, total: job.chunksTotal || 0, notes: job.noteCount })}
+                          </span>
+                          {job.status === 'transcribing' && (
+                            <span className="block h-1 mt-1 rounded bg-zinc-200 dark:bg-white/10 overflow-hidden">
+                              <span className="block h-full bg-purple-500 transition-all" style={{ width: `${pct}%` }} />
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {job.status === 'done' && (
+                        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                          <CheckCircle2 size={11} />
+                          {t('midiStudio.doneSummary', { notes: job.noteCount, seconds: Math.round(job.durationSec) })}
+                        </div>
+                      )}
+                      {job.status === 'failed' && (
+                        <>
+                          <div className="mt-0.5 text-[11px] text-red-500 dark:text-red-400 truncate">{job.error || t('midiStudio.statusFailed')}</div>
+                          {job.gated && (
+                            <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
+                              <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
+                              <span>
+                                {t('midiStudio.gatedHint')}{' '}
+                                <a href={HF_MODEL_URLS[job.model]} target="_blank" rel="noreferrer" className="underline">
+                                  {t('midiStudio.gatedHintLink', { model: job.model })}
+                                </a>
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
-                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
-                      <CheckCircle2 size={11} />
-                      {t('midiStudio.doneSummary', { notes: job.noteCount, seconds: Math.round(job.durationSec) })}
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {job.status === 'done' && (
+                        <>
+                          <button
+                            onClick={() => setExpandedJob(e => e === job.id ? null : job.id)}
+                            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                            title={t('midiStudio.preview')}
+                          >
+                            {expandedJob === job.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                          </button>
+                          <a
+                            href={getMidiFileUrl(job.id)}
+                            className="p-1.5 rounded-md text-zinc-500 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                            title={t('midiStudio.downloadMid')}
+                            download
+                          >
+                            <Download size={15} />
+                          </a>
+                        </>
+                      )}
+                      <button
+                        onClick={() => handleDelete(job.id)}
+                        className="p-1.5 rounded-md text-zinc-500 hover:text-red-500 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                        title={running ? t('midiStudio.cancel') : t('midiStudio.delete')}
+                      >
+                        {running ? <X size={15} /> : <Trash2 size={15} />}
+                      </button>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <button
-                      onClick={() => setExpandedJob(e => e === job.id ? null : job.id)}
-                      className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                      title={t('midiStudio.preview')}
-                    >
-                      {expandedJob === job.id ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                    </button>
-                    <a
-                      href={getMidiFileUrl(job.id)}
-                      className="p-1.5 rounded-md text-zinc-500 hover:text-purple-600 dark:hover:text-purple-400 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                      title={t('midiStudio.downloadMid')}
-                      download
-                    >
-                      <Download size={15} />
-                    </a>
-                    <button
-                      onClick={() => handleDelete(job.id)}
-                      className="p-1.5 rounded-md text-zinc-500 hover:text-red-500 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                      title={t('midiStudio.delete')}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
+                  {expandedJob === job.id && job.status === 'done' && <PianoRoll jobId={job.id} />}
                 </div>
-                {expandedJob === job.id && <PianoRoll jobId={job.id} />}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 

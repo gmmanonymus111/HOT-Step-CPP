@@ -9,11 +9,30 @@ const API_BASE = '/api/midi-studio';
 
 export type MuscriptorModel = 'small' | 'medium' | 'large';
 
+export interface ModelState {
+  downloaded: boolean;
+  sizeBytes: number;
+  downloading: boolean;
+  receivedBytes: number;
+  totalBytes: number;
+  error?: string;
+  gated?: boolean;
+}
+
 export interface MidiStudioStatus {
-  /** True while the native ace-midi engine port is still in development */
-  enginePending: boolean;
+  /** ace-midi engine binary present next to ace-server */
+  engineAvailable: boolean;
   hfTokenSet: boolean;
-  models: MuscriptorModel[];
+  models: Record<MuscriptorModel, ModelState>;
+}
+
+export interface MidiJobProgress {
+  status: 'queued' | 'transcribing' | 'done' | 'failed' | 'cancelled';
+  chunksDone?: number;
+  chunksTotal?: number;
+  noteCount?: number;
+  error?: string;
+  gated?: boolean;
 }
 
 export interface MidiJobSummary {
@@ -28,8 +47,9 @@ export interface MidiJobSummary {
   error?: string;
   /** Failure looks like gated-model / HF auth trouble */
   gated?: boolean;
-  /** Last progress line — only present client-side while polling */
-  progressLine?: string;
+  /** chunk progress — present on in-flight jobs */
+  chunksDone?: number;
+  chunksTotal?: number;
 }
 
 /**
@@ -98,6 +118,21 @@ export async function saveHfToken(token: string): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
   }), 'Save token');
+}
+
+/** Begin downloading a model's gated weights. Poll getMidiStatus() for progress. */
+export async function startModelDownload(model: MuscriptorModel): Promise<void> {
+  await jsonOrThrow(await fetch(`${API_BASE}/models/${model}/download`, { method: 'POST' }), 'Download');
+}
+
+/** Poll a transcription job's progress. */
+export async function getMidiProgress(jobId: string): Promise<MidiJobProgress> {
+  return jsonOrThrow(await fetch(`${API_BASE}/${jobId}/progress`), 'Progress');
+}
+
+/** SSE URL streaming live note events for an in-flight job (Phase 6 UI). */
+export function getMidiStreamUrl(jobId: string): string {
+  return `${API_BASE}/${jobId}/stream`;
 }
 
 /** Queue a transcription job. Returns the job ID. */
