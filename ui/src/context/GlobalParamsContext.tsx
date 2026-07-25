@@ -113,6 +113,9 @@ export interface GlobalParams {
   lmCfgScale: number; setLmCfgScale: (v: number) => void;
   lmTopK: number; setLmTopK: (v: number) => void;
   lmTopP: number; setLmTopP: (v: number) => void;
+  // Anti-loop repetition penalty on code sampling (local HOT-Step feature)
+  lmRepPenalty: number; setLmRepPenalty: (v: number) => void;
+  lmRepWindow: number; setLmRepWindow: (v: number) => void;
   lmNegativePrompt: string; setLmNegativePrompt: (v: string) => void;
   lmCodesStrength: number; setLmCodesStrength: (v: number) => void;
   // Post-processing

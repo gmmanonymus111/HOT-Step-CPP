@@ -23,6 +23,7 @@
 #endif
 
 #include <algorithm>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -351,6 +352,32 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
     return results;
 }
 
+// Windowed repetition penalty over recently emitted audio codes (HF-style:
+// positive logits divided, negative multiplied). Slot 0 (im_end) is never
+// touched. Music codes legitimately repeat (sustained textures), so the
+// penalty is gentle and windowed — its job is to make degenerate short-cycle
+// loops self-extinguish (each repeat accumulates penalty on the loop's few
+// codes until an escape token wins), not to forbid repetition outright.
+// Loops became reachable once planner-LM adapters started sharpening the
+// code distribution toward one artist's statistics.
+static void apply_code_rep_penalty(float *                  compact_logits,
+                                   const std::vector<int> & codes,
+                                   float                    penalty,
+                                   int                      window) {
+    if (penalty <= 1.0f || codes.empty()) {
+        return;
+    }
+    size_t start = codes.size() > (size_t) window ? codes.size() - (size_t) window : 0;
+    std::unordered_set<int> seen;
+    for (size_t i = start; i < codes.size(); i++) {
+        seen.insert(codes[i]);
+    }
+    for (int c : seen) {
+        float & l = compact_logits[c + 1];  // compact layout: [im_end, code_0, ...]
+        l = l > 0.0f ? l / penalty : l * penalty;
+    }
+}
+
 // Batched Phase 2: N sequences with potentially different prompts.
 // aces.size() == N: each element gets its own lyrics/metadata.
 // aces.size() == 1: single prompt replicated for all N (prefill once, copy KV).
@@ -368,7 +395,9 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                                                  const char *                   negative_prompt,
                                                  bool                           use_batch_cfg,
                                                  bool (*cancel)(void *),
-                                                 void * cancel_data) {
+                                                 void * cancel_data,
+                                                 float  rep_penalty = 1.0f,
+                                                 int    rep_window  = 64) {
     int  V             = lm_vocab_size(m);
     bool use_cfg       = cfg_scale > 1.0f;
     bool shared_prompt = ((int) aces.size() == 1);
@@ -593,6 +622,9 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                 compact_logits[c + 1] = lc[code_offset + c];
             }
 
+            // Anti-loop: windowed repetition penalty over this sequence's recent codes
+            apply_code_rep_penalty(compact_logits.data(), seqs[orig_i].audio_codes, rep_penalty, rep_window);
+
             // CPU samples instantly because it only has to sort ~2049 items instead of 150,000+
             int compact_tok =
                 sample_top_k_p(compact_logits.data(), compact_V, temperature, top_p, top_k, seqs[orig_i].rng);
@@ -663,7 +695,9 @@ static std::vector<std::string> run_phase2_trtllm(
     float                  cfg_cutoff_ratio,
     const char*            negative_prompt,
     bool (*cancel)(void*),
-    void* cancel_data
+    void* cancel_data,
+    float rep_penalty = 1.0f,
+    int   rep_window  = 64
 ) {
     int  V             = LM_TRTLLM_VOCAB;
     bool use_cfg       = cfg_scale > 1.0f;
@@ -750,6 +784,9 @@ static std::vector<std::string> run_phase2_trtllm(
         for (int c = 0; c < AUDIO_CODE_COUNT; c++) {
             compact[c + 1] = logits_cond[AUDIO_CODE_BASE + c];
         }
+
+        // Anti-loop: windowed repetition penalty over recent codes
+        apply_code_rep_penalty(compact.data(), audio_codes, rep_penalty, rep_window);
 
         int compact_tok = sample_top_k_p(compact.data(), compact_V, temperature, top_p, top_k, rng);
         int tok = (compact_tok == 0) ? TOKEN_IM_END : (AUDIO_CODE_BASE + compact_tok - 1);
@@ -1532,7 +1569,8 @@ int ace_lm_generate(AceLm *            ctx,
             const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
             batch_codes = run_phase2_trtllm(&ctx->lm_trtllm, *bpe, aces[0],
                                              temperature, top_p, top_k, seed, cfg_scale,
-                                             req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data);
+                                             req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data,
+                                             req->lm_rep_penalty, req->lm_rep_window);
         } else
 #endif
         // Speculative decode: draft model available + batch_size=1
@@ -1544,7 +1582,8 @@ int ace_lm_generate(AceLm *            ctx,
         } else {
             batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
                                            req->lm_cfg_cutoff_ratio,
-                                           neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
+                                           neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data,
+                                           req->lm_rep_penalty, req->lm_rep_window);
         }
         if (batch_codes.empty()) {
             return -1;

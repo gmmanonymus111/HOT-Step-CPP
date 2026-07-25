@@ -33,6 +33,8 @@ void request_init(AceRequest * r) {
     r->lm_cfg_cutoff_ratio  = 1.0f;
     r->lm_top_p             = 0.9f;
     r->lm_top_k             = 0;
+    r->lm_rep_penalty       = 1.0f;
+    r->lm_rep_window        = 64;
     r->lm_negative_prompt   = "";
     r->lm_seed              = -1;
     r->use_cot_caption      = true;
@@ -243,6 +245,12 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "lm_top_p")) && yyjson_is_num(v)) {
         r->lm_top_p = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_rep_penalty")) && yyjson_is_num(v)) {
+        r->lm_rep_penalty = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_rep_window")) && yyjson_is_num(v)) {
+        r->lm_rep_window = (int) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "guidance_scale")) && yyjson_is_num(v)) {
         r->guidance_scale = (float) yyjson_get_num(v);
@@ -502,6 +510,12 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->lm_cfg_cutoff_ratio != def.lm_cfg_cutoff_ratio) {
         yyjson_mut_obj_add_real(doc, root, "lm_cfg_cutoff_ratio", r->lm_cfg_cutoff_ratio);
+    }
+    if (all || r->lm_rep_penalty != def.lm_rep_penalty) {
+        yyjson_mut_obj_add_real(doc, root, "lm_rep_penalty", r->lm_rep_penalty);
+    }
+    if (all || r->lm_rep_window != def.lm_rep_window) {
+        yyjson_mut_obj_add_int(doc, root, "lm_rep_window", r->lm_rep_window);
     }
     if (all || r->lm_top_p != def.lm_top_p) {
         yyjson_mut_obj_add_real(doc, root, "lm_top_p", r->lm_top_p);

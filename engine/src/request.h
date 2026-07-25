@@ -60,6 +60,11 @@ struct AceRequest {
     float       lm_cfg_cutoff_ratio; // 1.0 (1.0 = full CFG, 0.5 = CFG for first 50% of tokens)
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
+    float       lm_rep_penalty;      // 1.0 = off. HF-style windowed repetition
+                                     // penalty over recently emitted audio codes;
+                                     // breaks degenerate code loops (adapters
+                                     // sharpen the code distribution). ~1.05-1.15.
+    int         lm_rep_window;       // 64 codes (~13 s at 5 Hz) penalty lookback
     std::string lm_negative_prompt;  // ""
     int64_t     lm_seed;             // -1 = random. mt19937 consumes the low 32
                                      // bits. Same int64_t storage trick as seed

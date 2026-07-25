@@ -60,6 +60,16 @@ export const LmThinkingDropdown: React.FC = () => {
       <Slider label="Top-P" value={gp.lmTopP}
         onChange={gp.setLmTopP} min={0} max={1} step={0.01} showInput />
 
+      {/* Anti-loop: windowed repetition penalty on audio-code sampling.
+          1.0 = off. Breaks the stuck-loop failure mode (planner adapters
+          sharpen the code distribution into repetition attractors). */}
+      <Slider label="Repetition Penalty" value={gp.lmRepPenalty}
+        onChange={gp.setLmRepPenalty} min={1.0} max={1.5} step={0.01} showInput />
+      {gp.lmRepPenalty > 1.0 && (
+        <Slider label="Rep. Window (codes)" value={gp.lmRepWindow}
+          onChange={gp.setLmRepWindow} min={8} max={256} step={8} showInput />
+      )}
+
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('lm.negativePrompt')}</label>
         <input className={inputClasses} value={gp.lmNegativePrompt}

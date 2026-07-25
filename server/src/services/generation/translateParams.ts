@@ -93,6 +93,9 @@ export function translateParams(params: any): AceRequest {
   if (params.lmCfgScale !== undefined) req.lm_cfg_scale = params.lmCfgScale;
   if (params.lmTopP !== undefined) req.lm_top_p = params.lmTopP;
   if (params.lmTopK !== undefined) req.lm_top_k = params.lmTopK;
+  // Anti-loop repetition penalty on code sampling (local HOT-Step feature)
+  if (params.lmRepPenalty !== undefined) req.lm_rep_penalty = params.lmRepPenalty;
+  if (params.lmRepWindow !== undefined) req.lm_rep_window = params.lmRepWindow;
   if (params.negative_prompt) req.negative_prompt = params.negative_prompt;
   if (params.lmNegativePrompt) req.lm_negative_prompt = params.lmNegativePrompt;
 
