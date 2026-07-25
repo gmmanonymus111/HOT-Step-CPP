@@ -309,9 +309,11 @@ export const adapterApi = {
   /** Scan folder for .safetensors files */
   scan: (folder: string) =>
     post<{ files: AdapterFile[] }>('/adapters/scan', { folder }),
-  /** Planner-LM adapters from the adapters root's lm/ subtree (local HOT-Step feature) */
-  lmList: () =>
-    get<{ root: string; adapters: { name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }[] }>('/adapters/lm'),
+  /** Planner-LM adapters (local HOT-Step feature). Scans `folder` when given,
+   *  else the adapters root's lm/ subtree. */
+  lmList: (folder?: string) =>
+    get<{ root: string; adapters: { name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }[] }>(
+      `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 };
 
 // ── VST3 Post-Processing ────────────────────────────────────

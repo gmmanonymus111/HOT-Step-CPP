@@ -80,6 +80,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   rebaseSource: readKey("hs-rebaseSource", ''),
   rebaseBeta: readKey("hs-rebaseBeta", 0.75),
   adapterFolder: readKey("hs-adapterFolder", ''),
+  // '' = server default (hot-step-cpp/adapters/lm). Point at your archive to
+  // pick planner adapters from there, like the DiT adapter folder.
+  lmAdapterFolder: readKey("hs-lmAdapterFolder", ''),
   advancedAdapters: readKey("hs-advancedAdapters", false),
   adaptersOpen: readKey("hs-adaptersOpen", false),
   inferenceSteps: readKey("hs-inferenceSteps", 12),
@@ -242,6 +245,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setRebaseSource: (v: any) => { set({ rebaseSource: v }); writeKey("hs-rebaseSource", v); },
   setRebaseBeta: (v: any) => { set({ rebaseBeta: v }); writeKey("hs-rebaseBeta", v); },
   setAdapterFolder: (v: any) => { set({ adapterFolder: v }); writeKey("hs-adapterFolder", v); },
+  setLmAdapterFolder: (v: any) => { set({ lmAdapterFolder: v }); writeKey("hs-lmAdapterFolder", v); },
   setAdvancedAdapters: (v: any) => { set({ advancedAdapters: v }); writeKey("hs-advancedAdapters", v); },
   setAdaptersOpen: (v: any) => { set({ adaptersOpen: v }); writeKey("hs-adaptersOpen", v); },
   setInferenceSteps: (v: any) => { set({ inferenceSteps: v }); writeKey("hs-inferenceSteps", v); },

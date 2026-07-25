@@ -112,7 +112,10 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const [lmAdapterList, setLmAdapterList] = useState<{ name: string; path: string }[]>([]);
   useEffect(() => {
     if (mode !== 'presets') return;
-    adapterApi.lmList().then(r => setLmAdapterList(r?.adapters || [])).catch(() => {});
+    // Same scan folder the global Adapters menu uses (persisted store value)
+    let folder = '';
+    try { folder = JSON.parse(localStorage.getItem('hs-lmAdapterFolder') || '""') || ''; } catch { /* default */ }
+    adapterApi.lmList(folder || undefined).then(r => setLmAdapterList(r?.adapters || [])).catch(() => {});
   }, [mode]);
 
   // Fetch lyrics state

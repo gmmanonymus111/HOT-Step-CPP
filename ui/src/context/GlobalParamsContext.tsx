@@ -29,6 +29,7 @@ export interface GlobalParams {
   // Planner-LM adapter (runtime LoRA on the 5Hz LM; local HOT-Step feature)
   lmAdapter: string; setLmAdapter: (v: string) => void;
   lmAdapterScale: number; setLmAdapterScale: (v: number) => void;
+  lmAdapterFolder: string; setLmAdapterFolder: (v: string) => void;
   // Adapters
   adapter: string; setAdapter: (v: string) => void;
   adapterScale: number; setAdapterScale: (v: number) => void;

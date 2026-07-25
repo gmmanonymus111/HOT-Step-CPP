@@ -66,7 +66,10 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
   const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string }[]>([]);
   useEffect(() => {
     if (!isOpen) return;
-    adapterApi.lmList().then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
+    // Same scan folder the global Adapters menu uses (persisted store value)
+    let folder = '';
+    try { folder = JSON.parse(localStorage.getItem('hs-lmAdapterFolder') || '""') || ''; } catch { /* default */ }
+    adapterApi.lmList(folder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
   }, [isOpen]);
 
   // Load existing preset
@@ -215,9 +218,10 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                       className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500 transition-colors cursor-pointer"
                     >
                       <option value="">None (base planner)</option>
-                      {/* Keep a stale path selectable so opening the modal doesn't silently drop it */}
+                      {/* Preset paths from outside the scanned folder stay selectable —
+                          the engine loads by path, so this is informational, not an error */}
                       {form.lm_adapter_path && !lmAdapters.some(a => a.path === form.lm_adapter_path) && (
-                        <option value={form.lm_adapter_path}>{form.lm_adapter_path.split(/[\\/]/).pop()} (missing?)</option>
+                        <option value={form.lm_adapter_path}>{form.lm_adapter_path.split(/[\\/]/).pop()} (outside scan folder)</option>
                       )}
                       {lmAdapters.map(a => (
                         <option key={a.path} value={a.path}>{a.name}</option>

@@ -63,8 +63,8 @@ export const AdaptersDropdown: React.FC = () => {
   // path-fallback resolver loads directly.
   const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number }[]>([]);
   const refreshLmAdapters = useCallback(() => {
-    adapterApi.lmList().then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
-  }, []);
+    adapterApi.lmList(gp.lmAdapterFolder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
+  }, [gp.lmAdapterFolder]);
   useEffect(() => { refreshLmAdapters(); }, [refreshLmAdapters]);
 
   const fileBrowserMode = gp.advancedAdapters ? 'folder' as const : 'file' as const;
@@ -441,6 +441,13 @@ export const AdaptersDropdown: React.FC = () => {
           Artist-trained song-structure adapter applied to the planner LM at runtime.
           Pairs with the matching DiT adapter (timbre) — same trigger word.
         </p>
+        <input
+          type="text"
+          value={gp.lmAdapterFolder}
+          onChange={(e) => gp.setLmAdapterFolder(e.target.value)}
+          placeholder="Scan folder (empty = adapters/lm)"
+          className="w-full px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-[11px] text-zinc-700 dark:text-zinc-300 placeholder-zinc-500 focus:border-violet-500/50 outline-none transition-colors"
+        />
         {lmAdapters.length === 0 ? (
           <p className="text-[10px] text-zinc-600 px-1">
             None found in adapters/lm — train one with Side-Step's lm-train.

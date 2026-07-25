@@ -125,18 +125,20 @@ router.post('/scan', (req, res) => {
 });
 
 /**
- * GET /api/adapters/lm
+ * GET /api/adapters/lm?folder=...
  *
- * Lists planner-LM adapters (local HOT-Step feature) from the adapters
- * root's `lm/` subtree: PEFT directories (adapter_model.safetensors +
- * adapter_config.json) and bare .safetensors files.  Filesystem-based so
- * freshly trained adapters appear WITHOUT an engine restart — the UI sends
- * the absolute path and the engine's path-fallback resolver loads it.
+ * Lists planner-LM adapters (local HOT-Step feature): PEFT directories
+ * (adapter_model.safetensors + adapter_config.json) and bare .safetensors
+ * files.  Scans `folder` when given (the user's archive, like the DiT
+ * adapter folder), else the adapters root's `lm/` subtree.  Filesystem-based
+ * so freshly trained adapters appear WITHOUT an engine restart — the UI
+ * sends the absolute path and the engine's path-fallback resolver loads it.
  *
  * Response: { root: string, adapters: { name, path, kind, size, mtime }[] }
  */
-router.get('/lm', (_req, res) => {
-  const root = path.join(config.aceServer.adapters, 'lm');
+router.get('/lm', (req, res) => {
+  const folderParam = (req.query.folder as string) || '';
+  const root = folderParam ? path.resolve(folderParam) : path.join(config.aceServer.adapters, 'lm');
   const adapters: Array<{ name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }> = [];
   try {
     if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
