@@ -804,6 +804,36 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
 
 // =====================================================================
 
+// Resolve a planner-LM adapter (local HOT-Step feature): registry name from
+// adapters/lm/, or an explicit path (PEFT dir or .safetensors). Returns ""
+// when the adapter cannot be resolved — callers must FAIL the request rather
+// than silently running the base LM the user didn't ask for.
+static std::string resolve_lm_adapter_path(const std::string & name_or_path) {
+    if (name_or_path.empty()) {
+        return "";
+    }
+    for (const auto & e : g_registry.lm_adapters) {
+        if (e.name == name_or_path) {
+            return e.path;
+        }
+    }
+    // Path fallback (absolute or relative): PEFT dir or bare safetensors file
+    bool looks_like_path = name_or_path.find('/') != std::string::npos ||
+                           name_or_path.find('\\') != std::string::npos;
+    if (looks_like_path) {
+        if (registry_is_file(name_or_path.c_str())) {
+            return name_or_path;
+        }
+        std::string peft = name_or_path + "/adapter_model.safetensors";
+        if (registry_is_file(peft.c_str())) {
+            return name_or_path;
+        }
+    }
+    fprintf(stderr, "[Server] LM adapter not found: %s (looked in adapters/lm/ registry%s)\n",
+            name_or_path.c_str(), looks_like_path ? " and as a path" : "");
+    return "";
+}
+
 // LM worker: generates metadata + lyrics + codes, stores JSON result in job.
 static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch_size, int mode) {
     if (job->cancel.load()) {
@@ -823,6 +853,21 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
     }
     AceLmParams p = g_lm_params;
     p.model_path  = entry->path.c_str();
+
+    // Planner-LM runtime LoRA (local HOT-Step feature)
+    std::string lm_adapter_path;
+    if (!ace_req.lm_adapter.empty()) {
+        lm_adapter_path = resolve_lm_adapter_path(ace_req.lm_adapter);
+        if (lm_adapter_path.empty()) {
+            job_set_phase(*job, JobPhase::FAILED);
+            job->status.store(2);
+            return;
+        }
+        p.adapter_path  = lm_adapter_path.c_str();
+        p.adapter_scale = ace_req.lm_adapter_scale;
+        fprintf(stderr, "[Server] LM adapter: %s (scale %.2f)\n",
+                lm_adapter_path.c_str(), ace_req.lm_adapter_scale);
+    }
 
     // LM has no DiT; it reuses LOADING_DIT to mean "loading the big model" so
     // the wrapper has one 'loading' phase to surface across /lm and /synth.
@@ -2361,6 +2406,13 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     }
     yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
 
+    // lm_adapters: planner-LM LoRAs (local HOT-Step feature, adapters/lm/)
+    yyjson_mut_val * lm_adapters_arr = yyjson_mut_arr(doc);
+    for (const auto & e : g_registry.lm_adapters) {
+        yyjson_mut_arr_add_str(doc, lm_adapters_arr, e.name.c_str());
+    }
+    yyjson_mut_obj_add_val(doc, root, "lm_adapters", lm_adapters_arr);
+
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "cli", cli);
@@ -2564,6 +2616,7 @@ int main(int argc, char ** argv) {
     if (adapters_dir) {
         fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
         registry_scan_adapters(&g_registry, adapters_dir);
+        registry_scan_lm_adapters(&g_registry, adapters_dir);
     }
 
     // HOT-Step: load noise profile for spectral denoiser (optional)

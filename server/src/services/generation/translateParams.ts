@@ -123,6 +123,10 @@ export function translateParams(params: any): AceRequest {
   // Model routing
   if (params.ditModel) req.synth_model = params.ditModel;
   if (params.lmModel) req.lm_model = params.lmModel;
+  // Planner-LM runtime LoRA (local HOT-Step feature). Lives in aceReq (not
+  // the sideband), so it survives the LM-echo synth rebuild by construction.
+  if (params.lmAdapter) req.lm_adapter = params.lmAdapter;
+  if (params.lmAdapterScale !== undefined) req.lm_adapter_scale = params.lmAdapterScale;
   if (params.vaeModel) req.vae_model = params.vaeModel;
   if (params.embeddingModel) req.emb_model = params.embeddingModel;
   if (params.loraPath) req.adapter = mapPath(params.loraPath);

@@ -148,6 +148,12 @@ struct AceRequest {
     std::string lm_model;       // ""
     std::string adapter;        // ""
     float       adapter_scale;  // 1.0
+
+    // Planner-LM runtime LoRA (local HOT-Step feature): name resolved
+    // against --adapters <dir>/lm (or an absolute/relative path), applied
+    // to the 5Hz LM at runtime (never merged, base quant untouched).
+    std::string lm_adapter;        // ""
+    float       lm_adapter_scale;  // 1.0
     // Multi-adapter stack. When non-empty, supersedes `adapter`/`adapter_scale`:
     // every entry is applied with its own scale (merged or summed depending on
     // adapter_mode). Each name is resolved against --adapters by the server.

@@ -18,6 +18,7 @@ router.get('/', async (_req, res) => {
     res.json({
       models: props.models,
       adapters: props.adapters,
+      lmAdapters: props.lm_adapters ?? [],
       config: props.cli,
       defaults: props.default,
     });
@@ -28,6 +29,7 @@ router.get('/', async (_req, res) => {
     res.json({
       models: { dit: [], lm: [], vae: [], understand: [] },
       adapters: [],
+      lmAdapters: [],
       config: {},
       defaults: {},
       aceServerDown: true,

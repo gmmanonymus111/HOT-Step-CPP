@@ -47,6 +47,7 @@ struct ModelRegistry {
     std::vector<ModelEntry>   vae;
     std::vector<ModelEntry>   pp_vae;  // PP-VAE (post-processing VAE, auto-detected)
     std::vector<AdapterEntry> adapters;
+    std::vector<AdapterEntry> lm_adapters;  // planner-LM LoRAs from <adapters>/lm/ (local HOT-Step feature)
 };
 
 // find an entry by name in a bucket. returns NULL if not found.
@@ -489,6 +490,42 @@ static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_di
             std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
             reg->adapters.push_back({ dname, full });
             fprintf(stderr, "[Registry] Adapter: %s (PEFT)\n", dname.c_str());
+            count++;
+        }
+    }
+
+    return count > 0;
+}
+
+// Planner-LM adapters (local HOT-Step feature): <adapters_dir>/lm/ subtree,
+// same formats as DiT adapters (PEFT dir or bare .safetensors). Kept in a
+// separate bucket so LM adapters never appear in DiT dropdowns or vice versa.
+static bool registry_scan_lm_adapters(ModelRegistry * reg, const char * adapters_dir) {
+    std::string lm_dir = std::string(adapters_dir) + REGISTRY_SEP + "lm";
+    int         count  = 0;
+
+    std::vector<std::string> files;
+    registry_list_dir(lm_dir.c_str(), &files);
+    std::sort(files.begin(), files.end());
+    for (const auto & fname : files) {
+        if (!str_ends_with(fname, ".safetensors")) {
+            continue;
+        }
+        std::string full = lm_dir + REGISTRY_SEP + fname;
+        reg->lm_adapters.push_back({ fname, full });
+        fprintf(stderr, "[Registry] LM adapter: %s\n", fname.c_str());
+        count++;
+    }
+
+    std::vector<std::string> subdirs;
+    registry_list_subdirs(lm_dir.c_str(), &subdirs);
+    std::sort(subdirs.begin(), subdirs.end());
+    for (const auto & dname : subdirs) {
+        std::string adapter = lm_dir + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
+        if (registry_is_file(adapter.c_str())) {
+            std::string full = lm_dir + REGISTRY_SEP + dname;
+            reg->lm_adapters.push_back({ dname, full });
+            fprintf(stderr, "[Registry] LM adapter: %s (PEFT)\n", dname.c_str());
             count++;
         }
     }

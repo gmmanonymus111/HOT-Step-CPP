@@ -16,6 +16,7 @@
 
 #include "config-json.h"
 #include "gguf-weights.h"
+#include "lm-adapter.h"
 #include "silence-latent.h"
 #include "timer.h"
 #include "weight-source.h"
@@ -35,7 +36,8 @@ namespace {
 // Key hashing. Only the fields relevant for this ModelKind participate, so
 // pipeline authors cannot accidentally drift a key by leaving a field that
 // their kind does not care about at a different default than their peer.
-// LM: kind + path + max_seq + n_kv_sets. DiT: kind + path + adapter_path
+// LM: kind + path + max_seq + n_kv_sets + adapter_path + adapter_scale
+// (planner-LM runtime LoRA). DiT: kind + path + adapter_path
 // + adapter_scale. Everything else: kind + path.
 struct ModelKeyHash {
     size_t operator()(const ModelKey & k) const noexcept {
@@ -44,6 +46,11 @@ struct ModelKeyHash {
         if (k.kind == MODEL_LM) {
             h ^= std::hash<int>{}(k.max_seq) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             h ^= std::hash<int>{}(k.n_kv_sets) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            // planner-LM runtime LoRA: adapter-bearing LMs are distinct instances
+            h ^= std::hash<std::string>{}(k.adapter_path) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            uint32_t lm_bits;
+            memcpy(&lm_bits, &k.adapter_scale, sizeof(lm_bits));
+            h ^= std::hash<uint32_t>{}(lm_bits) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         } else if (k.kind == MODEL_DIT) {
             h ^= std::hash<std::string>{}(k.adapter_path) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             // adapter_scale: hash the raw bit pattern so 1.0f and 1.00001f are distinct.
@@ -78,7 +85,9 @@ struct ModelKeyEq {
             return false;
         }
         if (a.kind == MODEL_LM) {
-            return a.max_seq == b.max_seq && a.n_kv_sets == b.n_kv_sets;
+            return a.max_seq == b.max_seq && a.n_kv_sets == b.n_kv_sets
+                && a.adapter_path == b.adapter_path
+                && a.adapter_scale == b.adapter_scale;
         }
         if (a.kind == MODEL_DIT) {
             return a.adapter_path == b.adapter_path
@@ -287,8 +296,13 @@ void store_free(ModelStore * s) {
 // load, install entry. The deleter is a plain C function that matches the
 // module's free signature, avoiding template plumbing.
 static void del_lm(void * p) {
-    qw3lm_free(static_cast<Qwen3LM *>(p));
-    delete static_cast<Qwen3LM *>(p);
+    Qwen3LM * m = static_cast<Qwen3LM *>(p);
+    if (m->lora) {
+        lm_adapter_free(m->lora);
+        m->lora = nullptr;
+    }
+    qw3lm_free(m);
+    delete m;
 }
 
 static void del_text_enc(void * p) {
@@ -372,12 +386,42 @@ Qwen3LM * store_require_lm(ModelStore * s, const ModelKey & k) {
     }
     Timer     t;
     Qwen3LM * m = new Qwen3LM();
-    if (!qw3lm_load(m, k.path.c_str(), k.max_seq, k.n_kv_sets)) {
+    // Planner-LM runtime LoRA (local HOT-Step feature): load with fusion
+    // disabled so per-projection deltas stay addressable, then attach slots.
+    bool want_adapter   = !k.adapter_path.empty();
+    g_qwen3_load_no_fuse = want_adapter;
+    bool loaded          = qw3lm_load(m, k.path.c_str(), k.max_seq, k.n_kv_sets);
+    g_qwen3_load_no_fuse = false;
+    if (!loaded) {
         delete m;
         return nullptr;
     }
+    if (want_adapter) {
+        m->lora = lm_adapter_load(k.adapter_path.c_str(), k.adapter_scale, m->backend);
+        if (!m->lora) {
+            // Cache-key law: a failed adapter load must NEVER be cached as a
+            // success under an adapter-bearing key (mirrors dit.h behaviour).
+            fprintf(stderr, "[Store] LM adapter load FAILED (%s) — refusing base-only fallback\n",
+                    k.adapter_path.c_str());
+            qw3lm_free(m);
+            delete m;
+            return nullptr;
+        }
+        if (m->lora->max_layer >= m->cfg.n_layers) {
+            fprintf(stderr, "[Store] LM adapter has %d layers but model has %d — mismatch, refusing\n",
+                    m->lora->max_layer + 1, m->cfg.n_layers);
+            lm_adapter_free(m->lora);
+            m->lora = nullptr;
+            qw3lm_free(m);
+            delete m;
+            return nullptr;
+        }
+        for (int i = 0; i <= m->lora->max_layer; i++) {
+            m->layers[i].lora = &m->lora->layers[i];
+        }
+    }
     install_entry(s, k, m, bytes_of_lm(m), "LM", del_lm);
-    fprintf(stderr, "[Store] Load LM: %.0f ms\n", t.ms());
+    fprintf(stderr, "[Store] Load LM: %.0f ms%s\n", t.ms(), want_adapter ? " (with planner adapter)" : "");
     return m;
 }
 

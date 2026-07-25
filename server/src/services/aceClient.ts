@@ -28,6 +28,8 @@ export interface AceProps {
     vae: string[];
   };
   adapters: string[];
+  /** Planner-LM adapters from adapters/lm/ (local HOT-Step feature) */
+  lm_adapters?: string[];
   cli: {
     max_batch: number;
     mp3_bitrate: number;
@@ -80,6 +82,9 @@ export interface AceRequest {
   // Server routing fields
   synth_model?: string;
   lm_model?: string;
+  /** Planner-LM runtime LoRA (local HOT-Step feature) */
+  lm_adapter?: string;
+  lm_adapter_scale?: number;
   vae_model?: string;
   emb_model?: string;
   adapter?: string;

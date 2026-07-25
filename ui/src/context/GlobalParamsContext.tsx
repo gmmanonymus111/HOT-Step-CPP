@@ -26,6 +26,9 @@ export interface GlobalParams {
   lmModel: string; setLmModel: (v: string) => void;
   vaeModel: string; setVaeModel: (v: string) => void;
   embeddingModel: string; setEmbeddingModel: (v: string) => void;
+  // Planner-LM adapter (runtime LoRA on the 5Hz LM; local HOT-Step feature)
+  lmAdapter: string; setLmAdapter: (v: string) => void;
+  lmAdapterScale: number; setLmAdapterScale: (v: number) => void;
   // Adapters
   adapter: string; setAdapter: (v: string) => void;
   adapterScale: number; setAdapterScale: (v: number) => void;

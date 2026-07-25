@@ -71,6 +71,7 @@ export const ModelsDropdown: React.FC = () => {
   const lmModels = models?.models?.lm || [];
   const vaeModels = models?.models?.vae || [];
   const embeddingModels = models?.models?.embedding || [];
+  const lmAdapters = models?.lmAdapters || [];
 
   // Format-type filter (gguf / safetensors / onnx). Persisted across sessions.
   // Only affects which options the dropdowns show — not auto-selection, so a
@@ -148,6 +149,44 @@ export const ModelsDropdown: React.FC = () => {
           <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">{getLmModelDescription(gp.lmModel)}</p>
         )}
       </div>
+
+      {/* Planner Adapter — runtime LoRA on the 5Hz LM (shown only when any exist) */}
+      {lmAdapters.length > 0 && (
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+            Planner Adapter
+          </label>
+          <select
+            id="lm-adapter-select"
+            value={gp.lmAdapter}
+            onChange={(e) => gp.setLmAdapter(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer"
+          >
+            <option value="">None (base planner)</option>
+            {lmAdapters.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+          {gp.lmAdapter && (
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-[10px] text-zinc-500 uppercase tracking-wider whitespace-nowrap">Strength</span>
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.05}
+                value={gp.lmAdapterScale}
+                onChange={(e) => gp.setLmAdapterScale(parseFloat(e.target.value))}
+                className="flex-1 accent-pink-500"
+              />
+              <span className="text-[10px] text-zinc-400 font-mono w-8 text-right">{gp.lmAdapterScale.toFixed(2)}</span>
+            </div>
+          )}
+          <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">
+            Artist-trained song-structure adapter applied to the planner LM at runtime.
+          </p>
+        </div>
+      )}
 
       {/* VAE Model — only show when multiple VAEs are available */}
       {vaeModels.length > 1 && (

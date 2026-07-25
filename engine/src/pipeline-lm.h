@@ -20,6 +20,10 @@ struct AceLmParams {
     bool         use_batch_cfg;  // batch cond+uncond in one forward
     bool         clamp_fp16;     // clamp hidden states to FP16 range
     const char * draft_model_path;  // draft LM for speculative decode (NULL = disabled)
+
+    // Planner-LM runtime LoRA (local HOT-Step feature). NULL/empty = none.
+    const char * adapter_path;   // resolved PEFT dir or .safetensors path
+    float        adapter_scale;  // user strength (× alpha/r at load)
 };
 
 void ace_lm_default_params(AceLmParams * p);

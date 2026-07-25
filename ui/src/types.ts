@@ -335,6 +335,8 @@ export interface AceModels {
     vae: string[];
   };
   adapters: string[];
+  /** Planner-LM adapters from adapters/lm/ (local HOT-Step feature) */
+  lmAdapters?: string[];
   config: {
     max_batch: number;
     mp3_bitrate: number;

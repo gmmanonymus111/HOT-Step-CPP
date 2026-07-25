@@ -47,8 +47,14 @@ struct Qw3lmGraphCache {
     std::vector<uint16_t> mask_data;
 };
 
+struct LMLora;  // runtime planner-LM LoRA (lm-adapter.h); owned via model-store
+
 struct Qwen3LM {
     Qwen3LMConfig cfg;
+
+    // Runtime LoRA attached after load (local HOT-Step feature). Layer slot
+    // pointers in layers[].lora point into this. Freed by the store's del_lm.
+    LMLora * lora;
 
     // Weights (on backend)
     struct ggml_tensor * embed_tokens;  // [H, V] on GPU (used by mul_mat lm_head)
@@ -434,9 +440,9 @@ static struct ggml_tensor * qw3lm_build_attn(struct ggml_context * ctx,
         k = ggml_cont(ctx, ggml_view_2d(ctx, qk, kv_dim, S, qk->nb[1], (size_t) q_dim * qk->nb[0]));
         v = qwen3_linear(ctx, ly->v_proj, x);
     } else {
-        q = qwen3_linear(ctx, ly->q_proj, x);
-        k = qwen3_linear(ctx, ly->k_proj, x);
-        v = qwen3_linear(ctx, ly->v_proj, x);
+        q = qwen3_linear_lora(ctx, ly->q_proj, qwen3_lora_slot(ly->lora, QW_LORA_Q), x);
+        k = qwen3_linear_lora(ctx, ly->k_proj, qwen3_lora_slot(ly->lora, QW_LORA_K), x);
+        v = qwen3_linear_lora(ctx, ly->v_proj, qwen3_lora_slot(ly->lora, QW_LORA_V), x);
     }
 
     // Reshape to heads: [X*D, S] -> [D, X, S]
@@ -496,7 +502,7 @@ static struct ggml_tensor * qw3lm_build_attn(struct ggml_context * ctx,
     attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
 
     // O projection
-    return qwen3_linear(ctx, ly->o_proj, attn);
+    return qwen3_linear_lora(ctx, ly->o_proj, qwen3_lora_slot(ly->lora, QW_LORA_O), attn);
 }
 
 // Forward pass: token_ids[n_tokens] -> logits[vocab_size] (last token only)
@@ -880,9 +886,9 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
                 k = ggml_cont(ctx, ggml_view_2d(ctx, qk, kv_dim, N, qk->nb[1], (size_t) q_dim * qk->nb[0]));
                 v = qwen3_linear(ctx, ly->v_proj, norm);
             } else {
-                q = qwen3_linear(ctx, ly->q_proj, norm);
-                k = qwen3_linear(ctx, ly->k_proj, norm);
-                v = qwen3_linear(ctx, ly->v_proj, norm);
+                q = qwen3_linear_lora(ctx, ly->q_proj, qwen3_lora_slot(ly->lora, QW_LORA_Q), norm);
+                k = qwen3_linear_lora(ctx, ly->k_proj, qwen3_lora_slot(ly->lora, QW_LORA_K), norm);
+                v = qwen3_linear_lora(ctx, ly->v_proj, qwen3_lora_slot(ly->lora, QW_LORA_V), norm);
             }
 
             // Reshape to heads: [D, Heads, N]
@@ -953,7 +959,7 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
             struct ggml_tensor * attn_cat = ggml_reshape_2d(ctx, attn_result, Nh * D, N);
 
             // Batched O proj
-            struct ggml_tensor * attn_out = qwen3_linear(ctx, ly->o_proj, attn_cat);
+            struct ggml_tensor * attn_out = qwen3_linear_lora(ctx, ly->o_proj, qwen3_lora_slot(ly->lora, QW_LORA_O), attn_cat);
             hidden                        = ggml_add(ctx, hidden, attn_out);
             if (m->clamp_fp16) {
                 hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);

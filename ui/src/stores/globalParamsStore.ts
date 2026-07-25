@@ -42,6 +42,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   ditModel: readKey("hs-ditModel", ''),
   lmModel: readKey("hs-lmModel", ''),
   vaeModel: readKey("hs-vaeModel", ''),
+  lmAdapter: readKey("hs-lmAdapter", ''),
+  lmAdapterScale: readKey("hs-lmAdapterScale", 1.0),
   embeddingModel: readKey("hs-embeddingModel", ''),
   adapter: readKey("hs-adapter", ''),
   adapterScale: readKey("hs-adapterScale", 1.0),
@@ -185,6 +187,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // -- Actions --
   setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
   setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
+  setLmAdapter: (v: any) => { set({ lmAdapter: v }); writeKey("hs-lmAdapter", v); },
+  setLmAdapterScale: (v: any) => { set({ lmAdapterScale: v }); writeKey("hs-lmAdapterScale", v); },
   setVaeModel: (v: any) => {
     set({ vaeModel: v });
     writeKey("hs-vaeModel", v);
@@ -409,6 +413,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
 
     return {
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
+      // Planner-LM adapter (runtime LoRA on the 5Hz LM) — aceReq fields, so
+      // they survive the LM-echo synth rebuild by construction.
+      lmAdapter: s.lmAdapter || undefined,
+      lmAdapterScale: s.lmAdapter ? s.lmAdapterScale : undefined,
       loraPath: primary, loraScale: stack[0]?.scale ?? 1.0,
       // Multi-adapter stack (>1 entry) — sent alongside loraPath; the engine
       // prefers the stack and applies each adapter with its own scale.
