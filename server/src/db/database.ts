@@ -149,6 +149,8 @@ export function initDb(): void {
       adapter_group_scales  TEXT,
       reference_track_path  TEXT,
       audio_cover_strength  REAL,
+      lm_adapter_path       TEXT,
+      lm_adapter_scale      REAL,
       created_at            TEXT DEFAULT (datetime('now'))
     );
 
@@ -272,6 +274,9 @@ export function initDb(): void {
     "ALTER TABLE artists ADD COLUMN image_url TEXT",
     "ALTER TABLE artists ADD COLUMN genius_id INTEGER",
     "ALTER TABLE lyrics_sets ADD COLUMN image_url TEXT",
+    // Planner-LM adapter per album (local HOT-Step feature)
+    "ALTER TABLE album_presets ADD COLUMN lm_adapter_path TEXT",
+    "ALTER TABLE album_presets ADD COLUMN lm_adapter_scale REAL",
   ];
   for (const sql of lireekMigrations) {
     try { db.exec(sql); } catch { /* column already exists */ }

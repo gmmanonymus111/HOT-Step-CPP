@@ -7,6 +7,7 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { config } from '../config.js';
 
 const router = Router();
 
@@ -120,6 +121,46 @@ router.post('/scan', (req, res) => {
     res.json({ files });
   } catch {
     res.json({ files: [] });
+  }
+});
+
+/**
+ * GET /api/adapters/lm
+ *
+ * Lists planner-LM adapters (local HOT-Step feature) from the adapters
+ * root's `lm/` subtree: PEFT directories (adapter_model.safetensors +
+ * adapter_config.json) and bare .safetensors files.  Filesystem-based so
+ * freshly trained adapters appear WITHOUT an engine restart — the UI sends
+ * the absolute path and the engine's path-fallback resolver loads it.
+ *
+ * Response: { root: string, adapters: { name, path, kind, size, mtime }[] }
+ */
+router.get('/lm', (_req, res) => {
+  const root = path.join(config.aceServer.adapters, 'lm');
+  const adapters: Array<{ name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }> = [];
+  try {
+    if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const fullPath = path.join(root, entry.name);
+        try {
+          if (entry.isDirectory()) {
+            const model = path.join(fullPath, 'adapter_model.safetensors');
+            if (fs.existsSync(model)) {
+              const stat = fs.statSync(model);
+              adapters.push({ name: entry.name, path: fullPath, kind: 'peft', size: stat.size, mtime: stat.mtimeMs });
+            }
+          } else if (entry.isFile() && entry.name.endsWith('.safetensors')) {
+            const stat = fs.statSync(fullPath);
+            adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size, mtime: stat.mtimeMs });
+          }
+        } catch { /* skip unreadable entries */ }
+      }
+    }
+    adapters.sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ root, adapters });
+  } catch (err: any) {
+    res.json({ root, adapters: [], error: err.message });
   }
 });
 

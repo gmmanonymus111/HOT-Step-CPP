@@ -104,6 +104,9 @@ export interface AlbumPreset {
   adapter_group_scales?: { self_attn: number; cross_attn: number; mlp: number; cond_embed: number };
   reference_track_path?: string;
   audio_cover_strength?: number;
+  /** Planner-LM adapter (song structure; local HOT-Step feature) */
+  lm_adapter_path?: string;
+  lm_adapter_scale?: number;
   created_at: string;
 }
 
@@ -291,6 +294,8 @@ export const lireekApi = {
     adapter_group_scales?: { self_attn: number; cross_attn: number; mlp: number; cond_embed: number };
     reference_track_path?: string;
     audio_cover_strength?: number;
+    lm_adapter_path?: string;
+    lm_adapter_scale?: number;
   }): Promise<{ preset: AlbumPreset }> =>
     api(`/api/lireek/lyrics-sets/${lyricsSetId}/preset`, { method: 'PUT', body: params }),
 

@@ -484,6 +484,8 @@ export function registerCrudRoutes(router: Router): void {
         adapterGroupScales: req.body.adapter_group_scales,
         referenceTrackPath: req.body.reference_track_path,
         audioCoverStrength: req.body.audio_cover_strength,
+        lmAdapterPath: req.body.lm_adapter_path,
+        lmAdapterScale: req.body.lm_adapter_scale,
       });
       res.json({ preset: hydratePreset(preset) });
     } catch (err: any) {

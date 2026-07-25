@@ -57,6 +57,16 @@ export const AdaptersDropdown: React.FC = () => {
     modelApi.list().then(m => setDitModels(m?.models?.dit || [])).catch(() => {});
   }, []);
 
+  // Planner-LM adapters (runtime LoRA on the 5Hz LM). Filesystem-scanned via
+  // the Node route so freshly trained adapters appear WITHOUT an engine
+  // restart — selection sends the absolute path, which the engine's
+  // path-fallback resolver loads directly.
+  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number }[]>([]);
+  const refreshLmAdapters = useCallback(() => {
+    adapterApi.lmList().then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
+  }, []);
+  useEffect(() => { refreshLmAdapters(); }, [refreshLmAdapters]);
+
   const fileBrowserMode = gp.advancedAdapters ? 'folder' as const : 'file' as const;
   // In advanced mode the stack drives everything; in simple mode the single adapter does.
   const stack: { path: string; scale: number; stepStart?: number; stepEnd?: number }[] = gp.adapterStack || [];
@@ -414,6 +424,78 @@ export const AdaptersDropdown: React.FC = () => {
           )}
         </>
       )}
+
+      {/* ═══ PLANNER ADAPTER (LM) — song-structure LoRA on the 5Hz planner ═══ */}
+      <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-white/5">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider">
+            Planner Adapter (LM)
+          </span>
+          <button type="button" onClick={refreshLmAdapters}
+            className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+            title="Rescan adapters/lm for new planner adapters">
+            <RotateCcw size={12} />
+          </button>
+        </div>
+        <p className="text-[10px] text-zinc-500 leading-relaxed -mt-1">
+          Artist-trained song-structure adapter applied to the planner LM at runtime.
+          Pairs with the matching DiT adapter (timbre) — same trigger word.
+        </p>
+        {lmAdapters.length === 0 ? (
+          <p className="text-[10px] text-zinc-600 px-1">
+            None found in adapters/lm — train one with Side-Step's lm-train.
+          </p>
+        ) : (
+          <div className="rounded-xl bg-zinc-50/80 dark:bg-zinc-900/50 border border-zinc-200 dark:border-white/5 overflow-hidden" style={{ maxHeight: '160px', overflowY: 'auto' }}>
+            {lmAdapters.map((a) => {
+              const isActive = gp.lmAdapter === a.path;
+              return (
+                <button
+                  key={a.path}
+                  onClick={() => { gp.setLmAdapter(isActive ? '' : a.path); }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
+                    isActive ? 'bg-violet-500/10 border-l-2 border-violet-500' : 'hover:bg-white/5 border-l-2 border-transparent'
+                  }`}
+                >
+                  {isActive ? (
+                    <Circle size={8} fill="#8b5cf6" className="text-violet-500 flex-shrink-0" />
+                  ) : (
+                    <Circle size={8} className="text-zinc-600 flex-shrink-0" />
+                  )}
+                  <span className={`text-xs truncate flex-1 ${isActive ? 'text-violet-400 font-medium' : 'text-zinc-600 dark:text-zinc-400'}`}>
+                    {a.name}
+                  </span>
+                  <span className="text-zinc-600 flex-shrink-0" style={{ fontSize: '10px' }}>
+                    {formatSize(a.size)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {gp.lmAdapter && (
+          <div className="px-3 py-2 rounded-xl bg-violet-500/10 border border-violet-500/20 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-violet-400 font-medium truncate flex-1" title={gp.lmAdapter}>
+                {lmAdapters.find(a => a.path === gp.lmAdapter)?.name || gp.lmAdapter}
+              </span>
+              <button
+                onClick={() => gp.setLmAdapter('')}
+                className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors flex-shrink-0"
+                title="Unload planner adapter"
+              >
+                <X size={12} />
+              </button>
+            </div>
+            <Slider label="Strength" value={gp.lmAdapterScale}
+              onChange={gp.setLmAdapterScale} min={0} max={2} step={0.05} showInput />
+            <p className="text-[9px] text-zinc-500 leading-relaxed -mt-1">
+              1.0 = as trained. Above ~1.4 risks repetitive planning — prefer more
+              training epochs over slider overdrive.
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* ═══ SHARED CONTROLS (when adapter selected) ═══ */}
       {hasAdapter && (

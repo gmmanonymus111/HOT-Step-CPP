@@ -350,6 +350,8 @@ export function upsertPreset(lyricsSetId: number, data: {
   adapterGroupScales?: any;
   referenceTrackPath?: string | null;
   audioCoverStrength?: number | null;
+  lmAdapterPath?: string | null;
+  lmAdapterScale?: number | null;
 }): Record<string, any> {
   const db = getDb();
   const existing = getPreset(lyricsSetId);
@@ -358,18 +360,21 @@ export function upsertPreset(lyricsSetId: number, data: {
   if (existing) {
     db.prepare(
       `UPDATE album_presets SET adapter_path = ?, adapter_scale = ?, adapter_group_scales = ?,
-       reference_track_path = ?, audio_cover_strength = ? WHERE lyrics_set_id = ?`
+       reference_track_path = ?, audio_cover_strength = ?, lm_adapter_path = ?, lm_adapter_scale = ?
+       WHERE lyrics_set_id = ?`
     ).run(
       data.adapterPath ?? null, data.adapterScale ?? null, groupScalesJson,
-      data.referenceTrackPath ?? null, data.audioCoverStrength ?? null, lyricsSetId,
+      data.referenceTrackPath ?? null, data.audioCoverStrength ?? null,
+      data.lmAdapterPath ?? null, data.lmAdapterScale ?? null, lyricsSetId,
     );
   } else {
     db.prepare(
-      `INSERT INTO album_presets (lyrics_set_id, adapter_path, adapter_scale, adapter_group_scales, reference_track_path, audio_cover_strength)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO album_presets (lyrics_set_id, adapter_path, adapter_scale, adapter_group_scales, reference_track_path, audio_cover_strength, lm_adapter_path, lm_adapter_scale)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       lyricsSetId, data.adapterPath ?? null, data.adapterScale ?? null, groupScalesJson,
       data.referenceTrackPath ?? null, data.audioCoverStrength ?? null,
+      data.lmAdapterPath ?? null, data.lmAdapterScale ?? null,
     );
   }
   return getPreset(lyricsSetId)!;

@@ -10,7 +10,7 @@
  * Adapted for C++ engine: removed adapter type detection (not needed).
  */
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   X, Loader2, CheckCircle, AlertCircle, ListOrdered, Sparkles,
@@ -26,6 +26,7 @@ import {
 } from '../../stores/streamingStore';
 import type { QueueItemType } from '../../stores/streamingStore';
 import { lireekApi } from '../../services/lireekApi';
+import { adapterApi } from '../../services/api';
 import type { Artist, LyricsSet, Profile, AlbumPreset } from '../../services/lireekApi';
 import { useAuth } from '../../context/AuthContext';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
@@ -106,6 +107,14 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const [presetFilter, setPresetFilter] = useState('');
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserTarget, setBrowserTarget] = useState<'adapter' | 'matchering'>('adapter');
+  // Planner-LM adapter bulk assignment (local HOT-Step feature)
+  const [lmAdapterPath, setLmAdapterPath] = useState('');
+  const [lmAdapterScale, setLmAdapterScale] = useState(1.0);
+  const [lmAdapterList, setLmAdapterList] = useState<{ name: string; path: string }[]>([]);
+  useEffect(() => {
+    if (mode !== 'presets') return;
+    adapterApi.lmList().then(r => setLmAdapterList(r?.adapters || [])).catch(() => {});
+  }, [mode]);
 
   // Fetch lyrics state
   const [fetchInputMode, setFetchInputMode] = useState<FetchInputMode>('paste');
@@ -281,18 +290,32 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
     if (selected.size === 0) return;
     const hasAdapter = adapterPath.trim().length > 0;
     const hasRef = matcheringPath.trim().length > 0;
-    if (!hasAdapter && !hasRef) { showToast?.('Set at least one path (adapter or reference) to apply'); return; }
+    const hasLm = lmAdapterPath.trim().length > 0;
+    if (!hasAdapter && !hasRef && !hasLm) { showToast?.('Set at least one field (adapter, reference, or planner adapter) to apply'); return; }
 
     setApplying(true);
     let success = 0, failed = 0;
     for (const lsId of Array.from(selected)) {
       try {
-        const params: any = {};
+        // upsertPreset is a FULL overwrite server-side — start from the album's
+        // existing preset so applying one field never wipes the others.
+        const existing = presetMap.get(lsId);
+        const params: any = {
+          adapter_path: existing?.adapter_path,
+          adapter_group_scales: existing?.adapter_group_scales,
+          reference_track_path: existing?.reference_track_path,
+          lm_adapter_path: existing?.lm_adapter_path,
+          lm_adapter_scale: existing?.lm_adapter_scale,
+        };
         if (hasAdapter) {
           params.adapter_path = adapterPath.trim();
           params.adapter_group_scales = { self_attn: selfAttn, cross_attn: crossAttn, mlp, cond_embed: condEmbed };
         }
         if (hasRef) params.reference_track_path = matcheringPath.trim();
+        if (hasLm) {
+          params.lm_adapter_path = lmAdapterPath.trim();
+          params.lm_adapter_scale = lmAdapterScale;
+        }
         await lireekApi.upsertPreset(lsId, params);
         success++;
       } catch (err) {
@@ -413,6 +436,23 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                   )}
                 </div>
               )}
+              {/* Planner-LM adapter (song structure) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                  <Zap className="w-3.5 h-3.5 text-violet-400" /> Planner Adapter (LM) to Apply
+                </div>
+                <select value={lmAdapterPath} onChange={e => setLmAdapterPath(e.target.value)}
+                  className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-violet-500 transition-colors cursor-pointer">
+                  <option value="">Keep existing / none</option>
+                  {lmAdapterList.map(a => (
+                    <option key={a.path} value={a.path}>{a.name}</option>
+                  ))}
+                </select>
+                {lmAdapterPath && (
+                  <EditableSlider label="Strength" value={lmAdapterScale} min={0} max={2} step={0.05}
+                    onChange={setLmAdapterScale} formatDisplay={v => v.toFixed(2)} />
+                )}
+              </div>
               {/* Reference track */}
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">

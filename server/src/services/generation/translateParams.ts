@@ -128,7 +128,9 @@ export function translateParams(params: any): AceRequest {
   if (params.lmModel) req.lm_model = params.lmModel;
   // Planner-LM runtime LoRA (local HOT-Step feature). Lives in aceReq (not
   // the sideband), so it survives the LM-echo synth rebuild by construction.
-  if (params.lmAdapter) req.lm_adapter = params.lmAdapter;
+  // mapPath: same path translation the DiT adapters get (UI sends absolute
+  // filesystem paths from the /api/adapters/lm scan).
+  if (params.lmAdapter) req.lm_adapter = mapPath(params.lmAdapter);
   if (params.lmAdapterScale !== undefined) req.lm_adapter_scale = params.lmAdapterScale;
   if (params.vaeModel) req.vae_model = params.vaeModel;
   if (params.embeddingModel) req.emb_model = params.embeddingModel;

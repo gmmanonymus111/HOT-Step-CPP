@@ -880,6 +880,15 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
     }
   }
 
+  // 3b) Planner-LM adapter from album preset (song structure; local HOT-Step
+  // feature). Same inject-only-when-set semantics as the DiT adapter above:
+  // a preset without one leaves the global Planner Adapter selection active.
+  if (preset?.lm_adapter_path) {
+    writePersistedState('hs-lmAdapter', preset.lm_adapter_path);
+    params.lmAdapter = preset.lm_adapter_path;
+    params.lmAdapterScale = typeof preset.lm_adapter_scale === 'number' ? preset.lm_adapter_scale : 1.0;
+  }
+
   // 4) Mastering reference from album preset (does NOT force-enable — respects global toggle)
   if (preset?.reference_track_path) {
     // Update the top bar to reflect the mastering reference
