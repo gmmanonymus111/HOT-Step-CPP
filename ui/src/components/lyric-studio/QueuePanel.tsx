@@ -109,7 +109,6 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const [browserTarget, setBrowserTarget] = useState<'adapter' | 'matchering'>('adapter');
   // Planner-LM adapter bulk assignment (local HOT-Step feature)
   const [lmAdapterPath, setLmAdapterPath] = useState('');
-  const [lmAdapterScale, setLmAdapterScale] = useState(1.0);
   const [lmAdapterList, setLmAdapterList] = useState<{ name: string; path: string }[]>([]);
   useEffect(() => {
     if (mode !== 'presets') return;
@@ -312,10 +311,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           params.adapter_group_scales = { self_attn: selfAttn, cross_attn: crossAttn, mlp, cond_embed: condEmbed };
         }
         if (hasRef) params.reference_track_path = matcheringPath.trim();
-        if (hasLm) {
-          params.lm_adapter_path = lmAdapterPath.trim();
-          params.lm_adapter_scale = lmAdapterScale;
-        }
+        if (hasLm) params.lm_adapter_path = lmAdapterPath.trim();
         await lireekApi.upsertPreset(lsId, params);
         success++;
       } catch (err) {
@@ -448,10 +444,6 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                     <option key={a.path} value={a.path}>{a.name}</option>
                   ))}
                 </select>
-                {lmAdapterPath && (
-                  <EditableSlider label="Strength" value={lmAdapterScale} min={0} max={2} step={0.05}
-                    onChange={setLmAdapterScale} formatDisplay={v => v.toFixed(2)} />
-                )}
               </div>
               {/* Reference track */}
               <div className="space-y-1.5">

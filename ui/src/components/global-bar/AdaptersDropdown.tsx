@@ -474,7 +474,7 @@ export const AdaptersDropdown: React.FC = () => {
           </div>
         )}
         {gp.lmAdapter && (
-          <div className="px-3 py-2 rounded-xl bg-violet-500/10 border border-violet-500/20 space-y-1.5">
+          <div className="px-3 py-2 rounded-xl bg-violet-500/10 border border-violet-500/20">
             <div className="flex items-center gap-2">
               <span className="text-xs text-violet-400 font-medium truncate flex-1" title={gp.lmAdapter}>
                 {lmAdapters.find(a => a.path === gp.lmAdapter)?.name || gp.lmAdapter}
@@ -487,14 +487,17 @@ export const AdaptersDropdown: React.FC = () => {
                 <X size={12} />
               </button>
             </div>
-            <Slider label="Strength" value={gp.lmAdapterScale}
-              onChange={gp.setLmAdapterScale} min={0} max={2} step={0.05} showInput />
-            <p className="text-[9px] text-zinc-500 leading-relaxed -mt-1">
-              1.0 = as trained. Above ~1.4 risks repetitive planning — prefer more
-              training epochs over slider overdrive.
-            </p>
           </div>
         )}
+        {/* Global planner strength — ALWAYS visible: like the DiT Adapter Scale,
+            it also governs planner adapters supplied by Album Presets. */}
+        <Slider label="Planner Strength" value={gp.lmAdapterScale}
+          onChange={gp.setLmAdapterScale} min={0} max={2} step={0.05} showInput />
+        <p className="text-[9px] text-zinc-500 leading-relaxed -mt-1">
+          Applies to the adapter above AND album-preset planner adapters.
+          1.0 = as trained; above ~1.4 risks repetitive planning — prefer more
+          training epochs over slider overdrive.
+        </p>
       </div>
 
       {/* ═══ SHARED CONTROLS (when adapter selected) ═══ */}

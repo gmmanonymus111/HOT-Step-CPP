@@ -419,8 +419,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
       // Planner-LM adapter (runtime LoRA on the 5Hz LM) — aceReq fields, so
       // they survive the LM-echo synth rebuild by construction.
+      // lmAdapterScale is emitted UNCONDITIONALLY: like the DiT loraScale, the
+      // global strength governs album-preset planner adapters too (the preset
+      // supplies only the path).
       lmAdapter: s.lmAdapter || undefined,
-      lmAdapterScale: s.lmAdapter ? s.lmAdapterScale : undefined,
+      lmAdapterScale: s.lmAdapterScale,
       loraPath: primary, loraScale: stack[0]?.scale ?? 1.0,
       // Multi-adapter stack (>1 entry) — sent alongside loraPath; the engine
       // prefers the stack and applies each adapter with its own scale.

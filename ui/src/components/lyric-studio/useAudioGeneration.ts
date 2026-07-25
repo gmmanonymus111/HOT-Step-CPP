@@ -77,10 +77,10 @@ export function useAudioGeneration({ profiles, showToast: _showToast }: UseAudio
       gps.setAdaptersOpen(true);
     }
 
-    // Planner-LM adapter from album preset (song structure; local HOT-Step feature)
+    // Planner-LM adapter from album preset (path only — strength stays with
+    // the global Adapters-menu slider, mirroring the DiT adapter semantics)
     if (preset?.lm_adapter_path) {
       gps.setLmAdapter(preset.lm_adapter_path);
-      gps.setLmAdapterScale(typeof preset.lm_adapter_scale === 'number' ? preset.lm_adapter_scale : 1.0);
     }
 
     // Mastering reference from album preset (does NOT force-enable — respects global toggle)

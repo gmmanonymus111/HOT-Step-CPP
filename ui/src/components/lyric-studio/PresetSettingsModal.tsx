@@ -13,7 +13,6 @@ interface PresetForm {
   cond_embed: number;
   reference_track_path: string;
   lm_adapter_path: string;
-  lm_adapter_scale: number;
 }
 
 const DEFAULT_FORM: PresetForm = {
@@ -24,7 +23,6 @@ const DEFAULT_FORM: PresetForm = {
   cond_embed: 1.0,
   reference_track_path: '',
   lm_adapter_path: '',
-  lm_adapter_scale: 1.0,
 };
 
 interface PresetSettingsModalProps {
@@ -86,7 +84,6 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
             cond_embed: res.preset.adapter_group_scales?.cond_embed ?? 1.0,
             reference_track_path: res.preset.reference_track_path || '',
             lm_adapter_path: res.preset.lm_adapter_path || '',
-            lm_adapter_scale: res.preset.lm_adapter_scale ?? 1.0,
           });
         } else {
           setForm(DEFAULT_FORM);
@@ -104,7 +101,6 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
         adapter_group_scales: { self_attn: form.self_attn, cross_attn: form.cross_attn, mlp: form.mlp, cond_embed: form.cond_embed },
         reference_track_path: form.reference_track_path || undefined,
         lm_adapter_path: form.lm_adapter_path || undefined,
-        lm_adapter_scale: form.lm_adapter_path ? form.lm_adapter_scale : undefined,
       });
       showToast('Preset saved');
       onClose();
@@ -227,13 +223,9 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                         <option key={a.path} value={a.path}>{a.name}</option>
                       ))}
                     </select>
-                    {form.lm_adapter_path && (
-                      <Slider label="Strength" value={form.lm_adapter_scale} min={0} max={2} step={0.05}
-                        onChange={v => setForm(p => ({ ...p, lm_adapter_scale: v }))}
-                        help="Song-structure influence. 1.0 = as trained; >1.4 risks repetitive planning" />
-                    )}
                     <p className="text-[10px] text-zinc-600">
-                      Shapes song structure/phrasing via the 5Hz planner — pairs with the DiT adapter above (same trigger word)
+                      Shapes song structure/phrasing via the 5Hz planner — pairs with the DiT adapter above (same trigger word).
+                      Strength comes from the global Adapters menu, like the DiT adapter scale.
                     </p>
                   </div>
                 </div>
