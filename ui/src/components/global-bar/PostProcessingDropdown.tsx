@@ -308,6 +308,7 @@ export const PostProcessingDropdown: React.FC = () => {
       : [...cur, { name, scale: 1.0, enabled: false, ...patch }];
     gp.setStableStepAdapters(next);
   };
+  const [ssAdaptersOpen, setSsAdaptersOpen] = usePersistedState('hs-ssAdaptersOpen', false);
   const ssActiveAdapterCount = (gp.stableStepAdapters ?? [])
     .filter((a: any) => a.enabled && a.scale !== 0 && stableStepAdapterList.some(l => l.name === a.name))
     .length;
@@ -613,11 +614,18 @@ export const PostProcessingDropdown: React.FC = () => {
                 </p>
               </div>
 
-              {/* StableStep adapters: per-adapter enable + strength */}
+              {/* StableStep adapters: per-adapter enable + strength (collapsed by default) */}
               <div>
-                <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">
-                  Adapters{ssActiveAdapterCount > 0 ? ` (${ssActiveAdapterCount} active)` : ''}
-                </label>
+                <button
+                  type="button"
+                  onClick={() => setSsAdaptersOpen(o => !o)}
+                  className="w-full flex items-center gap-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1"
+                >
+                  <ChevronDown size={12}
+                    className={`transition-transform ${ssAdaptersOpen ? 'rotate-180' : ''}`} />
+                  <span>Adapters{ssActiveAdapterCount > 0 ? ` (${ssActiveAdapterCount} active)` : ''}</span>
+                </button>
+                {ssAdaptersOpen && (<>
                 {stableStepAdapterList.length === 0 ? (
                   <p className="text-[10px] text-zinc-500 leading-relaxed">
                     No StableStep adapters installed — drop adapter .gguf files in
@@ -672,6 +680,7 @@ export const PostProcessingDropdown: React.FC = () => {
                     )}
                   </div>
                 )}
+                </>)}
               </div>
 
               {/* Preserve source dynamics: envelope match to the pre-refine audio */}
@@ -691,6 +700,63 @@ export const PostProcessingDropdown: React.FC = () => {
                   </span>
                 </span>
               </label>
+
+              {/* Source blend: crossover splice or full-band mix with the AS1.5 source */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Source blend</label>
+                <div className="flex rounded-xl overflow-hidden border border-zinc-300 dark:border-white/10 bg-zinc-100 dark:bg-zinc-800">
+                  {([
+                    { value: 'off' as const, label: 'Off', tip: 'Full SA3 refine output (no source blending)' },
+                    { value: 'crossover' as const, label: 'Crossover', tip: 'Keep the source below the crossover, SA3 above — AS1.5 lows + SA3 mids/highs' },
+                    { value: 'mix' as const, label: 'Mix', tip: 'Full-band wet/dry blend between source and SA3' },
+                  ]).map((opt, idx) => {
+                    const selected = (gp.stableStepBlendMode ?? 'off') === opt.value;
+                    return (
+                      <button key={opt.value} type="button" title={opt.tip}
+                        onClick={() => gp.setStableStepBlendMode(opt.value)}
+                        className={`flex-1 px-2 py-1.5 text-xs transition-colors ${idx > 0 ? 'border-l border-zinc-300 dark:border-white/10' : ''} ${
+                          selected
+                            ? 'bg-sky-500/20 text-sky-600 dark:text-sky-300 font-medium'
+                            : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer'
+                        }`}>
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {gp.stableStepBlendMode === 'crossover' && (
+                  <div className="space-y-1.5 mt-2">
+                    <EditableSlider
+                      label="Crossover frequency"
+                      value={gp.stableStepCrossoverHz}
+                      min={60} max={8000} step={10}
+                      onChange={gp.setStableStepCrossoverHz}
+                      formatDisplay={v => v >= 1000 ? (v / 1000).toFixed(1) + ' kHz' : v.toFixed(0) + ' Hz'}
+                      tooltip="Below this: AS1.5 source. Above: SA3 refine. ~250 Hz keeps kick/bass fundamentals from the source."
+                    />
+                    <EditableSlider
+                      label="Crossover width"
+                      value={gp.stableStepCrossoverWidthHz}
+                      min={20} max={1000} step={10}
+                      onChange={gp.setStableStepCrossoverWidthHz}
+                      formatDisplay={v => v.toFixed(0) + ' Hz'}
+                      tooltip="Width of the transition band. Wider = smoother, softer seam; narrower = more surgical split."
+                    />
+                  </div>
+                )}
+                {gp.stableStepBlendMode === 'mix' && (
+                  <div className="mt-2">
+                    <EditableSlider
+                      label="SA3 amount"
+                      value={gp.stableStepMix}
+                      min={0} max={1} step={0.05}
+                      onChange={gp.setStableStepMix}
+                      formatDisplay={v => (v * 100).toFixed(0) + '%'}
+                      tooltip="0% = pure AS1.5 source, 100% = pure SA3 refine, in between = blend."
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

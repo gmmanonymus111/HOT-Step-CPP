@@ -3209,6 +3209,14 @@ int main(int argc, char ** argv) {
     //   rms_match 1 (default) match output RMS to input | 0 raw
     //   env_match 1 = windowed envelope match to the input (timbre from the
     //             refine, dynamics from the source); supersedes rms_match
+    //   mix       0..1 wet/dry blend with the SOURCE: 0 = pure source,
+    //             1 = pure refined (default). Mutually exclusive with the
+    //             band splice below (mix wins when both are sent).
+    //   band_blend 1 = spectral splice: source below the crossover, refined
+    //             above, raised-cosine transition. band_freq = crossover
+    //             center Hz (default 250), band_width = transition width Hz
+    //             (default 200). STFT 8192/hop 2048, Hann, weight-normalized
+    //             overlap-add (linear-phase; no IIR crossover phase seam).
     //   out_sr    output sample rate (default: input rate)
     //   debug_zero_noise  1 = deterministic validation mode (zero noise)
     //   backend   "onnx" (5 graphs in models/onnx/sa3/) | "gguf" (4 sa3-*.gguf
@@ -3459,6 +3467,83 @@ int main(int argc, char ** argv) {
             }
             fprintf(stderr, "[Server] SA3 refine envelope match: %lld blocks, gain %.3f..%.3f\n",
                     (long long) n_blocks, gmin, gmax);
+        }
+
+        // Source blending — wet/dry mix OR spectral band splice (see docs above).
+        float mix = -1.0f;
+        if (req.has_param("mix")) {
+            mix = std::strtof(req.get_param_value("mix").c_str(), nullptr);
+            if (mix < 0.0f) mix = 0.0f;
+            if (mix > 1.0f) mix = 1.0f;
+        }
+        if (mix >= 0.0f && mix < 1.0f) {
+            for (int64_t i = 0; i < (int64_t) 2 * T44; i++) {
+                float v = p44[i] * (1.0f - mix) + out44[(size_t) i] * mix;
+                out44[(size_t) i] = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+            }
+            fprintf(stderr, "[Server] SA3 refine source mix: %.2f\n", mix);
+        } else if (mix < 0.0f && req.has_param("band_blend") &&
+                   req.get_param_value("band_blend") == "1") {
+            float fc = 250.0f, bw = 200.0f;
+            if (req.has_param("band_freq"))
+                fc = std::strtof(req.get_param_value("band_freq").c_str(), nullptr);
+            if (req.has_param("band_width"))
+                bw = std::strtof(req.get_param_value("band_width").c_str(), nullptr);
+            if (fc < 40.0f) fc = 40.0f;
+            if (fc > 16000.0f) fc = 16000.0f;
+            if (bw < 10.0f) bw = 10.0f;
+            const float f_lo = fc - bw * 0.5f, f_hi = fc + bw * 0.5f;
+
+            // STFT splice: per bin, g = 0 below f_lo (all source), 1 above
+            // f_hi (all refined), raised cosine between. Hann analysis +
+            // synthesis, weight-normalized OLA (edge-safe, COLA-free).
+            const int N = 8192, HOP = 2048, BINS = N / 2 + 1;
+            std::vector<float> win((size_t) N), gcurve((size_t) BINS);
+            for (int i = 0; i < N; i++)
+                win[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / N);
+            for (int b = 0; b < BINS; b++) {
+                float f = (float) b * SA3_SR / N;
+                float g;
+                if (f <= f_lo)      g = 0.0f;
+                else if (f >= f_hi) g = 1.0f;
+                else g = 0.5f - 0.5f * cosf(3.14159265f * (f - f_lo) / (f_hi - f_lo));
+                gcurve[b] = g;
+            }
+            std::vector<float> frame_s((size_t) N), frame_r((size_t) N), frame_o((size_t) N);
+            std::vector<sl_detail::Cpx> spec_s((size_t) BINS), spec_r((size_t) BINS);
+            for (int ch = 0; ch < 2; ch++) {
+                const float * s = p44 + (size_t) ch * T44;
+                float *       r = out44.data() + (size_t) ch * T44;
+                std::vector<float> acc((size_t) T44, 0.0f), wsum((size_t) T44, 0.0f);
+                for (int64_t st = 0; st < T44; st += HOP) {
+                    for (int i = 0; i < N; i++) {
+                        int64_t idx = st + i;
+                        float w = win[i];
+                        frame_s[i] = (idx < T44) ? s[idx] * w : 0.0f;
+                        frame_r[i] = (idx < T44) ? r[idx] * w : 0.0f;
+                    }
+                    sl_detail::rfft(frame_s.data(), spec_s.data(), N);
+                    sl_detail::rfft(frame_r.data(), spec_r.data(), N);
+                    for (int b = 0; b < BINS; b++) {
+                        float g = gcurve[b];
+                        spec_s[b] = sl_detail::Cpx(spec_s[b].re * (1.0f - g) + spec_r[b].re * g,
+                                        spec_s[b].im * (1.0f - g) + spec_r[b].im * g);
+                    }
+                    sl_detail::irfft(spec_s.data(), frame_o.data(), N);
+                    for (int i = 0; i < N; i++) {
+                        int64_t idx = st + i;
+                        if (idx >= T44) break;
+                        acc[(size_t) idx]  += frame_o[i] * win[i];
+                        wsum[(size_t) idx] += win[i] * win[i];
+                    }
+                }
+                for (int64_t i = 0; i < T44; i++) {
+                    float v = acc[(size_t) i] / (wsum[(size_t) i] + 1e-9f);
+                    r[i] = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+            fprintf(stderr, "[Server] SA3 refine band splice: source < %.0f Hz, refined > %.0f Hz\n",
+                    f_lo, f_hi);
         }
         free(p44);
 

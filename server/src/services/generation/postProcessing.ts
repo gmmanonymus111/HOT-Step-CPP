@@ -61,6 +61,12 @@ interface PostProcessParams {
    *  refined audio to the pre-refine source (counters mastered-density
    *  "loudness war" character from adapters trained on commercial masters). */
   stableStepPreserveDynamics?: boolean;
+  /** Source blending: 'off' | 'crossover' (source lows + refined highs at a
+   *  spectral crossover) | 'mix' (full-band wet/dry). */
+  stableStepBlendMode?: 'off' | 'crossover' | 'mix';
+  stableStepCrossoverHz?: number;      // crossover center (default 250)
+  stableStepCrossoverWidthHz?: number; // transition width (default 200)
+  stableStepMix?: number;              // 0 = pure source .. 1 = pure refined
   /** Per-track captions (parallel to audioUrls) used to build the SA3 prompt.
    *  Populated by the generate route from the LM results. */
   stableStepCaptions?: string[];
@@ -279,6 +285,16 @@ export async function runPostProcessingChain(
             ? params.stableStepBackend : undefined;
           const adapters = (params.stableStepAdapters ?? []).filter(a => a && a.name && a.scale !== 0);
           const envMatch = params.stableStepPreserveDynamics !== false;
+          const blendMode = params.stableStepBlendMode ?? 'off';
+          const blendOpts = blendMode === 'mix'
+            ? { mix: Math.min(1, Math.max(0, params.stableStepMix ?? 1)) }
+            : blendMode === 'crossover'
+              ? { bandBlend: true, bandFreq: params.stableStepCrossoverHz ?? 250,
+                  bandWidth: params.stableStepCrossoverWidthHz ?? 200 }
+              : {};
+          if (blendMode !== 'off') {
+            log('INFO', `[StableStep] Source blend: ${JSON.stringify(blendOpts)}`);
+          }
           if (adapters.length > 0) {
             log('INFO', `[StableStep] Adapters: ${adapters.map(a => `${a.name}@${a.scale}`).join(', ')}`);
           }
@@ -295,7 +311,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const wavBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(wavBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, ...blendOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else if (!vocalSep) {
@@ -305,7 +321,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const srcBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(srcBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, ...blendOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else {
@@ -316,7 +332,7 @@ export async function runPostProcessingChain(
 
             setStage(`StableStep: refining instrumental${suffix}...`);
             const refinedInst = await aceClient.submitSa3Refine(vs.instBuf, {
-              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters, envMatch,
+              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters, envMatch, ...blendOpts,
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);

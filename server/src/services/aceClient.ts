@@ -601,6 +601,13 @@ export const aceClient = {
       /** Windowed envelope match: output follows the source's short-term RMS
        *  envelope (timbre from the refine, dynamics from the source). */
       envMatch?: boolean;
+      /** Wet/dry blend with the source: 0 = pure source, 1 = pure refined.
+       *  Mutually exclusive with the band splice (mix wins engine-side). */
+      mix?: number;
+      /** Spectral band splice: source below the crossover, refined above. */
+      bandBlend?: boolean;
+      bandFreq?: number;   // crossover center Hz (engine default 250)
+      bandWidth?: number;  // transition width Hz (engine default 200)
     },
   ): Promise<Buffer> {
     const params = new URLSearchParams();
@@ -611,6 +618,12 @@ export const aceClient = {
       params.set('adapters', opts.adapters.map(a => `${a.name}:${a.scale}`).join(','));
     }
     if (opts.envMatch) params.set('env_match', '1');
+    if (opts.mix !== undefined) params.set('mix', String(opts.mix));
+    if (opts.bandBlend) {
+      params.set('band_blend', '1');
+      if (opts.bandFreq !== undefined) params.set('band_freq', String(opts.bandFreq));
+      if (opts.bandWidth !== undefined) params.set('band_width', String(opts.bandWidth));
+    }
     if (opts.strength !== undefined) params.set('strength', String(opts.strength));
     if (opts.steps !== undefined) params.set('steps', String(opts.steps));
     if (opts.sampler) params.set('sampler', opts.sampler);

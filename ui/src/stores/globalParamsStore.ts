@@ -166,6 +166,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   stableStepAdapters: readKey("hs-stableStepAdapters", [] as Array<{ name: string; scale: number; enabled: boolean }>),
   // Preserve source dynamics: envelope-match refined audio to the source
   stableStepPreserveDynamics: readKey("hs-stableStepPreserveDynamics", true),
+  // Source blending: 'off' | 'crossover' (source lows + refined highs) | 'mix'
+  stableStepBlendMode: readKey("hs-stableStepBlendMode", 'off'),
+  stableStepCrossoverHz: readKey("hs-stableStepCrossoverHz", 250),
+  stableStepCrossoverWidthHz: readKey("hs-stableStepCrossoverWidthHz", 200),
+  stableStepMix: readKey("hs-stableStepMix", 1.0),
   coverArtEnabled: readKey("hs-coverArtEnabled", false),
   coverArtSubject: readKey("hs-coverArtSubject", ''),
   qualityEvalEnabled: readKey("hs-qualityEvalEnabled", false),
@@ -333,6 +338,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setStableStepBackend: (v: any) => { set({ stableStepBackend: v }); writeKey("hs-stableStepBackend", v); },
   setStableStepAdapters: (v: any) => { set({ stableStepAdapters: v }); writeKey("hs-stableStepAdapters", v); },
   setStableStepPreserveDynamics: (v: any) => { set({ stableStepPreserveDynamics: v }); writeKey("hs-stableStepPreserveDynamics", v); },
+  setStableStepBlendMode: (v: any) => { set({ stableStepBlendMode: v }); writeKey("hs-stableStepBlendMode", v); },
+  setStableStepCrossoverHz: (v: any) => { set({ stableStepCrossoverHz: v }); writeKey("hs-stableStepCrossoverHz", v); },
+  setStableStepCrossoverWidthHz: (v: any) => { set({ stableStepCrossoverWidthHz: v }); writeKey("hs-stableStepCrossoverWidthHz", v); },
+  setStableStepMix: (v: any) => { set({ stableStepMix: v }); writeKey("hs-stableStepMix", v); },
   setCoverArtEnabled: (v: any) => { set({ coverArtEnabled: v }); writeKey("hs-coverArtEnabled", v); },
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
@@ -544,6 +553,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
         : undefined,
       stableStepPreserveDynamics: (s.postProcessingEnabled && s.stableStepOn)
         ? s.stableStepPreserveDynamics !== false : undefined,
+      stableStepBlendMode: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode !== 'off')
+        ? s.stableStepBlendMode : undefined,
+      stableStepCrossoverHz: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode === 'crossover')
+        ? s.stableStepCrossoverHz : undefined,
+      stableStepCrossoverWidthHz: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode === 'crossover')
+        ? s.stableStepCrossoverWidthHz : undefined,
+      stableStepMix: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode === 'mix')
+        ? s.stableStepMix : undefined,
       coverArtEnabled: (s.postProcessingEnabled && s.coverArtEnabled) || undefined,
       coverArtSubject: (s.postProcessingEnabled && s.coverArtEnabled && s.coverArtSubject) ? s.coverArtSubject : undefined,
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,

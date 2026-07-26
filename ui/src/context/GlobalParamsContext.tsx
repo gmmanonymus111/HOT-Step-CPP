@@ -153,6 +153,10 @@ export interface GlobalParams {
   stableStepAdapters: Array<{ name: string; scale: number; enabled: boolean }>;
   setStableStepAdapters: (v: Array<{ name: string; scale: number; enabled: boolean }>) => void;
   stableStepPreserveDynamics: boolean; setStableStepPreserveDynamics: (v: boolean) => void;
+  stableStepBlendMode: 'off' | 'crossover' | 'mix'; setStableStepBlendMode: (v: 'off' | 'crossover' | 'mix') => void;
+  stableStepCrossoverHz: number; setStableStepCrossoverHz: (v: number) => void;
+  stableStepCrossoverWidthHz: number; setStableStepCrossoverWidthHz: (v: number) => void;
+  stableStepMix: number; setStableStepMix: (v: number) => void;
   // Cover Art
   coverArtEnabled: boolean; setCoverArtEnabled: (v: boolean) => void;
   coverArtSubject: string; setCoverArtSubject: (v: string) => void;

@@ -255,6 +255,10 @@ export interface GenerationParams {
   stableStepBackend?: 'auto' | 'onnx' | 'gguf'; // engine backend (default 'auto')
   stableStepAdapters?: Array<{ name: string; scale: number }>; // DoRA adapters (GGML backend only)
   stableStepPreserveDynamics?: boolean; // envelope-match refined audio to source dynamics
+  stableStepBlendMode?: 'off' | 'crossover' | 'mix'; // source blending mode
+  stableStepCrossoverHz?: number;      // crossover center (crossover mode)
+  stableStepCrossoverWidthHz?: number; // transition width (crossover mode)
+  stableStepMix?: number;              // 0 = pure AS1.5 .. 1 = pure SA3 (mix mode)
 
   // DCW (Dynamic CFG Weighting)
   dcwEnabled?: boolean;

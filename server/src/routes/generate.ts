@@ -1160,6 +1160,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         : [],
       // Preserve source dynamics (envelope match) — default ON
       stableStepPreserveDynamics: job.params.stableStepPreserveDynamics !== false,
+      // Source blending: 'off' | 'crossover' | 'mix'
+      stableStepBlendMode: (job.params.stableStepBlendMode === 'crossover' || job.params.stableStepBlendMode === 'mix')
+        ? job.params.stableStepBlendMode as 'crossover' | 'mix' : 'off' as const,
+      stableStepCrossoverHz: typeof job.params.stableStepCrossoverHz === 'number'
+        ? job.params.stableStepCrossoverHz : 250,
+      stableStepCrossoverWidthHz: typeof job.params.stableStepCrossoverWidthHz === 'number'
+        ? job.params.stableStepCrossoverWidthHz : 200,
+      stableStepMix: typeof job.params.stableStepMix === 'number' ? job.params.stableStepMix : 1,
       stableStepCaptions: audioUrls.map((_, ti) =>
         (lmResults[ti]?.caption || firstResult.caption || job.params.caption || '') as string),
       whisperIsolateVocals: !!job.params.whisperIsolateVocals,
