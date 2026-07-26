@@ -103,11 +103,13 @@
 #include "gguf-weights.h"
 #include "yyjson.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define SA3_DIT_MAX_LAYERS 32
@@ -378,48 +380,76 @@ static struct ggml_tensor * sa3_load_tensor_adapted(WeightCtx * wctx, const GGUF
         return gf_load_tensor(wctx, gf, name, shape_override, n_dims_override);
     }
 
-    // Decode base to f32; accumulate each adapter: acc += s·(d[row]·(W + BA) − W)
+    // All hits describe the same base tensor — enforce identical (out, in)
+    // so the fused row pass below can share row geometry.
+    const int64_t rows = hits[0].out, cols = hits[0].in;
+    hits.erase(std::remove_if(hits.begin(), hits.end(), [&](const Hit & h) {
+        return h.out != rows || h.in != cols;
+    }), hits.end());
+
+    // Fused row-parallel merge (the naive scalar version of this cost ~20 s
+    // for a full adapter load; SIMD bf16 conversion + threading brings it to
+    // well under a second). Per row: decode base, add each adapter's
+    // s·(d[row]·(W + BA) − W), encode straight back to BF16. Rows are fully
+    // independent; thread-local scratch is one f32 row pair.
     const uint16_t * base_data = (const uint16_t *) gf_get_data(gf, name.c_str());
-    std::vector<float> wf((size_t) n_elem);
-    for (int64_t i = 0; i < n_elem; i++) {
-        wf[i] = ggml_bf16_to_fp32(*(const ggml_bf16_t *) &base_data[i]);
-    }
-    std::vector<float> acc(wf);
-    std::vector<float> ba;
-
-    for (const auto & h : hits) {
-        ba.assign((size_t) n_elem, 0.0f);
-        // ba[i,j] = Σ_k b[i,k]·a[k,j] — k-outer axpy for vectorization
-        for (int64_t i = 0; i < h.out; i++) {
-            float *       row = ba.data() + i * h.in;
-            const float * bi  = h.b + i * h.r;
-            for (int64_t k = 0; k < h.r; k++) {
-                const float   coef = bi[k];
-                const float * ak   = h.a + k * h.in;
-                for (int64_t j = 0; j < h.in; j++) {
-                    row[j] += coef * ak[j];
-                }
-            }
-        }
-        for (int64_t i = 0; i < h.out; i++) {
-            const float di = h.d[i];
-            const float * wrow = wf.data() + i * h.in;
-            const float * brow = ba.data() + i * h.in;
-            float *       arow = acc.data() + i * h.in;
-            for (int64_t j = 0; j < h.in; j++) {
-                arow[j] += h.scale * (di * (wrow[j] + brow[j]) - wrow[j]);
-            }
-        }
-    }
-
-    // Encode result to BF16 staging (float[] storage used as raw bytes;
-    // unique_ptr keeps the address stable — see WeightCtx).
     size_t nbytes = (size_t) n_elem * sizeof(uint16_t);
     auto   buf    = std::make_unique<float[]>((nbytes + sizeof(float) - 1) / sizeof(float));
     uint16_t * outp = (uint16_t *) buf.get();
-    for (int64_t i = 0; i < n_elem; i++) {
-        ggml_bf16_t b = ggml_fp32_to_bf16(acc[i]);
-        outp[i] = *(uint16_t *) &b;
+
+    unsigned nt = std::thread::hardware_concurrency();
+    if (nt < 1) nt = 1;
+    if ((int64_t) nt > rows) nt = (unsigned) rows;
+    const int64_t chunk = (rows + nt - 1) / nt;
+
+    auto worker = [&](int64_t r0, int64_t r1) {
+        std::vector<float> wrow((size_t) cols);
+        std::vector<float> arow((size_t) cols);
+        for (int64_t i = r0; i < r1; i++) {
+            ggml_bf16_to_fp32_row((const ggml_bf16_t *) (base_data + i * cols),
+                                  wrow.data(), cols);
+            memcpy(arow.data(), wrow.data(), sizeof(float) * cols);
+            for (const auto & h : hits) {
+                // ba row: Σ_k b[i,k]·a[k,:] — k-outer axpy, then the DoRA merge
+                // folded in per element: acc += s·(d·(w + ba) − w)
+                const float * bi = h.b + i * h.r;
+                const float   di = h.d[i];
+                const float   s  = h.scale;
+                // accumulate ba into a running row (reuse of wrow forbidden —
+                // later hits need the pristine base row)
+                static thread_local std::vector<float> barow;
+                barow.assign((size_t) cols, 0.0f);
+                for (int64_t k = 0; k < h.r; k++) {
+                    const float   coef = bi[k];
+                    const float * ak   = h.a + k * cols;
+                    float *       dst  = barow.data();
+                    for (int64_t j = 0; j < cols; j++) {
+                        dst[j] += coef * ak[j];
+                    }
+                }
+                const float * w = wrow.data();
+                const float * b = barow.data();
+                float *       a = arow.data();
+                for (int64_t j = 0; j < cols; j++) {
+                    a[j] += s * (di * (w[j] + b[j]) - w[j]);
+                }
+            }
+            ggml_fp32_to_bf16_row(arow.data(), (ggml_bf16_t *) (outp + i * cols), cols);
+        }
+    };
+
+    if (nt <= 1) {
+        worker(0, rows);
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(nt);
+        for (unsigned t = 0; t < nt; t++) {
+            int64_t r0 = (int64_t) t * chunk;
+            int64_t r1 = r0 + chunk < rows ? r0 + chunk : rows;
+            if (r0 >= r1) break;
+            threads.emplace_back(worker, r0, r1);
+        }
+        for (auto & th : threads) th.join();
     }
 
     // Tensor descriptor mirrors gf_load_tensor's shape handling
