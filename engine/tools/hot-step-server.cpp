@@ -3667,6 +3667,26 @@ int main(int argc, char ** argv) {
         res.set_content(wav, "audio/wav");
     });
 
+    // POST /supersep/release?id=... — drop a job from the pool, freeing its
+    // stems (each VOCALS_ONLY job pins ~2 full-track float stems in RAM and
+    // g_sep_jobs has no eviction, so long sessions / batch callers leak
+    // without this). A still-running worker holds its own shared_ptr, so the
+    // job is cancelled and memory is reclaimed when the worker finishes.
+    svr.Post("/supersep/release", [](const httplib::Request & req, httplib::Response & res) {
+        if (!req.has_param("id")) { json_error(res, 400, "Missing id"); return; }
+        std::string id = req.get_param_value("id");
+        std::shared_ptr<SuperSepJob> job;
+        {
+            std::lock_guard<std::mutex> lock(mtx_sep_jobs);
+            auto it = g_sep_jobs.find(id);
+            if (it == g_sep_jobs.end()) { json_error(res, 404, "Job not found"); return; }
+            job = it->second;
+            g_sep_jobs.erase(it);
+        }
+        if (job->status.load() == 0) job->cancel.store(true);
+        res.set_content("{\"released\":true}", "application/json");
+    });
+
     // POST /supersep/recombine — mix stems with volume/mute, return WAV
     // Body: JSON {"id":"...", "stems":[{"index":0,"volume":1.0,"muted":false},...]}
     svr.Post("/supersep/recombine", [](const httplib::Request & req, httplib::Response & res) {
