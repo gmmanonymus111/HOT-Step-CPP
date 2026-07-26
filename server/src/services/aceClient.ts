@@ -598,6 +598,9 @@ export const aceClient = {
       /** StableStep DoRA adapters (models/sa3-adapters/<name>.gguf), merged
        *  into the SA3 DiT at load. Forces the GGUF backend engine-side. */
       adapters?: Array<{ name: string; scale: number }>;
+      /** Windowed envelope match: output follows the source's short-term RMS
+       *  envelope (timbre from the refine, dynamics from the source). */
+      envMatch?: boolean;
     },
   ): Promise<Buffer> {
     const params = new URLSearchParams();
@@ -607,6 +610,7 @@ export const aceClient = {
     if (opts.adapters && opts.adapters.length > 0) {
       params.set('adapters', opts.adapters.map(a => `${a.name}:${a.scale}`).join(','));
     }
+    if (opts.envMatch) params.set('env_match', '1');
     if (opts.strength !== undefined) params.set('strength', String(opts.strength));
     if (opts.steps !== undefined) params.set('steps', String(opts.steps));
     if (opts.sampler) params.set('sampler', opts.sampler);

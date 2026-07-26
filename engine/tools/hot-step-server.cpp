@@ -3207,6 +3207,8 @@ int main(int argc, char ** argv) {
     //   sampler   "pingpong" (default) | "euler"
     //   seed      RNG seed (default: random)
     //   rms_match 1 (default) match output RMS to input | 0 raw
+    //   env_match 1 = windowed envelope match to the input (timbre from the
+    //             refine, dynamics from the source); supersedes rms_match
     //   out_sr    output sample rate (default: input rate)
     //   debug_zero_noise  1 = deterministic validation mode (zero noise)
     //   backend   "onnx" (5 graphs in models/onnx/sa3/) | "gguf" (4 sa3-*.gguf
@@ -3402,14 +3404,67 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "[Server] SA3 refine compute (%s): %.0f ms\n",
                 use_gguf ? "gguf" : "onnx", refine_timer.ms());
-        free(p44);
         if (!ok) {
+            free(p44);
             json_error(res, 500, "SA3 refine failed");
             return;
         }
 
-        // RMS gain matching (same convention as PP-VAE)
-        if (rms_match && in_rms > 1e-6f) {
+        // env_match=1: windowed envelope match — the refined output's
+        // short-term RMS is gain-ridden to follow the SOURCE's envelope, so
+        // the refine changes timbre but not dynamics. Motivation: adapters
+        // trained on mastered material generate loudness-war density
+        // ("rectangle" waveforms); a single global RMS gain can fix level but
+        // not crest factor. ~93 ms windows on a ~46 ms grid, per-sample
+        // linear gain interpolation, combined-channel gain (stereo balance
+        // preserved). Replaces the global RMS match when active.
+        bool env_match = req.has_param("env_match") && req.get_param_value("env_match") == "1";
+        if (env_match) {
+            const int64_t hop = 2048, win = 4096;   // @44.1k: ~46 ms grid, ~93 ms window
+            const int64_t n_blocks = (T44 + hop - 1) / hop;
+            std::vector<float> gains((size_t) n_blocks, 1.0f);
+            float gmin = 1e9f, gmax = 0.0f;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                int64_t s0 = b * hop - (win - hop) / 2;
+                if (s0 < 0) s0 = 0;
+                int64_t s1 = s0 + win;
+                if (s1 > T44) s1 = T44;
+                double in_sq = 0.0, out_sq = 0.0;
+                for (int64_t i = s0; i < s1; i++) {
+                    in_sq  += (double) p44[i] * p44[i]
+                            + (double) p44[T44 + i] * p44[T44 + i];
+                    out_sq += (double) out44[(size_t) i] * out44[(size_t) i]
+                            + (double) out44[(size_t) (T44 + i)] * out44[(size_t) (T44 + i)];
+                }
+                int64_t n = (s1 - s0) * 2;
+                if (n < 1) n = 1;
+                float bin  = (float) sqrt(in_sq / (double) n);
+                float bout = (float) sqrt(out_sq / (double) n);
+                float g = bin / (bout + 1e-6f);
+                if (g > 8.0f) g = 8.0f;   // cap: don't amplify refine noise into source-only passages
+                gains[(size_t) b] = g;
+                if (g < gmin) gmin = g;
+                if (g > gmax) gmax = g;
+            }
+            for (int64_t i = 0; i < T44; i++) {
+                int64_t b  = i / hop;
+                float   fr = (float) (i - b * hop) / (float) hop;
+                float   g0 = gains[(size_t) b];
+                float   g1 = (b + 1 < n_blocks) ? gains[(size_t) (b + 1)] : g0;
+                float   g  = g0 + (g1 - g0) * fr;
+                for (int ch = 0; ch < 2; ch++) {
+                    float v = out44[(size_t) ch * T44 + i] * g;
+                    out44[(size_t) ch * T44 + i] = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+            fprintf(stderr, "[Server] SA3 refine envelope match: %lld blocks, gain %.3f..%.3f\n",
+                    (long long) n_blocks, gmin, gmax);
+        }
+        free(p44);
+
+        // RMS gain matching (same convention as PP-VAE); superseded by the
+        // envelope match when env_match=1.
+        if (!env_match && rms_match && in_rms > 1e-6f) {
             double out_sum_sq = 0.0;
             for (size_t i = 0; i < out44.size(); i++) out_sum_sq += (double) out44[i] * out44[i];
             float out_rms = (float) sqrt(out_sum_sq / (double) out44.size());

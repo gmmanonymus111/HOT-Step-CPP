@@ -1158,6 +1158,8 @@ async function runGeneration(job: GenerationJob): Promise<void> {
             .map(a => ({ name: a.name as string, scale: typeof a.scale === 'number' ? a.scale : 1.0 }))
             .filter(a => a.scale !== 0)
         : [],
+      // Preserve source dynamics (envelope match) — default ON
+      stableStepPreserveDynamics: job.params.stableStepPreserveDynamics !== false,
       stableStepCaptions: audioUrls.map((_, ti) =>
         (lmResults[ti]?.caption || firstResult.caption || job.params.caption || '') as string),
       whisperIsolateVocals: !!job.params.whisperIsolateVocals,

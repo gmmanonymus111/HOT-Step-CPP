@@ -673,6 +673,24 @@ export const PostProcessingDropdown: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* Preserve source dynamics: envelope match to the pre-refine audio */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={gp.stableStepPreserveDynamics !== false}
+                  onChange={e => gp.setStableStepPreserveDynamics(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span className="flex-1">
+                  <span className="block text-xs text-zinc-700 dark:text-zinc-300">Preserve source dynamics</span>
+                  <span className="block text-[10px] text-zinc-500 leading-relaxed">
+                    The refined audio follows the original's loudness envelope — timbre
+                    from the refine, dynamics from your generation. Prevents adapters
+                    trained on mastered material from producing brickwalled waveforms.
+                  </span>
+                </span>
+              </label>
             </div>
           )}
         </div>

@@ -164,6 +164,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   stableStepBackend: readKey("hs-stableStepBackend", 'auto'),
   // StableStep DoRA adapters: [{name, scale, enabled}] — persisted selection
   stableStepAdapters: readKey("hs-stableStepAdapters", [] as Array<{ name: string; scale: number; enabled: boolean }>),
+  // Preserve source dynamics: envelope-match refined audio to the source
+  stableStepPreserveDynamics: readKey("hs-stableStepPreserveDynamics", true),
   coverArtEnabled: readKey("hs-coverArtEnabled", false),
   coverArtSubject: readKey("hs-coverArtSubject", ''),
   qualityEvalEnabled: readKey("hs-qualityEvalEnabled", false),
@@ -330,6 +332,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setStableStepStrength: (v: any) => { set({ stableStepStrength: v }); writeKey("hs-stableStepStrength", v); },
   setStableStepBackend: (v: any) => { set({ stableStepBackend: v }); writeKey("hs-stableStepBackend", v); },
   setStableStepAdapters: (v: any) => { set({ stableStepAdapters: v }); writeKey("hs-stableStepAdapters", v); },
+  setStableStepPreserveDynamics: (v: any) => { set({ stableStepPreserveDynamics: v }); writeKey("hs-stableStepPreserveDynamics", v); },
   setCoverArtEnabled: (v: any) => { set({ coverArtEnabled: v }); writeKey("hs-coverArtEnabled", v); },
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
@@ -539,6 +542,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
             .filter((a: any) => a.enabled && a.scale !== 0)
             .map((a: any) => ({ name: a.name, scale: a.scale }))
         : undefined,
+      stableStepPreserveDynamics: (s.postProcessingEnabled && s.stableStepOn)
+        ? s.stableStepPreserveDynamics !== false : undefined,
       coverArtEnabled: (s.postProcessingEnabled && s.coverArtEnabled) || undefined,
       coverArtSubject: (s.postProcessingEnabled && s.coverArtEnabled && s.coverArtSubject) ? s.coverArtSubject : undefined,
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,
