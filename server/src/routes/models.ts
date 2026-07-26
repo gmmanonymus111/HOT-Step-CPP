@@ -108,4 +108,26 @@ router.get('/stablestep', (_req, res) => {
   }
 });
 
+// GET /api/models/stablestep/adapters — list StableStep DoRA adapter GGUFs
+// (<modelsDir>/sa3-adapters/*.gguf). These are merged into the SA3 DiT at
+// refine time with per-adapter strength; GGUF backend only.
+router.get('/stablestep/adapters', (_req, res) => {
+  try {
+    const dir = path.join(config.aceServer.models, 'sa3-adapters');
+    let adapters: Array<{ name: string; sizeMb: number }> = [];
+    if (fs.existsSync(dir)) {
+      adapters = fs.readdirSync(dir)
+        .filter(f => f.endsWith('.gguf') && !f.endsWith('.part'))
+        .map(f => ({
+          name: f.slice(0, -'.gguf'.length),
+          sizeMb: Math.round(fs.statSync(path.join(dir, f)).size / 1e6),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+    res.json({ adapters });
+  } catch (err: any) {
+    res.json({ adapters: [], error: err.message });
+  }
+});
+
 export default router;

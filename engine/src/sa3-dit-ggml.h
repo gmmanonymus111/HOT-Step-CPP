@@ -283,7 +283,164 @@ static void sa3_dit_parse_config(SA3DiTConfig * c, const char * config_json) {
 
 // ── loading ─────────────────────────────────────────────────────────────────
 
-static bool sa3_dit_load(SA3DiT * m, const char * gguf_path) {
+// ── StableStep adapters: compact DoRA-rows GGUFs merged at load ─────────
+// Each adapter file (models/sa3-adapters/*.gguf, arch "sa3-adapter",
+// format "dora-rows-v1") stores, per adapted base tensor <name>:
+//   <name>.row_scale [out]    D diagonal: magnitude / (‖W+BA‖_row + 1e-12)
+//   <name>.lora_a    [r, in]  A
+//   <name>.lora_b    [out, r] (α/r)·B
+// (export: StableAudio3/scripts/export_sa3_adapter_deltas.py). The exact
+// DoRA merge is W' = D·(W + B·A); the DiT loads with the strength-
+// interpolated W + Σ sᵢ·(W'ᵢ − W) baked in before GPU upload — a merge-mode
+// analogue of the AS1.5 adapter system. Cache correctness: the adapter spec
+// MUST be part of the ModelKey (adapter_stack, hashed/compared for
+// MODEL_SA3_GGML).
+
+struct Sa3AdapterSpec {
+    std::string path;
+    float       scale;
+};
+
+struct Sa3AdapterSet {
+    std::vector<GGUFModel> files;
+    std::vector<float>     scales;
+    std::vector<std::string> names;
+
+    bool open(const std::vector<Sa3AdapterSpec> & specs) {
+        for (const auto & sp : specs) {
+            GGUFModel gf = {};
+            if (!gf_load(&gf, sp.path.c_str())) {
+                fprintf(stderr, "[SA3-DiT] FATAL: adapter load failed: %s\n", sp.path.c_str());
+                close();
+                return false;
+            }
+            files.push_back(gf);
+            scales.push_back(sp.scale);
+            names.push_back(sp.path);
+        }
+        return true;
+    }
+    void close() {
+        for (auto & gf : files) gf_close(&gf);
+        files.clear(); scales.clear(); names.clear();
+    }
+};
+
+// Like gf_load_tensor, but when any open adapter carries DoRA factors for
+// `name`, materialise the strength-interpolated merged weight
+//   bf16( W + Σ sᵢ·( dᵢ[row]·(W + BᵢAᵢ) − W ) )
+// into a staging buffer instead of pointing at the base mmap. Only BF16 base
+// tensors are eligible (all ≥2D sa3-dit weights are BF16 by the converter's
+// policy); anything else falls through to the plain zero-copy load.
+static struct ggml_tensor * sa3_load_tensor_adapted(WeightCtx * wctx, const GGUFModel & gf,
+                                                    Sa3AdapterSet * ad, const std::string & name,
+                                                    const int64_t * shape_override = nullptr,
+                                                    int n_dims_override = 0) {
+    if (!ad || ad->files.empty()) {
+        return gf_load_tensor(wctx, gf, name, shape_override, n_dims_override);
+    }
+
+    struct ggml_tensor * base_meta = ggml_get_tensor(gf.meta, name.c_str());
+    if (!base_meta) {
+        // let gf_load_tensor produce the canonical FATAL
+        return gf_load_tensor(wctx, gf, name, shape_override, n_dims_override);
+    }
+
+    // Collect this tensor's DoRA factors from each open adapter file.
+    // Factor layout (F32, ggml ne[0] = innermost):
+    //   row_scale ne = [out];  lora_a ne = [in, r];  lora_b ne = [r, out]
+    struct Hit { const float * d; const float * a; const float * b; int64_t r, in, out; float scale; };
+    std::vector<Hit> hits;
+    int64_t n_elem = ggml_nelements(base_meta);
+    for (size_t i = 0; i < ad->files.size(); i++) {
+        const GGUFModel & agf = ad->files[i];
+        struct ggml_tensor * dm = ggml_get_tensor(agf.meta, (name + ".row_scale").c_str());
+        struct ggml_tensor * am = ggml_get_tensor(agf.meta, (name + ".lora_a").c_str());
+        struct ggml_tensor * bm = ggml_get_tensor(agf.meta, (name + ".lora_b").c_str());
+        if (!dm || !am || !bm) continue;
+        int64_t out = dm->ne[0], in = am->ne[0], r = am->ne[1];
+        if (bm->ne[0] != r || bm->ne[1] != out || out * in != n_elem ||
+            dm->type != GGML_TYPE_F32 || am->type != GGML_TYPE_F32 || bm->type != GGML_TYPE_F32) {
+            fprintf(stderr, "[SA3-DiT] WARNING: adapter '%s' factors for '%s' malformed — skipped\n",
+                    ad->names[i].c_str(), name.c_str());
+            continue;
+        }
+        hits.push_back({ (const float *) gf_get_data(agf, (name + ".row_scale").c_str()),
+                         (const float *) gf_get_data(agf, (name + ".lora_a").c_str()),
+                         (const float *) gf_get_data(agf, (name + ".lora_b").c_str()),
+                         r, in, out, ad->scales[i] });
+    }
+    if (hits.empty() || base_meta->type != GGML_TYPE_BF16) {
+        if (!hits.empty()) {
+            fprintf(stderr, "[SA3-DiT] WARNING: base '%s' is not BF16 — adapter skipped\n",
+                    name.c_str());
+        }
+        return gf_load_tensor(wctx, gf, name, shape_override, n_dims_override);
+    }
+
+    // Decode base to f32; accumulate each adapter: acc += s·(d[row]·(W + BA) − W)
+    const uint16_t * base_data = (const uint16_t *) gf_get_data(gf, name.c_str());
+    std::vector<float> wf((size_t) n_elem);
+    for (int64_t i = 0; i < n_elem; i++) {
+        wf[i] = ggml_bf16_to_fp32(*(const ggml_bf16_t *) &base_data[i]);
+    }
+    std::vector<float> acc(wf);
+    std::vector<float> ba;
+
+    for (const auto & h : hits) {
+        ba.assign((size_t) n_elem, 0.0f);
+        // ba[i,j] = Σ_k b[i,k]·a[k,j] — k-outer axpy for vectorization
+        for (int64_t i = 0; i < h.out; i++) {
+            float *       row = ba.data() + i * h.in;
+            const float * bi  = h.b + i * h.r;
+            for (int64_t k = 0; k < h.r; k++) {
+                const float   coef = bi[k];
+                const float * ak   = h.a + k * h.in;
+                for (int64_t j = 0; j < h.in; j++) {
+                    row[j] += coef * ak[j];
+                }
+            }
+        }
+        for (int64_t i = 0; i < h.out; i++) {
+            const float di = h.d[i];
+            const float * wrow = wf.data() + i * h.in;
+            const float * brow = ba.data() + i * h.in;
+            float *       arow = acc.data() + i * h.in;
+            for (int64_t j = 0; j < h.in; j++) {
+                arow[j] += h.scale * (di * (wrow[j] + brow[j]) - wrow[j]);
+            }
+        }
+    }
+
+    // Encode result to BF16 staging (float[] storage used as raw bytes;
+    // unique_ptr keeps the address stable — see WeightCtx).
+    size_t nbytes = (size_t) n_elem * sizeof(uint16_t);
+    auto   buf    = std::make_unique<float[]>((nbytes + sizeof(float) - 1) / sizeof(float));
+    uint16_t * outp = (uint16_t *) buf.get();
+    for (int64_t i = 0; i < n_elem; i++) {
+        ggml_bf16_t b = ggml_fp32_to_bf16(acc[i]);
+        outp[i] = *(uint16_t *) &b;
+    }
+
+    // Tensor descriptor mirrors gf_load_tensor's shape handling
+    int     n_dims;
+    int64_t ne[4] = { 1, 1, 1, 1 };
+    if (shape_override && n_dims_override > 0) {
+        n_dims = n_dims_override;
+        for (int i = 0; i < n_dims; i++) ne[i] = shape_override[i];
+    } else {
+        n_dims = ggml_n_dims(base_meta);
+        for (int i = 0; i < n_dims; i++) ne[i] = base_meta->ne[i];
+    }
+    struct ggml_tensor * tensor = ggml_new_tensor(wctx->ctx, GGML_TYPE_BF16, n_dims, ne);
+    ggml_set_name(tensor, name.c_str());
+    wctx->pending.push_back({ tensor, buf.get(), nbytes, 0 });
+    wctx->staging.push_back(std::move(buf));
+    return tensor;
+}
+
+static bool sa3_dit_load(SA3DiT * m, const char * gguf_path,
+                         const std::vector<Sa3AdapterSpec> * adapters = nullptr) {
     BackendPair bp = backend_init("SA3-DiT");
     m->backend     = bp.backend;
     m->cpu_backend = bp.cpu_backend;
@@ -294,6 +451,19 @@ static bool sa3_dit_load(SA3DiT * m, const char * gguf_path) {
         fprintf(stderr, "[SA3-DiT] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+
+    Sa3AdapterSet adset;
+    if (adapters && !adapters->empty()) {
+        if (!adset.open(*adapters)) {
+            gf_close(&gf);
+            return false;
+        }
+        for (size_t i = 0; i < adset.names.size(); i++) {
+            fprintf(stderr, "[SA3-DiT] Adapter: %s (strength %.2f)\n",
+                    adset.names[i].c_str(), adset.scales[i]);
+        }
+    }
+    Sa3AdapterSet * ad = adset.files.empty() ? nullptr : &adset;
 
     sa3_dit_parse_config(&m->cfg, gf_get_str(gf, "sa3.config_json"));
     const SA3DiTConfig & c = m->cfg;
@@ -308,25 +478,25 @@ static bool sa3_dit_load(SA3DiT * m, const char * gguf_path) {
     // Conv1d k=1 weights: torch (out, in, 1) -> ggml (1, in, out); reload as [in, out].
     {
         const int64_t conv_shape[2] = { c.io_channels, c.io_channels };
-        m->pre_conv_w  = gf_load_tensor(&m->wctx, gf, "model.preprocess_conv.weight", conv_shape, 2);
-        m->post_conv_w = gf_load_tensor(&m->wctx, gf, "model.postprocess_conv.weight", conv_shape, 2);
+        m->pre_conv_w  = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.preprocess_conv.weight", conv_shape, 2);
+        m->post_conv_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.postprocess_conv.weight", conv_shape, 2);
     }
 
-    m->cond0_w = gf_load_tensor(&m->wctx, gf, "model.to_cond_embed.0.weight");
-    m->cond2_w = gf_load_tensor(&m->wctx, gf, "model.to_cond_embed.2.weight");
-    m->glob0_w = gf_load_tensor(&m->wctx, gf, "model.to_global_embed.0.weight");
-    m->glob2_w = gf_load_tensor(&m->wctx, gf, "model.to_global_embed.2.weight");
-    m->ts0_w   = gf_load_tensor(&m->wctx, gf, "model.to_timestep_embed.0.weight");
+    m->cond0_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_cond_embed.0.weight");
+    m->cond2_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_cond_embed.2.weight");
+    m->glob0_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_global_embed.0.weight");
+    m->glob2_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_global_embed.2.weight");
+    m->ts0_w   = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_timestep_embed.0.weight");
     m->ts0_b   = gf_load_tensor_f32(&m->wctx, gf, "model.to_timestep_embed.0.bias");
-    m->ts2_w   = gf_load_tensor(&m->wctx, gf, "model.to_timestep_embed.2.weight");
+    m->ts2_w   = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.to_timestep_embed.2.weight");
     m->ts2_b   = gf_load_tensor_f32(&m->wctx, gf, "model.to_timestep_embed.2.bias");
-    m->gc0_w   = gf_load_tensor(&m->wctx, gf, "model.transformer.global_cond_embedder.0.weight");
+    m->gc0_w   = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.transformer.global_cond_embedder.0.weight");
     m->gc0_b   = gf_load_tensor_f32(&m->wctx, gf, "model.transformer.global_cond_embedder.0.bias");
-    m->gc2_w   = gf_load_tensor(&m->wctx, gf, "model.transformer.global_cond_embedder.2.weight");
+    m->gc2_w   = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.transformer.global_cond_embedder.2.weight");
     m->gc2_b   = gf_load_tensor_f32(&m->wctx, gf, "model.transformer.global_cond_embedder.2.bias");
 
-    m->proj_in_w   = gf_load_tensor(&m->wctx, gf, "model.transformer.project_in.weight");
-    m->proj_out_w  = gf_load_tensor(&m->wctx, gf, "model.transformer.project_out.weight");
+    m->proj_in_w   = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.transformer.project_in.weight");
+    m->proj_out_w  = sa3_load_tensor_adapted(&m->wctx, gf, ad, "model.transformer.project_out.weight");
     // f32: concatenated with the f32 activation sequence (ggml_concat needs same type)
     m->memory_toks = gf_load_tensor_f32(&m->wctx, gf, "model.transformer.memory_tokens");
 
@@ -341,25 +511,25 @@ static bool sa3_dit_load(SA3DiT * m, const char * gguf_path) {
         ly->ff_norm_g  = gf_load_tensor_f32(&m->wctx, gf, p + ".ff_norm.gamma");
         ly->ssg        = gf_load_tensor_f32(&m->wctx, gf, p + ".to_scale_shift_gate");
 
-        ly->attn_qkv  = gf_load_tensor(&m->wctx, gf, p + ".self_attn.to_qkv.weight");
-        ly->attn_out  = gf_load_tensor(&m->wctx, gf, p + ".self_attn.to_out.weight");
+        ly->attn_qkv  = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".self_attn.to_qkv.weight");
+        ly->attn_out  = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".self_attn.to_out.weight");
         ly->attn_qn_g = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.q_norm.gamma");
         ly->attn_kn_g = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.k_norm.gamma");
 
-        ly->cross_q    = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.to_q.weight");
-        ly->cross_kv   = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.to_kv.weight");
-        ly->cross_out  = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.to_out.weight");
+        ly->cross_q    = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".cross_attn.to_q.weight");
+        ly->cross_kv   = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".cross_attn.to_kv.weight");
+        ly->cross_out  = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".cross_attn.to_out.weight");
         ly->cross_qn_g = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.q_norm.gamma");
         ly->cross_kn_g = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.k_norm.gamma");
 
-        ly->ff0_w = gf_load_tensor(&m->wctx, gf, p + ".ff.ff.0.proj.weight");
+        ly->ff0_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".ff.ff.0.proj.weight");
         ly->ff0_b = gf_load_tensor_f32(&m->wctx, gf, p + ".ff.ff.0.proj.bias");
-        ly->ff2_w = gf_load_tensor(&m->wctx, gf, p + ".ff.ff.2.weight");
+        ly->ff2_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".ff.ff.2.weight");
         ly->ff2_b = gf_load_tensor_f32(&m->wctx, gf, p + ".ff.ff.2.bias");
 
-        ly->loc0_w = gf_load_tensor(&m->wctx, gf, p + ".to_local_embed.0.weight");
+        ly->loc0_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".to_local_embed.0.weight");
         ly->loc0_b = gf_load_tensor_f32(&m->wctx, gf, p + ".to_local_embed.0.bias");
-        ly->loc2_w = gf_load_tensor(&m->wctx, gf, p + ".to_local_embed.2.weight");
+        ly->loc2_w = sa3_load_tensor_adapted(&m->wctx, gf, ad, p + ".to_local_embed.2.weight");
         ly->loc2_b = gf_load_tensor_f32(&m->wctx, gf, p + ".to_local_embed.2.bias");
     }
 
@@ -367,9 +537,11 @@ static bool sa3_dit_load(SA3DiT * m, const char * gguf_path) {
             c.depth, c.n_heads, c.dim_heads, c.io_channels, c.n_memory_tokens, c.ff_inner, c.rope_dims);
 
     if (!wctx_alloc(&m->wctx, m->backend)) {
+        adset.close();
         gf_close(&gf);
         return false;
     }
+    adset.close();
     gf_close(&gf);
     return true;
 }

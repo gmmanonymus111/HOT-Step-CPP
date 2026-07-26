@@ -253,6 +253,7 @@ export interface GenerationParams {
   stableStepOn?: boolean;
   stableStepStrength?: number; // 0.10–0.60 init noise level (default 0.3)
   stableStepBackend?: 'auto' | 'onnx' | 'gguf'; // engine backend (default 'auto')
+  stableStepAdapters?: Array<{ name: string; scale: number }>; // DoRA adapters (GGML backend only)
 
   // DCW (Dynamic CFG Weighting)
   dcwEnabled?: boolean;

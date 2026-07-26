@@ -74,6 +74,10 @@ struct ModelKeyHash {
             // multi-adapter stack: distinct stacks (paths + per-adapter scales)
             // bake distinct weights, so they must cache as distinct DiTs.
             h ^= std::hash<std::string>{}(k.adapter_stack) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        } else if (k.kind == MODEL_SA3_GGML) {
+            // StableStep adapters are merged into the SA3 DiT at load —
+            // distinct adapter specs must cache as distinct models.
+            h ^= std::hash<std::string>{}(k.adapter_stack) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
     }
@@ -101,6 +105,10 @@ struct ModelKeyEq {
                 && a.rebase_source == b.rebase_source
                 && a.rebase_beta   == b.rebase_beta
                 && a.adapter_stack == b.adapter_stack;
+        }
+        if (a.kind == MODEL_SA3_GGML) {
+            // StableStep adapter spec is baked into the loaded DiT weights.
+            return a.adapter_stack == b.adapter_stack;
         }
         return true;
     }
@@ -680,14 +688,35 @@ Sa3GgmlRefine * store_require_sa3_ggml(ModelStore * s, const ModelKey & k) {
         evict_all_except(s, k);
     }
     Timer           t;
+    // Parse the StableStep adapter spec out of adapter_stack:
+    // "path=scale;path=scale;..." (built by the /sa3-refine handler).
+    std::vector<Sa3AdapterSpec> specs;
+    {
+        const std::string & sig = k.adapter_stack;
+        size_t pos = 0;
+        while (pos < sig.size()) {
+            size_t semi = sig.find(';', pos);
+            if (semi == std::string::npos) semi = sig.size();
+            std::string entry = sig.substr(pos, semi - pos);
+            size_t eq = entry.rfind('=');
+            if (eq != std::string::npos && eq > 0) {
+                Sa3AdapterSpec sp;
+                sp.path  = entry.substr(0, eq);
+                sp.scale = strtof(entry.c_str() + eq + 1, nullptr);
+                specs.push_back(sp);
+            }
+            pos = semi + 1;
+        }
+    }
     Sa3GgmlRefine * m = new Sa3GgmlRefine();
-    if (!sa3_ggml_load(m, k.path.c_str())) {  // k.path = models root with the 4 sa3-*.gguf
+    // k.path = models root with the 4 sa3-*.gguf
+    if (!sa3_ggml_load(m, k.path.c_str(), specs.empty() ? nullptr : &specs)) {
         sa3_ggml_free(m);
         delete m;
         return nullptr;
     }
     install_entry(s, k, m, bytes_of_sa3_ggml(m), "SA3-Refine-GGML", del_sa3_ggml);
-    fprintf(stderr, "[Store] Load SA3-Refine-GGML: %.0f ms\n", t.ms());
+    fprintf(stderr, "[Store] Load SA3-Refine-GGML: %.0f ms (%zu adapters)\n", t.ms(), specs.size());
     return m;
 }
 

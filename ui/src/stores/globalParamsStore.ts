@@ -162,6 +162,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // Engine backend for the SA3 refine: 'auto' (engine picks) | 'onnx'
   // (ONNX Runtime/TensorRT, NVIDIA) | 'gguf' (GGML — CUDA/Vulkan/CPU).
   stableStepBackend: readKey("hs-stableStepBackend", 'auto'),
+  // StableStep DoRA adapters: [{name, scale, enabled}] — persisted selection
+  stableStepAdapters: readKey("hs-stableStepAdapters", [] as Array<{ name: string; scale: number; enabled: boolean }>),
   coverArtEnabled: readKey("hs-coverArtEnabled", false),
   coverArtSubject: readKey("hs-coverArtSubject", ''),
   qualityEvalEnabled: readKey("hs-qualityEvalEnabled", false),
@@ -327,6 +329,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setStableStepOn: (v: any) => { set({ stableStepOn: v }); writeKey("hs-stableStepOn", v); },
   setStableStepStrength: (v: any) => { set({ stableStepStrength: v }); writeKey("hs-stableStepStrength", v); },
   setStableStepBackend: (v: any) => { set({ stableStepBackend: v }); writeKey("hs-stableStepBackend", v); },
+  setStableStepAdapters: (v: any) => { set({ stableStepAdapters: v }); writeKey("hs-stableStepAdapters", v); },
   setCoverArtEnabled: (v: any) => { set({ coverArtEnabled: v }); writeKey("hs-coverArtEnabled", v); },
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
@@ -527,6 +530,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       stableStepStrength: (s.postProcessingEnabled && s.stableStepOn) ? s.stableStepStrength : undefined,
       stableStepBackend: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBackend !== 'auto')
         ? s.stableStepBackend : undefined,
+      stableStepAdapters: (s.postProcessingEnabled && s.stableStepOn)
+        ? (s.stableStepAdapters ?? [])
+            .filter((a: any) => a.enabled && a.scale !== 0)
+            .map((a: any) => ({ name: a.name, scale: a.scale }))
+        : undefined,
       coverArtEnabled: (s.postProcessingEnabled && s.coverArtEnabled) || undefined,
       coverArtSubject: (s.postProcessingEnabled && s.coverArtEnabled && s.coverArtSubject) ? s.coverArtSubject : undefined,
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,

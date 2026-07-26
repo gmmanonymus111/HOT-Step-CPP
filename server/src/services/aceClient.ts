@@ -595,12 +595,18 @@ export const aceClient = {
       /** Engine backend: 'onnx' (ONNX Runtime/TensorRT) or 'gguf' (GGML —
        *  CUDA/Vulkan/CPU). 'auto'/undefined lets the engine pick. */
       backend?: 'auto' | 'onnx' | 'gguf';
+      /** StableStep DoRA adapters (models/sa3-adapters/<name>.gguf), merged
+       *  into the SA3 DiT at load. Forces the GGUF backend engine-side. */
+      adapters?: Array<{ name: string; scale: number }>;
     },
   ): Promise<Buffer> {
     const params = new URLSearchParams();
     params.set('tokens', opts.tokens.join(','));
     params.set('n_tokens', String(opts.nTokens));
     if (opts.backend && opts.backend !== 'auto') params.set('backend', opts.backend);
+    if (opts.adapters && opts.adapters.length > 0) {
+      params.set('adapters', opts.adapters.map(a => `${a.name}:${a.scale}`).join(','));
+    }
     if (opts.strength !== undefined) params.set('strength', String(opts.strength));
     if (opts.steps !== undefined) params.set('steps', String(opts.steps));
     if (opts.sampler) params.set('sampler', opts.sampler);

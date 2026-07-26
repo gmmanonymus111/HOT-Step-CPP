@@ -1150,6 +1150,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       // anything else normalizes to 'auto' (engine picks).
       stableStepBackend: (job.params.stableStepBackend === 'onnx' || job.params.stableStepBackend === 'gguf')
         ? job.params.stableStepBackend as 'onnx' | 'gguf' : 'auto' as const,
+      // StableStep DoRA adapters: [{name, scale}] — normalized, disabled/zero
+      // entries dropped (engine forces GGUF backend when any are active).
+      stableStepAdapters: Array.isArray(job.params.stableStepAdapters)
+        ? (job.params.stableStepAdapters as Array<{ name?: string; scale?: number }>)
+            .filter(a => a && typeof a.name === 'string' && a.name.length > 0)
+            .map(a => ({ name: a.name as string, scale: typeof a.scale === 'number' ? a.scale : 1.0 }))
+            .filter(a => a.scale !== 0)
+        : [],
       stableStepCaptions: audioUrls.map((_, ti) =>
         (lmResults[ti]?.caption || firstResult.caption || job.params.caption || '') as string),
       whisperIsolateVocals: !!job.params.whisperIsolateVocals,

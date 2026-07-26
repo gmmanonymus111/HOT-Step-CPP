@@ -54,6 +54,9 @@ interface PostProcessParams {
   /** Engine backend for the SA3 refine: 'onnx' (ONNX Runtime/TensorRT),
    *  'gguf' (GGML — CUDA/Vulkan/CPU) or 'auto' (engine picks, default). */
   stableStepBackend?: 'auto' | 'onnx' | 'gguf';
+  /** StableStep DoRA adapters (models/sa3-adapters/<name>.gguf) merged into
+   *  the SA3 DiT at load with per-adapter strength. Forces the GGUF backend. */
+  stableStepAdapters?: Array<{ name: string; scale: number }>;
   /** Per-track captions (parallel to audioUrls) used to build the SA3 prompt.
    *  Populated by the generate route from the LM results. */
   stableStepCaptions?: string[];
@@ -270,6 +273,10 @@ export async function runPostProcessingChain(
           // Engine backend: 'onnx' | 'gguf' forces one; undefined = engine auto.
           const backend = (params.stableStepBackend === 'onnx' || params.stableStepBackend === 'gguf')
             ? params.stableStepBackend : undefined;
+          const adapters = (params.stableStepAdapters ?? []).filter(a => a && a.name && a.scale !== 0);
+          if (adapters.length > 0) {
+            log('INFO', `[StableStep] Adapters: ${adapters.map(a => `${a.name}@${a.scale}`).join(', ')}`);
+          }
           const strength = params.stableStepStrength ?? 0.3;
           const caption = params.stableStepCaptions?.[i] || '';
           const durationSec = wavDurationSec(processedPath);
@@ -283,7 +290,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const wavBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(wavBuf, {
-              tokens: ids, nTokens, strength, backend,
+              tokens: ids, nTokens, strength, backend, adapters,
             });
             fs.writeFileSync(processedPath, refined);
           } else if (!vocalSep) {
@@ -293,7 +300,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const srcBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(srcBuf, {
-              tokens: ids, nTokens, strength, backend,
+              tokens: ids, nTokens, strength, backend, adapters,
             });
             fs.writeFileSync(processedPath, refined);
           } else {
@@ -304,7 +311,7 @@ export async function runPostProcessingChain(
 
             setStage(`StableStep: refining instrumental${suffix}...`);
             const refinedInst = await aceClient.submitSa3Refine(vs.instBuf, {
-              tokens: ids, nTokens, strength, outSr: 48000, backend,
+              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters,
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);

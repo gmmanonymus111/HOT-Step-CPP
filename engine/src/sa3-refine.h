@@ -350,8 +350,10 @@ struct Sa3GgmlRefine final : Sa3Backend {
 
 // Load all four GGUFs from `dir` (the models root, same place the pp-vae
 // GGUFs live). The seconds embedder reads its two tiny tensors from the DiT
-// GGUF (conditioner.* extras).
-static inline bool sa3_ggml_load(Sa3GgmlRefine * m, const char * dir) {
+// GGUF (conditioner.* extras). `adapters` (optional) = StableStep DoRA
+// adapter GGUFs merged into the DiT weights at load (see sa3-dit-ggml.h).
+static inline bool sa3_ggml_load(Sa3GgmlRefine * m, const char * dir,
+                                 const std::vector<Sa3AdapterSpec> * adapters = nullptr) {
     if (!m || !dir) return false;
     m->dir = dir;
     std::string d = dir;
@@ -359,9 +361,10 @@ static inline bool sa3_ggml_load(Sa3GgmlRefine * m, const char * dir) {
            && sa3_seconds_embedder_load(&m->seconds_m, (d + "/sa3-dit-BF16.gguf").c_str())
            && sa3_same_load(&m->same_enc_m, (d + "/sa3-same-enc-F16.gguf").c_str(), true)
            && sa3_same_load(&m->same_dec_m, (d + "/sa3-same-dec-F16.gguf").c_str(), false)
-           && sa3_dit_load(&m->dit_m, (d + "/sa3-dit-BF16.gguf").c_str());
+           && sa3_dit_load(&m->dit_m, (d + "/sa3-dit-BF16.gguf").c_str(), adapters);
     m->loaded = ok;
-    fprintf(stderr, "[SA3] GGML backend loaded from %s: %s\n", dir, ok ? "OK" : "FAILED");
+    fprintf(stderr, "[SA3] GGML backend loaded from %s (%zu adapters): %s\n", dir,
+            adapters ? adapters->size() : 0, ok ? "OK" : "FAILED");
     return ok;
 }
 

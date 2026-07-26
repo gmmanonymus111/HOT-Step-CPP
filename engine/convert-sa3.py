@@ -93,9 +93,21 @@ def write_sa3_gguf(out_path, arch, tensors, config_json, extra_meta=None, half="
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    cfg_path = hf_hub_download(REPO, "model_config.json")
-    ckpt_path = hf_hub_download(REPO, "model.safetensors")
+    # Local-checkpoint support (e.g. LoRA-merged models): --ckpt/--config
+    # override the HF download; --out-dir redirects output; --dit-only skips
+    # the SAME + T5Gemma GGUFs (unchanged when only the DiT was fine-tuned).
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", default=None, help="Local model.safetensors (default: HF download)")
+    ap.add_argument("--config", default=None, help="Local model_config.json (default: HF download)")
+    ap.add_argument("--out-dir", default=OUTPUT_DIR)
+    ap.add_argument("--dit-only", action="store_true")
+    args = ap.parse_args()
+    out_dir = args.out_dir
+
+    os.makedirs(out_dir, exist_ok=True)
+    cfg_path = args.config or hf_hub_download(REPO, "model_config.json")
+    ckpt_path = args.ckpt or hf_hub_download(REPO, "model.safetensors")
     with open(cfg_path) as f:
         config_json = f.read()
 
@@ -123,11 +135,14 @@ def main():
             elif key.startswith("conditioner."):
                 dit_tensors.append((key, to_np(f.get_tensor(key))))
 
-    write_sa3_gguf(os.path.join(OUTPUT_DIR, "sa3-dit-BF16.gguf"),
+    write_sa3_gguf(os.path.join(out_dir, "sa3-dit-BF16.gguf"),
                   "sa3-dit", dit_tensors, config_json)
-    write_sa3_gguf(os.path.join(OUTPUT_DIR, "sa3-same-enc-F16.gguf"),
+    if args.dit_only:
+        log("Done (dit-only).")
+        return
+    write_sa3_gguf(os.path.join(out_dir, "sa3-same-enc-F16.gguf"),
                   "sa3-same-enc", enc_tensors, config_json, half="f16")
-    write_sa3_gguf(os.path.join(OUTPUT_DIR, "sa3-same-dec-F16.gguf"),
+    write_sa3_gguf(os.path.join(out_dir, "sa3-same-dec-F16.gguf"),
                   "sa3-same-dec", dec_tensors, config_json, half="f16")
 
     # ── T5Gemma encoder (separate HF model in the repo subfolder) ───────
@@ -149,7 +164,7 @@ def main():
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
         key = "conditioner.conditioners.prompt.padding_embedding"
         t5_tensors.append((key, to_np(f.get_tensor(key))))
-    write_sa3_gguf(os.path.join(OUTPUT_DIR, "sa3-text-enc-BF16.gguf"),
+    write_sa3_gguf(os.path.join(out_dir, "sa3-text-enc-BF16.gguf"),
                   "sa3-t5gemma", t5_tensors, t5_config_json,
                   extra_meta={"sa3.parent_config_json": config_json})
 

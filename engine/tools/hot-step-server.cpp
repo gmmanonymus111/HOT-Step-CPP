@@ -3212,6 +3212,10 @@ int main(int argc, char ** argv) {
     //   backend   "onnx" (5 graphs in models/onnx/sa3/) | "gguf" (4 sa3-*.gguf
     //             in the models root) | "auto" (default: onnx if present,
     //             else gguf). 501 if the selected backend's models are absent.
+    //   adapters  CSV "name:strength,name:strength" — StableStep DoRA adapter
+    //             GGUFs from <models>/sa3-adapters/<name>.gguf, merged into
+    //             the DiT at load. Forces the GGUF backend (ONNX graphs are
+    //             frozen). 400 if a named adapter file is missing.
     svr.Post("/sa3-refine", [models_dir](const httplib::Request & req, httplib::Response & res) {
         if (req.body.empty()) {
             json_error(res, 400, "Empty body (expected WAV audio)");
@@ -3226,6 +3230,55 @@ int main(int argc, char ** argv) {
         bool have_onnx = file_exists(sa3_dir + "/sa3-dit.onnx");
         bool have_gguf = file_exists(std::string(models_dir) + "/sa3-dit-BF16.gguf");
         std::string backend = req.has_param("backend") ? req.get_param_value("backend") : "auto";
+
+        // StableStep adapters: parse + resolve BEFORE backend selection —
+        // adapters exist only on the GGUF path, so they force it.
+        std::vector<std::pair<std::string, float>> adapter_specs;  // (path, scale)
+        std::string adapter_sig;  // "path=scale;..." for the ModelKey
+        if (req.has_param("adapters") && !req.get_param_value("adapters").empty()) {
+            const std::string csv = req.get_param_value("adapters");
+            size_t pos = 0;
+            while (pos < csv.size()) {
+                size_t comma = csv.find(',', pos);
+                if (comma == std::string::npos) comma = csv.size();
+                std::string entry = csv.substr(pos, comma - pos);
+                pos = comma + 1;
+                if (entry.empty()) continue;
+                size_t colon = entry.rfind(':');
+                std::string name  = (colon == std::string::npos) ? entry : entry.substr(0, colon);
+                float       scale = (colon == std::string::npos) ? 1.0f
+                                    : strtof(entry.c_str() + colon + 1, nullptr);
+                // Name sanitation: bare filename stem only (no path traversal)
+                if (name.empty() || name.find('/') != std::string::npos ||
+                    name.find('\\') != std::string::npos || name.find("..") != std::string::npos) {
+                    json_error(res, 400, "Invalid adapter name");
+                    return;
+                }
+                std::string path = std::string(models_dir) + "/sa3-adapters/" + name + ".gguf";
+                if (!file_exists(path)) {
+                    json_error(res, 400, ("SA3 adapter not found: " + name +
+                                          " (expected models/sa3-adapters/" + name + ".gguf)").c_str());
+                    return;
+                }
+                adapter_specs.push_back({ path, scale });
+                if (!adapter_sig.empty()) adapter_sig += ";";
+                adapter_sig += path + "=" + std::to_string(scale);
+            }
+            if (!adapter_specs.empty()) {
+                if (!have_gguf) {
+                    json_error(res, 501, "SA3 adapters require the GGUF backend (sa3-*.gguf not installed)");
+                    return;
+                }
+                if (backend == "onnx") {
+                    json_error(res, 400, "SA3 adapters are GGUF-only — remove backend=onnx or switch to gguf");
+                    return;
+                }
+                backend = "gguf";
+                fprintf(stderr, "[Server] SA3 refine: %zu adapter(s) requested — GGUF backend forced\n",
+                        adapter_specs.size());
+            }
+        }
+
         bool use_gguf;
         if (backend == "onnx") {
             if (!have_onnx) {
@@ -3321,6 +3374,7 @@ int main(int argc, char ** argv) {
             ModelKey k{};
             k.kind = MODEL_SA3_GGML;
             k.path = models_dir;  // 4 sa3-*.gguf in the models root
+            k.adapter_stack = adapter_sig;  // "" = stock; else distinct cached model
             Sa3GgmlRefine * sa3 = store_require_sa3_ggml(g_store, k);
             if (!sa3) {
                 free(p44);

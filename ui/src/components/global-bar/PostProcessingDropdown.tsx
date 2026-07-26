@@ -289,6 +289,29 @@ export const PostProcessingDropdown: React.FC = () => {
       .catch(() => { setStableStepAvailable(false); setStableStepBackends({ onnx: false, gguf: false }); });
   }, []);
 
+  // StableStep DoRA adapters (models/sa3-adapters/*.gguf) — merged into the
+  // SA3 DiT at refine time with per-adapter strength. GGML backend only.
+  const [stableStepAdapterList, setStableStepAdapterList] = useState<Array<{ name: string; sizeMb: number }>>([]);
+  useEffect(() => {
+    fetch('/api/models/stablestep/adapters')
+      .then(r => r.json())
+      .then(data => setStableStepAdapterList(Array.isArray(data.adapters) ? data.adapters : []))
+      .catch(() => setStableStepAdapterList([]));
+  }, []);
+  const ssAdapterState = (name: string) =>
+    (gp.stableStepAdapters ?? []).find((a: any) => a.name === name);
+  const setSsAdapter = (name: string, patch: { enabled?: boolean; scale?: number }) => {
+    const cur: Array<{ name: string; scale: number; enabled: boolean }> = gp.stableStepAdapters ?? [];
+    const existing = cur.find(a => a.name === name);
+    const next = existing
+      ? cur.map(a => (a.name === name ? { ...a, ...patch } : a))
+      : [...cur, { name, scale: 1.0, enabled: false, ...patch }];
+    gp.setStableStepAdapters(next);
+  };
+  const ssActiveAdapterCount = (gp.stableStepAdapters ?? [])
+    .filter((a: any) => a.enabled && a.scale !== 0 && stableStepAdapterList.some(l => l.name === a.name))
+    .length;
+
   // Postprocess plugin availability — fetch from /api/plugins
   const [postprocessPlugins, setPostprocessPlugins] = useState<any[]>([]);
   useEffect(() => {
@@ -588,6 +611,67 @@ export const PostProcessingDropdown: React.FC = () => {
                       ? 'GGML backend — runs on CUDA, Vulkan or CPU. Fastest option on NVIDIA in current testing.'
                       : 'Auto lets the engine pick the best installed backend.'}
                 </p>
+              </div>
+
+              {/* StableStep adapters: per-adapter enable + strength */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">
+                  Adapters{ssActiveAdapterCount > 0 ? ` (${ssActiveAdapterCount} active)` : ''}
+                </label>
+                {stableStepAdapterList.length === 0 ? (
+                  <p className="text-[10px] text-zinc-500 leading-relaxed">
+                    No StableStep adapters installed — drop adapter .gguf files in
+                    <span className="font-mono"> models/sa3-adapters/</span> and reopen this panel.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {stableStepAdapterList.map(a => {
+                      const st = ssAdapterState(a.name);
+                      const enabled = !!st?.enabled;
+                      const scale = st?.scale ?? 1.0;
+                      return (
+                        <div key={a.name}
+                             className={`rounded-lg border px-2 py-1.5 ${enabled
+                               ? 'border-sky-400/40 bg-sky-500/5'
+                               : 'border-zinc-300 dark:border-white/10'}`}>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={enabled}
+                              onChange={e => setSsAdapter(a.name, { enabled: e.target.checked })}
+                              className="accent-sky-500"
+                            />
+                            <span className="flex-1 text-xs text-zinc-700 dark:text-zinc-300 font-mono truncate"
+                                  title={`${a.name} (${a.sizeMb} MB)`}>
+                              {a.name}
+                            </span>
+                            {enabled && (
+                              <span className="text-[10px] text-zinc-500 tabular-nums">
+                                {(scale * 100).toFixed(0)}%
+                              </span>
+                            )}
+                          </div>
+                          {enabled && (
+                            <input
+                              type="range"
+                              min={0} max={2} step={0.05}
+                              value={scale}
+                              onChange={e => setSsAdapter(a.name, { scale: parseFloat(e.target.value) })}
+                              className="w-full mt-1 accent-sky-500"
+                              title="Adapter strength (100% = trained strength; >100% amplifies)"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                    {ssActiveAdapterCount > 0 && (
+                      <p className="text-[10px] text-amber-500/90 leading-relaxed">
+                        Adapters run on the GGML backend — the engine switches to it
+                        automatically while any adapter is active.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

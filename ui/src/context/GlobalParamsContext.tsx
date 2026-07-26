@@ -150,6 +150,8 @@ export interface GlobalParams {
   stableStepOn: boolean; setStableStepOn: (v: boolean) => void;
   stableStepStrength: number; setStableStepStrength: (v: number) => void;
   stableStepBackend: 'auto' | 'onnx' | 'gguf'; setStableStepBackend: (v: 'auto' | 'onnx' | 'gguf') => void;
+  stableStepAdapters: Array<{ name: string; scale: number; enabled: boolean }>;
+  setStableStepAdapters: (v: Array<{ name: string; scale: number; enabled: boolean }>) => void;
   // Cover Art
   coverArtEnabled: boolean; setCoverArtEnabled: (v: boolean) => void;
   coverArtSubject: string; setCoverArtSubject: (v: string) => void;
