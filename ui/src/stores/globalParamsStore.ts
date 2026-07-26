@@ -459,7 +459,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       rebaseBeta: (primary && s.rebaseSource) ? s.rebaseBeta : undefined,
       triggerWord: triggerWord || undefined,
       triggerWords: triggerWords.length ? triggerWords : undefined,
-      triggerPlacement: triggerWords.length ? settings.triggerPlacement : undefined,
+      // '|| prepend' fallback matches the queue path (audioGenQueueStore):
+      // an ace-settings object saved before triggerPlacement existed has the
+      // key undefined, and translateParams skips injection entirely without a
+      // placement — which silently dropped trigger words on Create/custom-gen.
+      triggerPlacement: triggerWords.length ? (settings.triggerPlacement || 'prepend') : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,
       cfgCutoffRatio: s.cfgCutoffRatio < 1.0 ? s.cfgCutoffRatio : undefined,
       lmCfgCutoffRatio: s.lmCfgCutoffRatio < 1.0 ? s.lmCfgCutoffRatio : undefined,
