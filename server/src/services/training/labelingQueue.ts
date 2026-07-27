@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { execSync, type ChildProcess } from 'child_process';
 import type { Response } from 'express';
 import { pushLog } from '../../routes/logs.js';
 import { config } from '../../config.js';
@@ -64,6 +65,10 @@ export interface TrainingJob {
   events: TrainingStreamEvent[];
   listeners: Set<Response>;
   controller: AbortController;
+  /** Live child process for job kinds that spawn one (preprocess → ace-train).
+   *  An AbortController does nothing to a spawned process — cancelJob() kills
+   *  this directly. */
+  child?: ChildProcess;
 }
 
 const jobs = new Map<string, TrainingJob>();
@@ -195,11 +200,11 @@ export function pushEvent(job: TrainingJob, ev: TrainingStreamEvent): void {
   broadcast(job, ev);
 }
 
-function emitJob(job: TrainingJob): void {
+export function emitJob(job: TrainingJob): void {
   pushEvent(job, { type: 'job', job: toSummary(job) });
 }
 
-function emitProgress(job: TrainingJob): void {
+export function emitProgress(job: TrainingJob): void {
   pushEvent(job, {
     type: 'progress',
     done: job.done,
@@ -289,6 +294,46 @@ export function enqueue(job: TrainingJob, run: (j: TrainingJob) => Promise<void>
   queueTail = queueTail.then(() => run(job)).catch(() => { /* runners handle their own errors */ });
 }
 
+/**
+ * Kill a job's spawned child and everything it started.
+ *
+ * `child.kill()` is a plain TerminateProcess on the ace-train PID only, but
+ * ace-train shells out to ffmpeg per song (P5). A cancel mid-transcode would
+ * otherwise leave ffmpeg running and writing its temp WAV into `<out>/.tmp/`
+ * long after the UI says "cancelled" — nothing reaps it until a later run's
+ * startup purge. Same reasoning as the engine stop's `taskkill /T`.
+ */
+export function killJobChild(job: TrainingJob): void {
+  const child = job.child;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform === 'win32' && child.pid) {
+      execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' });
+    } else if (child.pid) {
+      // Not detached, so there is no process group to signal — kill the leader
+      // and let ffmpeg die on its broken stdio pipe.
+      child.kill('SIGKILL');
+    }
+  } catch {
+    try { child.kill(); } catch { /* already gone */ }
+  }
+}
+
+/**
+ * Kill every live job child. Called from index.ts's shutdown() — Node exiting
+ * mid-preprocess otherwise orphans a GPU-resident ace-train (~3.2 GB), which
+ * then competes with the engine the relaunched server immediately starts. The
+ * routine tsx-watch SIGTERM in this repo's dev loop hits exactly this.
+ */
+export function killActiveChildren(): void {
+  for (const job of jobs.values()) {
+    if (job.child) {
+      console.log(`[Training] Shutdown — killing child of job ${job.id} (pid ${job.child.pid})`);
+      killJobChild(job);
+    }
+  }
+}
+
 export function cancelJob(id: string): boolean {
   const job = jobs.get(id);
   if (!job) return false;
@@ -296,6 +341,10 @@ export function cancelJob(id: string): boolean {
     job.status = 'cancelled';
     job.finishedAt = Date.now();
     job.controller.abort();
+    // A spawned child (ace-train) ignores the AbortController entirely — kill
+    // the whole tree, or a cancelled preprocess job keeps the GPU for hours and
+    // leaves an ffmpeg grandchild transcoding into <out>/.tmp/.
+    killJobChild(job);
     // Rows this job had queued/in flight go back to their on-disk state at once,
     // or they would render "Queued…"/"Working…" (and read-only) forever.
     clearTransientStatuses(job.datasetId, job.sampleIds);
@@ -312,11 +361,11 @@ export function cancelJob(id: string): boolean {
   return true;
 }
 
-function isCancelled(job: TrainingJob): boolean {
+export function isCancelled(job: TrainingJob): boolean {
   return job.status === 'cancelled' || job.controller.signal.aborted;
 }
 
-function finishJob(job: TrainingJob, status: TrainingJobStatus, error?: string): void {
+export function finishJob(job: TrainingJob, status: TrainingJobStatus, error?: string): void {
   if (job.status === 'cancelled') return;   // a cancel already closed the stream
   job.status = status;
   job.error = error ?? null;
@@ -1021,5 +1070,20 @@ export function startCaptionJob(
 export function startBuildJob(datasetId: string, opts: BuildOptions & { outputPath: string }): TrainingJob {
   const job = createJob('build', datasetId, [], opts);
   enqueue(job, runBuildJob);
+  return job;
+}
+
+/**
+ * Preprocess (Training Studio phase 2) — spawns ace-train, which owns the GPU
+ * for the whole run. The runner is imported lazily: preprocessRunner imports
+ * emitProgress/finishJob/isCancelled from this module, and a top-level import
+ * both ways is a cycle.
+ */
+export function startPreprocessJob(datasetId: string, sampleIds: string[], opts: unknown): TrainingJob {
+  const job = createJob('preprocess', datasetId, sampleIds, opts);
+  enqueue(job, async (j) => {
+    const { runPreprocessJob } = await import('./preprocessRunner.js');
+    await runPreprocessJob(j);
+  });
   return job;
 }

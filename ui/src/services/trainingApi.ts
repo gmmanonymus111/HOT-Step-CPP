@@ -15,7 +15,8 @@ export type MergePolicy =
   | 'overwrite_lyrics'
   | 'overwrite_all';
 
-export type TrainingJobKind = 'label' | 'enhance-genius' | 'enhance-caption' | 'build';
+export type TrainingJobKind =
+  | 'label' | 'enhance-genius' | 'enhance-caption' | 'build' | 'preprocess';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -94,6 +95,7 @@ export interface TrainingDatasetDetail extends TrainingDatasetSummary {
   samples: TrainingSample[];
   warnings: string[];         // e.g. "Only 6 samples — 10+ recommended"
   activeJobId: string | null;
+  preprocessedVariants: number;   // subdirs of data/training/tensors/<slug> with a preprocess_meta.json
 }
 
 // ── Jobs ─────────────────────────────────────────────────────────────────
@@ -107,11 +109,62 @@ export interface TrainingJobSummary {
   failed: number;
   currentSampleId: string | null;
   phase: string;              // free-form: 'essentia' | 'understand' | 'waiting-for-engine' | 'genius' | 'llm' | 'writing' | 'build'
+                              // kind==='preprocess' adds: 'engine-stop' | 'loading-models'
+                              //                          | 'preprocess' | 'stats' | 'engine-restart'
   engineQueueDepth: number;   // # of ace-server jobs ahead of ours; 0 if unknown
   error: string | null;
   createdAt: number;          // epoch ms
   startedAt: number | null;
   finishedAt: number | null;
+}
+
+// ── Preprocess ───────────────────────────────────────────────────────────
+export type PreprocessDtype   = 'f32' | 'bf16';
+export type PreprocessCompat  = 'hotstep' | 'sidestep';
+export type PreprocessNormalize = 'none' | 'peak';
+
+export interface PreprocessOptions {
+  /** DiT base model name from capabilities.preprocess.ditModels.
+   *  Omitted → server uses capabilities.preprocess.defaultDit; if that is
+   *  empty the request is rejected with 400. */
+  ditModel?: string;
+  vaeModel?: string;          // default capabilities.preprocess.defaultVae
+  textEncoder?: string;       // default capabilities.preprocess.defaultTextEnc
+  sampleIds?: string[];       // omit = every non-excluded, non-missing sample
+  maxDuration?: number;       // default 240; 0 = no truncation
+  normalize?: PreprocessNormalize;  // default 'peak'
+  targetDb?: number;          // default -1.0
+  dtype?: PreprocessDtype;    // default 'f32'
+  compat?: PreprocessCompat;  // default 'hotstep'
+  maxCaptionTokens?: number;  // default 256
+  maxLyricTokens?: number;    // default 512
+  vaeChunk?: number;          // default 384    (latent frames; ~15.4s tiles — VRAM-bounded)
+  vaeOverlap?: number;        // default 64     (latent frames)
+  overwrite?: boolean;        // default false
+  stopEngine?: boolean;       // default TRUE — stop ace-server for the job
+  outputDir?: string;         // default data/training/tensors/<slug>/<variantKey>
+}
+
+export interface PreprocessVariantStatus {
+  variantKey: string;      // directory name, e.g. 'acestep-v15-base-BF16'
+  modelVariant: string;    // exact DiT file name from preprocess_meta.json
+  outputDir: string;       // absolute
+  createdAt: string;       // ISO, '' if unknown
+  compat: string;          // 'hotstep' | 'sidestep' | '' (unknown/legacy)
+  dtype: string;           // 'F32' | 'BF16' | ''
+  total: number;           // songs the run attempted
+  processed: number;
+  failed: number;
+  cachedCount: number;     // .safetensors files actually present on disk
+  staleCount: number;      // cached entries whose source audio size/mtime changed
+  missingCount: number;    // current dataset samples with no cache entry
+  bytes: number;           // total size of the variant dir
+  hasChannelStats: boolean;
+}
+
+export interface PreprocessStatus {
+  tensorsRoot: string;                    // data/training/tensors/<slug>
+  variants: PreprocessVariantStatus[];    // newest createdAt first
 }
 
 // ── Capabilities ─────────────────────────────────────────────────────────
@@ -131,6 +184,18 @@ export interface TrainingCapabilities {
     configured: boolean;
     defaultProvider: string;
     providers: Array<{ id: string; name: string; available: boolean; models: string[]; defaultModel: string }>;
+  };
+  preprocess: {
+    available: boolean;      // ace-train binary found on disk
+    binPath: string;         // '' when not found
+    ditModels: string[];     // from the cached /props snapshot
+    vaeModels: string[];
+    textEncoders: string[];
+    defaultDit: string;      // first /bf16/i match, else ''
+    defaultVae: string;
+    defaultTextEnc: string;
+    modelsCachedAt: number;  // epoch ms of the snapshot; 0 = never probed
+    engineSuspended: boolean;// true while a preprocess job owns the GPU
   };
 }
 
@@ -348,6 +413,24 @@ export async function startBuild(id: string, outputPath?: string): Promise<{ job
   return request<{ jobId: string }>(
     `/datasets/${encodeURIComponent(id)}/build`,
     { method: 'POST', ...jsonBody(outputPath ? { outputPath } : {}) },
+  );
+}
+
+export async function startPreprocess(id: string, opts: PreprocessOptions): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>(
+    `/datasets/${encodeURIComponent(id)}/preprocess`,
+    { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+export async function getPreprocessStatus(id: string): Promise<PreprocessStatus> {
+  return request<PreprocessStatus>(`/datasets/${encodeURIComponent(id)}/preprocess`);
+}
+
+export async function deletePreprocessVariant(id: string, variantKey: string): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/datasets/${encodeURIComponent(id)}/preprocess/${encodeURIComponent(variantKey)}`,
+    { method: 'DELETE' },
   );
 }
 

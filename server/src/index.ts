@@ -11,11 +11,9 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { spawn, ChildProcess } from 'child_process';
-import { execSync } from 'child_process';
 
 import { config, PROJECT_ROOT, PORTABLE_MODE } from './config.js';
-import { initLogger, logEngine, closeLogger } from './services/logger.js';
+import { initLogger, closeLogger } from './services/logger.js';
 import { initDb, closeDb } from './db/database.js';
 // lireekDb is now part of the unified hotstep.db — no separate init needed
 import authRoutes from './routes/auth.js';
@@ -27,7 +25,7 @@ import shutdownRoutes from './routes/shutdown.js';
 import masteringRoutes from './routes/mastering.js';
 import downloadRoutes from './routes/download.js';
 import adapterRoutes from './routes/adapters.js';
-import logsRoutes, { pushLog } from './routes/logs.js';
+import logsRoutes from './routes/logs.js';
 import lireekRoutes from './routes/lireek.js';
 import vstRoutes from './routes/vst.js';
 import analyzeRoutes from './routes/analyze.js';
@@ -149,177 +147,13 @@ if (fs.existsSync(uiDistPath)) {
   console.log('[Server] For development, run Vite dev server separately');
 }
 
-// Start ace-server as a child process if configured
-let aceProcess: ChildProcess | null = null;
-
+// The ace-server child lifecycle (spawn, log fan-out, crash-respawn limiter,
+// deliberate stop/restart) lives in services/aceEngineProcess.ts so that the
+// training preprocess job can borrow the GPU. §4.1 of the preprocess plan.
 import { setEngineReady } from './engineState.js';
 import { aceClient } from './services/aceClient.js';
-
-// Crash-count limiter: prevent infinite respawn on fatal errors (missing DLLs, etc.)
-let crashCount = 0;
-let firstCrashTime = 0;
-const MAX_CRASHES = 3;
-const CRASH_WINDOW_MS = 30_000; // 30 seconds
-
-function startAceServer(): ChildProcess | null {
-  const exe = config.aceServer.exe;
-  if (!exe || !fs.existsSync(exe)) {
-    console.log(`[Server] ace-server not found at: ${exe}`);
-    console.log('[Server] Start ace-server manually, or set ACESTEPCPP_EXE in .env');
-    return null;
-  }
-
-  const args = [
-    '--models', config.aceServer.models,
-    '--host', config.aceServer.host,
-    '--port', String(config.aceServer.port),
-  ];
-
-  // Add adapters dir if it exists
-  if (config.aceServer.adapters && fs.existsSync(config.aceServer.adapters)) {
-    args.push('--adapters', config.aceServer.adapters);
-  }
-
-  // --keep-loaded: flips the engine's ModelStore to EVICT_NEVER so the ~17 s
-  // LoKr precompute (and the DiT/VAE load) only happens once per combo instead
-  // of every /synth. Default OFF (VRAM trade-off) — toggle in Settings →
-  // Environment → "Keep models in VRAM" (ACESTEPCPP_KEEP_LOADED), restart-required.
-  if (config.aceServer.keepLoaded) {
-    args.push('--keep-loaded');
-    console.log('[Server] --keep-loaded: DiT + adapter stay resident across requests');
-  }
-
-  // Add noise profile if available
-  if (config.aceServer.noiseProfile && fs.existsSync(config.aceServer.noiseProfile)) {
-    args.push('--noise-profile', config.aceServer.noiseProfile);
-    console.log(`[Server] Noise profile: ${config.aceServer.noiseProfile}`);
-  }
-
-  // Add draft LM for speculative decoding (if available)
-  if (config.aceServer.draftLm && fs.existsSync(config.aceServer.draftLm)) {
-    args.push('--draft-lm', config.aceServer.draftLm);
-    console.log(`[Server] Draft LM: ${path.basename(config.aceServer.draftLm)}`);
-  }
-
-  // VAE tiling parameters (resolves Vulkan pinned memory allocation failures)
-  if (config.aceServer.vaeChunk) {
-    args.push('--vae-chunk', String(config.aceServer.vaeChunk));
-  }
-  if (config.aceServer.vaeOverlap) {
-    args.push('--vae-overlap', String(config.aceServer.vaeOverlap));
-  }
-
-  // Add ONNX model directory for ORT/TRT VAE (if it exists and contains .onnx files)
-  if (config.aceServer.onnxDir && fs.existsSync(config.aceServer.onnxDir)) {
-    const hasOnnx = fs.readdirSync(config.aceServer.onnxDir).some(f => f.endsWith('.onnx'));
-    if (hasOnnx) {
-      args.push('--onnx-dir', config.aceServer.onnxDir);
-      console.log(`[Server] ONNX models: ${config.aceServer.onnxDir}`);
-    }
-  }
-
-  console.log(`[Server] Starting ace-server: ${path.basename(exe)}`);
-  console.log(`[Server] Models: ${config.aceServer.models}`);
-  console.log(`[Server] Port: ${config.aceServer.port}`);
-
-  // Inject TensorRT libs into PATH if available (so ORT can load nvinfer_10.dll)
-  // and CUDA_VISIBLE_DEVICES for GPU selection.
-  // IMPORTANT: On Windows, process.env is a case-insensitive Proxy, but spreading
-  // it to a plain object creates case-sensitive keys. The key is typically 'Path'
-  // not 'PATH', so we must find the actual key to avoid creating a shadowing duplicate.
-  let spawnOpts: { stdio: any; env?: NodeJS.ProcessEnv } = {
-    stdio: ['ignore', 'pipe', 'pipe'] as any,
-  };
-
-  const needsCustomEnv = (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs))
-    || config.aceServer.cudaVisibleDevices;
-
-  if (needsCustomEnv) {
-    const env = { ...process.env };
-
-    // GPU device selection (e.g. "0", "1", "0,1")
-    if (config.aceServer.cudaVisibleDevices) {
-      env.CUDA_VISIBLE_DEVICES = config.aceServer.cudaVisibleDevices;
-      console.log(`[Server] GPU selection: CUDA_VISIBLE_DEVICES=${config.aceServer.cudaVisibleDevices}`);
-    }
-
-    if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
-      // Find the actual PATH key (case-insensitive on Windows)
-      const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
-      const pathSep = process.platform === 'win32' ? ';' : ':';
-      env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
-
-      // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
-      // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
-      const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
-      if (fs.existsSync(trtllmLibs)) {
-        env[pathKey] = trtllmLibs + pathSep + env[pathKey];
-        console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
-      }
-
-      console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
-    }
-
-    spawnOpts.env = env;
-  }
-
-  const child = spawn(exe, args, spawnOpts);
-
-  // Filter repetitive GGML noise from console output (still written to ace_engine.log via logEngine)
-  const isNoise = (line: string) =>
-    line.includes('CUDA graph warmup') || line.includes('CUDA Graph id') || line.includes('ggml_backend_cuda_graph_compute');
-
-  child.stdout?.on('data', (data: Buffer) => {
-    const lines = data.toString().split('\n').filter(Boolean);
-    for (const line of lines) {
-      if (!isNoise(line)) console.log(`[ace-server] ${line}`);
-      logEngine(line);
-      pushLog(line, 'engine');
-    }
-  });
-
-  child.stderr?.on('data', (data: Buffer) => {
-    const lines = data.toString().split('\n').filter(Boolean);
-    for (const line of lines) {
-      if (!isNoise(line)) console.log(`[ace-server] ${line}`);
-      logEngine(line);
-      pushLog(line, 'engine');
-    }
-  });
-
-  child.on('exit', (code, signal) => {
-    if (signal !== 'SIGTERM' && signal !== 'SIGINT' && code !== 0) {
-      console.error(`[ace-server] Process exited with code ${code}, signal ${signal}`);
-
-      // Crash-count limiter: reset window if enough time has passed
-      const now = Date.now();
-      if (now - firstCrashTime > CRASH_WINDOW_MS) {
-        crashCount = 0;
-        firstCrashTime = now;
-      }
-      crashCount++;
-
-      if (crashCount >= MAX_CRASHES) {
-        console.error(`[ace-server] Crashed ${MAX_CRASHES} times within ${CRASH_WINDOW_MS / 1000}s — giving up.`);
-        console.error('[ace-server] This usually means a required DLL is missing from the engine/ directory.');
-        console.error('[ace-server] Check the error above, or try re-extracting the release zip.');
-        setEngineReady(false, `Engine crashed ${MAX_CRASHES} times — check logs for missing DLLs`);
-        return;
-      }
-
-      console.log(`[ace-server] Restarting in 3 seconds... (crash ${crashCount}/${MAX_CRASHES})`);
-      setTimeout(() => {
-        aceProcess = startAceServer();
-      }, 3000);
-    }
-  });
-
-  child.on('error', (err) => {
-    console.error(`[ace-server] Failed to start: ${err.message}`);
-  });
-
-  return child;
-}
+import { startAceServer, stopAceServer } from './services/aceEngineProcess.js';
+import { killActiveChildren } from './services/training/labelingQueue.js';
 
 // ── Required runtime DLL bootstrap ──────────────────────────────────
 // On first launch, the CUDA engine variant needs cuBLAS DLLs that aren't
@@ -482,7 +316,7 @@ async function ensureRequiredRuntime(): Promise<{ ok: boolean; missing: string[]
   }
 
   setEngineReady(false, cudaReady ? 'Starting engine...' : 'Starting engine (CPU only — CUDA runtime missing)...');
-  aceProcess = startAceServer();
+  startAceServer();
   setEngineReady(true, cudaReady ? 'Ready' : 'Ready (CPU only — GPU runtime missing)');
 
   // Fire-and-forget warm-on-startup: once the engine /health is up, POST /warm
@@ -547,19 +381,18 @@ function shutdown() {
 
   console.log('\n[Server] Shutting down...');
 
-  // Kill ace-server child process — use taskkill on Windows for proper tree kill
-  if (aceProcess && !aceProcess.killed && aceProcess.pid) {
-    console.log('[Server] Stopping ace-server...');
-    try {
-      if (process.platform === 'win32') {
-        execSync(`taskkill /PID ${aceProcess.pid} /T /F`, { stdio: 'ignore' });
-      } else {
-        aceProcess.kill('SIGTERM');
-      }
-    } catch {
-      // Process may already be dead
-    }
-  }
+  // Kill any spawned training child (ace-train) FIRST. It is not detached and
+  // not in a job object, so Node exiting without this leaves a GPU-resident
+  // process (~3.2 GB) behind that competes with the engine the relaunched
+  // server starts — routine with tsx watch's SIGTERM during dev.
+  try { killActiveChildren(); } catch (err) { console.error('[Server] killActiveChildren failed:', err); }
+
+  // Kill ace-server child process — tree kill on Windows, SIGTERM elsewhere.
+  // `suspend: false` — a shutdown is not a preprocess suspension, so
+  // /api/generate must not answer with the "paused for training" message
+  // during the 1 s exit window.
+  // Fire-and-forget: the 1 s process.exit delay below covers the wait.
+  void stopAceServer('Server shutting down', undefined, { suspend: false });
 
   // Close HTTP server
   server.close(() => {

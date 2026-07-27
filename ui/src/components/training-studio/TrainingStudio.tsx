@@ -1,8 +1,9 @@
 // TrainingStudio.tsx — Training Studio orchestrator (Dataset phase)
 //
-// Phase 1 ships dataset creation only: import audio → label locally
+// Phase 1 ships dataset creation: import audio → label locally
 // (/understand + Essentia) → optionally enhance in the cloud → review/edit →
-// build dataset.json. Preprocess / Train / Monitor are stepper chips only.
+// build dataset.json. Phase 2 adds Preprocess (dataset.json → tensor caches).
+// Train / Monitor are still stepper chips only.
 
 import React, { useEffect } from 'react';
 import { AlertTriangle, GraduationCap } from 'lucide-react';
@@ -12,6 +13,7 @@ import { CapabilityBanner } from './CapabilityBanner';
 import { DatasetDetail } from './DatasetDetail';
 import { DatasetList } from './DatasetList';
 import { PhaseStepper } from './PhaseStepper';
+import { PreprocessPanel } from './PreprocessPanel';
 
 export const TrainingStudio: React.FC = () => {
   const { t } = useTranslation();
@@ -59,6 +61,8 @@ export const TrainingStudio: React.FC = () => {
           </div>
         ) : phase === 'dataset' ? (
           selectedDatasetId ? <DatasetDetail /> : <DatasetList />
+        ) : phase === 'preprocess' ? (
+          <PreprocessPanel />
         ) : (
           <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-8 text-center text-sm text-zinc-500">
             {t('trainingStudio.phase.comingSoon')}

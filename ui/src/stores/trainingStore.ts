@@ -15,6 +15,8 @@ import type {
   LabelOptions,
   PatchDatasetInput,
   PatchSampleInput,
+  PreprocessOptions,
+  PreprocessStatus,
   TrainingCapabilities,
   TrainingDatasetDetail,
   TrainingDatasetSummary,
@@ -46,7 +48,7 @@ function clearTimer(key: string): void {
 
 interface TrainingState {
   // navigation
-  phase: 'dataset' | 'preprocess' | 'train' | 'monitor';   // only 'dataset' selectable in v1
+  phase: 'dataset' | 'preprocess' | 'train' | 'monitor';   // 'dataset' and 'preprocess' selectable
   step: 'label' | 'review' | 'build';
   selectedDatasetId: string | null;
 
@@ -60,6 +62,10 @@ interface TrainingState {
   // job
   activeJob: TrainingJobSummary | null;
   jobLog: Array<{ level: string; message: string; ts: number }>;   // capped at 200
+
+  // preprocess
+  preprocessStatus: PreprocessStatus | null;
+  preprocessLoading: boolean;
 
   // grid
   selectedSampleIds: Set<string>;
@@ -95,6 +101,9 @@ interface TrainingState {
   startGenius(opts: GeniusOptions): Promise<void>;
   startCaption(opts: CaptionOptions): Promise<void>;
   startBuild(outputPath?: string): Promise<void>;
+  loadPreprocessStatus(): Promise<void>;
+  startPreprocess(opts: PreprocessOptions): Promise<void>;
+  deletePreprocessVariant(variantKey: string): Promise<void>;
   cancelJob(): Promise<void>;
   applyStreamEvent(ev: TrainingStreamEvent): void;   // called by useTrainingStream
 }
@@ -127,6 +136,9 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   activeJob: null,
   jobLog: [],
 
+  preprocessStatus: null,
+  preprocessLoading: false,
+
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
   pendingEdits: {},
@@ -145,6 +157,10 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     sampleOrder: [],
     activeJob: null,
     jobLog: [],
+    // Variant cards are per-dataset; keeping them would attribute one dataset's
+    // caches to the next one opened.
+    preprocessStatus: null,
+    preprocessLoading: false,
     selectedSampleIds: new Set<string>(),
     openSampleId: null,
     pendingEdits: {},
@@ -196,6 +212,13 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               openSampleId: null,
               pendingEdits: {},
               jobLog: [],
+              // Per-dataset, exactly like closeDataset. The Preprocess panel's
+              // own picker calls openDataset(), so without this A's variant
+              // cards stay rendered under B — and Delete would then post B's id
+              // with A's variantKey (identical keys across datasets, since the
+              // key is just the DiT base name) and rm -rf the wrong cache.
+              preprocessStatus: null,
+              preprocessLoading: false,
             }
           : {}),
       });
@@ -396,6 +419,50 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
       const { jobId } = await trainingApi.startBuild(id, outputPath);
       set({ jobLog: [], error: null });
       await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  loadPreprocessStatus: async () => {
+    const id = get().selectedDatasetId;
+    if (!id) { set({ preprocessStatus: null }); return; }
+    set({ preprocessLoading: true });
+    try {
+      const preprocessStatus = await trainingApi.getPreprocessStatus(id);
+      // A slow request must not overwrite a newer dataset's status — but it must
+      // still clear the spinner, or a stale response landing last leaves it
+      // spinning forever next to the "Tensor caches" heading.
+      if (get().selectedDatasetId !== id) { set({ preprocessLoading: false }); return; }
+      set({ preprocessStatus, preprocessLoading: false });
+    } catch (err) {
+      // Advisory — a failed status read must never blank the panel's controls,
+      // but it must not leave ANOTHER dataset's cards on screen either.
+      console.warn('[Training] preprocess status failed:', errMessage(err));
+      if (get().selectedDatasetId === id) set({ preprocessStatus: null, preprocessLoading: false });
+      else set({ preprocessLoading: false });
+    }
+  },
+
+  startPreprocess: async (opts) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      const { jobId } = await trainingApi.startPreprocess(id, opts);
+      set({ jobLog: [], error: null });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  deletePreprocessVariant: async (variantKey) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      await trainingApi.deletePreprocessVariant(id, variantKey);
+      set({ error: null });
+      await get().loadPreprocessStatus();
     } catch (err) {
       set({ error: errMessage(err) });
     }

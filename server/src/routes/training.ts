@@ -33,6 +33,9 @@
 //   POST   /datasets/:id/enhance/caption                — start an LLM caption job
 //   POST   /datasets/:id/build                          — start a build job
 //   GET    /datasets/:id/dataset-json                   — read back the built file
+//   POST   /datasets/:id/preprocess                     — start a tensor-cache job
+//   GET    /datasets/:id/preprocess                     — tensor-cache status
+//   DELETE /datasets/:id/preprocess/:variantKey         — delete one cache variant
 
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
@@ -56,8 +59,15 @@ import { writeSidecar } from '../services/training/sidecarIO.js';
 import { essentiaAvailable } from '../services/training/essentiaClient.js';
 import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services/training/understandClient.js';
 import * as queue from '../services/training/labelingQueue.js';
+import { isEngineSuspended } from '../services/aceEngineProcess.js';
+import {
+  aceTrainExe, getModelSnapshot, pickBf16, refreshModelSnapshot,
+  tensorsDir, tensorsRoot, variantKeyFor, type ResolvedPreprocessOptions,
+} from '../services/training/aceTrain.js';
+import { countPreprocessedVariants, readPreprocessStatus } from '../services/training/preprocessStatus.js';
 import type {
   BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, PatchSampleInput,
+  PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetDetail, TrainingDatasetRow, TrainingSample,
 } from '../services/training/types.js';
 
@@ -100,6 +110,9 @@ async function detailFor(ds: TrainingDatasetRow): Promise<TrainingDatasetDetail>
 
   const active = queue.activeJobForDataset(ds.id);
 
+  let preprocessedVariants = 0;
+  try { preprocessedVariants = countPreprocessedVariants(ds.slug); } catch { /* stays 0 */ }
+
   return {
     ...ds,
     // The DB counters are a cache; the fresh scan is what the client sees.
@@ -110,6 +123,7 @@ async function detailFor(ds: TrainingDatasetRow): Promise<TrainingDatasetDetail>
     samples,
     warnings,
     activeJobId: active ? active.id : null,
+    preprocessedVariants,
   };
 }
 
@@ -193,6 +207,11 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
     essentia: { available: false, binPath: config.essentia.bin },
     genius: { configured: false },
     llm: { configured: false, defaultProvider: config.lireek.defaultProvider, providers: [] },
+    preprocess: {
+      available: false, binPath: '', ditModels: [], vaeModels: [], textEncoders: [],
+      defaultDit: '', defaultVae: '', defaultTextEnc: '', modelsCachedAt: 0,
+      engineSuspended: false,
+    },
   };
 
   try { caps.engine.up = await aceClient.isReachable(); } catch { /* stays false */ }
@@ -223,6 +242,26 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
   } catch (err: any) {
     console.warn(`[Training] Provider probe failed: ${err.message}`);
   }
+
+  // ── Preprocess (phase 2). Every probe degrades independently; the model
+  // lists come from a CACHED /props snapshot so the picker survives the engine
+  // being stopped by a running preprocess job (P28).
+  try {
+    const exe = aceTrainExe();
+    caps.preprocess.available = !!exe;
+    caps.preprocess.binPath = exe ?? '';
+  } catch { /* stays unavailable */ }
+  try { caps.preprocess.engineSuspended = isEngineSuspended(); } catch { /* stays false */ }
+  try {
+    const snap = caps.engine.up ? await refreshModelSnapshot() : getModelSnapshot();
+    caps.preprocess.ditModels = snap.dit;
+    caps.preprocess.vaeModels = snap.vae;
+    caps.preprocess.textEncoders = snap.textEnc;
+    caps.preprocess.defaultDit = pickBf16(snap.dit);
+    caps.preprocess.defaultVae = pickBf16(snap.vae) || snap.vae[0] || '';
+    caps.preprocess.defaultTextEnc = snap.textEnc[0] || '';
+    caps.preprocess.modelsCachedAt = snap.cachedAt;
+  } catch { /* stays empty */ }
 
   res.json(caps);
 });
@@ -993,6 +1032,192 @@ router.get('/datasets/:id/dataset-json', (req: Request, res: Response) => {
     res.json({ path: target, builtAt: ds.builtAt, dataset });
   } catch (err: any) {
     console.error(`[Training] dataset-json read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Preprocess (§2.8, phase 2) ───────────────────────────────────────────
+
+/** Clamp a numeric option to its default when the client omitted it. */
+function numOpt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (queue.activeJobForDataset(ds.id)) {
+      res.status(409).json({ error: 'A job is already running for this dataset' });
+      return;
+    }
+    // The Build step is what produces dataset.json — and with it the stable
+    // sample ids the tensor cache filenames are keyed on.
+    if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
+      res.status(400).json({ error: 'Dataset must be built first — run Build before Preprocess' });
+      return;
+    }
+    if (!aceTrainExe()) {
+      res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
+      return;
+    }
+
+    const body = (req.body || {}) as PreprocessOptions;
+
+    const samples = await buildSamples(ds);
+    const wanted = Array.isArray(body.sampleIds)
+      ? new Set(body.sampleIds.filter((s): s is string => typeof s === 'string'))
+      : null;
+    const targets = samples
+      .filter(s => !s.excluded && !s.fileMissing)
+      .filter(s => (wanted ? wanted.has(s.sampleId) : true))
+      .map(s => s.sampleId);
+    if (targets.length === 0) {
+      res.status(400).json({ error: 'Dataset has no includable samples' });
+      return;
+    }
+
+    // Models come from the CACHED snapshot — the engine may be stopped by a job
+    // on another dataset. An empty snapshot means /props was never read, in
+    // which case an explicit name is passed straight through to ace-train.
+    // A never-probed snapshot (fresh boot, or a /capabilities read that raced the
+    // engine coming up) would otherwise 400 with 'No DiT base model available'
+    // even though the engine is reachable — probe once instead of rejecting.
+    let snap = getModelSnapshot();
+    if (!snap.cachedAt && !isEngineSuspended()) snap = await refreshModelSnapshot();
+    const dit = (typeof body.ditModel === 'string' ? body.ditModel.trim() : '') || pickBf16(snap.dit);
+    if (!dit) {
+      res.status(400).json({ error: 'No DiT base model available' });
+      return;
+    }
+    if (body.ditModel && snap.dit.length > 0 && !snap.dit.includes(dit)) {
+      res.status(400).json({ error: `Unknown DiT model: ${dit}` });
+      return;
+    }
+    const vae = (typeof body.vaeModel === 'string' ? body.vaeModel.trim() : '')
+      || pickBf16(snap.vae) || snap.vae[0] || '';
+    const textEnc = (typeof body.textEncoder === 'string' ? body.textEncoder.trim() : '')
+      || snap.textEnc[0] || '';
+
+    const maxDuration = numOpt(body.maxDuration, 240);
+    const vaeChunk = numOpt(body.vaeChunk, 384);
+    const vaeOverlap = numOpt(body.vaeOverlap, 48);
+    const maxCaptionTokens = numOpt(body.maxCaptionTokens, 256);
+    const maxLyricTokens = numOpt(body.maxLyricTokens, 512);
+    const targetDb = numOpt(body.targetDb, -1.0);
+
+    if (maxDuration < 0) {
+      res.status(400).json({ error: 'maxDuration must be >= 0' });
+      return;
+    }
+    if (vaeChunk < 64) {
+      res.status(400).json({ error: 'vaeChunk must be >= 64' });
+      return;
+    }
+    if (vaeOverlap < 0 || vaeOverlap >= vaeChunk) {
+      res.status(400).json({ error: 'vaeOverlap must be >= 0 and less than vaeChunk' });
+      return;
+    }
+    if (maxCaptionTokens < 16 || maxCaptionTokens > 4096) {
+      res.status(400).json({ error: 'maxCaptionTokens must be between 16 and 4096' });
+      return;
+    }
+    if (maxLyricTokens < 16 || maxLyricTokens > 4096) {
+      res.status(400).json({ error: 'maxLyricTokens must be between 16 and 4096' });
+      return;
+    }
+    if (targetDb < -60 || targetDb > 0) {
+      res.status(400).json({ error: 'targetDb must be between -60 and 0' });
+      return;
+    }
+
+    const variantKey = variantKeyFor(dit);
+    let outputDir = tensorsDir(ds.slug, dit);
+    if (typeof body.outputDir === 'string' && body.outputDir.trim()) {
+      // Containment, same rule the sibling DELETE handler applies (§7.8). This
+      // path is mkdir'd, ace-train creates <out>/.tmp/ in it and deletes orphan
+      // *.__writing__ files there, so an unchecked absolute path from the
+      // request body is a write primitive. Staying under the dataset's tensors
+      // root also keeps the cache visible to GET/DELETE .../preprocess — a
+      // cache written anywhere else is unmanaged disk the UI can never see.
+      const root = tensorsRoot(ds.slug);
+      const resolved = path.resolve(body.outputDir.trim());
+      if (!isInside(root, resolved) || path.resolve(root) === resolved) {
+        res.status(400).json({ error: `outputDir must be a subdirectory of ${root}` });
+        return;
+      }
+      outputDir = resolved;
+    }
+
+    const opts: ResolvedPreprocessOptions = {
+      ditModel: dit,
+      vaeModel: vae,
+      textEncoder: textEnc,
+      maxDuration: Math.trunc(maxDuration),
+      normalize: (body.normalize === 'none' ? 'none' : 'peak') as PreprocessNormalize,
+      targetDb,
+      dtype: (body.dtype === 'bf16' ? 'bf16' : 'f32') as PreprocessDtype,
+      compat: (body.compat === 'sidestep' ? 'sidestep' : 'hotstep') as PreprocessCompat,
+      maxCaptionTokens: Math.trunc(maxCaptionTokens),
+      maxLyricTokens: Math.trunc(maxLyricTokens),
+      vaeChunk: Math.trunc(vaeChunk),
+      vaeOverlap: Math.trunc(vaeOverlap),
+      overwrite: body.overwrite === true,
+      stopEngine: body.stopEngine !== false,
+      outputDir,
+      variantKey,
+    };
+
+    const job = queue.startPreprocessJob(ds.id, targets, opts);
+    console.log(`[Training] Preprocess job ${job.id} queued — ${targets.length} songs, variant ${variantKey}`);
+    res.status(202).json({ jobId: job.id });
+  } catch (err: any) {
+    console.error(`[Training] Preprocess start failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/datasets/:id/preprocess', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    res.json(readPreprocessStatus(ds, await buildSamples(ds)));
+  } catch (err: any) {
+    console.error(`[Training] Preprocess status failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/datasets/:id/preprocess/:variantKey', (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (queue.activeJobForDataset(ds.id)) {
+      res.status(409).json({ error: 'A job is running for this dataset' });
+      return;
+    }
+    const root = tensorsRoot(ds.slug);
+    const dir = path.join(root, path.basename(String(req.params.variantKey ?? '')));
+    // §7.8 — the client-supplied key never escapes the dataset's tensors root.
+    if (!isInside(root, dir) || root === path.resolve(dir) || !fs.existsSync(dir)) {
+      res.status(404).json({ error: 'Variant not found' });
+      return;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log(`[Training] Deleted tensor cache ${dir}`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Preprocess delete failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

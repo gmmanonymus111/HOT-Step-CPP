@@ -18,6 +18,14 @@ const PHASE_KEYS: Record<string, string> = {
   genius: 'trainingStudio.job.phaseGenius',
   llm: 'trainingStudio.job.phaseLlm',
   build: 'trainingStudio.job.phaseBuild',
+  // Preprocess phases (§2.7). Without these the raw kebab-case enum is
+  // interpolated verbatim into the translated "{{done}}/{{total}} — {{phase}}"
+  // sentence, so non-English users read "engine-stop" mid-sentence.
+  'engine-stop': 'trainingStudio.job.phaseEngineStop',
+  'loading-models': 'trainingStudio.job.phaseLoadingModels',
+  preprocess: 'trainingStudio.job.phasePreprocess',
+  stats: 'trainingStudio.job.phaseStats',
+  'engine-restart': 'trainingStudio.job.phaseEngineRestart',
 };
 
 function formatEta(seconds: number): string {

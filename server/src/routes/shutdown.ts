@@ -14,8 +14,17 @@ import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { PROJECT_ROOT, PORTABLE_MODE } from '../config.js';
+import { killActiveChildren } from '../services/training/labelingQueue.js';
 
 const router = Router();
+
+/** Reap spawned training children (ace-train + its ffmpeg) before we exit.
+ *  Only the Windows /api/shutdown path used to clean these up, and only as a
+ *  side effect of taskkill /T on our own tree — portable /api/restart and every
+ *  non-Windows path orphaned a GPU-resident process. */
+function killTrainingChildren(): void {
+  try { killActiveChildren(); } catch (err) { console.error('[Shutdown] killActiveChildren failed:', err); }
+}
 
 /** Kill the ace-server child process safely (cross-platform). */
 function killAceServer(): void {
@@ -145,6 +154,7 @@ router.post('/', (_req, res) => {
 
   setTimeout(() => {
     console.log('[Server] Shutting down...');
+    killTrainingChildren();
     killAceServer();
     killVite();
 
@@ -178,6 +188,7 @@ router.post('/restart', (_req, res) => {
 
   setTimeout(() => {
     console.log('[Server] Restarting — stopping ace-server and self...');
+    killTrainingChildren();
     killAceServer();
 
     // Do NOT kill Vite (port 3000) — leave it running for dev mode

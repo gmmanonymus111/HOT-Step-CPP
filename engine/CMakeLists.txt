@@ -521,6 +521,13 @@ link_ggml_backends(sa3-ggml-test)
 add_executable(ace-midi tools/ace-midi.cpp)
 link_ggml_backends(ace-midi)
 
+# ace-train: training toolchain (phase 2: dataset tensor preprocessing —
+# docs/plans/2026-07-27-preprocess-implementation.md). Standalone tool: every
+# engine module it uses is header-only, so no acestep-core link is needed.
+add_executable(ace-train tools/ace-train.cpp)
+target_link_libraries(ace-train PRIVATE yyjson)
+link_ggml_backends(ace-train)
+
 # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
 # The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
 add_executable(mp3-codec tools/mp3-codec.cpp)

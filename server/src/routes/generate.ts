@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { getUserId } from './auth.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
 import { engineReady, engineBootStatus } from '../engineState.js';
+import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import { autoTrimSilence } from '../services/autoTrim.js';
 import { wavDurationSec } from '../services/audioCrop.js';
 import { writeHslat, latentFrameCount, latentDuration, type HslatMetadata } from '../services/latentFormat.js';
@@ -1474,6 +1475,13 @@ function enqueueGeneration(job: GenerationJob): void {
 
 // POST /api/generate — start a generation job
 router.post('/', (req, res) => {
+  // The engine is deliberately stopped while a training preprocess job owns the
+  // GPU — say so instead of the generic "not ready" boot message.
+  if (isEngineSuspended()) {
+    res.status(503).json({ error: 'Engine is paused for training preprocessing — try again when the job finishes' });
+    return;
+  }
+
   // Reject requests while engine is still bootstrapping (downloading DLLs, etc.)
   if (!engineReady) {
     res.status(503).json({
