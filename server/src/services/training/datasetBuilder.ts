@@ -25,6 +25,7 @@ const OWNED_SAMPLE_KEYS = [
 const OWNED_METADATA_KEYS = [
   'name', 'custom_tag', 'tag_position', 'created_at', 'num_samples',
   'all_instrumental', 'genre_ratio', 'default_artist', 'default_album', 'default_genre',
+  'default_language',
 ] as const;
 
 interface PriorDataset {
@@ -179,6 +180,7 @@ export async function buildDataset(
     default_artist: ds.defaultArtist || '',
     default_album: ds.defaultAlbum || '',
     default_genre: ds.defaultGenre || '',
+    default_language: ds.defaultLanguage || 'english',
   };
   for (const [key, value] of Object.entries(prior.metadata)) {
     if ((OWNED_METADATA_KEYS as readonly string[]).includes(key)) continue;

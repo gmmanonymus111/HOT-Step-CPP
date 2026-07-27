@@ -223,6 +223,7 @@ export function initDb(): void {
       default_artist    TEXT NOT NULL DEFAULT '',
       default_album     TEXT NOT NULL DEFAULT '',
       default_genre     TEXT NOT NULL DEFAULT '',
+      default_language  TEXT NOT NULL DEFAULT 'english',
       sample_count      INTEGER NOT NULL DEFAULT 0,
       labeled_count     INTEGER NOT NULL DEFAULT 0,
       excluded_count    INTEGER NOT NULL DEFAULT 0,
@@ -236,6 +237,18 @@ export function initDb(): void {
   `);
 
   // ── Migrations — add columns that may not exist in older databases ────────
+  // Training datasets migrations
+  const trainingMigrations: Array<{ check: string; alter: string }> = [
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='default_language'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN default_language TEXT NOT NULL DEFAULT 'english'`,
+    },
+  ];
+  for (const m of trainingMigrations) {
+    const row = db.prepare(m.check).get() as { c: number };
+    if (row.c === 0) db.exec(m.alter);
+  }
+
   // Songs table migrations
   const songsMigrations: Array<{ check: string; alter: string }> = [
     {

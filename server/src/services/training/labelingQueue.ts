@@ -370,6 +370,7 @@ async function mergeIntoSidecar(
   incoming: Record<string, string>,
   policy: MergePolicy,
   deriveInstrumental = false,
+  forced?: Record<string, string>,
 ): Promise<void> {
   // `existing` comes from the 3-convention detect, but the write is always
   // Option A — that is how a split-convention folder gets normalised (§6.6).
@@ -379,6 +380,9 @@ async function mergeIntoSidecar(
     const winning = (merged.lyrics ?? '').trim();
     merged = mergeFields(merged, { is_instrumental: winning ? 'false' : 'true' }, policy);
   }
+  // `forced` bypasses the merge policy — used for fields the user DECLARED
+  // (dataset language), which must also repair earlier wrong guesses.
+  if (forced) merged = { ...merged, ...forced };
   await writeSidecar(sample.sidecarPath, merged);
 }
 
@@ -456,6 +460,7 @@ function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingS
 interface PassAResult {
   duration: number;
   tags: { artist: string; title: string; album: string };
+  tagGenre: string;
   tagBpm: number | null;
   essentiaBpm: number | null;
   essentiaKey: string;
@@ -502,6 +507,7 @@ async function runPassA(
   const result: PassAResult = {
     duration: meta.duration,
     tags: { artist: meta.artist, title: meta.title, album: meta.album },
+    tagGenre: meta.genre,
     tagBpm: meta.bpm,
     essentiaBpm: essentia?.bpm ?? null,
     essentiaKey,
@@ -529,11 +535,14 @@ async function runPassA(
   if (result.essentiaBpm !== null) { incoming.bpm = String(result.essentiaBpm); sources.bpm = 'essentia'; }
   else if (result.tagBpm !== null) { incoming.bpm = String(result.tagBpm); sources.bpm = 'tags'; }
   if (essentiaKey) { incoming.key = essentiaKey; sources.key = 'essentia'; }
+  if (meta.genre) { incoming.genre = meta.genre; sources.genre = 'tags'; }
+  if (ds.defaultLanguage) { sources.language = 'user'; }
   if (meta.duration > 0) incoming.duration = meta.duration.toFixed(2);
 
   try {
-    if (Object.keys(incoming).length > 0) {
-      await mergeIntoSidecar(sample, incoming, policy);
+    if (Object.keys(incoming).length > 0 || ds.defaultLanguage) {
+      await mergeIntoSidecar(sample, incoming, policy, false,
+        ds.defaultLanguage ? { language: ds.defaultLanguage } : undefined);
     }
   } catch (err: any) {
     markError(job, ds, sample, `Could not write sidecar: ${err.message}`);
@@ -662,14 +671,21 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
           if (result.caption) { incoming.caption = result.caption; sources.caption = 'understand'; }
           if (result.lyrics) { incoming.lyrics = result.lyrics; sources.lyrics = 'understand'; }
           if (result.timesignature) { incoming.signature = result.timesignature; sources.signature = 'understand'; }
-          if (result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
+          // Language: the dataset's declared language is authoritative — the
+          // LM's vocal_language guess is only used when the user cleared it.
+          if (ds.defaultLanguage) { sources.language = 'user'; }
+          else if (result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
+          // Genre: understand's metadata FSM has no genre field; embedded tags
+          // are the best local source (LLM enhance can improve it later).
+          if (a?.tagGenre) { incoming.genre = a.tagGenre; sources.genre = 'tags'; }
           // Duration is measured, never taken from the LM's chain-of-thought guess.
           if (a && a.duration > 0) incoming.duration = a.duration.toFixed(2);
 
           job.phase = 'writing';
           // §4.8 — is_instrumental follows the WINNING lyrics, so it is derived
           // from the merge result rather than from `result.lyrics` alone.
-          await mergeIntoSidecar(sample, incoming, policy, true);
+          await mergeIntoSidecar(sample, incoming, policy, true,
+            ds.defaultLanguage ? { language: ds.defaultLanguage } : undefined);
 
           // audio_codes NEVER enters the sidecar — it goes here (D7).
           patchLabel(ds.slug, sample.sampleId, {

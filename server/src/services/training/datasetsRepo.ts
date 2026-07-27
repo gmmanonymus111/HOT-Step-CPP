@@ -23,6 +23,7 @@ interface DbRow {
   default_artist: string;
   default_album: string;
   default_genre: string;
+  default_language: string;
   sample_count: number;
   labeled_count: number;
   excluded_count: number;
@@ -51,6 +52,7 @@ function toRow(r: DbRow): TrainingDatasetRow {
     defaultArtist: r.default_artist,
     defaultAlbum: r.default_album,
     defaultGenre: r.default_genre,
+    defaultLanguage: r.default_language,
     sampleCount: r.sample_count,
     labeledCount: r.labeled_count,
     excludedCount: r.excluded_count,
@@ -74,6 +76,7 @@ const COLUMN_OF: Record<string, string> = {
   defaultArtist: 'default_artist',
   defaultAlbum: 'default_album',
   defaultGenre: 'default_genre',
+  defaultLanguage: 'default_language',
   sampleCount: 'sample_count',
   labeledCount: 'labeled_count',
   excludedCount: 'excluded_count',
@@ -116,11 +119,11 @@ export function insertDataset(row: TrainingDatasetRow): void {
   getDb().prepare(`
     INSERT INTO training_datasets (
       id, slug, name, source_dir, recursive, custom_tag, tag_position, genre_ratio,
-      default_artist, default_album, default_genre, sample_count, labeled_count,
+      default_artist, default_album, default_genre, default_language, sample_count, labeled_count,
       excluded_count, status, built_at, dataset_json_path, created_at, updated_at
     ) VALUES (
       @id, @slug, @name, @source_dir, @recursive, @custom_tag, @tag_position, @genre_ratio,
-      @default_artist, @default_album, @default_genre, @sample_count, @labeled_count,
+      @default_artist, @default_album, @default_genre, @default_language, @sample_count, @labeled_count,
       @excluded_count, @status, @built_at, @dataset_json_path, @created_at, @updated_at
     )
   `).run({
@@ -135,6 +138,7 @@ export function insertDataset(row: TrainingDatasetRow): void {
     default_artist: row.defaultArtist,
     default_album: row.defaultAlbum,
     default_genre: row.defaultGenre,
+    default_language: row.defaultLanguage,
     sample_count: row.sampleCount,
     labeled_count: row.labeledCount,
     excluded_count: row.excludedCount,

@@ -12,10 +12,11 @@ export interface AudioMetaResult {
   artist: string;
   title: string;
   album: string;
+  genre: string;      // first embedded genre tag, '' when absent
   bpm: number | null; // embedded BPM tag, when the container carries one
 }
 
-const EMPTY: AudioMetaResult = { duration: 0, artist: '', title: '', album: '', bpm: null };
+const EMPTY: AudioMetaResult = { duration: 0, artist: '', title: '', album: '', genre: '', bpm: null };
 
 /** Control chars to drop from tag text — everything below 0x20 except \t and \n,
  *  plus DEL. Built from escapes so the source file stays plain ASCII. */
@@ -40,6 +41,7 @@ export async function read(audioPath: string): Promise<AudioMetaResult> {
       artist: sanitizeTag(md.common.artist),
       title: sanitizeTag(md.common.title),
       album: sanitizeTag(md.common.album),
+      genre: sanitizeTag(md.common.genre?.[0]),
       bpm,
     };
   } catch (err: any) {

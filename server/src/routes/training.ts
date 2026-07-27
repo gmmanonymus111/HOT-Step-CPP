@@ -335,6 +335,9 @@ router.post('/datasets', async (req: Request, res: Response) => {
       defaultArtist: typeof body.defaultArtist === 'string' ? body.defaultArtist : metaString(priorMeta, 'default_artist'),
       defaultAlbum: typeof body.defaultAlbum === 'string' ? body.defaultAlbum : metaString(priorMeta, 'default_album'),
       defaultGenre: typeof body.defaultGenre === 'string' ? body.defaultGenre : metaString(priorMeta, 'default_genre'),
+      defaultLanguage: typeof body.defaultLanguage === 'string' && body.defaultLanguage.trim()
+        ? body.defaultLanguage.trim().toLowerCase()
+        : (metaString(priorMeta, 'default_language') || 'english'),
       sampleCount: preview.audioFiles,
       labeledCount: preview.withCaption,
       excludedCount: 0,
@@ -478,6 +481,7 @@ router.patch('/datasets/:id', (req: Request, res: Response) => {
     if (typeof body.defaultArtist === 'string') patch.defaultArtist = body.defaultArtist;
     if (typeof body.defaultAlbum === 'string') patch.defaultAlbum = body.defaultAlbum;
     if (typeof body.defaultGenre === 'string') patch.defaultGenre = body.defaultGenre;
+    if (typeof body.defaultLanguage === 'string') patch.defaultLanguage = body.defaultLanguage.trim().toLowerCase();
     if (typeof body.recursive === 'boolean') patch.recursive = body.recursive;
 
     // slug and sourceDir are immutable after creation.

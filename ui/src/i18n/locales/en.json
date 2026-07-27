@@ -49,6 +49,8 @@
     "trainingStudio.wizard.namePlaceholder": "my-artist",
     "trainingStudio.wizard.trigger": "Trigger word",
     "trainingStudio.wizard.triggerHint": "Added to every caption so you can summon this style later.",
+    "trainingStudio.wizard.language": "Lyric language",
+    "trainingStudio.wizard.languageHint": "You know this better than the AI does — it overrides the local AI's language guess on every file.",
     "trainingStudio.wizard.scanning": "Scanning folder…",
     "trainingStudio.wizard.found": "{{count}} audio files found",
     "trainingStudio.wizard.foundNone": "No audio files in this folder",

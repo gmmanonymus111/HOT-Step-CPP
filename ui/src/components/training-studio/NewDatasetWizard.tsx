@@ -39,6 +39,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
   const [name, setName] = useState('');
   const [triggerTouched, setTriggerTouched] = useState(false);
   const [customTag, setCustomTag] = useState('');
+  const [language, setLanguage] = useState('english');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [preview, setPreview] = useState<ScanPreview | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -50,7 +51,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
   useEffect(() => {
     if (!open) return;
     setSourceDir(''); setRecursive(true); setName(''); setTriggerTouched(false);
-    setCustomTag(''); setPreview(null); setScanError(null); setCreateError(null);
+    setCustomTag(''); setLanguage('english'); setPreview(null); setScanError(null); setCreateError(null);
   }, [open]);
 
   // Monotonic request id — a slow scan of an earlier prefix must never overwrite
@@ -96,6 +97,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
         sourceDir,
         recursive,
         customTag: effectiveTag,
+        defaultLanguage: language.trim().toLowerCase() || 'english',
       });
       onClose();
     } catch (err) {
@@ -221,6 +223,16 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
               </div>
             </div>
             <div className="text-[11px] text-zinc-500 -mt-2">{t('trainingStudio.wizard.triggerHint')}</div>
+
+            {/* Lyric language — declared, never guessed by the local AI */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.wizard.language')}</label>
+              <select value={language} onChange={(e) => setLanguage(e.target.value)} className={`${field} max-w-56`}>
+                {['english', 'german', 'spanish', 'french', 'italian', 'portuguese', 'russian', 'japanese', 'korean', 'chinese'].map(l =>
+                  <option key={l} value={l}>{l.charAt(0).toUpperCase() + l.slice(1)}</option>)}
+              </select>
+              <div className="text-[11px] text-zinc-500">{t('trainingStudio.wizard.languageHint')}</div>
+            </div>
 
             {createError && (
               <div className="px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-xs text-red-500 dark:text-red-400">{createError}</div>

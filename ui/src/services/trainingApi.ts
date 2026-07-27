@@ -41,6 +41,7 @@ export interface TrainingDatasetSummary {
   defaultArtist: string;
   defaultAlbum: string;
   defaultGenre: string;
+  defaultLanguage: string;   // language the user KNOWS the corpus is in; overrides understand's guess
   sampleCount: number;
   labeledCount: number;
   excludedCount: number;
@@ -169,6 +170,7 @@ export interface CreateDatasetInput {
   defaultArtist?: string;
   defaultAlbum?: string;
   defaultGenre?: string;
+  defaultLanguage?: string;  // default 'english'
 }
 
 export type PatchDatasetInput = Partial<{
@@ -179,6 +181,7 @@ export type PatchDatasetInput = Partial<{
   defaultArtist: string;
   defaultAlbum: string;
   defaultGenre: string;
+  defaultLanguage: string;
   recursive: boolean;
 }>;
 
