@@ -37,6 +37,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
   const [sourceDir, setSourceDir] = useState('');
   const [recursive, setRecursive] = useState(true);
   const [name, setName] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
   const [triggerTouched, setTriggerTouched] = useState(false);
   const [customTag, setCustomTag] = useState('');
   const [language, setLanguage] = useState('english');
@@ -50,7 +51,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
   // Reset each time the modal is opened fresh.
   useEffect(() => {
     if (!open) return;
-    setSourceDir(''); setRecursive(true); setName(''); setTriggerTouched(false);
+    setSourceDir(''); setRecursive(true); setName(''); setNameTouched(false); setTriggerTouched(false);
     setCustomTag(''); setLanguage('english'); setPreview(null); setScanError(null); setCreateError(null);
   }, [open]);
 
@@ -84,8 +85,12 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
 
   if (!open) return null;
 
-  const effectiveTag = triggerTouched ? customTag : slugify(name);
-  const canCreate = !!sourceDir && !!name.trim() && !creating && !!preview && preview.audioFiles > 0;
+  // Name defaults to the selected folder's own name; trigger word follows the
+  // name. Each stops auto-following the moment the user edits it.
+  const folderName = sourceDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+  const effectiveName = nameTouched ? name : folderName;
+  const effectiveTag = triggerTouched ? customTag : slugify(effectiveName);
+  const canCreate = !!sourceDir && !!effectiveName.trim() && !creating && !!preview && preview.audioFiles > 0;
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -93,7 +98,7 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
     setCreateError(null);
     try {
       await createDataset({
-        name: name.trim(),
+        name: effectiveName.trim(),
         sourceDir,
         recursive,
         customTag: effectiveTag,
@@ -204,8 +209,8 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
                 <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.wizard.name')}</label>
                 <input
                   type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  value={effectiveName}
+                  onChange={(e) => { setNameTouched(true); setName(e.target.value); }}
                   placeholder={t('trainingStudio.wizard.namePlaceholder')}
                   maxLength={100}
                   className={field}
