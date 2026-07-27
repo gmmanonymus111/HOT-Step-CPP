@@ -4,8 +4,11 @@ A feature-rich UI for [acestep.cpp](https://github.com/ServeurpersoCom/acestep.c
 
 Describe a song with a text caption and lyrics, and get stereo 48kHz audio generated entirely on your local hardware. No cloud, no API keys, no subscriptions.
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ezVtmg9GKX)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/scragnog)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-scragnog-FFD21E?style=for-the-badge)](https://huggingface.co/scragnog)
+
+💬 **Questions, feedback, or want to share what you've made?** [Join the Discord](https://discord.gg/ezVtmg9GKX) — it's where I'm most active for HOT-Step discussion and support.
 
 > ### 🧱 New: Song Builder *(in development — try it out!)*
 > Build a song **section by section**, Udio-style. Generate an intro, then generate several options for the next section (verse, pre-chorus, chorus…), audition them, pick your favourite, and extend — one piece at a time. You can prepend an intro after the fact, set per-section lyrics and bar counts, choose where each section attaches, and even seed a repeated section from an earlier one to follow its chords.
