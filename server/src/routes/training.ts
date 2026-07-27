@@ -331,7 +331,7 @@ router.post('/datasets', async (req: Request, res: Response) => {
           : 'prepend'),
       genreRatio: Number.isFinite(Number(body.genreRatio))
         ? Math.min(100, Math.max(0, Math.trunc(Number(body.genreRatio))))
-        : (Number.isFinite(priorGenreRatio) ? Math.min(100, Math.max(0, Math.trunc(priorGenreRatio))) : 0),
+        : (Number.isFinite(priorGenreRatio) ? Math.min(100, Math.max(0, Math.trunc(priorGenreRatio))) : 30),
       defaultArtist: typeof body.defaultArtist === 'string' ? body.defaultArtist : metaString(priorMeta, 'default_artist'),
       defaultAlbum: typeof body.defaultAlbum === 'string' ? body.defaultAlbum : metaString(priorMeta, 'default_album'),
       defaultGenre: typeof body.defaultGenre === 'string' ? body.defaultGenre : metaString(priorMeta, 'default_genre'),
