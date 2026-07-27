@@ -93,6 +93,7 @@ export const SampleGrid: React.FC = () => {
   const bulkSet = useTrainingStore(s => s.bulkSet);
   const rescan = useTrainingStore(s => s.rescan);
   const startLabel = useTrainingStore(s => s.startLabel);
+  const startGenius = useTrainingStore(s => s.startGenius);
   const startCaption = useTrainingStore(s => s.startCaption);
   const caps = useTrainingStore(s => s.capabilities);
 
@@ -276,14 +277,23 @@ export const SampleGrid: React.FC = () => {
           >
             {t('trainingStudio.grid.bulkLabel')}
           </button>
-          {/* §5.4-7 — the scoped enhance job. Hidden entirely when no LLM key is
-              configured, matching how EnhancePanel gates the same action. */}
+          {/* §5.4-7 — scoped enhance jobs. Two EXPLICIT buttons: "Enhance" was
+              ambiguous between lyrics (Genius) and captions (LLM), and users
+              ran the wrong job. Each is hidden when its key is missing. */}
+          {caps?.genius.configured && (
+            <button
+              className={bulkBtn}
+              onClick={() => void startGenius({ sampleIds: Array.from(selectedSampleIds) })}
+            >
+              {t('trainingStudio.grid.bulkGenius')}
+            </button>
+          )}
           {caps?.llm.configured && (
             <button
               className={bulkBtn}
               onClick={() => void startCaption({ sampleIds: Array.from(selectedSampleIds) })}
             >
-              {t('trainingStudio.grid.bulkEnhance')}
+              {t('trainingStudio.grid.bulkCaption')}
             </button>
           )}
           <button

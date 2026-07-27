@@ -5,6 +5,7 @@ import { ArrowLeft, Database } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { BuildPanel } from './BuildPanel';
+import { JobProgress } from './JobProgress';
 import { LabelPanel } from './LabelPanel';
 import { SampleGrid } from './SampleGrid';
 import { useTrainingStream } from './useTrainingStream';
@@ -82,6 +83,11 @@ export const DatasetDetail: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* Job progress must be visible from EVERY step — bulk actions on the
+          Review grid start jobs too, and invisible work reads as "nothing
+          happened". LabelPanel embeds its own copy, so skip the label step. */}
+      {step !== 'label' && <JobProgress />}
 
       {step === 'label' && <LabelPanel />}
       {step === 'review' && <SampleGrid />}
