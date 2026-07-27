@@ -9,6 +9,7 @@
 
 #include "model-registry.h"
 #include "train/preprocess-run.h"  // pulls in st-write.h + preprocess-io.h
+#include "train/spike-run.h"       // Phase-0 training spike (evidence code)
 
 #include <cstdarg>
 #include <cstdio>
@@ -648,6 +649,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "preprocess")) {
         return cmd_preprocess(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "spike")) {
+        return cmd_spike(argc - 1, argv + 1);
     }
     fprintf(stderr, "ace-train: unknown subcommand '%s'\n", argv[1]);
     print_usage();
