@@ -77,13 +77,19 @@ export function buildUserPrompt(args: UserPromptArgs): string {
     `Local analysis: bpm ${args.bpm ?? 'unknown'}, key ${args.key || 'unknown'}, ` +
     `signature ${args.signature || 'unknown'}`,
   );
-  lines.push('Existing caption (from local audio analysis — treat as primary audible evidence):');
-  lines.push(args.localCaption || '(none)');
+  if (!args.audioAttached) {
+    // Text-only mode leans on the local caption. With real audio attached it is
+    // OMITTED entirely — a weak local caption anchors the model on wrong genres.
+    lines.push('Existing caption (from local audio analysis — treat as primary audible evidence):');
+    lines.push(args.localCaption || '(none)');
+  }
   if (args.lyricsExcerpt && args.lyricsExcerpt.trim()) {
     lines.push(`Lyrics excerpt:\n${args.lyricsExcerpt.slice(0, 500)}`);
   }
   lines.push('');
-  lines.push('Reminder: audible evidence comes first; metadata and lyrics are secondary.');
+  lines.push(args.audioAttached
+    ? 'Reminder: describe what you HEAR in the attached audio; metadata and lyrics are secondary context only.'
+    : 'Reminder: audible evidence comes first; metadata and lyrics are secondary.');
   return lines.join('\n');
 }
 

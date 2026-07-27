@@ -834,6 +834,8 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
           model: opts.model,
           includeLyricsExcerpt: opts.includeLyricsExcerpt !== false,
           temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.45,
+          signal: job.controller.signal,
+          log: (level, message) => emitLog(job, level, `${sample.filename}: ${message}`),
         });
         if (Object.keys(fields).length === 0) {
           markError(job, ds, sample, 'LLM returned nothing usable');

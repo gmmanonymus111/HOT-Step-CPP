@@ -6,7 +6,12 @@
 //
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §4.9
 
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
+import { execFile } from 'child_process';
+import { config, getFFmpegPath } from '../../config.js';
 import { searchSongLyrics } from '../lireek/geniusService.js';
 import { getProvider } from '../lireek/llm/registry.js';
 import { sanitizeHeaders } from './lyricsSanitizer.js';
@@ -127,6 +132,71 @@ export async function enhanceGenius(
 
 // ── LLM caption ──────────────────────────────────────────────────────────
 
+/** Inline-data request cap (Gemini inline limit is 20 MB; leave headroom). */
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+
+/**
+ * Transcode any input to a 96 kbps stereo MP3 for upload — small enough to
+ * inline (≈0.7 MB/min) and lossless-enough for captioning. `null` = no ffmpeg
+ * or transcode failure; the caller falls back to text-only.
+ */
+async function transcodeForUpload(audioPath: string, signal?: AbortSignal): Promise<Buffer | null> {
+  const ffmpeg = getFFmpegPath();
+  if (!ffmpeg) return null;
+  const tmp = path.join(os.tmpdir(), `hs_training_caption_${crypto.randomBytes(6).toString('hex')}.mp3`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        ffmpeg,
+        ['-y', '-i', audioPath, '-ar', '44100', '-ac', '2', '-codec:a', 'libmp3lame', '-b:a', '96k', tmp],
+        { timeout: 180_000, maxBuffer: 10 * 1024 * 1024, signal },
+        (error) => {
+          if (error && (error as NodeJS.ErrnoException).name === 'AbortError') { reject(error); return; }
+          resolve();
+        },
+      );
+    });
+    if (!fs.existsSync(tmp)) return null;
+    const buf = fs.readFileSync(tmp);
+    return buf.length > 0 && buf.length <= MAX_UPLOAD_BYTES ? buf : null;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* never existed */ }
+  }
+}
+
+/** One-shot Gemini generateContent with the MP3 inlined next to the prompt. */
+async function callGeminiWithAudio(
+  model: string,
+  prompt: string,
+  mp3: Buffer,
+  gen: { temperature: number; topP: number },
+  signal?: AbortSignal,
+): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.lireek.geminiApiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+    body: JSON.stringify({
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: 'audio/mpeg', data: mp3.toString('base64') } },
+        ],
+      }],
+      generationConfig: { temperature: gen.temperature, topP: gen.topP },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gemini audio request failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const data = await res.json() as any;
+  const parts = data?.candidates?.[0]?.content?.parts;
+  return Array.isArray(parts) ? parts.map((p: any) => p?.text ?? '').join('') : '';
+}
+
 function isNetworkError(err: any): boolean {
   const msg = String(err?.message || err || '');
   return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|network|timed out/i.test(msg);
@@ -139,44 +209,73 @@ function isNetworkError(err: any): boolean {
 export async function enhanceCaption(
   sample: TrainingSample,
   ds: TrainingDatasetRow,
-  opts: { provider: string; model?: string; includeLyricsExcerpt: boolean; temperature: number },
+  opts: {
+    provider: string; model?: string; includeLyricsExcerpt: boolean; temperature: number;
+    signal?: AbortSignal;
+    log?: (level: 'info' | 'warn', message: string) => void;
+  },
 ): Promise<Record<string, string>> {
   const provider = getProvider(opts.provider);
   const { artist, title } = resolveArtistTitle(sample, ds, {});
 
-  const userPrompt = buildUserPrompt({
+  const promptArgs = {
     title: sample.tagTitle || title,
     artist,
     lyricsExcerpt: opts.includeLyricsExcerpt ? sample.lyrics.slice(0, 500) : undefined,
-    audioAttached: false,
     localCaption: sample.caption,
     bpm: sample.bpm,
     key: sample.key,
     signature: sample.signature,
-  });
-
+  };
   const model = opts.model || provider.defaultModel;
 
   let text = '';
-  for (let attempt = 0; attempt < 2; attempt++) {
+
+  // Audio-grounded path (Gemini only): a text-only rewrite anchors on the local
+  // caption, which is exactly what the user is trying to escape. Any failure
+  // here falls through to the text-only path rather than failing the sample.
+  if (opts.provider === 'gemini' && config.lireek.geminiApiKey) {
     try {
-      let streamed = '';
-      const result = await provider.call(
-        CAPTION_INSTRUCTIONS,
-        userPrompt,
-        model,
-        (chunk: string) => { streamed += chunk; },
-        { temperature: opts.temperature, top_p: CAPTION_TOP_P },
-      );
-      // Defensive fallback (assistant.ts): some providers return '' and only stream.
-      text = (result && result.trim()) ? result : streamed;
-      break;
-    } catch (err: any) {
-      if (attempt === 0 && isNetworkError(err)) {
-        await new Promise(r => setTimeout(r, 2000));
-        continue;
+      const mp3 = await transcodeForUpload(sample.audioPath, opts.signal);
+      if (mp3) {
+        const audioPrompt = buildUserPrompt({ ...promptArgs, audioAttached: true });
+        text = await callGeminiWithAudio(model, audioPrompt, mp3,
+          { temperature: opts.temperature, topP: CAPTION_TOP_P }, opts.signal);
+        if (text.trim()) {
+          opts.log?.('info', `captioned from audio (${(mp3.length / 1048576).toFixed(1)} MB mp3)`);
+        }
+      } else {
+        opts.log?.('warn', 'audio attach unavailable (no ffmpeg or file too large) — captioning from text only');
       }
-      throw err;
+    } catch (err: any) {
+      if ((err as NodeJS.ErrnoException)?.name === 'AbortError') throw err;
+      opts.log?.('warn', `audio caption failed (${String(err?.message || err).slice(0, 160)}) — falling back to text`);
+      text = '';
+    }
+  }
+
+  if (!text.trim()) {
+    const userPrompt = buildUserPrompt({ ...promptArgs, audioAttached: false });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let streamed = '';
+        const result = await provider.call(
+          CAPTION_INSTRUCTIONS,
+          userPrompt,
+          model,
+          (chunk: string) => { streamed += chunk; },
+          { temperature: opts.temperature, top_p: CAPTION_TOP_P },
+        );
+        // Defensive fallback (assistant.ts): some providers return '' and only stream.
+        text = (result && result.trim()) ? result : streamed;
+        break;
+      } catch (err: any) {
+        if (attempt === 0 && isNetworkError(err)) {
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        throw err;
+      }
     }
   }
 
