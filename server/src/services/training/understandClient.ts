@@ -9,8 +9,12 @@
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §4.6, §7.1, §7.2
 
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import crypto from 'crypto';
+import { execFile } from 'child_process';
 import { aceClient, type AceRequest } from '../aceClient.js';
-import { config } from '../../config.js';
+import { config, getFFmpegPath } from '../../config.js';
 
 export interface UnderstandResult {
   caption: string;
@@ -67,6 +71,44 @@ export async function engineQueueDepth(excludeJobId?: string): Promise<number> {
   }
 }
 
+/** Formats the engine can decode from an upload buffer ("[Audio] No audio decoded from buffer" for anything else). */
+const ENGINE_DECODABLE = new Set(['.wav', '.mp3']);
+
+/**
+ * Read the file as engine-decodable audio: WAV/MP3 pass through untouched,
+ * everything else (.flac/.ogg/.opus/.m4a/.aac) is transcoded to a temp
+ * 48 kHz stereo WAV via ffmpeg first.
+ */
+async function readEngineDecodable(audioPath: string, signal: AbortSignal): Promise<Buffer> {
+  const ext = path.extname(audioPath).toLowerCase();
+  if (ENGINE_DECODABLE.has(ext)) return fs.readFileSync(audioPath);
+
+  const ffmpeg = getFFmpegPath();
+  if (!ffmpeg) {
+    throw new Error(`Cannot label ${ext} audio — ffmpeg not found to convert it to WAV`);
+  }
+  const tmpWav = path.join(os.tmpdir(), `hs_training_understand_${crypto.randomBytes(6).toString('hex')}.wav`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        ffmpeg,
+        ['-y', '-i', audioPath, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', tmpWav],
+        { timeout: 120_000, maxBuffer: 10 * 1024 * 1024, signal },
+        (error) => {
+          if (error && (error as NodeJS.ErrnoException).name === 'AbortError') { reject(error); return; }
+          resolve();  // caller checks the output file
+        },
+      );
+    });
+    if (!fs.existsSync(tmpWav)) {
+      throw new Error(`ffmpeg could not convert ${path.basename(audioPath)} to WAV`);
+    }
+    return fs.readFileSync(tmpWav);
+  } finally {
+    try { fs.unlinkSync(tmpWav); } catch { /* never existed */ }
+  }
+}
+
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
@@ -86,7 +128,8 @@ export async function runUnderstand(
 ): Promise<UnderstandResult> {
   if (hooks.signal.aborted) throw new AbortError();
 
-  const buf = fs.readFileSync(audioPath);
+  const buf = await readEngineDecodable(audioPath, hooks.signal);
+  if (hooks.signal.aborted) throw new AbortError();
   hooks.onPhase?.('understand');
   const jobId = await aceClient.submitUnderstand(buf, params);
 

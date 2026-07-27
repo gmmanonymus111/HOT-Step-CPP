@@ -469,8 +469,12 @@ async function runPassA(
   policy: MergePolicy,
   results: Map<string, PassAResult>,
 ): Promise<void> {
-  job.currentSampleId = sample.sampleId;
-  job.phase = 'essentia';
+  // When the understand lane runs concurrently it owns job.phase/currentSampleId
+  // (GPU progress is what the user watches); the CPU lane reports per-sample only.
+  if (opts.useUnderstand === false) {
+    job.currentSampleId = sample.sampleId;
+    job.phase = 'essentia';
+  }
   markProcessing(job, ds, sample);
 
   const meta = await audioMeta.read(sample.audioPath);
@@ -568,8 +572,19 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
     emitLog(job, 'info', `Labeling ${job.total} file(s)`);
     emitProgress(job);
 
-    // ── Pass A: tags + Essentia, parallel lane, concurrency 2 ──
+    // ── Pass A: tags + Essentia (CPU lane, concurrency 2) ──
+    // ── Pass B: /understand (GPU lane, strictly serial) ──
+    // The two lanes run CONCURRENTLY — Essentia/ffmpeg never touch the engine's
+    // GPU worker, so understand starts on file 1 as soon as its Pass A is done
+    // instead of after the whole folder is analyzed. Per-sample ordering is
+    // preserved (B awaits A per file), which keeps the §4.8 merge precedence
+    // and makes the two lanes' sidecar writes race-free.
     const passA = new Map<string, PassAResult>();
+    const passAResolvers = new Map<string, () => void>();
+    const passADone = new Map<string, Promise<void>>();
+    for (const t of targets) {
+      passADone.set(t.sampleId, new Promise<void>(r => passAResolvers.set(t.sampleId, r)));
+    }
     let cursor = 0;
     const worker = async () => {
       for (;;) {
@@ -580,21 +595,28 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         try {
           await runPassA(job, ds, sample, opts, policy, passA);
         } catch (err: any) {
-          markError(job, ds, sample, err?.message || 'Analysis failed');
-          emitProgress(job);
+          if (!isCancelled(job)) {
+            markError(job, ds, sample, err?.message || 'Analysis failed');
+            emitProgress(job);
+          }
+        } finally {
+          passAResolvers.get(sample.sampleId)?.();
         }
       }
     };
-    await Promise.all([worker(), worker()]);
+    const passALane = Promise.all([worker(), worker()]).then(() => {
+      // Release anything the workers never reached (cancellation) so the
+      // understand lane observes cancellation instead of awaiting forever.
+      for (const release of passAResolvers.values()) release();
+    });
 
-    if (isCancelled(job)) return;
-
-    // ── Pass B: /understand, strictly serial ──
-    if (opts.useUnderstand !== false) {
-      job.phase = 'understand';
+    const passBLane = (async () => {
+      if (opts.useUnderstand === false) return;
       let engineFailures = 0;
 
       for (const sample of targets) {
+        if (isCancelled(job)) return;
+        await passADone.get(sample.sampleId);
         if (isCancelled(job)) return;
         job.currentSampleId = sample.sampleId;
         job.phase = 'understand';
@@ -658,6 +680,8 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
           if (isEngineConnectionError(err)) {
             engineFailures++;
             if (engineFailures >= ENGINE_FAILURE_LIMIT) {
+              // Stop the CPU lane too — the job is over.
+              job.controller.abort();
               finishJob(job, 'failed', 'Engine became unreachable');
               return;
             }
@@ -668,9 +692,12 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         job.phase = 'understand';
         emitProgress(job);
       }
-    }
+    })();
+
+    await Promise.all([passALane, passBLane]);
 
     if (isCancelled(job)) return;
+    if (job.status !== 'running') return;   // engine-unreachable already finished the job
 
     const finalSamples = await buildSamples(ds, { withDuration: false });
     refreshCounters(ds, finalSamples);
