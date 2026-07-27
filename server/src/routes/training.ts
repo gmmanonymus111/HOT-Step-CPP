@@ -775,10 +775,35 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
 
     const body = (req.body || {}) as LabelOptions;
     const useEssentia = body.useEssentia !== false;
-    const useUnderstand = body.useUnderstand !== false;
-    if (!useEssentia && !useUnderstand) {
-      res.status(400).json({ error: 'useEssentia and useUnderstand are both false' });
+    // 2026-07-27 pivot: understand is LEGACY and opt-in; the default flow is
+    // Essentia + Genius + LLM caption, all engine-free.
+    const useUnderstand = body.useUnderstand === true;
+    const useGenius = body.useGenius === true;
+    const useCaption = body.useCaption === true;
+    if (!useEssentia && !useUnderstand && !useGenius && !useCaption) {
+      res.status(400).json({ error: 'No labeling steps enabled' });
       return;
+    }
+
+    if (useGenius && !config.lireek.geniusAccessToken) {
+      res.status(503).json({ error: 'GENIUS_ACCESS_TOKEN is not set' });
+      return;
+    }
+    if (useCaption) {
+      const providerName = body.caption?.provider || config.lireek.defaultProvider;
+      let provider;
+      try {
+        provider = getProvider(providerName);
+      } catch (err: any) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      if (!provider.isAvailable()) {
+        res.status(503).json({
+          error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
+        });
+        return;
+      }
     }
 
     if (useUnderstand) {
@@ -814,6 +839,8 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       ...body,
       useEssentia,
       useUnderstand,
+      useGenius,
+      useCaption,
       mergePolicy: body.mergePolicy || 'fill_missing',
     });
     repo.updateDataset(ds.id, { status: 'labeling' });

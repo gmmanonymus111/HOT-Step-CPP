@@ -19,6 +19,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import type { Response } from 'express';
 import { pushLog } from '../../routes/logs.js';
+import { config } from '../../config.js';
 import { jobsDir } from './paths.js';
 import { buildSamples, loadSidecarMetadata, sampleFromParts } from './datasetScan.js';
 import { mergeFields, writeSidecar } from './sidecarIO.js';
@@ -457,6 +458,11 @@ function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingS
 
 // ── Label job (§4.7) ─────────────────────────────────────────────────────
 
+/** Does this label job have a per-sample cloud/GPU lane after the CPU pass? */
+function hasCloudLane(opts: LabelOptions): boolean {
+  return opts.useUnderstand === true || opts.useGenius === true || opts.useCaption === true;
+}
+
 interface PassAResult {
   duration: number;
   tags: { artist: string; title: string; album: string };
@@ -474,9 +480,9 @@ async function runPassA(
   policy: MergePolicy,
   results: Map<string, PassAResult>,
 ): Promise<void> {
-  // When the understand lane runs concurrently it owns job.phase/currentSampleId
-  // (GPU progress is what the user watches); the CPU lane reports per-sample only.
-  if (opts.useUnderstand === false) {
+  // When a cloud lane runs concurrently it owns job.phase/currentSampleId
+  // (that progress is what the user watches); the CPU lane reports per-sample only.
+  if (!hasCloudLane(opts)) {
     job.currentSampleId = sample.sampleId;
     job.phase = 'essentia';
   }
@@ -549,14 +555,14 @@ async function runPassA(
     return;
   }
 
-  // With no Pass B this file is finished; otherwise keep it 'processing'.
-  if (opts.useUnderstand === false) {
+  // With no cloud lane this file is finished; otherwise keep it queued.
+  if (!hasCloudLane(opts)) {
     markLabeled(job, ds, sample, sources);
     job.done++;
   } else {
     patchLabel(ds.slug, sample.sampleId, { sources });
-    // Pass B still owes this file — hand it back to the queue rather than
-    // leaving every row showing "Working…" (and read-only) until it gets there.
+    // The cloud lane still owes this file — hand it back to the queue rather
+    // than leaving every row showing "Working…" (and read-only) until then.
     setTransientStatus(job.datasetId, sample.sampleId, 'pending');
     const fresh = refreshSample(ds, sample);
     pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'pending', sample: fresh });
@@ -635,8 +641,14 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
       for (const release of passAResolvers.values()) release();
     });
 
+    // The cloud lane runs any of three per-sample steps in sequence:
+    //   understand (LEGACY, default off — 2026-07-27 pivot: its captions/lyrics
+    //   are poor; audio_codes extraction moves to the preprocess phase)
+    //   → Genius lyrics → LLM caption+genre (audio-grounded on gemini).
+    // All results accumulate into ONE sidecar write per sample.
+    const cloudLane = hasCloudLane(opts);
     const passBLane = (async () => {
-      if (opts.useUnderstand === false) return;
+      if (!cloudLane) return;
       let engineFailures = 0;
 
       for (const sample of targets) {
@@ -644,84 +656,142 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         await passADone.get(sample.sampleId);
         if (isCancelled(job)) return;
         job.currentSampleId = sample.sampleId;
-        job.phase = 'understand';
         markProcessing(job, ds, sample);
         emitProgress(job);
 
+        const a = passA.get(sample.sampleId);
+        const incoming: Record<string, string> = {};
+        const sources: Record<string, FieldSource> = {};
+        const failures: string[] = [];
+
+        // Local results first — Essentia wins bpm/key (§4.8), tags win genre.
+        if (a?.essentiaBpm != null) { incoming.bpm = String(a.essentiaBpm); sources.bpm = 'essentia'; }
+        else if (a?.tagBpm != null) { incoming.bpm = String(a.tagBpm); sources.bpm = 'tags'; }
+        if (a?.essentiaKey) { incoming.key = a.essentiaKey; sources.key = 'essentia'; }
+        if (a?.tagGenre) { incoming.genre = a.tagGenre; sources.genre = 'tags'; }
+        if (ds.defaultLanguage) sources.language = 'user';
+        if (a && a.duration > 0) incoming.duration = a.duration.toFixed(2);
+
         try {
-          const result = await runUnderstand(sample.audioPath, understandParams(opts), {
-            signal: job.controller.signal,
-            onQueue: (depth) => { job.engineQueueDepth = depth; emitProgress(job); },
-            onPhase: (p) => { job.phase = p; emitProgress(job); },
-          });
-          engineFailures = 0;
+          // ── Step 1 (legacy): /understand ──
+          if (opts.useUnderstand === true) {
+            job.phase = 'understand';
+            emitProgress(job);
+            try {
+              const result = await runUnderstand(sample.audioPath, understandParams(opts), {
+                signal: job.controller.signal,
+                onQueue: (depth) => { job.engineQueueDepth = depth; emitProgress(job); },
+                onPhase: (p) => { job.phase = p; emitProgress(job); },
+              });
+              engineFailures = 0;
+              if (!incoming.bpm && result.bpm != null) { incoming.bpm = String(Math.trunc(result.bpm)); sources.bpm = 'understand'; }
+              if (!incoming.key && result.keyscale) { incoming.key = result.keyscale; sources.key = 'understand'; }
+              if (result.caption) { incoming.caption = result.caption; sources.caption = 'understand'; }
+              if (result.lyrics) { incoming.lyrics = result.lyrics; sources.lyrics = 'understand'; }
+              if (result.timesignature) { incoming.signature = result.timesignature; sources.signature = 'understand'; }
+              if (!ds.defaultLanguage && result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
+              // audio_codes NEVER enters the sidecar — it goes here (D7).
+              patchLabel(ds.slug, sample.sampleId, {
+                relPath: sample.relPath,
+                audioCodes: result.audioCodes,
+                audioCodesModel: opts.understand?.lmModel || null,
+                understand: {
+                  caption: result.caption,
+                  lyrics: result.lyrics,
+                  bpm: result.bpm,
+                  keyscale: result.keyscale,
+                  timesignature: result.timesignature,
+                  vocalLanguage: result.vocalLanguage,
+                  duration: result.duration,
+                  seed: result.seed,
+                },
+              });
+            } catch (err: any) {
+              if (err instanceof AbortError || isCancelled(job)) return;
+              failures.push(`understand: ${err?.message || 'failed'}`);
+              emitLog(job, 'warn', `${sample.filename}: understand failed — ${err?.message || err}`);
+              if (isEngineConnectionError(err)) {
+                engineFailures++;
+                if (engineFailures >= ENGINE_FAILURE_LIMIT) {
+                  // Stop the CPU lane too — the job is over.
+                  job.controller.abort();
+                  finishJob(job, 'failed', 'Engine became unreachable');
+                  return;
+                }
+              } else {
+                engineFailures = 0;
+              }
+            }
+          }
 
-          const a = passA.get(sample.sampleId);
-          const incoming: Record<string, string> = {};
-          const sources: Record<string, FieldSource> = {};
+          // ── Step 2: Genius lyrics ──
+          if (opts.useGenius === true) {
+            job.phase = 'genius';
+            emitProgress(job);
+            try {
+              const hit = await enhanceGenius(sample, ds, { sanitizeHeaders: true });
+              if (hit) {
+                incoming.lyrics = hit.lyrics;
+                sources.lyrics = 'genius';
+              } else {
+                const { artist, title } = resolveArtistTitle(sample, ds, {});
+                failures.push(`no Genius match ("${artist} — ${title}")`);
+                emitLog(job, 'warn', `${sample.filename}: no Genius match ("${artist} — ${title}")`);
+              }
+              // Genius scrape courtesy delay (its own scraper waits 300 ms).
+              await new Promise(r => setTimeout(r, 400));
+            } catch (err: any) {
+              if (err instanceof AbortError || isCancelled(job)) return;
+              failures.push(`genius: ${err?.message || 'failed'}`);
+              emitLog(job, 'warn', `${sample.filename}: Genius failed — ${err?.message || err}`);
+            }
+          }
 
-          // §4.8 — Essentia wins bpm/key; understand wins the text fields.
-          if (a?.essentiaBpm != null) { incoming.bpm = String(a.essentiaBpm); sources.bpm = 'essentia'; }
-          else if (result.bpm != null) { incoming.bpm = String(Math.trunc(result.bpm)); sources.bpm = 'understand'; }
-          else if (a?.tagBpm != null) { incoming.bpm = String(a.tagBpm); sources.bpm = 'tags'; }
-
-          if (a?.essentiaKey) { incoming.key = a.essentiaKey; sources.key = 'essentia'; }
-          else if (result.keyscale) { incoming.key = result.keyscale; sources.key = 'understand'; }
-
-          if (result.caption) { incoming.caption = result.caption; sources.caption = 'understand'; }
-          if (result.lyrics) { incoming.lyrics = result.lyrics; sources.lyrics = 'understand'; }
-          if (result.timesignature) { incoming.signature = result.timesignature; sources.signature = 'understand'; }
-          // Language: the dataset's declared language is authoritative — the
-          // LM's vocal_language guess is only used when the user cleared it.
-          if (ds.defaultLanguage) { sources.language = 'user'; }
-          else if (result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
-          // Genre: understand's metadata FSM has no genre field; embedded tags
-          // are the best local source (LLM enhance can improve it later).
-          if (a?.tagGenre) { incoming.genre = a.tagGenre; sources.genre = 'tags'; }
-          // Duration is measured, never taken from the LM's chain-of-thought guess.
-          if (a && a.duration > 0) incoming.duration = a.duration.toFixed(2);
+          // ── Step 3: LLM caption + genre (hears the audio on gemini) ──
+          if (opts.useCaption === true) {
+            job.phase = 'llm';
+            emitProgress(job);
+            try {
+              // Feed the freshest lyrics into the prompt excerpt.
+              const promptSample = incoming.lyrics ? { ...sample, lyrics: incoming.lyrics } : sample;
+              const fields = await enhanceCaption(promptSample, ds, {
+                provider: opts.caption?.provider || config.lireek.defaultProvider,
+                model: opts.caption?.model,
+                includeLyricsExcerpt: true,
+                temperature: 0.45,
+                signal: job.controller.signal,
+                log: (level, message) => emitLog(job, level, `${sample.filename}: ${message}`),
+              });
+              if (fields.caption) { incoming.caption = fields.caption; sources.caption = 'llm'; }
+              else failures.push('LLM returned no caption');
+              if (fields.genre) { incoming.genre = fields.genre; sources.genre = 'llm'; }
+              if (!incoming.bpm && fields.bpm) { incoming.bpm = fields.bpm; sources.bpm = 'llm'; }
+              if (!incoming.key && fields.key) { incoming.key = fields.key; sources.key = 'llm'; }
+              if (!incoming.signature && fields.signature) { incoming.signature = fields.signature; sources.signature = 'llm'; }
+            } catch (err: any) {
+              if (err instanceof AbortError || isCancelled(job)) return;
+              failures.push(`caption: ${err?.message || 'failed'}`);
+              emitLog(job, 'warn', `${sample.filename}: caption failed — ${err?.message || err}`);
+            }
+          }
 
           job.phase = 'writing';
-          // §4.8 — is_instrumental follows the WINNING lyrics, so it is derived
-          // from the merge result rather than from `result.lyrics` alone.
+          // is_instrumental follows the WINNING lyrics (§4.8).
           await mergeIntoSidecar(sample, incoming, policy, true,
             ds.defaultLanguage ? { language: ds.defaultLanguage } : undefined);
 
-          // audio_codes NEVER enters the sidecar — it goes here (D7).
-          patchLabel(ds.slug, sample.sampleId, {
-            relPath: sample.relPath,
-            audioCodes: result.audioCodes,
-            audioCodesModel: opts.understand?.lmModel || null,
-            understand: {
-              caption: result.caption,
-              lyrics: result.lyrics,
-              bpm: result.bpm,
-              keyscale: result.keyscale,
-              timesignature: result.timesignature,
-              vocalLanguage: result.vocalLanguage,
-              duration: result.duration,
-              seed: result.seed,
-            },
-          });
-
-          markLabeled(job, ds, sample, sources);
-          job.done++;
+          // Error only when every cloud step came back empty-handed; partial
+          // success is labeled with its warnings already in the job log.
+          if (failures.length > 0 && !incoming.caption && !incoming.lyrics) {
+            markError(job, ds, sample, failures.join('; '));
+          } else {
+            markLabeled(job, ds, sample, sources);
+            job.done++;
+          }
         } catch (err: any) {
           if (err instanceof AbortError || isCancelled(job)) return;
-          markError(job, ds, sample, err?.message || 'Understand failed');
-          if (isEngineConnectionError(err)) {
-            engineFailures++;
-            if (engineFailures >= ENGINE_FAILURE_LIMIT) {
-              // Stop the CPU lane too — the job is over.
-              job.controller.abort();
-              finishJob(job, 'failed', 'Engine became unreachable');
-              return;
-            }
-          } else {
-            engineFailures = 0;
-          }
+          markError(job, ds, sample, err?.message || 'Labeling failed');
         }
-        job.phase = 'understand';
         emitProgress(job);
       }
     })();

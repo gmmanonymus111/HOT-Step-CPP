@@ -207,10 +207,13 @@ export interface UnderstandOverrides {
 export interface LabelOptions {
   sampleIds?: string[];
   scope?: 'all' | 'unlabeled';
-  useEssentia?: boolean;
-  useUnderstand?: boolean;
+  useEssentia?: boolean;   // default true  — local BPM/key
+  useGenius?: boolean;     // default false — canonical lyrics (needs token)
+  useCaption?: boolean;    // default false — LLM caption+genre (audio-grounded on gemini)
+  useUnderstand?: boolean; // default false — LEGACY /understand path (2026-07-27 pivot)
   mergePolicy?: MergePolicy;
   understand?: UnderstandOverrides;
+  caption?: { provider?: string; model?: string };
 }
 
 export interface GeniusOptions {

@@ -1,8 +1,10 @@
-// LabelPanel.tsx — labeling options, start/cancel, live progress
+// LabelPanel.tsx — one-click labeling: Essentia + Genius + AI caption
 //
-// Essentia (BPM/key) runs in a fast parallel lane; the local-AI "understand"
-// pass is strictly serial behind the engine's single GPU worker. Both toggles
-// degrade to disabled + explained when the capability is missing.
+// 2026-07-27 pivot: ace-understand is out of the default flow (weak captions,
+// hallucinated lyrics). One button runs, per track: local BPM/key (Essentia,
+// parallel CPU lane) → Genius lyrics → audio-grounded LLM caption+genre.
+// No engine/GPU involvement at all. Each step degrades to disabled + an
+// explanation when its capability is missing.
 
 import React, { useState } from 'react';
 import { Loader2, Play } from 'lucide-react';
@@ -29,19 +31,22 @@ export const LabelPanel: React.FC = () => {
   const selectedSampleIds = useTrainingStore(s => s.selectedSampleIds);
 
   const essentiaOk = caps?.essentia.available !== false;
-  const understandOk = !!caps?.engine.up && caps.engine.understandSupported;
+  const geniusOk = !!caps?.genius.configured;
+  const captionOk = !!caps?.llm.configured;
 
   const [scope, setScope] = useState<'unlabeled' | 'all' | 'selected'>('unlabeled');
   const [useEssentia, setUseEssentia] = useState(true);
-  const [useUnderstand, setUseUnderstand] = useState(true);
-  const [lmModel, setLmModel] = useState('');   // '' = server picks the best (biggest LM, fast quant)
+  const [useGenius, setUseGenius] = useState(true);
+  const [useCaption, setUseCaption] = useState(true);
   const [mergePolicy, setMergePolicy] = useState<MergePolicy>('fill_missing');
   const [starting, setStarting] = useState(false);
 
   const selCount = selectedSampleIds.size;
   const jobRunning = !!activeJob && (activeJob.status === 'queued' || activeJob.status === 'running');
   const effectiveEssentia = useEssentia && essentiaOk;
-  const effectiveUnderstand = useUnderstand && understandOk;
+  const effectiveGenius = useGenius && geniusOk;
+  const effectiveCaption = useCaption && captionOk;
+  const anyStep = effectiveEssentia || effectiveGenius || effectiveCaption;
 
   const handleStart = async () => {
     setStarting(true);
@@ -49,9 +54,9 @@ export const LabelPanel: React.FC = () => {
       await startLabel({
         ...(scope === 'selected' ? { sampleIds: Array.from(selectedSampleIds) } : { scope: scope === 'all' ? 'all' : 'unlabeled' }),
         useEssentia: effectiveEssentia,
-        useUnderstand: effectiveUnderstand,
+        useGenius: effectiveGenius,
+        useCaption: effectiveCaption,
         mergePolicy,
-        ...(effectiveUnderstand && lmModel ? { understand: { lmModel } } : {}),
       });
     } finally {
       setStarting(false);
@@ -93,7 +98,7 @@ export const LabelPanel: React.FC = () => {
           </div>
         </div>
 
-        {/* Toggles */}
+        {/* Steps */}
         <div className="flex flex-col gap-2">
           <label className={`${radio} ${!essentiaOk ? 'opacity-50' : ''}`}>
             <input
@@ -109,37 +114,35 @@ export const LabelPanel: React.FC = () => {
             <div className="ml-6 text-[11px] text-amber-600 dark:text-amber-400">{t('trainingStudio.caps.essentiaMissing')}</div>
           )}
 
-          <label className={`${radio} ${!understandOk ? 'opacity-50' : ''}`}>
+          <label className={`${radio} ${!geniusOk ? 'opacity-50' : ''}`}>
             <input
               type="checkbox"
-              checked={effectiveUnderstand}
-              disabled={!understandOk}
-              onChange={(e) => setUseUnderstand(e.target.checked)}
+              checked={effectiveGenius}
+              disabled={!geniusOk}
+              onChange={(e) => setUseGenius(e.target.checked)}
               className="accent-amber-500"
             />
-            {t('trainingStudio.label.useUnderstand')}
+            {t('trainingStudio.label.useGenius')}
           </label>
-          {!understandOk && (
-            <div className="ml-6 text-[11px] text-amber-600 dark:text-amber-400">
-              {caps?.engine.up === false
-                ? t('trainingStudio.caps.engineDown')
-                : t('trainingStudio.caps.modelsMissing', { models: caps?.engine.missingModels.join(', ') || '—' })}
-            </div>
+          {!geniusOk && (
+            <div className="ml-6 text-[11px] text-amber-600 dark:text-amber-400">{t('trainingStudio.enhance.geniusMissing')}</div>
           )}
-          {effectiveUnderstand && (caps?.engine.lmModels?.length ?? 0) > 0 && (
-            <label className="ml-6 flex items-center gap-2">
-              <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.label.lmModel')}</span>
-              <select
-                value={lmModel}
-                onChange={(e) => setLmModel(e.target.value)}
-                className="rounded-lg px-2 py-1 text-[11px] bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
-              >
-                <option value="">{t('trainingStudio.label.lmModelAuto', { model: caps?.engine.defaultLmModel || '—' })}</option>
-                {caps?.engine.lmModels.map(m => <option key={m} value={m}>{m}</option>)}
-              </select>
-            </label>
+
+          <label className={`${radio} ${!captionOk ? 'opacity-50' : ''}`}>
+            <input
+              type="checkbox"
+              checked={effectiveCaption}
+              disabled={!captionOk}
+              onChange={(e) => setUseCaption(e.target.checked)}
+              className="accent-amber-500"
+            />
+            {t('trainingStudio.label.useCaption')}
+          </label>
+          {captionOk ? (
+            <div className="ml-6 text-[11px] text-zinc-500">{t('trainingStudio.label.useCaptionHint')}</div>
+          ) : (
+            <div className="ml-6 text-[11px] text-amber-600 dark:text-amber-400">{t('trainingStudio.enhance.captionMissing')}</div>
           )}
-          <div className="ml-6 text-[11px] text-zinc-500">{t('trainingStudio.label.quickHint')}</div>
         </div>
 
         {/* Merge policy */}
@@ -158,7 +161,7 @@ export const LabelPanel: React.FC = () => {
 
         <button
           onClick={() => void handleStart()}
-          disabled={jobRunning || starting || (!effectiveEssentia && !effectiveUnderstand)}
+          disabled={jobRunning || starting || !anyStep}
           className="self-start flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {starting ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}

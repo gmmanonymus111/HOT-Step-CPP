@@ -66,7 +66,7 @@
     "trainingStudio.step.build": "Build",
 
     "trainingStudio.label.title": "Label your audio",
-    "trainingStudio.label.subtitle": "HOT-Step listens to each track and writes a caption, lyrics, BPM, key and time signature.",
+    "trainingStudio.label.subtitle": "One pass per track: BPM and key detected locally, real lyrics from Genius, caption and genre from an AI that hears the audio.",
     "trainingStudio.label.scope": "What to label",
     "trainingStudio.label.scopeUnlabeled": "Unlabeled files only",
     "trainingStudio.label.scopeAll": "Every file (re-label)",
@@ -80,9 +80,9 @@
     "trainingStudio.label.mergeAll": "Replace everything",
     "trainingStudio.label.start": "Start labeling",
     "trainingStudio.label.starting": "Starting…",
-    "trainingStudio.label.quickHint": "Turning off the local AI gives a fast BPM/key-only pass.",
-    "trainingStudio.label.lmModel": "AI model",
-    "trainingStudio.label.lmModelAuto": "Auto — {{model}}",
+    "trainingStudio.label.useGenius": "Fetch lyrics from Genius",
+    "trainingStudio.label.useCaption": "Caption & genre with AI",
+    "trainingStudio.label.useCaptionHint": "Sends each track as a small MP3 so the AI describes what it actually hears (Gemini; other providers work from title, artist and lyrics).",
 
     "trainingStudio.enhance.title": "Enhance labels",
     "trainingStudio.enhance.subtitle": "Optional cloud steps. Nothing leaves your machine unless you press these.",
