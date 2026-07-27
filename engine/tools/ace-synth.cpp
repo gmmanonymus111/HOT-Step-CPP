@@ -7,6 +7,7 @@
 #include "audio-io.h"
 #include "backend.h"
 #include "ggml.h"
+#include "lua-plugin-registry.h"
 #include "model-registry.h"
 #include "model-store.h"
 #include "pipeline-synth.h"
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -291,6 +293,29 @@ int main(int argc, char ** argv) {
     if (argc < 2) {
         usage(argv[0]);
         return 1;
+    }
+
+    // Load solver/scheduler/guidance Lua plugins.  The fork routes ALL
+    // sampling through hot-step-sampler.h, which resolves solvers from the
+    // plugin registry — without this init the standalone CLI had no solvers
+    // at all ("unknown solver 'euler'") and crashed in the fallback path.
+    // Same exe-relative resolution as hot-step-server.cpp.
+    {
+        std::filesystem::path exe_path = std::filesystem::canonical(argv[0]);
+        std::filesystem::path exe_dir  = exe_path.parent_path();
+        std::string dir_name = exe_dir.filename().string();
+
+        std::filesystem::path engine_dir;
+        if (dir_name == "Release" || dir_name == "Debug" ||
+            dir_name == "RelWithDebInfo" || dir_name == "MinSizeRel") {
+            engine_dir = exe_dir.parent_path().parent_path();
+        } else if (dir_name == "build") {
+            engine_dir = exe_dir.parent_path();
+        } else {
+            engine_dir = exe_dir;
+        }
+        std::filesystem::path project_dir = engine_dir.parent_path();
+        PluginRegistry::instance().init(engine_dir.string(), project_dir.string());
     }
 
     // Defaults live in ace_synth_default_params. CLI locals read from params
