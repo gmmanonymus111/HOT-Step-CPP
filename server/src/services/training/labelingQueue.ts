@@ -478,8 +478,24 @@ async function runPassA(
   markProcessing(job, ds, sample);
 
   const meta = await audioMeta.read(sample.audioPath);
+
+  // Essentia is deterministic — if we already analyzed this exact file
+  // (size+mtime unchanged since the cached run), reuse the raw result from the
+  // label store instead of re-running ffmpeg + Essentia on a re-label.
+  const cached = readLabel(ds.slug, sample.sampleId);
+  const cacheFresh = (() => {
+    if (!cached?.durationCache) return false;
+    try {
+      const st = fs.statSync(sample.audioPath);
+      return cached.durationCache.sizeBytes === st.size && cached.durationCache.mtimeMs === st.mtimeMs;
+    } catch {
+      return false;
+    }
+  })();
   const essentia = (opts.useEssentia !== false && essentiaAvailable())
-    ? await analyzeWithEssentia(sample.audioPath, job.controller.signal)
+    ? (cacheFresh && cached?.essentia
+        ? cached.essentia
+        : await analyzeWithEssentia(sample.audioPath, job.controller.signal))
     : null;
 
   const essentiaKey = essentia ? essentiaKeyString(essentia.key, essentia.scale) : '';

@@ -6,7 +6,7 @@
 
 import { useEffect } from 'react';
 import { useTrainingStore } from '../../stores/trainingStore';
-import { jobStreamUrl, type TrainingStreamEvent } from '../../services/trainingApi';
+import { getJob, jobStreamUrl, type TrainingStreamEvent } from '../../services/trainingApi';
 
 export function useTrainingStream(jobId: string | null) {
   const applyStreamEvent = useTrainingStore(s => s.applyStreamEvent);
@@ -17,7 +17,21 @@ export function useTrainingStream(jobId: string | null) {
     es.onmessage = (e) => {
       try { applyStreamEvent(JSON.parse(e.data) as TrainingStreamEvent); } catch { /* ignore malformed frame */ }
     };
-    es.onerror = () => { /* EventSource auto-reconnects; buffer replay makes it idempotent */ };
+    es.onerror = () => {
+      // EventSource auto-reconnects and the buffer replay makes that safe. But
+      // if the server restarted, the in-memory job is gone (stream 404s forever)
+      // and no terminal event will ever arrive — the UI would show "running"
+      // and keep Start disabled indefinitely. Poll once per error: a live job
+      // is a no-op; a terminal or vanished job synthesizes its final status.
+      void getJob(jobId).then(
+        (job) => {
+          if (job.status !== 'queued' && job.status !== 'running') {
+            applyStreamEvent({ type: 'status', status: job.status, ...(job.error ? { error: job.error } : {}) });
+          }
+        },
+        () => applyStreamEvent({ type: 'status', status: 'failed', error: 'Job lost — the server restarted' }),
+      );
+    };
     return () => es.close();
   }, [jobId, applyStreamEvent]);
 }
