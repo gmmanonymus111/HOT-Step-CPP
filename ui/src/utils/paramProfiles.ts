@@ -82,6 +82,8 @@ export const PARAM_GROUPS: { title: string; fields: string[] }[] = [
       'natVibratoDepth', 'natFormantStrength', 'natMetallicReduction', 'natQuantizationMask',
       'natTransitionSmooth', 'ppVaeReencode', 'ppVaeBlend', 'ppVaeUseOnnx',
       'stableStepOn', 'stableStepStrength', 'stableStepBackend',
+      'stableStepAdapters', 'stableStepPreserveDynamics',
+      'stableStepBlendMode', 'stableStepCrossoverHz', 'stableStepCrossoverWidthHz', 'stableStepMix',
       'postprocessEnabled', 'postprocessPlugin',
       'lufsEnabled', 'lufsPreset', 'lufsTarget',
       'autoTrimEnabled', 'durationBuffer', 'autoTrimFadeMs',
