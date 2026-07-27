@@ -121,6 +121,8 @@ export interface TrainingCapabilities {
     understandSupported: boolean; // lm && dit && vae registries all non-empty
     missingModels: string[];      // e.g. ['lm'] — which registries are empty
     queueDepth: number;           // ace-server GET /jobs length
+    lmModels: string[];           // LM registry names, for the understand model picker
+    defaultLmModel: string;       // server's pick (biggest model, fast quant) when the UI sends none
   };
   essentia: { available: boolean; binPath: string };
   genius: { configured: boolean };

@@ -34,6 +34,7 @@ export const LabelPanel: React.FC = () => {
   const [scope, setScope] = useState<'unlabeled' | 'all' | 'selected'>('unlabeled');
   const [useEssentia, setUseEssentia] = useState(true);
   const [useUnderstand, setUseUnderstand] = useState(true);
+  const [lmModel, setLmModel] = useState('');   // '' = server picks the best (biggest LM, fast quant)
   const [mergePolicy, setMergePolicy] = useState<MergePolicy>('fill_missing');
   const [starting, setStarting] = useState(false);
 
@@ -50,6 +51,7 @@ export const LabelPanel: React.FC = () => {
         useEssentia: effectiveEssentia,
         useUnderstand: effectiveUnderstand,
         mergePolicy,
+        ...(effectiveUnderstand && lmModel ? { understand: { lmModel } } : {}),
       });
     } finally {
       setStarting(false);
@@ -123,6 +125,19 @@ export const LabelPanel: React.FC = () => {
                 ? t('trainingStudio.caps.engineDown')
                 : t('trainingStudio.caps.modelsMissing', { models: caps?.engine.missingModels.join(', ') || '—' })}
             </div>
+          )}
+          {effectiveUnderstand && (caps?.engine.lmModels?.length ?? 0) > 0 && (
+            <label className="ml-6 flex items-center gap-2">
+              <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.label.lmModel')}</span>
+              <select
+                value={lmModel}
+                onChange={(e) => setLmModel(e.target.value)}
+                className="rounded-lg px-2 py-1 text-[11px] bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
+              >
+                <option value="">{t('trainingStudio.label.lmModelAuto', { model: caps?.engine.defaultLmModel || '—' })}</option>
+                {caps?.engine.lmModels.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </label>
           )}
           <div className="ml-6 text-[11px] text-zinc-500">{t('trainingStudio.label.quickHint')}</div>
         </div>

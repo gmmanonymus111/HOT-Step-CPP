@@ -54,7 +54,7 @@ import { deleteLabel, deleteLabels, patchLabel, readLabel } from '../services/tr
 import { readDatasetJsonMetadata } from '../services/training/datasetBuilder.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
 import { essentiaAvailable } from '../services/training/essentiaClient.js';
-import { engineQueueDepth, engineUnderstandReady } from '../services/training/understandClient.js';
+import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services/training/understandClient.js';
 import * as queue from '../services/training/labelingQueue.js';
 import type {
   BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, PatchSampleInput,
@@ -189,7 +189,7 @@ function isWritableDir(dir: string): boolean {
 router.get('/capabilities', async (_req: Request, res: Response) => {
   // Every probe degrades independently — this endpoint never throws upward.
   const caps: TrainingCapabilities = {
-    engine: { up: false, ready: engineReady, understandSupported: false, missingModels: [], queueDepth: 0 },
+    engine: { up: false, ready: engineReady, understandSupported: false, missingModels: [], queueDepth: 0, lmModels: [], defaultLmModel: '' },
     essentia: { available: false, binPath: config.essentia.bin },
     genius: { configured: false },
     llm: { configured: false, defaultProvider: config.lireek.defaultProvider, providers: [] },
@@ -201,6 +201,8 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       const ready = await engineUnderstandReady();
       caps.engine.understandSupported = ready.ok;
       caps.engine.missingModels = ready.missing;
+      caps.engine.lmModels = ready.lmModels;
+      caps.engine.defaultLmModel = pickBestLm(ready.lmModels);
     } catch { caps.engine.missingModels = ['lm', 'dit', 'vae']; }
     try { caps.engine.queueDepth = await engineQueueDepth(); } catch { /* stays 0 */ }
   }
@@ -776,7 +778,7 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
     }
 
     if (useUnderstand) {
-      let ready: { ok: boolean; missing: string[] };
+      let ready: { ok: boolean; missing: string[]; lmModels: string[] };
       try {
         ready = await engineUnderstandReady();
       } catch {
@@ -786,6 +788,13 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       if (!ready.ok) {
         res.status(503).json({ error: `Engine is missing models: ${ready.missing.join(', ')}` });
         return;
+      }
+      // Without an explicit model the engine falls back to whatever is loaded,
+      // else the alphabetically-first registry entry — the 0.6B. Always pin the
+      // best LM unless the caller chose one.
+      if (!body.understand?.lmModel) {
+        const best = pickBestLm(ready.lmModels);
+        if (best) body.understand = { ...body.understand, lmModel: best };
       }
     }
 

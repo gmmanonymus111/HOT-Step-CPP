@@ -45,14 +45,36 @@ export class AbortError extends Error {
   }
 }
 
-/** Are the LM / DiT / VAE registries all populated? */
-export async function engineUnderstandReady(): Promise<{ ok: boolean; missing: string[] }> {
+/** Are the LM / DiT / VAE registries all populated? Also returns the LM list. */
+export async function engineUnderstandReady(): Promise<{ ok: boolean; missing: string[]; lmModels: string[] }> {
   const props = await aceClient.props();
   const missing: string[] = [];
   if (!props.models?.lm?.length) missing.push('lm');
   if (!props.models?.dit?.length) missing.push('dit');
   if (!props.models?.vae?.length) missing.push('vae');
-  return { ok: missing.length === 0, missing };
+  return { ok: missing.length === 0, missing, lmModels: props.models?.lm ?? [] };
+}
+
+/**
+ * Best LM for understand. Without an explicit request the engine falls back to
+ * "whatever is loaded, else FIRST REGISTRY ENTRY" — alphabetically the 0.6B,
+ * whose captions/lyrics are far below the 4B's. Prefer the biggest model in a
+ * fast near-lossless quant.
+ */
+export function pickBestLm(names: string[]): string {
+  const score = (n: string): number => {
+    let s = 0;
+    if (/4B/i.test(n)) s += 300;
+    else if (/1\.7B/i.test(n)) s += 200;
+    else if (/0\.6B/i.test(n)) s += 100;
+    if (/Q8_0/i.test(n)) s += 50;        // near-lossless, fastest of the high-quality quants
+    else if (/Q6_K/i.test(n)) s += 45;
+    else if (/Q5/i.test(n)) s += 40;
+    else if (/BF16/i.test(n)) s += 30;   // best quality but slow + heavy
+    else if (/NVFP4/i.test(n)) s += 10;
+    return s;
+  };
+  return [...names].sort((a, b) => score(b) - score(a))[0] ?? '';
 }
 
 /**

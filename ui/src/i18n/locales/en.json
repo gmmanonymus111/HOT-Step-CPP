@@ -79,6 +79,8 @@
     "trainingStudio.label.start": "Start labeling",
     "trainingStudio.label.starting": "Starting…",
     "trainingStudio.label.quickHint": "Turning off the local AI gives a fast BPM/key-only pass.",
+    "trainingStudio.label.lmModel": "AI model",
+    "trainingStudio.label.lmModelAuto": "Auto — {{model}}",
 
     "trainingStudio.enhance.title": "Enhance labels",
     "trainingStudio.enhance.subtitle": "Optional cloud steps. Nothing leaves your machine unless you press these.",
