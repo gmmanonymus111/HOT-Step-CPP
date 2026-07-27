@@ -47,14 +47,23 @@ export const JobProgress: React.FC = () => {
     if (!job) return;
     const m = marksRef.current;
     if (m.jobId !== job.id) { m.jobId = job.id; m.lastAt = Date.now(); m.lastDone = job.done; m.deltas = []; setEta(''); return; }
-    // Only understand work is slow enough (and serial enough) to extrapolate.
-    const isUnderstand = job.phase === 'understand' || job.phase === 'waiting-for-engine';
+    // Don't count time spent waiting in the global job queue as sample time.
+    if (job.status === 'queued') { m.lastAt = Date.now(); return; }
+    // `done` only increments as the serial per-track work completes (cloud lane
+    // when one is enabled, else the Essentia lane), so every increment is a
+    // valid pace sample regardless of which phase produced it.
     if (job.done > m.lastDone) {
       const now = Date.now();
-      if (isUnderstand && m.lastAt) m.deltas.push((now - m.lastAt) / 1000);
+      // A burst of increments per tick (parallel Essentia-only lane) still
+      // yields one delta per completion by splitting the elapsed time evenly.
+      const completed = job.done - m.lastDone;
+      if (m.lastAt) {
+        const per = (now - m.lastAt) / 1000 / completed;
+        for (let i = 0; i < completed; i++) m.deltas.push(per);
+      }
       m.lastAt = now;
       m.lastDone = job.done;
-      if (m.deltas.length >= 3) {
+      if (m.deltas.length >= 2) {
         const last5 = m.deltas.slice(-5);
         const avg = last5.reduce((a, b) => a + b, 0) / last5.length;
         setEta(formatEta(avg * Math.max(0, job.total - job.done)));
