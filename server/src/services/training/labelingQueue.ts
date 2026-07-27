@@ -378,8 +378,12 @@ async function mergeIntoSidecar(
   const existing = loadSidecarMetadata(sample.audioPath);
   let merged = mergeFields(existing, incoming, policy);
   if (deriveInstrumental) {
+    // Lyrics PRESENT is evidence the track is not instrumental. Lyrics ABSENT
+    // is not evidence of anything — a failed Genius lookup must not brand a
+    // vocal track instrumental. Truly instrumental tracks are marked by the
+    // user (or already carry is_instrumental in their sidecar).
     const winning = (merged.lyrics ?? '').trim();
-    merged = mergeFields(merged, { is_instrumental: winning ? 'false' : 'true' }, policy);
+    if (winning) merged = mergeFields(merged, { is_instrumental: 'false' }, policy);
   }
   // `forced` bypasses the merge policy — used for fields the user DECLARED
   // (dataset language), which must also repair earlier wrong guesses.
@@ -660,6 +664,15 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         emitProgress(job);
 
         const a = passA.get(sample.sampleId);
+        // `targets` was snapshotted BEFORE Pass A read the file tags — on a
+        // fresh dataset sample.tagArtist/tagTitle are empty, which sent Genius
+        // hunting with mangled filename guesses. Use Pass A's fresh tags.
+        const enriched: TrainingSample = a ? {
+          ...sample,
+          tagArtist: a.tags.artist || sample.tagArtist,
+          tagTitle: a.tags.title || sample.tagTitle,
+          tagAlbum: a.tags.album || sample.tagAlbum,
+        } : sample;
         const incoming: Record<string, string> = {};
         const sources: Record<string, FieldSource> = {};
         const failures: string[] = [];
@@ -729,12 +742,12 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
             job.phase = 'genius';
             emitProgress(job);
             try {
-              const hit = await enhanceGenius(sample, ds, { sanitizeHeaders: true });
+              const hit = await enhanceGenius(enriched, ds, { sanitizeHeaders: true });
               if (hit) {
                 incoming.lyrics = hit.lyrics;
                 sources.lyrics = 'genius';
               } else {
-                const { artist, title } = resolveArtistTitle(sample, ds, {});
+                const { artist, title } = resolveArtistTitle(enriched, ds, {});
                 failures.push(`no Genius match ("${artist} — ${title}")`);
                 emitLog(job, 'warn', `${sample.filename}: no Genius match ("${artist} — ${title}")`);
               }
@@ -753,7 +766,7 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
             emitProgress(job);
             try {
               // Feed the freshest lyrics into the prompt excerpt.
-              const promptSample = incoming.lyrics ? { ...sample, lyrics: incoming.lyrics } : sample;
+              const promptSample = incoming.lyrics ? { ...enriched, lyrics: incoming.lyrics } : enriched;
               const fields = await enhanceCaption(promptSample, ds, {
                 provider: opts.caption?.provider || config.lireek.defaultProvider,
                 model: opts.caption?.model,
