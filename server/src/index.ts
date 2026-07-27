@@ -44,6 +44,7 @@ import seedsRoutes from './routes/seeds.js';
 import profilesRoutes from './routes/profiles.js';
 import songBuilderRoutes from './routes/songBuilder.js';
 import midiStudioRoutes from './routes/midiStudio.js';
+import trainingRoutes from './routes/training.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,6 +98,7 @@ app.use('/api/seeds', seedsRoutes);
 app.use('/api/profiles', profilesRoutes);
 app.use('/api/builder', songBuilderRoutes);
 app.use('/api/midi-studio', midiStudioRoutes);
+app.use('/api/training', trainingRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {

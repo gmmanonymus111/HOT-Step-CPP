@@ -249,6 +249,16 @@ export const config = {
     },
   },
 
+  // Training Studio / Dataset Studio
+  // NOTE: deliberately NOT in EXPOSED_ENV_KEYS — none of these are user-facing
+  // settings, and exposing a key without a matching apply() line in
+  // reloadEnvConfig() is the classic silent-no-op bug.
+  training: {
+    dir: process.env.TRAINING_DIR || path.resolve(__dirname, '..', process.env.DATA_DIR || './data', 'training'),
+    understandTimeoutMs: parseInt(process.env.TRAINING_UNDERSTAND_TIMEOUT_MS || '1200000', 10), // 20 min/file
+    maxScanFiles: parseInt(process.env.TRAINING_MAX_SCAN_FILES || '5000', 10),
+  },
+
   // Whisper speech-to-text (lyrics transcription)
   whisper: {
     exe: process.env.WHISPER_EXE || path.join(PROJECT_ROOT, 'tools', 'whisper', `whisper-cli${BIN_EXT}`),

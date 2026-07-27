@@ -1,0 +1,879 @@
+// training/labelingQueue.ts — the Dataset Studio job engine
+//
+// Structurally a sibling of routes/midiStudio.ts (job Map, replayable event
+// buffer, SSE listener set, _meta.json persistence) with three differences:
+//   * no child process — all work is in-process (HTTP to ace-server, execFile
+//     for Essentia, fetch for Genius/LLM), so cancellation is an AbortController
+//   * ONE global promise-chain queue shared by all four job kinds (D10)
+//   * one active job per dataset, enforced at the route layer with a 409
+//
+// The engine has a single FIFO GPU worker, so /understand calls are strictly
+// serial for the whole server. Essentia + tag reading never touch that worker,
+// so they run in their own lane at concurrency 2 and populate the review grid
+// within seconds while the LM work is still queueing.
+//
+// Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §4.7, §4.8, §7.1, §7.9
+
+import fs from 'fs';
+import path from 'path';
+import { randomUUID } from 'crypto';
+import type { Response } from 'express';
+import { pushLog } from '../../routes/logs.js';
+import { jobsDir } from './paths.js';
+import { buildSamples, loadSidecarMetadata, sampleFromParts } from './datasetScan.js';
+import { mergeFields, writeSidecar } from './sidecarIO.js';
+import {
+  clearTransientStatus, clearTransientStatuses, patchLabel, readLabel, setTransientStatus,
+} from './labelStore.js';
+import { analyzeWithEssentia, essentiaAvailable, essentiaKeyString } from './essentiaClient.js';
+import { AbortError, runUnderstand } from './understandClient.js';
+import { enhanceCaption, enhanceGenius } from './enhanceService.js';
+import { buildDataset } from './datasetBuilder.js';
+import * as audioMeta from './audioMeta.js';
+import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
+import type { AceRequest } from '../aceClient.js';
+import type {
+  BuildOptions, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, MergePolicy,
+  TrainingDatasetRow, TrainingJobKind, TrainingJobStatus, TrainingJobSummary,
+  TrainingSample, TrainingStreamEvent,
+} from './types.js';
+
+const MAX_EVENTS = 2000;
+const GENIUS_DELAY_MS = 400;    // the Genius service already waits 300 ms itself
+const LLM_DELAY_MS = 250;
+const ENGINE_FAILURE_LIMIT = 3; // consecutive connection failures before we give up
+
+export interface TrainingJob {
+  id: string;
+  datasetId: string;
+  kind: TrainingJobKind;
+  status: TrainingJobStatus;
+  total: number;
+  done: number;
+  failed: number;
+  currentSampleId: string | null;
+  phase: string;
+  engineQueueDepth: number;
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  sampleIds: string[];
+  opts: unknown;
+  events: TrainingStreamEvent[];
+  listeners: Set<Response>;
+  controller: AbortController;
+}
+
+const jobs = new Map<string, TrainingJob>();
+let queueTail: Promise<void> = Promise.resolve();
+
+// ── Job model ────────────────────────────────────────────────────────────
+
+export function toSummary(job: TrainingJob): TrainingJobSummary {
+  return {
+    id: job.id,
+    datasetId: job.datasetId,
+    kind: job.kind,
+    status: job.status,
+    total: job.total,
+    done: job.done,
+    failed: job.failed,
+    currentSampleId: job.currentSampleId,
+    phase: job.phase,
+    engineQueueDepth: job.engineQueueDepth,
+    error: job.error,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+  };
+}
+
+export function createJob(
+  kind: TrainingJobKind,
+  datasetId: string,
+  sampleIds: string[],
+  opts: unknown,
+): TrainingJob {
+  const job: TrainingJob = {
+    id: randomUUID(),
+    datasetId,
+    kind,
+    status: 'queued',
+    total: sampleIds.length,
+    done: 0,
+    failed: 0,
+    currentSampleId: null,
+    phase: 'queued',
+    engineQueueDepth: 0,
+    error: null,
+    createdAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    sampleIds,
+    opts,
+    events: [],
+    listeners: new Set(),
+    controller: new AbortController(),
+  };
+  jobs.set(job.id, job);
+  return job;
+}
+
+export function getJob(id: string): TrainingJob | undefined {
+  return jobs.get(id);
+}
+
+export function activeJobForDataset(datasetId: string): TrainingJob | undefined {
+  for (const job of jobs.values()) {
+    if (job.datasetId === datasetId && (job.status === 'queued' || job.status === 'running')) return job;
+  }
+  return undefined;
+}
+
+/** Active jobs (memory) + finished jobs (disk `_meta.json`), newest first. */
+export function listJobs(datasetId?: string): TrainingJobSummary[] {
+  const out: TrainingJobSummary[] = [];
+  const seen = new Set<string>();
+
+  for (const job of jobs.values()) {
+    if (datasetId && job.datasetId !== datasetId) continue;
+    out.push(toSummary(job));
+    seen.add(job.id);
+  }
+
+  try {
+    const base = jobsDir();
+    if (fs.existsSync(base)) {
+      for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+        if (!entry.isDirectory() || seen.has(entry.name)) continue;
+        const metaPath = path.join(base, entry.name, '_meta.json');
+        if (!fs.existsSync(metaPath)) continue;
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as TrainingJobSummary;
+          if (datasetId && meta.datasetId !== datasetId) continue;
+          out.push(meta);
+        } catch { /* skip corrupted meta */ }
+      }
+    }
+  } catch { /* jobs dir unreadable — memory list is still valid */ }
+
+  out.sort((a, b) => b.createdAt - a.createdAt);
+  return out;
+}
+
+// ── Events / SSE ─────────────────────────────────────────────────────────
+
+function broadcast(job: TrainingJob, ev: TrainingStreamEvent): void {
+  const line = `data: ${JSON.stringify(ev)}\n\n`;
+  for (const res of job.listeners) {
+    try { res.write(line); } catch { /* client gone; cleanup runs on close */ }
+  }
+}
+
+/**
+ * Append to the replay buffer and push.
+ *
+ * §2.9: the buffer is capped at 2000, dropping the oldest `log` events first and
+ * **never** `sample`/`status`. A clean label run emits almost no logs, so the
+ * cap is also kept in reach by superseding a sample's own older event — replay
+ * is keyed by sampleId, so only the latest state for each row matters.
+ */
+export function pushEvent(job: TrainingJob, ev: TrainingStreamEvent): void {
+  if (ev.type === 'sample') {
+    const prior = job.events.findIndex(e => e.type === 'sample' && e.sampleId === ev.sampleId);
+    if (prior >= 0) job.events.splice(prior, 1);
+  }
+  job.events.push(ev);
+  if (job.events.length > MAX_EVENTS) {
+    let victim = job.events.findIndex(e => e.type === 'log');
+    if (victim < 0) victim = job.events.findIndex(e => e.type === 'progress');
+    if (victim < 0) victim = job.events.findIndex(e => e.type === 'job');
+    if (victim >= 0) job.events.splice(victim, 1);   // never `sample`/`status`
+  }
+  broadcast(job, ev);
+}
+
+function emitJob(job: TrainingJob): void {
+  pushEvent(job, { type: 'job', job: toSummary(job) });
+}
+
+function emitProgress(job: TrainingJob): void {
+  pushEvent(job, {
+    type: 'progress',
+    done: job.done,
+    total: job.total,
+    failed: job.failed,
+    phase: job.phase,
+    currentSampleId: job.currentSampleId,
+    engineQueueDepth: job.engineQueueDepth,
+  });
+}
+
+function emitLog(job: TrainingJob, level: 'info' | 'warn' | 'error', message: string): void {
+  pushEvent(job, { type: 'log', level, message, ts: Date.now() });
+}
+
+function endStream(job: TrainingJob): void {
+  for (const res of job.listeners) {
+    try { res.end(); } catch { /* already closed */ }
+  }
+  job.listeners.clear();
+}
+
+/** SSE: the full replay buffer, then live or closed (§2.9). */
+export function attachStream(job: TrainingJob, res: Response): void {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  for (const ev of job.events) {
+    res.write(`data: ${JSON.stringify(ev)}\n\n`);
+  }
+  // The buffer already opens with a `job` frame once the job has started; only
+  // synthesise one when it has not, so a replay can never clobber fresh state
+  // with the stale summary recorded at job start.
+  if (!job.events.some(e => e.type === 'job')) {
+    res.write(`data: ${JSON.stringify({ type: 'job', job: toSummary(job) })}\n\n`);
+  }
+
+  if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+    res.end();
+    return;
+  }
+  job.listeners.add(res);
+  res.on('close', () => job.listeners.delete(res));
+}
+
+// ── Persistence (§7.9) ───────────────────────────────────────────────────
+
+function persistMeta(job: TrainingJob): void {
+  try {
+    const dir = path.join(jobsDir(), job.id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '_meta.json'), JSON.stringify(toSummary(job), null, 2), 'utf-8');
+  } catch (err: any) {
+    console.warn(`[Training] Could not persist job ${job.id}: ${err.message}`);
+  }
+}
+
+/** A server restart loses running jobs — rewrite their meta so the list is honest. */
+function recoverStaleJobs(): void {
+  try {
+    const base = jobsDir();
+    if (!fs.existsSync(base)) return;
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const metaPath = path.join(base, entry.name, '_meta.json');
+      if (!fs.existsSync(metaPath)) continue;
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as TrainingJobSummary;
+        if (meta.status !== 'running' && meta.status !== 'queued') continue;
+        meta.status = 'failed';
+        meta.error = 'Server restarted';
+        meta.finishedAt = Date.now();
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      } catch { /* skip corrupted meta */ }
+    }
+  } catch { /* jobs dir unreadable */ }
+}
+recoverStaleJobs();
+
+// ── Queue + cancellation ─────────────────────────────────────────────────
+
+/** Append to the ONE global chain shared by every training job kind. */
+export function enqueue(job: TrainingJob, run: (j: TrainingJob) => Promise<void>): void {
+  queueTail = queueTail.then(() => run(job)).catch(() => { /* runners handle their own errors */ });
+}
+
+export function cancelJob(id: string): boolean {
+  const job = jobs.get(id);
+  if (!job) return false;
+  if (job.status === 'queued' || job.status === 'running') {
+    job.status = 'cancelled';
+    job.finishedAt = Date.now();
+    job.controller.abort();
+    // Rows this job had queued/in flight go back to their on-disk state at once,
+    // or they would render "Queued…"/"Working…" (and read-only) forever.
+    clearTransientStatuses(job.datasetId, job.sampleIds);
+    emitJob(job);
+    pushEvent(job, { type: 'status', status: 'cancelled' });
+    persistMeta(job);
+    endStream(job);
+    console.log(`[Training] Job ${id} cancelled`);
+  }
+  // §2.8 — DELETE always removes the job from the map. The finished `_meta.json`
+  // keeps it visible in GET /jobs, and dropping it here bounds memory: every job
+  // holds up to MAX_EVENTS events, some carrying a full sample with lyrics.
+  jobs.delete(id);
+  return true;
+}
+
+function isCancelled(job: TrainingJob): boolean {
+  return job.status === 'cancelled' || job.controller.signal.aborted;
+}
+
+function finishJob(job: TrainingJob, status: TrainingJobStatus, error?: string): void {
+  if (job.status === 'cancelled') return;   // a cancel already closed the stream
+  job.status = status;
+  job.error = error ?? null;
+  job.finishedAt = Date.now();
+  job.currentSampleId = null;
+  // Nothing is pending or processing once the job is over — including the rows
+  // a failure never reached.
+  clearTransientStatuses(job.datasetId, job.sampleIds);
+  emitJob(job);
+  pushEvent(job, { type: 'status', status, ...(error ? { error } : {}) });
+  persistMeta(job);
+  endStream(job);
+}
+
+// ── Shared helpers ───────────────────────────────────────────────────────
+
+function isEngineConnectionError(err: any): boolean {
+  const msg = String(err?.message || err || '');
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|socket hang up|Engine is not running/i.test(msg);
+}
+
+/** Re-read one sample from disk after a sidecar/label write. */
+function refreshSample(ds: TrainingDatasetRow, sample: TrainingSample): TrainingSample {
+  let sizeBytes = sample.sizeBytes;
+  let mtimeMs = 0;
+  try {
+    const st = fs.statSync(sample.audioPath);
+    sizeBytes = st.size;
+    mtimeMs = st.mtimeMs;
+  } catch { /* file vanished mid-job — the refreshed row keeps the old size */ }
+
+  const label = readLabel(ds.slug, sample.sampleId) ?? undefined;
+  const meta = loadSidecarMetadata(sample.audioPath);
+  const duration = label?.durationCache?.seconds ?? sample.duration;
+  return sampleFromParts(
+    ds.id,
+    { relPath: sample.relPath, absPath: sample.audioPath, sizeBytes, mtimeMs },
+    meta, label, duration, false,
+  );
+}
+
+/**
+ * Merge `incoming` into the sample's sidecar under `policy` and rewrite it.
+ *
+ * With `deriveInstrumental`, §4.8's rule is applied to the **winning** lyrics —
+ * the merge result, not just what /understand returned. Otherwise a track whose
+ * existing lyrics survive the merge would still be flagged instrumental
+ * whenever the local transcription came back empty.
+ */
+async function mergeIntoSidecar(
+  sample: TrainingSample,
+  incoming: Record<string, string>,
+  policy: MergePolicy,
+  deriveInstrumental = false,
+): Promise<void> {
+  // `existing` comes from the 3-convention detect, but the write is always
+  // Option A — that is how a split-convention folder gets normalised (§6.6).
+  const existing = loadSidecarMetadata(sample.audioPath);
+  let merged = mergeFields(existing, incoming, policy);
+  if (deriveInstrumental) {
+    const winning = (merged.lyrics ?? '').trim();
+    merged = mergeFields(merged, { is_instrumental: winning ? 'false' : 'true' }, policy);
+  }
+  await writeSidecar(sample.sidecarPath, merged);
+}
+
+function refreshCounters(ds: TrainingDatasetRow, samples: TrainingSample[], status?: string): void {
+  const labeled = samples.filter(s => !!s.caption.trim()).length;
+  const excluded = samples.filter(s => s.excluded).length;
+  // Always leave 'labeling' behind when a job ends — otherwise a partially
+  // labeled dataset would sit in the running state forever. A dataset that has
+  // already been built stays 'built': the route's syncCounters guards on that
+  // status and could never restore it once we dropped it.
+  const alreadyBuilt = !!ds.builtAt && !!ds.datasetJsonPath;
+  const next = status ?? (alreadyBuilt ? 'built' : (labeled > 0 ? 'labeled' : 'draft'));
+  try {
+    updateCounters(ds.id, {
+      sampleCount: samples.length,
+      labeledCount: labeled,
+      excludedCount: excluded,
+      status: next,
+    });
+  } catch (err: any) {
+    console.warn(`[Training] Counter update failed for ${ds.id}: ${err.message}`);
+  }
+}
+
+/** Resolve the job's target samples, in scan order. */
+async function loadTargets(
+  job: TrainingJob,
+  ds: TrainingDatasetRow,
+): Promise<{ all: TrainingSample[]; targets: TrainingSample[] }> {
+  const all = await buildSamples(ds, { withDuration: false });
+  const wanted = new Set(job.sampleIds);
+  const targets = all.filter(s => wanted.has(s.sampleId));
+  return { all, targets };
+}
+
+// 'pending'/'processing' are live-job state and stay in memory (§2.0); only the
+// durable outcome ('labeled'/'error') is written to the label record.
+function markPending(job: TrainingJob, ds: TrainingDatasetRow, targets: TrainingSample[]): void {
+  for (const s of targets) {
+    setTransientStatus(job.datasetId, s.sampleId, 'pending');
+    patchLabel(ds.slug, s.sampleId, { relPath: s.relPath, error: null });
+    pushEvent(job, { type: 'sample', sampleId: s.sampleId, status: 'pending' });
+  }
+}
+
+function markProcessing(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample): void {
+  setTransientStatus(job.datasetId, sample.sampleId, 'processing');
+  patchLabel(ds.slug, sample.sampleId, { relPath: sample.relPath, error: null });
+  pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'processing' });
+}
+
+function markError(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample, message: string): void {
+  clearTransientStatus(job.datasetId, sample.sampleId);
+  patchLabel(ds.slug, sample.sampleId, { relPath: sample.relPath, labelStatus: 'error', error: message });
+  job.failed++;
+  pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'error', error: message });
+  emitLog(job, 'error', `${sample.filename}: ${message}`);
+}
+
+function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample, sources: Record<string, FieldSource>): void {
+  clearTransientStatus(job.datasetId, sample.sampleId);
+  patchLabel(ds.slug, sample.sampleId, {
+    relPath: sample.relPath,
+    labelStatus: 'labeled',
+    error: null,
+    labeledAt: new Date().toISOString(),
+    sources,
+  });
+  const fresh = refreshSample(ds, sample);
+  pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: fresh.labelStatus, sample: fresh });
+}
+
+// ── Label job (§4.7) ─────────────────────────────────────────────────────
+
+interface PassAResult {
+  duration: number;
+  tags: { artist: string; title: string; album: string };
+  tagBpm: number | null;
+  essentiaBpm: number | null;
+  essentiaKey: string;
+}
+
+async function runPassA(
+  job: TrainingJob,
+  ds: TrainingDatasetRow,
+  sample: TrainingSample,
+  opts: LabelOptions,
+  policy: MergePolicy,
+  results: Map<string, PassAResult>,
+): Promise<void> {
+  job.currentSampleId = sample.sampleId;
+  job.phase = 'essentia';
+  markProcessing(job, ds, sample);
+
+  const meta = await audioMeta.read(sample.audioPath);
+  const essentia = (opts.useEssentia !== false && essentiaAvailable())
+    ? await analyzeWithEssentia(sample.audioPath, job.controller.signal)
+    : null;
+
+  const essentiaKey = essentia ? essentiaKeyString(essentia.key, essentia.scale) : '';
+  const result: PassAResult = {
+    duration: meta.duration,
+    tags: { artist: meta.artist, title: meta.title, album: meta.album },
+    tagBpm: meta.bpm,
+    essentiaBpm: essentia?.bpm ?? null,
+    essentiaKey,
+  };
+  results.set(sample.sampleId, result);
+
+  let sizeBytes = sample.sizeBytes;
+  let mtimeMs = 0;
+  try {
+    const st = fs.statSync(sample.audioPath);
+    sizeBytes = st.size;
+    mtimeMs = st.mtimeMs;
+  } catch { /* stat failure just costs us the duration cache */ }
+
+  patchLabel(ds.slug, sample.sampleId, {
+    relPath: sample.relPath,
+    tags: result.tags,
+    essentia: essentia ?? null,
+    durationCache: meta.duration > 0 ? { seconds: meta.duration, sizeBytes, mtimeMs } : null,
+  });
+
+  // Interim sidecar write — a cancelled job still leaves usable BPM/key data.
+  const incoming: Record<string, string> = {};
+  const sources: Record<string, FieldSource> = {};
+  if (result.essentiaBpm !== null) { incoming.bpm = String(result.essentiaBpm); sources.bpm = 'essentia'; }
+  else if (result.tagBpm !== null) { incoming.bpm = String(result.tagBpm); sources.bpm = 'tags'; }
+  if (essentiaKey) { incoming.key = essentiaKey; sources.key = 'essentia'; }
+  if (meta.duration > 0) incoming.duration = meta.duration.toFixed(2);
+
+  try {
+    if (Object.keys(incoming).length > 0) {
+      await mergeIntoSidecar(sample, incoming, policy);
+    }
+  } catch (err: any) {
+    markError(job, ds, sample, `Could not write sidecar: ${err.message}`);
+    return;
+  }
+
+  // With no Pass B this file is finished; otherwise keep it 'processing'.
+  if (opts.useUnderstand === false) {
+    markLabeled(job, ds, sample, sources);
+    job.done++;
+  } else {
+    patchLabel(ds.slug, sample.sampleId, { sources });
+    // Pass B still owes this file — hand it back to the queue rather than
+    // leaving every row showing "Working…" (and read-only) until it gets there.
+    setTransientStatus(job.datasetId, sample.sampleId, 'pending');
+    const fresh = refreshSample(ds, sample);
+    pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'pending', sample: fresh });
+  }
+  emitProgress(job);
+}
+
+function understandParams(opts: LabelOptions): Partial<AceRequest> {
+  const u = opts.understand || {};
+  const params: Partial<AceRequest> = {};
+  if (u.lmModel) params.lm_model = u.lmModel;
+  if (u.synthModel) params.synth_model = u.synthModel;
+  if (typeof u.lmTemperature === 'number') params.lm_temperature = u.lmTemperature;
+  if (typeof u.lmTopP === 'number') params.lm_top_p = u.lmTopP;
+  if (typeof u.lmTopK === 'number') params.lm_top_k = u.lmTopK;
+  if (typeof u.seed === 'number') params.seed = u.seed;
+  return params;
+}
+
+async function runLabelJob(job: TrainingJob): Promise<void> {
+  if (isCancelled(job)) return;
+  const ds = getDataset(job.datasetId);
+  if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
+
+  const opts = (job.opts || {}) as LabelOptions;
+  const policy: MergePolicy = opts.mergePolicy || 'fill_missing';
+
+  job.status = 'running';
+  job.startedAt = Date.now();
+  job.phase = 'essentia';
+  emitJob(job);
+
+  try {
+    const { targets } = await loadTargets(job, ds);
+    job.total = targets.length;
+    markPending(job, ds, targets);
+    pushLog(`[Training] Label job ${job.id} started — ${job.total} files`);
+    emitLog(job, 'info', `Labeling ${job.total} file(s)`);
+    emitProgress(job);
+
+    // ── Pass A: tags + Essentia, parallel lane, concurrency 2 ──
+    const passA = new Map<string, PassAResult>();
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        if (isCancelled(job)) return;
+        const index = cursor++;
+        if (index >= targets.length) return;
+        const sample = targets[index];
+        try {
+          await runPassA(job, ds, sample, opts, policy, passA);
+        } catch (err: any) {
+          markError(job, ds, sample, err?.message || 'Analysis failed');
+          emitProgress(job);
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+
+    if (isCancelled(job)) return;
+
+    // ── Pass B: /understand, strictly serial ──
+    if (opts.useUnderstand !== false) {
+      job.phase = 'understand';
+      let engineFailures = 0;
+
+      for (const sample of targets) {
+        if (isCancelled(job)) return;
+        job.currentSampleId = sample.sampleId;
+        job.phase = 'understand';
+        markProcessing(job, ds, sample);
+        emitProgress(job);
+
+        try {
+          const result = await runUnderstand(sample.audioPath, understandParams(opts), {
+            signal: job.controller.signal,
+            onQueue: (depth) => { job.engineQueueDepth = depth; emitProgress(job); },
+            onPhase: (p) => { job.phase = p; emitProgress(job); },
+          });
+          engineFailures = 0;
+
+          const a = passA.get(sample.sampleId);
+          const incoming: Record<string, string> = {};
+          const sources: Record<string, FieldSource> = {};
+
+          // §4.8 — Essentia wins bpm/key; understand wins the text fields.
+          if (a?.essentiaBpm != null) { incoming.bpm = String(a.essentiaBpm); sources.bpm = 'essentia'; }
+          else if (result.bpm != null) { incoming.bpm = String(Math.trunc(result.bpm)); sources.bpm = 'understand'; }
+          else if (a?.tagBpm != null) { incoming.bpm = String(a.tagBpm); sources.bpm = 'tags'; }
+
+          if (a?.essentiaKey) { incoming.key = a.essentiaKey; sources.key = 'essentia'; }
+          else if (result.keyscale) { incoming.key = result.keyscale; sources.key = 'understand'; }
+
+          if (result.caption) { incoming.caption = result.caption; sources.caption = 'understand'; }
+          if (result.lyrics) { incoming.lyrics = result.lyrics; sources.lyrics = 'understand'; }
+          if (result.timesignature) { incoming.signature = result.timesignature; sources.signature = 'understand'; }
+          if (result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
+          // Duration is measured, never taken from the LM's chain-of-thought guess.
+          if (a && a.duration > 0) incoming.duration = a.duration.toFixed(2);
+
+          job.phase = 'writing';
+          // §4.8 — is_instrumental follows the WINNING lyrics, so it is derived
+          // from the merge result rather than from `result.lyrics` alone.
+          await mergeIntoSidecar(sample, incoming, policy, true);
+
+          // audio_codes NEVER enters the sidecar — it goes here (D7).
+          patchLabel(ds.slug, sample.sampleId, {
+            relPath: sample.relPath,
+            audioCodes: result.audioCodes,
+            audioCodesModel: opts.understand?.lmModel || null,
+            understand: {
+              caption: result.caption,
+              lyrics: result.lyrics,
+              bpm: result.bpm,
+              keyscale: result.keyscale,
+              timesignature: result.timesignature,
+              vocalLanguage: result.vocalLanguage,
+              duration: result.duration,
+              seed: result.seed,
+            },
+          });
+
+          markLabeled(job, ds, sample, sources);
+          job.done++;
+        } catch (err: any) {
+          if (err instanceof AbortError || isCancelled(job)) return;
+          markError(job, ds, sample, err?.message || 'Understand failed');
+          if (isEngineConnectionError(err)) {
+            engineFailures++;
+            if (engineFailures >= ENGINE_FAILURE_LIMIT) {
+              finishJob(job, 'failed', 'Engine became unreachable');
+              return;
+            }
+          } else {
+            engineFailures = 0;
+          }
+        }
+        job.phase = 'understand';
+        emitProgress(job);
+      }
+    }
+
+    if (isCancelled(job)) return;
+
+    const finalSamples = await buildSamples(ds, { withDuration: false });
+    refreshCounters(ds, finalSamples);
+    pushLog(`[Training] Label job ${job.id} finished — ${job.done} labeled, ${job.failed} failed`);
+    finishJob(job, 'done');
+  } catch (err: any) {
+    if (isCancelled(job)) return;
+    console.error(`[Training] Label job ${job.id} FAILED — ${err?.message || err}`);
+    finishJob(job, 'failed', err?.message || 'Label job failed');
+  }
+}
+
+// ── Genius job ───────────────────────────────────────────────────────────
+
+async function runGeniusJob(job: TrainingJob): Promise<void> {
+  if (isCancelled(job)) return;
+  const ds = getDataset(job.datasetId);
+  if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
+
+  const opts = (job.opts || {}) as GeniusOptions;
+  const policy: MergePolicy = opts.mergePolicy || 'overwrite_lyrics';
+
+  job.status = 'running';
+  job.startedAt = Date.now();
+  job.phase = 'genius';
+  emitJob(job);
+
+  try {
+    const { targets } = await loadTargets(job, ds);
+    job.total = targets.length;
+    markPending(job, ds, targets);
+    pushLog(`[Training] Genius job ${job.id} started — ${job.total} files`);
+    emitProgress(job);
+
+    for (const sample of targets) {
+      if (isCancelled(job)) return;
+      job.currentSampleId = sample.sampleId;
+      markProcessing(job, ds, sample);
+
+      try {
+        const hit = await enhanceGenius(sample, ds, {
+          artist: opts.artist,
+          album: opts.album,
+          sanitizeHeaders: opts.sanitizeHeaders !== false,
+        });
+        if (!hit) {
+          markError(job, ds, sample, 'No Genius match');
+        } else {
+          await mergeIntoSidecar(sample, { lyrics: hit.lyrics, is_instrumental: 'false' }, policy);
+          markLabeled(job, ds, sample, { lyrics: 'genius' });
+          job.done++;
+        }
+      } catch (err: any) {
+        markError(job, ds, sample, err?.message || 'Genius lookup failed');
+      }
+
+      emitProgress(job);
+      await new Promise(r => setTimeout(r, GENIUS_DELAY_MS));
+    }
+
+    if (isCancelled(job)) return;
+    refreshCounters(ds, await buildSamples(ds, { withDuration: false }));
+    finishJob(job, 'done');
+  } catch (err: any) {
+    if (isCancelled(job)) return;
+    finishJob(job, 'failed', err?.message || 'Genius job failed');
+  }
+}
+
+// ── LLM caption job ──────────────────────────────────────────────────────
+
+async function runCaptionJob(job: TrainingJob): Promise<void> {
+  if (isCancelled(job)) return;
+  const ds = getDataset(job.datasetId);
+  if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
+
+  const opts = (job.opts || {}) as CaptionOptions & { provider: string };
+  const policy: MergePolicy = opts.mergePolicy || 'overwrite_caption';
+
+  job.status = 'running';
+  job.startedAt = Date.now();
+  job.phase = 'llm';
+  emitJob(job);
+
+  try {
+    const { targets } = await loadTargets(job, ds);
+    job.total = targets.length;
+    markPending(job, ds, targets);
+    pushLog(`[Training] Caption job ${job.id} started — ${job.total} files (${opts.provider})`);
+    emitProgress(job);
+
+    for (const sample of targets) {
+      if (isCancelled(job)) return;
+      job.currentSampleId = sample.sampleId;
+      markProcessing(job, ds, sample);
+
+      try {
+        const fields = await enhanceCaption(sample, ds, {
+          provider: opts.provider,
+          model: opts.model,
+          includeLyricsExcerpt: opts.includeLyricsExcerpt !== false,
+          temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.45,
+        });
+        if (Object.keys(fields).length === 0) {
+          markError(job, ds, sample, 'LLM returned nothing usable');
+        } else {
+          await mergeIntoSidecar(sample, fields, policy);
+          const sources: Record<string, FieldSource> = {};
+          for (const key of Object.keys(fields)) sources[key] = 'llm';
+          markLabeled(job, ds, sample, sources);
+          job.done++;
+        }
+      } catch (err: any) {
+        markError(job, ds, sample, err?.message || 'LLM call failed');
+      }
+
+      emitProgress(job);
+      await new Promise(r => setTimeout(r, LLM_DELAY_MS));
+    }
+
+    if (isCancelled(job)) return;
+    refreshCounters(ds, await buildSamples(ds, { withDuration: false }));
+    finishJob(job, 'done');
+  } catch (err: any) {
+    if (isCancelled(job)) return;
+    finishJob(job, 'failed', err?.message || 'Caption job failed');
+  }
+}
+
+// ── Build job (D18) ──────────────────────────────────────────────────────
+
+async function runBuildJob(job: TrainingJob): Promise<void> {
+  if (isCancelled(job)) return;
+  const ds = getDataset(job.datasetId);
+  if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
+
+  const opts = (job.opts || {}) as BuildOptions & { outputPath: string };
+
+  job.status = 'running';
+  job.startedAt = Date.now();
+  job.phase = 'build';
+  emitJob(job);
+
+  try {
+    // Durations are measured for the build — this is the one path that pays.
+    const samples = await buildSamples(ds, { withDuration: true });
+    const included = samples.filter(s => !s.excluded);
+    job.total = included.length;
+    emitProgress(job);
+
+    const missing = included.filter(s => s.fileMissing);
+    if (missing.length > 0) {
+      finishJob(job, 'failed', `${missing.length} included file(s) are missing from disk`);
+      return;
+    }
+
+    const outputPath = opts.outputPath || path.join(ds.sourceDir, 'dataset.json');
+    const result = await buildDataset(ds, included, outputPath, (done, total) => {
+      job.done = done;
+      job.total = total;
+      emitProgress(job);
+    });
+
+    const builtAt = new Date().toISOString();
+    updateDataset(ds.id, { builtAt, datasetJsonPath: result.path, status: 'built' });
+    refreshCounters(ds, samples, 'built');
+
+    pushLog(`[Training] Built ${result.path} — ${result.total} samples`);
+    emitLog(job, 'info', `Wrote ${result.path} (${result.total} samples)`);
+    finishJob(job, 'done');
+  } catch (err: any) {
+    if (isCancelled(job)) return;
+    console.error(`[Training] Build job ${job.id} FAILED — ${err?.message || err}`);
+    finishJob(job, 'failed', err?.message || 'Build failed');
+  }
+}
+
+// ── Public starters ──────────────────────────────────────────────────────
+
+export function startLabelJob(datasetId: string, sampleIds: string[], opts: LabelOptions): TrainingJob {
+  const job = createJob('label', datasetId, sampleIds, opts);
+  enqueue(job, runLabelJob);
+  return job;
+}
+
+export function startGeniusJob(datasetId: string, sampleIds: string[], opts: GeniusOptions): TrainingJob {
+  const job = createJob('enhance-genius', datasetId, sampleIds, opts);
+  enqueue(job, runGeniusJob);
+  return job;
+}
+
+export function startCaptionJob(
+  datasetId: string,
+  sampleIds: string[],
+  opts: CaptionOptions & { provider: string },
+): TrainingJob {
+  const job = createJob('enhance-caption', datasetId, sampleIds, opts);
+  enqueue(job, runCaptionJob);
+  return job;
+}
+
+export function startBuildJob(datasetId: string, opts: BuildOptions & { outputPath: string }): TrainingJob {
+  const job = createJob('build', datasetId, [], opts);
+  enqueue(job, runBuildJob);
+  return job;
+}

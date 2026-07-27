@@ -442,12 +442,33 @@ export const aceClient = {
     return data.id;
   },
 
-  /** POST /understand — submit understand job, returns job ID */
-  async submitUnderstand(audioBuffer: Buffer): Promise<string> {
+  /** POST /understand — submit understand job, returns job ID.
+   *  `params` (optional) is serialised into the multipart `request` part;
+   *  the engine parses it with the same request_parse_json used by /synth,
+   *  so any AceRequest field is legal. Engine defaults for understand are
+   *  lm_temperature 0.3 / lm_top_p 1.0 and are only overridden by what we send. */
+  async submitUnderstand(audioBuffer: Buffer, params?: Partial<AceRequest>): Promise<string> {
     const boundary = '----HotStepBoundary' + Date.now();
-    const header = `--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="input.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
-    const footer = `\r\n--${boundary}--\r\n`;
-    const body = Buffer.concat([Buffer.from(header), audioBuffer, Buffer.from(footer)]);
+
+    const parts: Buffer[] = [];
+    const addPart = (name: string, content: Buffer, contentType: string, filename?: string) => {
+      let header = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"`;
+      if (filename) header += `; filename="${filename}"`;
+      header += `\r\nContent-Type: ${contentType}\r\n\r\n`;
+      parts.push(Buffer.from(header));
+      parts.push(content);
+      parts.push(Buffer.from('\r\n'));
+    };
+
+    // Request JSON part — only when there is something to say, so the legacy
+    // audio-only call shape stays byte-identical.
+    if (params && Object.keys(params).length > 0) {
+      addPart('request', Buffer.from(JSON.stringify(params)), 'application/json');
+    }
+    addPart('audio', audioBuffer, 'audio/wav', 'input.wav');
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    const body = Buffer.concat(parts);
 
     const res = await fetch(`${BASE}/understand`, {
       method: 'POST',

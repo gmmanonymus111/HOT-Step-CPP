@@ -208,6 +208,31 @@ export function initDb(): void {
 
     CREATE INDEX IF NOT EXISTS idx_builder_projects_user ON builder_projects(user_id);
     CREATE INDEX IF NOT EXISTS idx_builder_sections_project ON builder_sections(project_id, position);
+
+    -- Training datasets (Dataset Studio). Disk is the source of truth for
+    -- sample data; this row exists for listing, status and settings only.
+    CREATE TABLE IF NOT EXISTS training_datasets (
+      id                TEXT PRIMARY KEY,
+      slug              TEXT NOT NULL UNIQUE,
+      name              TEXT NOT NULL DEFAULT 'Untitled',
+      source_dir        TEXT NOT NULL,
+      recursive         INTEGER NOT NULL DEFAULT 1,
+      custom_tag        TEXT NOT NULL DEFAULT '',
+      tag_position      TEXT NOT NULL DEFAULT 'prepend',
+      genre_ratio       INTEGER NOT NULL DEFAULT 0,
+      default_artist    TEXT NOT NULL DEFAULT '',
+      default_album     TEXT NOT NULL DEFAULT '',
+      default_genre     TEXT NOT NULL DEFAULT '',
+      sample_count      INTEGER NOT NULL DEFAULT 0,
+      labeled_count     INTEGER NOT NULL DEFAULT 0,
+      excluded_count    INTEGER NOT NULL DEFAULT 0,
+      status            TEXT NOT NULL DEFAULT 'draft',
+      built_at          TEXT NOT NULL DEFAULT '',
+      dataset_json_path TEXT NOT NULL DEFAULT '',
+      created_at        TEXT DEFAULT (datetime('now')),
+      updated_at        TEXT DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_training_datasets_src ON training_datasets(source_dir);
   `);
 
   // ── Migrations — add columns that may not exist in older databases ────────

@@ -15,6 +15,9 @@ const router = Router();
 const FILTER_EXTENSIONS: Record<string, string[]> = {
   adapters: ['.safetensors'],
   audio: ['.wav', '.mp3', '.flac', '.ogg', '.opus'],
+  // Training Studio folder picker — deliberately separate from `audio`, which
+  // other callers depend on staying as-is.
+  trainingAudio: ['.wav', '.mp3', '.flac', '.ogg', '.opus', '.m4a', '.aac'],
 };
 
 /**

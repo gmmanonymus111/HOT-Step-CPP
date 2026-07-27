@@ -42,6 +42,7 @@ import { RepaintStudio } from './components/repaint-studio/RepaintStudio';
 import { SongBuilder } from './components/song-builder/SongBuilder';
 import { StormPage } from './components/storm/StormPage';
 import { MidiStudio } from './components/midi-studio/MidiStudio';
+import { TrainingStudio } from './components/training-studio/TrainingStudio';
 import { GlobalParamBar } from './components/global-bar/GlobalParamBar';
 import { InstaGenPanel } from './components/insta-gen/InstaGenPanel';
 import { PlaylistSidebar } from './components/playlist/PlaylistSidebar';
@@ -93,6 +94,7 @@ function viewFromUrl(path = window.location.pathname): string {
   if (path.startsWith('/song-builder')) return 'song-builder';
   if (path.startsWith('/storm')) return 'storm';
   if (path.startsWith('/midi-studio')) return 'midi-studio';
+  if (path.startsWith('/training-studio')) return 'training-studio';
   if (path.startsWith('/repaint')) return 'repaint';
   if (path.startsWith('/library')) return 'library';
   if (path.startsWith('/settings')) return 'settings';
@@ -116,6 +118,7 @@ function urlForView(view: string): string {
   if (view === 'song-builder') return '/song-builder';
   if (view === 'storm') return '/storm';
   if (view === 'midi-studio') return '/midi-studio';
+  if (view === 'training-studio') return '/training-studio';
   if (view === 'repaint') return '/repaint';
   if (view === 'library') return '/library';
   if (view === 'settings') return '/settings';
@@ -294,6 +297,7 @@ const AppContent: React.FC = () => {
     player:       45,   // gold
     rightSidebar: 300,  // magenta
     storm:        210,  // electric blue
+    trainingStudio: 60,   // amber
   };
 
   // Register WaveSurfer ref objects with playback store.
@@ -722,6 +726,14 @@ const AppContent: React.FC = () => {
       return (
         <DiscoPulseWrapper hue={DISCO.playlist} className="flex-1 overflow-hidden">
           <MidiStudio />
+        </DiscoPulseWrapper>
+      );
+    }
+
+    if (activeView === 'training-studio') {
+      return (
+        <DiscoPulseWrapper hue={DISCO.trainingStudio} className="flex-1 overflow-hidden">
+          <TrainingStudio />
         </DiscoPulseWrapper>
       );
     }
