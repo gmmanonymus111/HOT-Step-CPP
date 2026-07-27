@@ -73,26 +73,56 @@ export function resolveArtistTitle(
   return { artist: artist.trim(), title: title.trim() };
 }
 
+/** Strip "(feat. X)" / "[ft. X]" parentheticals and trailing feat clauses from a title. */
+export function cleanTitleForSearch(title: string): string {
+  return title
+    .replace(/[([]\s*(?:feat\.?|ft\.?|featuring|with)\b[^)\]]*[)\]]/gi, ' ')
+    .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Strip a trailing "feat./ft. X" clause from an artist string. */
+export function cleanArtistForSearch(artist: string): string {
+  return artist.replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, '').trim();
+}
+
 /**
  * Fetch lyrics from Genius for one sample.
  * `null` means "no confident match" — the caller logs a warning and moves on.
+ *
+ * Retry ladder (collabs and feats break exact primary-artist matching —
+ * "Electric Callboy & BABYMETAL" is the primary artist of RATATATA):
+ *   1. exact match, artist/title as resolved (tags first)
+ *   2. exact match, feat-clauses stripped from both
+ *   3. relaxed match (artist containment + title agreement), cleaned strings
  */
 export async function enhanceGenius(
   sample: TrainingSample,
   ds: TrainingDatasetRow,
   opts: { artist?: string; album?: string; sanitizeHeaders: boolean },
-): Promise<{ lyrics: string; source: 'genius' } | null> {
+): Promise<{ lyrics: string; source: 'genius'; searched: string } | null> {
   const { artist, title } = resolveArtistTitle(sample, ds, opts);
+  const searched = `${artist} — ${title}`;
   if (!artist || !title) return null;
 
-  const hit = await searchSongLyrics(artist, title);
+  const cleanArtist = cleanArtistForSearch(artist) || artist;
+  const cleanTitle = cleanTitleForSearch(title) || title;
+
+  let hit = await searchSongLyrics(artist, title);
+  if (!hit && (cleanArtist !== artist || cleanTitle !== title)) {
+    hit = await searchSongLyrics(cleanArtist, cleanTitle);
+  }
+  if (!hit) {
+    hit = await searchSongLyrics(cleanArtist, cleanTitle, { relaxed: true });
+  }
   if (!hit || !hit.lyrics?.trim()) return null;
 
   let lyrics = cleanText(hit.lyrics, MAX_LYRICS_CHARS);
   if (opts.sanitizeHeaders) lyrics = sanitizeHeaders(lyrics);
   if (!lyrics.trim()) return null;
 
-  return { lyrics, source: 'genius' };
+  return { lyrics, source: 'genius', searched };
 }
 
 // ── LLM caption ──────────────────────────────────────────────────────────

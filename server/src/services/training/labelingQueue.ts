@@ -27,7 +27,7 @@ import {
 } from './labelStore.js';
 import { analyzeWithEssentia, essentiaAvailable, essentiaKeyString } from './essentiaClient.js';
 import { AbortError, runUnderstand } from './understandClient.js';
-import { enhanceCaption, enhanceGenius } from './enhanceService.js';
+import { enhanceCaption, enhanceGenius, resolveArtistTitle } from './enhanceService.js';
 import { buildDataset } from './datasetBuilder.js';
 import * as audioMeta from './audioMeta.js';
 import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
@@ -776,7 +776,9 @@ async function runGeniusJob(job: TrainingJob): Promise<void> {
           sanitizeHeaders: opts.sanitizeHeaders !== false,
         });
         if (!hit) {
-          markError(job, ds, sample, 'No Genius match');
+          const { artist, title } = resolveArtistTitle(sample, ds, { artist: opts.artist });
+          markError(job, ds, sample,
+            artist && title ? `No Genius match (searched "${artist} — ${title}")` : 'No Genius match (no artist/title found)');
         } else {
           await mergeIntoSidecar(sample, { lyrics: hit.lyrics, is_instrumental: 'false' }, policy);
           markLabeled(job, ds, sample, { lyrics: 'genius' });

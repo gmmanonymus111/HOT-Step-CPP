@@ -402,15 +402,40 @@ export async function fetchLyrics(
 /**
  * Search for a single song's lyrics on Genius.
  */
+/** Lowercase, strip parentheticals/brackets and punctuation, collapse spaces. */
+function normalizeTitle(s: string): string {
+  return s.toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function searchSongLyrics(
   artist: string, title: string,
+  opts?: { relaxed?: boolean },
 ): Promise<{ title: string; lyrics: string; url: string } | null> {
   const hits = await apiSearch(`${title} ${artist}`, 5);
-  const artistLower = artist.toLowerCase();
+  const artistLower = artist.toLowerCase().trim();
+  const titleNorm = normalizeTitle(title);
 
   for (const hit of hits) {
     const result = hit.result ?? {};
-    if (result.primary_artist?.name?.toLowerCase() !== artistLower) continue;
+    const primaryLower = (result.primary_artist?.name ?? '').toLowerCase().trim();
+    if (opts?.relaxed) {
+      // Collabs and feats break exact matching ("Electric Callboy & BABYMETAL",
+      // "Artist feat. X") — accept containment either way, but then require the
+      // titles to agree so a popular unrelated song can't slip in.
+      const artistOk = !!primaryLower
+        && (primaryLower.includes(artistLower) || artistLower.includes(primaryLower));
+      if (!artistOk) continue;
+      const resultNorm = normalizeTitle(result.title ?? '');
+      const titleOk = !!titleNorm && !!resultNorm
+        && (resultNorm.includes(titleNorm) || titleNorm.includes(resultNorm));
+      if (!titleOk) continue;
+    } else if (primaryLower !== artistLower) {
+      continue;
+    }
     const songUrl = result.url;
     if (!songUrl) continue;
 
