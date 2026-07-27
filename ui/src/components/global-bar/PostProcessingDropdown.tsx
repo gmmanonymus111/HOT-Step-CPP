@@ -757,6 +757,35 @@ export const PostProcessingDropdown: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* Refine seed: follows the generation seed unless overridden */}
+              <div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={gp.stableStepSeedFollowsDit !== false}
+                    onChange={e => gp.setStableStepSeedFollowsDit(e.target.checked)}
+                    className="mt-0.5 accent-sky-500"
+                  />
+                  <span className="flex-1">
+                    <span className="block text-xs text-zinc-700 dark:text-zinc-300">Follow generation seed</span>
+                    <span className="block text-[10px] text-zinc-500 leading-relaxed">
+                      The refine uses the song's resolved generation seed — regenerating
+                      with the same seed reproduces the same refine. Untick to set a
+                      fixed independent seed.
+                    </span>
+                  </span>
+                </label>
+                {gp.stableStepSeedFollowsDit === false && (
+                  <input
+                    type="number"
+                    value={gp.stableStepSeed}
+                    onChange={e => gp.setStableStepSeed(parseInt(e.target.value, 10) || 0)}
+                    className="mt-1.5 w-full px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 outline-none focus:border-sky-500/50"
+                    title="Fixed SA3 refine seed"
+                  />
+                )}
+              </div>
             </div>
           )}
         </div>

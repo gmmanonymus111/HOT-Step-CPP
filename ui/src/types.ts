@@ -259,6 +259,8 @@ export interface GenerationParams {
   stableStepCrossoverHz?: number;      // crossover center (crossover mode)
   stableStepCrossoverWidthHz?: number; // transition width (crossover mode)
   stableStepMix?: number;              // 0 = pure AS1.5 .. 1 = pure SA3 (mix mode)
+  stableStepSeed?: number;             // fixed SA3 refine seed (override mode)
+  stableStepSeedFollowsDit?: boolean;  // true (default) = follow generation seed
 
   // DCW (Dynamic CFG Weighting)
   dcwEnabled?: boolean;

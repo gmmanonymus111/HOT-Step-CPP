@@ -67,6 +67,10 @@ interface PostProcessParams {
   stableStepCrossoverHz?: number;      // crossover center (default 250)
   stableStepCrossoverWidthHz?: number; // transition width (default 200)
   stableStepMix?: number;              // 0 = pure source .. 1 = pure refined
+  /** SA3 refine RNG seed. Undefined = engine picks a random seed per refine.
+   *  Populated by the generate route: follows the resolved generation seed by
+   *  default, or a fixed user override (stableStepSeedFollowsDit=false). */
+  stableStepSeed?: number;
   /** Per-track captions (parallel to audioUrls) used to build the SA3 prompt.
    *  Populated by the generate route from the LM results. */
   stableStepCaptions?: string[];
@@ -299,6 +303,8 @@ export async function runPostProcessingChain(
             log('INFO', `[StableStep] Adapters: ${adapters.map(a => `${a.name}@${a.scale}`).join(', ')}`);
           }
           const strength = params.stableStepStrength ?? 0.3;
+          const ssSeed = params.stableStepSeed;
+          if (ssSeed !== undefined) log('INFO', `[StableStep] Seed: ${ssSeed}`);
           const caption = params.stableStepCaptions?.[i] || '';
           const durationSec = wavDurationSec(processedPath);
           const prompt = buildStableStepPrompt(caption, durationSec);
@@ -311,7 +317,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const wavBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(wavBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch, ...blendOpts,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else if (!vocalSep) {
@@ -321,7 +327,7 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const srcBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(srcBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch, ...blendOpts,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else {
@@ -332,7 +338,7 @@ export async function runPostProcessingChain(
 
             setStage(`StableStep: refining instrumental${suffix}...`);
             const refinedInst = await aceClient.submitSa3Refine(vs.instBuf, {
-              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters, envMatch, ...blendOpts,
+              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);

@@ -157,6 +157,8 @@ export interface GlobalParams {
   stableStepCrossoverHz: number; setStableStepCrossoverHz: (v: number) => void;
   stableStepCrossoverWidthHz: number; setStableStepCrossoverWidthHz: (v: number) => void;
   stableStepMix: number; setStableStepMix: (v: number) => void;
+  stableStepSeed: number; setStableStepSeed: (v: number) => void;
+  stableStepSeedFollowsDit: boolean; setStableStepSeedFollowsDit: (v: boolean) => void;
   // Cover Art
   coverArtEnabled: boolean; setCoverArtEnabled: (v: boolean) => void;
   coverArtSubject: string; setCoverArtSubject: (v: string) => void;

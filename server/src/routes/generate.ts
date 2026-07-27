@@ -1168,6 +1168,13 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       stableStepCrossoverWidthHz: typeof job.params.stableStepCrossoverWidthHz === 'number'
         ? job.params.stableStepCrossoverWidthHz : 200,
       stableStepMix: typeof job.params.stableStepMix === 'number' ? job.params.stableStepMix : 1,
+      // SA3 refine seed: follow the RESOLVED generation seed by default
+      // (job.params.seed is back-filled from aceReq.seed, so this is
+      // deterministic per song even with a randomized master seed), or a
+      // fixed override when stableStepSeedFollowsDit === false.
+      stableStepSeed: job.params.stableStepSeedFollowsDit === false
+        ? (typeof job.params.stableStepSeed === 'number' ? job.params.stableStepSeed : undefined)
+        : (typeof job.params.seed === 'number' && job.params.seed >= 0 ? job.params.seed : undefined),
       stableStepCaptions: audioUrls.map((_, ti) =>
         (lmResults[ti]?.caption || firstResult.caption || job.params.caption || '') as string),
       whisperIsolateVocals: !!job.params.whisperIsolateVocals,

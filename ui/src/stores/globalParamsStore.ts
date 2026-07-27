@@ -171,6 +171,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   stableStepCrossoverHz: readKey("hs-stableStepCrossoverHz", 250),
   stableStepCrossoverWidthHz: readKey("hs-stableStepCrossoverWidthHz", 200),
   stableStepMix: readKey("hs-stableStepMix", 1.0),
+  // SA3 refine seed: follows the generation seed by default (LM-seed pattern)
+  stableStepSeed: readKey("hs-stableStepSeed", 4242),
+  stableStepSeedFollowsDit: readKey("hs-stableStepSeedFollowsDit", true),
   coverArtEnabled: readKey("hs-coverArtEnabled", false),
   coverArtSubject: readKey("hs-coverArtSubject", ''),
   qualityEvalEnabled: readKey("hs-qualityEvalEnabled", false),
@@ -342,6 +345,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setStableStepCrossoverHz: (v: any) => { set({ stableStepCrossoverHz: v }); writeKey("hs-stableStepCrossoverHz", v); },
   setStableStepCrossoverWidthHz: (v: any) => { set({ stableStepCrossoverWidthHz: v }); writeKey("hs-stableStepCrossoverWidthHz", v); },
   setStableStepMix: (v: any) => { set({ stableStepMix: v }); writeKey("hs-stableStepMix", v); },
+  setStableStepSeed: (v: any) => { set({ stableStepSeed: v }); writeKey("hs-stableStepSeed", v); },
+  setStableStepSeedFollowsDit: (v: any) => { set({ stableStepSeedFollowsDit: v }); writeKey("hs-stableStepSeedFollowsDit", v); },
   setCoverArtEnabled: (v: any) => { set({ coverArtEnabled: v }); writeKey("hs-coverArtEnabled", v); },
   setCoverArtSubject: (v: any) => { set({ coverArtSubject: v }); writeKey("hs-coverArtSubject", v); },
   setQualityEvalEnabled: (v: any) => { set({ qualityEvalEnabled: v }); writeKey("hs-qualityEvalEnabled", v); },
@@ -561,6 +566,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
         ? s.stableStepCrossoverWidthHz : undefined,
       stableStepMix: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode === 'mix')
         ? s.stableStepMix : undefined,
+      stableStepSeedFollowsDit: (s.postProcessingEnabled && s.stableStepOn)
+        ? s.stableStepSeedFollowsDit !== false : undefined,
+      stableStepSeed: (s.postProcessingEnabled && s.stableStepOn && s.stableStepSeedFollowsDit === false)
+        ? s.stableStepSeed : undefined,
       coverArtEnabled: (s.postProcessingEnabled && s.coverArtEnabled) || undefined,
       coverArtSubject: (s.postProcessingEnabled && s.coverArtEnabled && s.coverArtSubject) ? s.coverArtSubject : undefined,
       qualityEvalEnabled: (s.postProcessingEnabled && s.qualityEvalEnabled) || undefined,
