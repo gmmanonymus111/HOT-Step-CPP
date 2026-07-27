@@ -47,6 +47,7 @@ export const SampleRow: React.FC<SampleRowProps> = ({
 }) => {
   const { t } = useTranslation();
   const editSample = useTrainingStore(s => s.editSample);
+  const datasetTag = useTrainingStore(s => s.detail?.customTag ?? '');
   const flushSample = useTrainingStore(s => s.flushSample);
   const revertSampleField = useTrainingStore(s => s.revertSampleField);
   const toggleExcluded = useTrainingStore(s => s.toggleExcluded);
@@ -164,7 +165,9 @@ export const SampleRow: React.FC<SampleRowProps> = ({
       </button>
     ),
 
-    tag: textCell('customTag', sample.customTag),
+    // Empty = inherits the dataset trigger tag (applied at build time); the
+    // inherited value is shown greyed so the inheritance is visible.
+    tag: textCell('customTag', sample.customTag, datasetTag || undefined),
     repeat: numberCell('repeat', sample.repeat, 1),
 
     // Deliberately NOT gated on fileMissing: excluding a vanished file is the
