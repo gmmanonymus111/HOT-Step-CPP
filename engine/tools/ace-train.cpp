@@ -8,6 +8,7 @@
 // docs/plans/2026-07-27-preprocess-implementation.md §3.1
 
 #include "model-registry.h"
+#include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
 #include "train/preprocess-run.h"  // pulls in st-write.h + preprocess-io.h
 #include "train/spike-run.h"       // Phase-0 training spike (evidence code)
 
@@ -99,6 +100,7 @@ static void print_usage(void) {
             "\n"
             "Subcommands:\n"
             "  preprocess    Build per-song tensor caches from a dataset.\n"
+            "  train-lm      Train a planner-LM LoRA from a preprocessed tensor cache.\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -131,6 +133,56 @@ static void print_usage(void) {
             "    --limit <n>                   0        debug: stop after n songs (0 = all)\n"
             "    --jsonl                       off      emit machine-readable JSONL on stdout\n"
             "    --verify <file>               debug: re-open a written .safetensors and report it\n"
+            "    -h, --help\n"
+            "\n"
+            "ace-train train-lm  (all paths absolute; long options only; \"--flag value\" form)\n"
+            "\n"
+            "  Stages (default: extract,train,export):\n"
+            "    --stages <csv>              subset of extract,train,export in that order\n"
+            "\n"
+            "  Input:\n"
+            "    --tensors <dir>             preprocess variant dir (required for `extract`;\n"
+            "                                also the default location of the codes file)\n"
+            "    --codes <path>              lm_codes.jsonl  (default <tensors>/lm_codes.jsonl)\n"
+            "    --out <dir>                 adapter output dir (required for train/export)\n"
+            "\n"
+            "  Models:\n"
+            "    --models <dir>              root scanned by registry_scan() for name lookups\n"
+            "    --dit <name|path>           FSQ-tokenizer source for `extract`\n"
+            "                                (default: dit_path from <tensors>/preprocess_meta.json)\n"
+            "    --lm <name|path>            LM base GGUF (required for `train`)\n"
+            "    --lm-size <0.6B|1.7B>       label written into adapter_config/base_model_name_or_path\n"
+            "                                (default: inferred from the LM's hidden_size/n_layers)\n"
+            "\n"
+            "  LoRA:\n"
+            "    --rank <n>                  16\n"
+            "    --alpha <n>                 32\n"
+            "\n"
+            "  Optimizer / schedule:\n"
+            "    --lr <f>                    1e-4\n"
+            "    --epochs <n>                16          hard cap; target-loss usually stops earlier\n"
+            "    --grad-accum <n>            4\n"
+            "    --warmup-ratio <f>          0.05\n"
+            "    --grad-clip <f>             1.0         0 = disabled\n"
+            "    --weight-decay <f>          0.01\n"
+            "    --seed <n>                  42\n"
+            "    --target-loss <f>           0.4         0 = disabled (run to the epoch cap)\n"
+            "    --order <shuffle|fixed>     shuffle     `fixed` = file order (A/B parity runs)\n"
+            "\n"
+            "  Sequence / memory:\n"
+            "    --max-len <n>               0           0 = auto-fit from free VRAM\n"
+            "    --vram-reserve-mb <n>       1024        headroom left unallocated\n"
+            "    --loss-on-cot                           default ON\n"
+            "    --no-loss-on-cot\n"
+            "\n"
+            "  Run management:\n"
+            "    --milestone-step <f>        0.1         0 = disabled\n"
+            "    --milestone-keep <n>        6\n"
+            "    --no-milestones\n"
+            "    --overwrite                 off         re-extract every song / overwrite <out>\n"
+            "    --limit <n>                 0           debug: first n songs only\n"
+            "    --self-test                 off         run the correctness gates and exit\n"
+            "    --jsonl                     off         machine-readable JSONL on stdout\n"
             "    -h, --help\n",
             ACE_VERSION);
 }
@@ -636,6 +688,149 @@ static int cmd_preprocess(int argc, char ** argv) {
     return (processed == 0 && attempted > 0) ? 1 : 0;
 }
 
+// ─── train-lm ───────────────────────────────────────────────────────────────
+//
+// docs/plans/2026-07-27-lm-trainer-implementation.md §2.1, §3.1
+
+static int cmd_train_lm(int argc, char ** argv) {
+    LmTrainArgs a;
+    std::string stages_csv, dit_arg, lm_arg, lm_size_arg;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--stages") && i + 1 < argc) stages_csv = argv[++i];
+        else if (!strcmp(argv[i], "--tensors") && i + 1 < argc) a.tensors_dir = argv[++i];
+        else if (!strcmp(argv[i], "--codes") && i + 1 < argc) a.codes_path = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) a.out_dir = argv[++i];
+        else if (!strcmp(argv[i], "--models") && i + 1 < argc) a.models_dir = argv[++i];
+        else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
+        else if (!strcmp(argv[i], "--lm") && i + 1 < argc) lm_arg = argv[++i];
+        else if (!strcmp(argv[i], "--lm-size") && i + 1 < argc) lm_size_arg = argv[++i];
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lr") && i + 1 < argc) a.lr = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--epochs") && i + 1 < argc) a.epochs = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-accum") && i + 1 < argc) a.grad_accum = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--warmup-ratio") && i + 1 < argc) a.warmup_ratio = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-clip") && i + 1 < argc) a.grad_clip = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--weight-decay") && i + 1 < argc) a.weight_decay = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--target-loss") && i + 1 < argc) a.target_loss = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--order") && i + 1 < argc) a.order = argv[++i];
+        else if (!strcmp(argv[i], "--max-len") && i + 1 < argc) a.max_len = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--limit") && i + 1 < argc) a.limit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--loss-on-cot")) a.loss_on_cot = true;
+        else if (!strcmp(argv[i], "--no-loss-on-cot")) a.loss_on_cot = false;
+        else if (!strcmp(argv[i], "--no-milestones")) a.milestone_step = 0.0f;
+        else if (!strcmp(argv[i], "--overwrite")) a.overwrite = true;
+        else if (!strcmp(argv[i], "--self-test")) a.self_test = true;
+        else if (!strcmp(argv[i], "--jsonl")) g_jsonl = true;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else {
+            fprintf(stderr, "ace-train train-lm: unknown option '%s'\n", argv[i]);
+            print_usage();
+            return 2;
+        }
+    }
+
+    // ── stages ──────────────────────────────────────────────────────────
+    if (!stages_csv.empty()) {
+        const bool want_ex = stages_csv.find("extract") != std::string::npos;
+        const bool want_tr = stages_csv.find("train") != std::string::npos;
+        const bool want_xp = stages_csv.find("export") != std::string::npos;
+        a.stages.clear();
+        if (want_ex) a.stages.push_back("extract");
+        if (want_tr) a.stages.push_back("train");
+        if (want_xp) a.stages.push_back("export");
+        if (a.stages.empty()) {
+            fprintf(stderr, "ace-train train-lm: --stages must name at least one of extract,train,export\n");
+            return 2;
+        }
+    }
+
+    // ── numeric sanity (the server clamps these too; be defensive) ───────
+    if (a.rank < 1 || a.rank > 256 || a.alpha < 1 || a.alpha > 1024 || a.epochs < 1 || a.epochs > 200 ||
+        a.grad_accum < 1 || a.grad_accum > 64 || a.lr <= 0.0f || a.lr > 1.0f || a.grad_clip < 0.0f ||
+        a.warmup_ratio < 0.0f || a.warmup_ratio > 0.5f || a.weight_decay < 0.0f || a.weight_decay > 1.0f ||
+        a.target_loss < 0.0f || a.target_loss > 20.0f || a.milestone_keep < 0 || a.milestone_keep > 64 ||
+        a.vram_reserve_mb < 0 || (a.max_len != 0 && (a.max_len < 512 || a.max_len > 16384))) {
+        fprintf(stderr, "ace-train train-lm: numeric option out of range\n");
+        return 2;
+    }
+    if (a.order != "shuffle" && a.order != "fixed") {
+        fprintf(stderr, "ace-train train-lm: --order must be shuffle|fixed\n");
+        return 2;
+    }
+
+    // ── model resolution (same rule as preprocess) ──────────────────────
+    ModelRegistry reg;
+    if (!a.models_dir.empty()) {
+        registry_scan(&reg, a.models_dir.c_str());
+    }
+    if (!lm_arg.empty()) {
+        std::string name;
+        if (!resolve_model(lm_arg, reg.lm, false, a.lm_path, name)) {
+            fprintf(stderr, "ace-train train-lm: cannot resolve --lm '%s' in %s\n", lm_arg.c_str(),
+                    a.models_dir.c_str());
+            return 2;
+        }
+        a.lm_name = name;
+    }
+    if (!dit_arg.empty()) {
+        std::string name;
+        if (!resolve_model(dit_arg, reg.dit, false, a.dit_path, name)) {
+            fprintf(stderr, "ace-train train-lm: cannot resolve --dit '%s' in %s\n", dit_arg.c_str(),
+                    a.models_dir.c_str());
+            return 2;
+        }
+    }
+
+    // ── required arguments per stage ────────────────────────────────────
+    if (a.self_test) {
+        if (a.lm_path.empty()) {
+            fprintf(stderr, "ace-train train-lm --self-test: --lm is required\n");
+            return 2;
+        }
+    } else {
+        if (lm_has_stage(a, "extract") && a.tensors_dir.empty()) {
+            fprintf(stderr, "ace-train train-lm: --tensors is required for the extract stage\n");
+            return 2;
+        }
+        if (lm_has_stage(a, "train") && a.lm_path.empty()) {
+            fprintf(stderr, "ace-train train-lm: --lm is required for the train stage\n");
+            return 2;
+        }
+        if ((lm_has_stage(a, "train") || lm_has_stage(a, "export")) && a.out_dir.empty()) {
+            fprintf(stderr, "ace-train train-lm: --out is required for the train/export stages\n");
+            return 2;
+        }
+    }
+    if (a.codes_path.empty()) {
+        if (a.tensors_dir.empty()) {
+            if (!a.self_test) {
+                fprintf(stderr, "ace-train train-lm: --codes or --tensors is required\n");
+                return 2;
+            }
+        } else {
+            a.codes_path = lm_join(a.tensors_dir, "lm_codes.jsonl");
+        }
+    }
+
+    // ── lm_size label ───────────────────────────────────────────────────
+    if (!lm_size_arg.empty()) {
+        a.lm_size = lm_size_arg;
+    } else if (!a.lm_path.empty()) {
+        const Qwen3LMConfig c = qw3lm_load_config(a.lm_path.c_str(), !ends_with_gguf(a.lm_path.c_str()));
+        a.lm_size             = lm_size_label_from_config(c);
+    }
+
+    // MANDATORY: ggml_time_ms() divides by an uninitialised frequency otherwise.
+    ggml_time_init();
+    return lm_train_main(a);
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char ** argv) {
@@ -649,6 +844,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "preprocess")) {
         return cmd_preprocess(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "train-lm")) {
+        return cmd_train_lm(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);

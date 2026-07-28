@@ -15,8 +15,12 @@ import type {
   LabelOptions,
   PatchDatasetInput,
   PatchSampleInput,
+  LmSize,
   PreprocessOptions,
   PreprocessStatus,
+  TrainLmEpoch,
+  TrainLmOptions,
+  TrainLmStatus,
   TrainingCapabilities,
   TrainingDatasetDetail,
   TrainingDatasetSummary,
@@ -36,6 +40,15 @@ const editTimers = new Map<string, number>();
 // Jobs whose terminal `status` event already triggered the authoritative
 // refresh. The SSE buffer is replayed on reconnect, so this must be guarded.
 const refreshedJobs = new Set<string>();
+// The last EXPLICIT train-lm status query. §5.5 spells the terminal refresh as
+// `loadTrainLmStatus()` with no argument, but the panel carries its own
+// lmSize/adapterName: a no-arg call defaults server-side to 0.6B + dataset slug,
+// i.e. a DIFFERENT adapter directory, and it races the panel's own correctly
+// parameterised refresh. Remembering the last query makes the no-arg form mean
+// "refresh what is on screen".
+let lastTrainLmQuery: { variantKey?: string; adapterName?: string; lmSize?: LmSize } | undefined;
+// Monotonic request id — the older of two in-flight status reads must not win.
+let trainLmSeq = 0;
 
 function timerKey(sampleId: string, field: string): string {
   return `${sampleId}:${field}`;
@@ -66,6 +79,16 @@ interface TrainingState {
   // preprocess
   preprocessStatus: PreprocessStatus | null;
   preprocessLoading: boolean;
+
+  // train (LM)
+  trainLmStatus: TrainLmStatus | null;
+  trainLmLoading: boolean;
+  trainLmEpochs: TrainLmEpoch[];          // live, from `metric` events
+  trainLmLast: { loss: number; lr: number; gradNorm: number; etaMs: number } | null;
+  /** From the one `data` metric — songs skipped for exceeding max sequence
+   *  length. Surfaced in the panel; without it the only trace is a warn line
+   *  in the scrolling log tail (§5.6 mandates the string). */
+  trainLmSkippedLong: number;
 
   // grid
   selectedSampleIds: Set<string>;
@@ -104,6 +127,8 @@ interface TrainingState {
   loadPreprocessStatus(): Promise<void>;
   startPreprocess(opts: PreprocessOptions): Promise<void>;
   deletePreprocessVariant(variantKey: string): Promise<void>;
+  loadTrainLmStatus(q?: { variantKey?: string; adapterName?: string; lmSize?: LmSize }): Promise<void>;
+  startTrainLm(opts: TrainLmOptions): Promise<void>;
   cancelJob(): Promise<void>;
   applyStreamEvent(ev: TrainingStreamEvent): void;   // called by useTrainingStream
 }
@@ -139,6 +164,12 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   preprocessStatus: null,
   preprocessLoading: false,
 
+  trainLmStatus: null,
+  trainLmLoading: false,
+  trainLmEpochs: [],
+  trainLmLast: null,
+  trainLmSkippedLong: 0,
+
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
   pendingEdits: {},
@@ -161,6 +192,13 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     // caches to the next one opened.
     preprocessStatus: null,
     preprocessLoading: false,
+    // Same reasoning: the adapter dir is keyed on the dataset slug, so B would
+    // otherwise render A's trained-adapter card.
+    trainLmStatus: null,
+    trainLmLoading: false,
+    trainLmEpochs: [],
+    trainLmLast: null,
+    trainLmSkippedLong: 0,
     selectedSampleIds: new Set<string>(),
     openSampleId: null,
     pendingEdits: {},
@@ -219,6 +257,11 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               // key is just the DiT base name) and rm -rf the wrong cache.
               preprocessStatus: null,
               preprocessLoading: false,
+              trainLmStatus: null,
+              trainLmLoading: false,
+              trainLmEpochs: [],
+              trainLmLast: null,
+              trainLmSkippedLong: 0,
             }
           : {}),
       });
@@ -468,6 +511,44 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     }
   },
 
+  loadTrainLmStatus: async (q) => {
+    const id = get().selectedDatasetId;
+    if (!id) { set({ trainLmStatus: null }); return; }
+    // No argument = "refresh whatever the panel last asked for" (see
+    // lastTrainLmQuery), not "read the 0.6B/<slug> directory".
+    const query = q ?? lastTrainLmQuery;
+    if (q) lastTrainLmQuery = q;
+    const seq = ++trainLmSeq;
+    set({ trainLmLoading: true });
+    try {
+      const trainLmStatus = await trainingApi.getTrainLmStatus(id, query);
+      // A superseded request must not win: a newer one is in flight and owns the
+      // spinner. A slow request must not overwrite a newer dataset's status, but
+      // it must still clear the spinner — same rule as loadPreprocessStatus.
+      if (seq !== trainLmSeq) return;
+      if (get().selectedDatasetId !== id) { set({ trainLmLoading: false }); return; }
+      set({ trainLmStatus, trainLmLoading: false });
+    } catch (err) {
+      // Advisory: a failed status read must never blank the panel's controls.
+      console.warn('[Training] train-lm status failed:', errMessage(err));
+      if (seq !== trainLmSeq) return;
+      if (get().selectedDatasetId === id) set({ trainLmStatus: null, trainLmLoading: false });
+      else set({ trainLmLoading: false });
+    }
+  },
+
+  startTrainLm: async (opts) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      const { jobId } = await trainingApi.startTrainLm(id, opts);
+      set({ jobLog: [], error: null, trainLmEpochs: [], trainLmLast: null, trainLmSkippedLong: 0 });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
   cancelJob: async () => {
     const job = get().activeJob;
     if (!job) return;
@@ -539,6 +620,47 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
         break;
       }
 
+      case 'metric': {
+        // §5.5 spells these as `ev.loss ?? 0`, but the runner deliberately OMITS
+        // a metric field the engine did not send (trainLmRunner optNum: "a metric
+        // field defaulted to 0 is indistinguishable from a real 0 in the loss
+        // curve"). Defaulting here re-introduces exactly that: a loss-less epoch
+        // frame would plot at 0.0000, drag LossSparkline's y-range and the target
+        // line to the floor, and read as "converged". So an epoch with no loss is
+        // not plotted, and trainLmLast keeps its previous value per field.
+        const prev = get().trainLmLast;
+        if (ev.metric === 'epoch' && typeof ev.epoch === 'number' && typeof ev.loss === 'number') {
+          // REPLACE by epoch number, never append — the SSE buffer is replayed
+          // on reconnect and the curve must be idempotent (same rule as
+          // samplesById).
+          const epoch = ev.epoch;
+          const next = [...get().trainLmEpochs.filter(e => e.epoch !== epoch), {
+            epoch, loss: ev.loss, lr: ev.lr ?? 0,
+            gradNorm: ev.gradNorm ?? 0, ms: ev.ms ?? 0,
+          }].sort((a, b) => a.epoch - b.epoch);
+          set({
+            trainLmEpochs: next,
+            trainLmLast: {
+              loss: ev.loss, lr: ev.lr ?? prev?.lr ?? 0,
+              gradNorm: ev.gradNorm ?? prev?.gradNorm ?? 0, etaMs: ev.etaMs ?? prev?.etaMs ?? 0,
+            },
+          });
+        } else if (ev.metric === 'epoch' || ev.metric === 'step') {
+          if (typeof ev.loss === 'number' || typeof ev.lr === 'number' || typeof ev.gradNorm === 'number') {
+            set({
+              trainLmLast: {
+                loss: ev.loss ?? prev?.loss ?? 0, lr: ev.lr ?? prev?.lr ?? 0,
+                gradNorm: ev.gradNorm ?? prev?.gradNorm ?? 0, etaMs: ev.etaMs ?? prev?.etaMs ?? 0,
+              },
+            });
+          }
+        } else if (ev.metric === 'data' && typeof ev.skippedLong === 'number') {
+          set({ trainLmSkippedLong: ev.skippedLong });
+        }
+        // 'vram' / 'milestone' carry their own log line — nothing to store.
+        break;
+      }
+
       case 'status': {
         const job = get().activeJob;
         if (job) set({ activeJob: { ...job, status: ev.status, error: ev.error ?? job.error } });
@@ -558,6 +680,9 @@ function refreshAfterJob(get: () => TrainingState, jobId: string): void {
   refreshedJobs.add(jobId);
   void get().openDataset(id);
   void get().loadDatasets();
+  // A finished train-lm job wrote (or failed to write) the adapter dir — the
+  // done-state card reads that from disk, so re-read it here.
+  if (get().activeJob?.kind === 'train-lm') void get().loadTrainLmStatus();
 }
 
 /**

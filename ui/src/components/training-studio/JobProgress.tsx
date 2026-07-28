@@ -26,6 +26,11 @@ const PHASE_KEYS: Record<string, string> = {
   preprocess: 'trainingStudio.job.phasePreprocess',
   stats: 'trainingStudio.job.phaseStats',
   'engine-restart': 'trainingStudio.job.phaseEngineRestart',
+  // train-lm phases (§2.7). 'engine-stop', 'loading-models' and
+  // 'engine-restart' above are reused verbatim.
+  extract: 'trainingStudio.job.phaseExtract',
+  train: 'trainingStudio.job.phaseTrain',
+  export: 'trainingStudio.job.phaseExport',
 };
 
 function formatEta(seconds: number): string {

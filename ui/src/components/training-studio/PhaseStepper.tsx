@@ -1,8 +1,7 @@
 // PhaseStepper.tsx — Dataset · Preprocess · Train · Monitor
 //
-// Only the Dataset phase ships in this release; the rest render as disabled
-// chips with a "coming soon" tooltip so later phases slot in without a
-// restructure.
+// Dataset, Preprocess and Train ship; Monitor renders as a disabled chip with
+// a "coming soon" tooltip so it slots in without a restructure.
 
 import React from 'react';
 import { Database, Layers, Cpu, Activity, Lock } from 'lucide-react';
@@ -14,7 +13,7 @@ type Phase = 'dataset' | 'preprocess' | 'train' | 'monitor';
 const PHASES: Array<{ id: Phase; icon: React.ReactNode; labelKey: string; enabled: boolean }> = [
   { id: 'dataset',    icon: <Database size={14} />, labelKey: 'trainingStudio.phase.dataset',    enabled: true },
   { id: 'preprocess', icon: <Layers size={14} />,   labelKey: 'trainingStudio.phase.preprocess', enabled: true },
-  { id: 'train',      icon: <Cpu size={14} />,      labelKey: 'trainingStudio.phase.train',      enabled: false },
+  { id: 'train',      icon: <Cpu size={14} />,      labelKey: 'trainingStudio.phase.train',      enabled: true },
   { id: 'monitor',    icon: <Activity size={14} />, labelKey: 'trainingStudio.phase.monitor',    enabled: false },
 ];
 

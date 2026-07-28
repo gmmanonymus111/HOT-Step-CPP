@@ -14,7 +14,8 @@ import { config } from '../../config.js';
 import { aceClient } from '../aceClient.js';
 import { slugify, trainingBaseDir } from './paths.js';
 import type {
-  PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
+  LmSize, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
+  TrainLmStage,
 } from './types.js';
 
 /** Model-file extensions stripped when deriving a variant key. */
@@ -55,10 +56,10 @@ export function tensorsDir(slug: string, variantKey: string): string {
 // ── Cached /props model snapshot (P28) ───────────────────────────────────
 
 export interface ModelSnapshot {
-  dit: string[]; vae: string[]; textEnc: string[]; cachedAt: number;
+  dit: string[]; vae: string[]; textEnc: string[]; lm: string[]; cachedAt: number;
 }
 
-let snapshot: ModelSnapshot = { dit: [], vae: [], textEnc: [], cachedAt: 0 };
+let snapshot: ModelSnapshot = { dit: [], vae: [], textEnc: [], lm: [], cachedAt: 0 };
 
 /** Last successful /props read. Survives the engine being stopped mid-job. */
 export function getModelSnapshot(): ModelSnapshot {
@@ -77,6 +78,7 @@ export async function refreshModelSnapshot(): Promise<ModelSnapshot> {
     const vae = stringList(props?.models?.vae);
     // `models.embedding` IS the text-encoder bucket (Qwen3-Embedding).
     const textEnc = stringList(props?.models?.embedding);
+    const lm = stringList(props?.models?.lm);
     // §4.2 says the previous snapshot survives a FAILURE, not emptiness. A
     // successful /props that honestly reports three empty buckets (models
     // deleted, ACESTEPCPP_MODELS repointed) must replace the cache, or the
@@ -85,7 +87,7 @@ export async function refreshModelSnapshot(): Promise<ModelSnapshot> {
     // has already been stopped. A malformed response (no `models` object at
     // all) is still treated as a failure.
     if (props && typeof props === 'object' && props.models && typeof props.models === 'object') {
-      snapshot = { dit, vae, textEnc, cachedAt: Date.now() };
+      snapshot = { dit, vae, textEnc, lm, cachedAt: Date.now() };
     }
   } catch {
     // Engine down or stopped for a job — the cache is exactly what we want.
@@ -96,6 +98,21 @@ export async function refreshModelSnapshot(): Promise<ModelSnapshot> {
 /** First name matching /bf16/i, else ''. */
 export function pickBf16(names: string[]): string {
   return names.find(n => /bf16/i.test(n)) ?? '';
+}
+
+/**
+ * Preferred BF16 LM for a size, e.g. '0.6B' -> 'acestep-5Hz-lm-0.6B-BF16.gguf'.
+ *
+ * Match rule (§4.2): the name contains `-<size>-` (case-insensitive) AND /bf16/i.
+ * Falls back to the first name containing `-<size>-` at all; '' when none.
+ * The fallback is deliberately kept: the trainer refuses a genuinely quantized
+ * base at mirror time with a clear message, which beats offering nothing.
+ */
+export function pickLmFor(size: LmSize, names: string[]): string {
+  // '0.6B' carries a literal '.', which must not become a regex wildcard.
+  const token = new RegExp(`-${size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-`, 'i');
+  const matches = names.filter(n => token.test(n));
+  return matches.find(n => /bf16/i.test(n)) ?? matches[0] ?? '';
 }
 
 // ── Argv construction ────────────────────────────────────────────────────
@@ -153,6 +170,86 @@ export function buildPreprocessArgs(input: {
     '--vae-overlap', String(o.vaeOverlap),
   ];
   if (input.ffmpeg) args.push('--ffmpeg', input.ffmpeg);
+  if (o.overwrite) args.push('--overwrite');
+  args.push('--jsonl');
+  return args;
+}
+
+// ── LM LoRA training (phase 3) ───────────────────────────────────────────
+
+/** Every TrainLmOptions field the runner needs, with defaults and clamps
+ *  already applied by the route. `job.opts` carries exactly this shape for a
+ *  train-lm job. Spec §4.2. */
+export interface ResolvedTrainLmOptions {
+  lmSize: LmSize;
+  lmModel: string;
+  ditModel: string;
+  variantKey: string;
+  /** Absolute preprocess variant dir the codes are extracted from. */
+  tensorsDir: string;
+  /** Absolute <tensorsDir>/lm_codes.jsonl. */
+  codesPath: string;
+  adapterName: string;
+  /** Absolute <adapters>/lm/<adapterName>-<lmSize>. */
+  adapterDir: string;
+  targetLoss: number;
+  epochs: number;
+  rank: number;
+  alpha: number;
+  learningRate: number;
+  gradAccum: number;
+  gradClip: number;
+  warmupRatio: number;
+  weightDecay: number;
+  maxLen: number;
+  seed: number;
+  lossOnCot: boolean;
+  order: 'shuffle' | 'fixed';
+  milestoneStep: number;
+  milestoneKeep: number;
+  stages: TrainLmStage[];
+  overwrite: boolean;
+  stopEngine: boolean;
+}
+
+/** Full argv for `ace-train train-lm` (§2.1 order). */
+export function buildTrainLmArgs(input: {
+  opts: ResolvedTrainLmOptions; modelsDir: string;
+}): string[] {
+  const o = input.opts;
+  const args = [
+    'train-lm',
+    '--stages', o.stages.join(','),
+    '--tensors', o.tensorsDir,
+    '--codes', o.codesPath,
+    '--out', o.adapterDir,
+    '--models', input.modelsDir,
+    // `--dit` DEFAULTS to preprocess_meta.json's dit_path (§2.1). Omitting the
+    // pair is not the same as passing an empty value: resolve_model('') fails and
+    // the sibling cmd_preprocess exits 2 on it — which here would happen only
+    // AFTER the runner stopped ace-server, so the user would pay a full engine
+    // stop/restart cycle for a resolvable-by-default condition. ditModel is ''
+    // whenever the variant's meta is missing/unparseable or lacks model_variant.
+    ...(o.ditModel ? ['--dit', o.ditModel] : []),
+    '--lm', o.lmModel,
+    '--lm-size', o.lmSize,
+    '--rank', String(o.rank),
+    '--alpha', String(o.alpha),
+    '--lr', String(o.learningRate),
+    '--epochs', String(o.epochs),
+    '--grad-accum', String(o.gradAccum),
+    '--warmup-ratio', String(o.warmupRatio),
+    '--grad-clip', String(o.gradClip),
+    '--weight-decay', String(o.weightDecay),
+    '--seed', String(o.seed),
+    '--target-loss', String(o.targetLoss),
+    '--order', o.order,
+    '--max-len', String(o.maxLen),
+    '--milestone-step', String(o.milestoneStep),
+    '--milestone-keep', String(o.milestoneKeep),
+  ];
+  // `--loss-on-cot` is the CLI default; only the negation needs emitting.
+  if (!o.lossOnCot) args.push('--no-loss-on-cot');
   if (o.overwrite) args.push('--overwrite');
   args.push('--jsonl');
   return args;

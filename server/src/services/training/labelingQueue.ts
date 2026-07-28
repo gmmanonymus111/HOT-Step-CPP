@@ -195,6 +195,13 @@ export function pushEvent(job: TrainingJob, ev: TrainingStreamEvent): void {
     let victim = job.events.findIndex(e => e.type === 'log');
     if (victim < 0) victim = job.events.findIndex(e => e.type === 'progress');
     if (victim < 0) victim = job.events.findIndex(e => e.type === 'job');
+    // Terminal fallback. `train-lm` is the first kind that emits a high-volume
+    // metric class — one `metric:'step'` per optimizer step, ~25 000 for a
+    // 500-song run — so once log/progress/job are all evicted the buffer would
+    // otherwise grow without bound and attachStream() would replay every frame on
+    // each SSE reconnect. Metrics still outrank logs; `sample`/`status` remain
+    // untouchable.
+    if (victim < 0) victim = job.events.findIndex(e => e.type === 'metric');
     if (victim >= 0) job.events.splice(victim, 1);   // never `sample`/`status`
   }
   broadcast(job, ev);
@@ -1084,6 +1091,24 @@ export function startPreprocessJob(datasetId: string, sampleIds: string[], opts:
   enqueue(job, async (j) => {
     const { runPreprocessJob } = await import('./preprocessRunner.js');
     await runPreprocessJob(j);
+  });
+  return job;
+}
+
+/**
+ * LM LoRA training (Training Studio phase 3) — spawns ace-train, which owns the
+ * whole card for the run. Same lazy import as preprocess: trainLmRunner imports
+ * emitProgress/finishJob/isCancelled/killJobChild from this module, and a
+ * top-level import both ways is a cycle.
+ *
+ * `sampleIds` is empty — the run's inputs are the preprocess variant's tensor
+ * files, not dataset rows, so there is no per-sample row state to mark.
+ */
+export function startTrainLmJob(datasetId: string, opts: unknown): TrainingJob {
+  const job = createJob('train-lm', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runTrainLmJob } = await import('./trainLmRunner.js');
+    await runTrainLmJob(j);
   });
   return job;
 }

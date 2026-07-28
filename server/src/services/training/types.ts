@@ -16,7 +16,7 @@ export type MergePolicy =
   | 'overwrite_all';
 
 export type TrainingJobKind =
-  | 'label' | 'enhance-genius' | 'enhance-caption' | 'build' | 'preprocess';
+  | 'label' | 'enhance-genius' | 'enhance-caption' | 'build' | 'preprocess' | 'train-lm';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -111,6 +111,7 @@ export interface TrainingJobSummary {
   currentSampleId: string | null;
   // 'essentia' | 'understand' | 'waiting-for-engine' | 'genius' | 'llm' | 'writing' | 'build'
   // kind==='preprocess' adds: 'engine-stop' | 'loading-models' | 'preprocess' | 'stats' | 'engine-restart'
+  // kind==='train-lm'   adds: 'engine-stop' | 'loading-models' | 'extract' | 'train' | 'export' | 'engine-restart'
   phase: string;
   engineQueueDepth: number;   // # of ace-server jobs ahead of ours; 0 if unknown
   error: string | null;
@@ -149,9 +150,44 @@ export interface TrainingCapabilities {
     modelsCachedAt: number;  // epoch ms of the snapshot; 0 = never probed
     engineSuspended: boolean;// true while a preprocess job owns the GPU
   };
+  trainLm: TrainLmCapabilities;
 }
 
 // ─── SSE stream ───────────────────────────────────────────────────────────
+
+/** Structured training numbers (L21). Additive member of TrainingStreamEvent.
+ *  Consumers MUST ignore unknown `metric` values rather than throwing. */
+export interface TrainingMetricEvent {
+  type: 'metric';
+  metric: 'vram' | 'data' | 'step' | 'epoch' | 'milestone';
+  ts: number;
+  // epoch / step
+  epoch?: number;
+  epochs?: number;
+  step?: number;
+  totalSteps?: number;
+  loss?: number;
+  lr?: number;
+  gradNorm?: number;
+  clipScale?: number;
+  etaMs?: number;
+  ms?: number;
+  best?: boolean;
+  // vram
+  freeMb?: number;
+  totalMb?: number;
+  estMb?: number;
+  vramMb?: number;
+  maxLen?: number;
+  // data
+  samples?: number;
+  skippedLong?: number;
+  stepsPerEpoch?: number;
+  loraParams?: number;
+  // milestone
+  path?: string;
+}
+
 export type TrainingStreamEvent =
   | { type: 'job'; job: TrainingJobSummary }                       // first event on connect + on any status change
   | {
@@ -163,7 +199,8 @@ export type TrainingStreamEvent =
       sample?: TrainingSample; error?: string;                     // `sample` present on success
     }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; ts: number }
-  | { type: 'status'; status: TrainingJobStatus; error?: string };  // terminal; server closes after this
+  | { type: 'status'; status: TrainingJobStatus; error?: string }   // terminal; server closes after this
+  | TrainingMetricEvent;
 
 // ─── Request payloads ─────────────────────────────────────────────────────
 
@@ -301,6 +338,85 @@ export interface PreprocessVariantStatus {
 export interface PreprocessStatus {
   tensorsRoot: string;                    // data/training/tensors/<slug>
   variants: PreprocessVariantStatus[];    // newest createdAt first
+}
+
+// ─── LM LoRA training (Training Studio phase 3) ───────────────────────────
+// Spec: docs/plans/2026-07-27-lm-trainer-implementation.md §2.7
+export type LmSize = '0.6B' | '1.7B';
+export type TrainLmStage = 'extract' | 'train' | 'export';
+
+export interface TrainLmOptions {
+  /** Base LM size. v1 supports 0.6B and 1.7B only; 4B is rejected with 400. */
+  lmSize?: LmSize;                 // default '0.6B'
+  /** Explicit LM GGUF name from capabilities.trainLm.lmModels. Omit to let the
+   *  server pick the BF16 model matching lmSize. */
+  lmModel?: string;
+  /** Which preprocess variant to train from. Omit = the newest variant. */
+  variantKey?: string;
+  /** Adapter directory stem; final dir is `<adapterName>-<lmSize>`.
+   *  Omit = the dataset slug. */
+  adapterName?: string;
+  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  epochs?: number;                 // default 16 (hard cap)
+  rank?: number;                   // default 16
+  alpha?: number;                  // default 32
+  learningRate?: number;           // default 0.0001
+  gradAccum?: number;              // default 4
+  gradClip?: number;               // default 1.0;  0 disables
+  warmupRatio?: number;            // default 0.05
+  weightDecay?: number;            // default 0.01
+  maxLen?: number;                 // default 0 = auto-fit from free VRAM
+  seed?: number;                   // default 42
+  lossOnCot?: boolean;             // default true
+  order?: 'shuffle' | 'fixed';     // default 'shuffle'
+  milestoneStep?: number;          // default 0.1;  0 disables
+  milestoneKeep?: number;          // default 6
+  stages?: TrainLmStage[];         // default ['extract','train','export']
+  overwrite?: boolean;             // default false — re-extract every song
+  stopEngine?: boolean;            // default TRUE — stop ace-server for the job
+}
+
+export interface TrainLmEpoch {
+  epoch: number;
+  loss: number;
+  lr: number;
+  gradNorm: number;
+  ms: number;
+}
+
+export interface TrainLmStatus {
+  /** '' when the dataset has no preprocessed variant at all. */
+  variantKey: string;
+  tensorsDir: string;              // absolute, '' if none
+  /** lm_codes.jsonl */
+  codesPath: string;               // absolute, '' if none
+  codesExists: boolean;
+  codesCount: number;              // rows in lm_codes.jsonl
+  codesStale: number;              // rows whose tensor file changed since extract
+  codesMissing: number;            // cached tensors with no codes row
+  adapterName: string;             // stem, without the -<size> suffix
+  adapterDir: string;              // absolute; where the next run would write
+  adapterExists: boolean;          // adapter_model.safetensors present
+  adapterBytes: number;
+  lmSize: string;                  // from lm_train_log.json, '' if unknown
+  trainedAt: string;               // ISO, '' if unknown
+  finalLoss: number;               // -1 if unknown
+  bestLoss: number;                // -1 if unknown
+  epochsRun: number;               // 0 if unknown
+  targetLoss: number;              // -1 if unknown
+  stoppedOnTarget: boolean;
+  epochs: TrainLmEpoch[];          // [] if unknown
+  milestones: Array<{ loss: number; epoch: number; path: string }>;
+}
+
+export interface TrainLmCapabilities {
+  available: boolean;              // ace-train binary found
+  lmModels: string[];              // from the cached /props snapshot (models.lm)
+  /** Sizes this build can train. v1: ['0.6B','1.7B']. */
+  sizes: LmSize[];
+  /** size -> preferred BF16 model name; '' when none is installed. */
+  defaultLmBySize: Record<string, string>;
+  adaptersRoot: string;            // <adapters>/lm
 }
 
 /** camelCase mirror of a `training_datasets` row. Identical in shape to

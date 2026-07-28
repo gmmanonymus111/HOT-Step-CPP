@@ -3,7 +3,8 @@
 // Phase 1 ships dataset creation: import audio → label locally
 // (/understand + Essentia) → optionally enhance in the cloud → review/edit →
 // build dataset.json. Phase 2 adds Preprocess (dataset.json → tensor caches).
-// Train / Monitor are still stepper chips only.
+// Phase 3 adds Train (tensor caches → an LM LoRA). Monitor is still a stepper
+// chip only.
 
 import React, { useEffect } from 'react';
 import { AlertTriangle, GraduationCap } from 'lucide-react';
@@ -14,6 +15,7 @@ import { DatasetDetail } from './DatasetDetail';
 import { DatasetList } from './DatasetList';
 import { PhaseStepper } from './PhaseStepper';
 import { PreprocessPanel } from './PreprocessPanel';
+import { TrainPanel } from './TrainPanel';
 
 export const TrainingStudio: React.FC = () => {
   const { t } = useTranslation();
@@ -63,6 +65,8 @@ export const TrainingStudio: React.FC = () => {
           selectedDatasetId ? <DatasetDetail /> : <DatasetList />
         ) : phase === 'preprocess' ? (
           <PreprocessPanel />
+        ) : phase === 'train' ? (
+          <TrainPanel />
         ) : (
           <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-8 text-center text-sm text-zinc-500">
             {t('trainingStudio.phase.comingSoon')}

@@ -36,6 +36,8 @@
 //   POST   /datasets/:id/preprocess                     — start a tensor-cache job
 //   GET    /datasets/:id/preprocess                     — tensor-cache status
 //   DELETE /datasets/:id/preprocess/:variantKey         — delete one cache variant
+//   POST   /datasets/:id/train-lm                       — start an LM LoRA training job
+//   GET    /datasets/:id/train-lm                       — LM adapter / codes status
 
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
@@ -61,14 +63,20 @@ import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services
 import * as queue from '../services/training/labelingQueue.js';
 import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import {
-  aceTrainExe, getModelSnapshot, pickBf16, refreshModelSnapshot,
-  tensorsDir, tensorsRoot, variantKeyFor, type ResolvedPreprocessOptions,
+  aceTrainExe, getModelSnapshot, pickBf16, pickLmFor, refreshModelSnapshot,
+  tensorsDir, tensorsRoot, variantKeyFor,
+  type ResolvedPreprocessOptions, type ResolvedTrainLmOptions,
 } from '../services/training/aceTrain.js';
 import { countPreprocessedVariants, readPreprocessStatus } from '../services/training/preprocessStatus.js';
+import {
+  adapterDirFor, adapterLmRoot, newestVariantKey, readTrainLmStatus,
+  safeAdapterName, variantDitModel, variantExists,
+} from '../services/training/trainLmStatus.js';
 import type {
-  BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, PatchSampleInput,
-  PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
+  BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, LmSize,
+  PatchSampleInput, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetDetail, TrainingDatasetRow, TrainingSample,
+  TrainLmOptions, TrainLmStage,
 } from '../services/training/types.js';
 
 const router = Router();
@@ -212,6 +220,10 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       defaultDit: '', defaultVae: '', defaultTextEnc: '', modelsCachedAt: 0,
       engineSuspended: false,
     },
+    trainLm: {
+      available: false, lmModels: [], sizes: ['0.6B', '1.7B'],
+      defaultLmBySize: { '0.6B': '', '1.7B': '' }, adaptersRoot: '',
+    },
   };
 
   try { caps.engine.up = await aceClient.isReachable(); } catch { /* stays false */ }
@@ -261,6 +273,20 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
     caps.preprocess.defaultVae = pickBf16(snap.vae) || snap.vae[0] || '';
     caps.preprocess.defaultTextEnc = snap.textEnc[0] || '';
     caps.preprocess.modelsCachedAt = snap.cachedAt;
+  } catch { /* stays empty */ }
+
+  // ── LM trainer (phase 3). Same rules: every probe individually caught, the
+  // model list comes from the cached snapshot so the picker survives the engine
+  // being stopped by a running training job.
+  try { caps.trainLm.available = !!aceTrainExe(); } catch { /* stays false */ }
+  try { caps.trainLm.adaptersRoot = adapterLmRoot(); } catch { /* stays '' */ }
+  try {
+    const snap = getModelSnapshot();
+    caps.trainLm.lmModels = snap.lm;
+    caps.trainLm.defaultLmBySize = {
+      '0.6B': pickLmFor('0.6B', snap.lm),
+      '1.7B': pickLmFor('1.7B', snap.lm),
+    };
   } catch { /* stays empty */ }
 
   res.json(caps);
@@ -1218,6 +1244,223 @@ router.delete('/datasets/:id/preprocess/:variantKey', (req: Request, res: Respon
     res.json({ ok: true });
   } catch (err: any) {
     console.error(`[Training] Preprocess delete failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── LM LoRA training (§2.8, phase 3) ─────────────────────────────────────
+
+const TRAIN_LM_STAGES: readonly TrainLmStage[] = ['extract', 'train', 'export'];
+const ADAPTER_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** `null` when in range, else the §2.8-shaped 400 message. */
+function outOfRange(name: string, n: number, min: number, max: number): string | null {
+  if (!Number.isFinite(n) || n < min || n > max) return `${name} must be between ${min} and ${max}`;
+  return null;
+}
+
+router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (queue.activeJobForDataset(ds.id)) {
+      res.status(409).json({ error: 'A job is already running for this dataset' });
+      return;
+    }
+    if (!aceTrainExe()) {
+      res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
+      return;
+    }
+    if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
+      res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
+      return;
+    }
+
+    const body = (req.body || {}) as TrainLmOptions & { ditModel?: unknown };
+
+    // ── variant ──────────────────────────────────────────────────────────
+    const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
+    // isSafeVariantKey (inside variantExists) rejects any key that is not a
+    // single directory name: without it `../../otherslug/…` escapes the tensors
+    // root and ace-train would read from — and write lm_codes.jsonl into — an
+    // arbitrary directory. Same §7.8 rule the two preprocess routes apply.
+    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+      res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
+      return;
+    }
+    const variantKey = requestedVariant || newestVariantKey(ds.slug);
+    if (!variantKey) {
+      res.status(400).json({ error: 'Dataset has no preprocessed tensors — run Preprocess first' });
+      return;
+    }
+
+    // ── base size ────────────────────────────────────────────────────────
+    // 4B is refused HERE, not by the engine: the engine's own refusal (§3.7)
+    // arrives only after the runner has already stopped the app's engine.
+    if (body.lmSize !== undefined && body.lmSize !== '0.6B' && body.lmSize !== '1.7B') {
+      res.status(400).json({
+        error: '4B LM training needs more VRAM than this build supports — use 0.6B or 1.7B',
+      });
+      return;
+    }
+    const lmSize: LmSize = body.lmSize === '1.7B' ? '1.7B' : '0.6B';
+
+    // ── models ───────────────────────────────────────────────────────────
+    // Same never-probed race fix as preprocess: a fresh boot would otherwise
+    // 400 with "No LM base model available" while the engine is reachable.
+    let snap = getModelSnapshot();
+    if (!snap.cachedAt && !isEngineSuspended()) snap = await refreshModelSnapshot();
+    const requestedLm = typeof body.lmModel === 'string' ? body.lmModel.trim() : '';
+    const lmModel = requestedLm || pickLmFor(lmSize, snap.lm);
+    if (!lmModel) {
+      res.status(400).json({ error: `No LM base model available for ${lmSize}` });
+      return;
+    }
+    if (requestedLm && snap.lm.length > 0 && !snap.lm.includes(lmModel)) {
+      res.status(400).json({ error: `Unknown LM model: ${lmModel}` });
+      return;
+    }
+
+    // The FSQ tokenizer lives inside the DiT, and it must be the one the
+    // latents were made against — the variant's own record wins by default.
+    const ditOverride = typeof body.ditModel === 'string' ? body.ditModel.trim() : '';
+    const ditModel = ditOverride || variantDitModel(ds.slug, variantKey);
+
+    // ── adapter name / dir ───────────────────────────────────────────────
+    const adapterName = (typeof body.adapterName === 'string' ? body.adapterName.trim() : '') || ds.slug;
+    // The regex alone accepts '.', '..', '.hidden' — all of which safeAdapterName()
+    // silently REWRITES ('..' and '.' both collapse to 'adapter', '.hidden' to
+    // 'hidden'). The stored/logged/returned adapterName would then name a
+    // directory that does not exist, and two distinct requests would write the
+    // same dir. Reject anything the sanitiser would have to change.
+    if (!ADAPTER_NAME_RE.test(adapterName) || safeAdapterName(adapterName) !== adapterName) {
+      res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
+      return;
+    }
+    const adaptersRoot = adapterLmRoot();
+    const adapterDir = adapterDirFor(adapterName, lmSize);
+    // Containment, same rule the preprocess outputDir uses (§7.8): this path is
+    // mkdir'd and written into by a spawned process.
+    if (!isInside(adaptersRoot, adapterDir) || path.resolve(adaptersRoot) === path.resolve(adapterDir)) {
+      res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
+      return;
+    }
+
+    // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
+    const epochs = numOpt(body.epochs, 16);
+    const targetLoss = numOpt(body.targetLoss, 0.4);
+    const rank = numOpt(body.rank, 16);
+    const alpha = numOpt(body.alpha, 32);
+    const learningRate = numOpt(body.learningRate, 0.0001);
+    const gradAccum = numOpt(body.gradAccum, 4);
+    const gradClip = numOpt(body.gradClip, 1.0);
+    const warmupRatio = numOpt(body.warmupRatio, 0.05);
+    const weightDecay = numOpt(body.weightDecay, 0.01);
+    const maxLen = numOpt(body.maxLen, 0);
+    const seed = numOpt(body.seed, 42);
+    const milestoneStep = numOpt(body.milestoneStep, 0.1);
+    const milestoneKeep = numOpt(body.milestoneKeep, 6);
+
+    const rangeFailure =
+      outOfRange('epochs', epochs, 1, 200)
+      ?? outOfRange('targetLoss', targetLoss, 0, 20)
+      ?? outOfRange('rank', rank, 1, 256)
+      ?? outOfRange('alpha', alpha, 1, 1024)
+      ?? outOfRange('gradAccum', gradAccum, 1, 64)
+      ?? outOfRange('gradClip', gradClip, 0, 100)
+      ?? outOfRange('warmupRatio', warmupRatio, 0, 0.5)
+      ?? outOfRange('weightDecay', weightDecay, 0, 1)
+      ?? outOfRange('seed', seed, 0, 2 ** 31 - 1)
+      ?? outOfRange('milestoneStep', milestoneStep, 0, 5)
+      ?? outOfRange('milestoneKeep', milestoneKeep, 0, 64);
+    if (rangeFailure) {
+      res.status(400).json({ error: rangeFailure });
+      return;
+    }
+    if (!Number.isFinite(learningRate) || learningRate <= 0 || learningRate > 1) {
+      res.status(400).json({ error: 'learningRate must be greater than 0 and at most 1' });
+      return;
+    }
+    // 0 means "auto-fit from free VRAM" (L8); any explicit value must be usable.
+    if (maxLen !== 0 && (maxLen < 512 || maxLen > 16384)) {
+      res.status(400).json({ error: 'maxLen must be 0 (auto) or between 512 and 16384' });
+      return;
+    }
+
+    // ── stages ───────────────────────────────────────────────────────────
+    const requestedStages = Array.isArray(body.stages) ? body.stages : [];
+    const stages = TRAIN_LM_STAGES.filter(s => requestedStages.includes(s));
+    const resolvedStages: TrainLmStage[] = stages.length > 0 ? [...stages] : [...TRAIN_LM_STAGES];
+
+    // Belt and braces: the key is already segment-validated above, but this is
+    // the path a spawned process reads and writes, so assert containment too.
+    const tensorsPath = path.join(tensorsRoot(ds.slug), variantKey);
+    if (!isInside(tensorsRoot(ds.slug), tensorsPath)) {
+      res.status(400).json({ error: `Unknown preprocess variant: ${variantKey}` });
+      return;
+    }
+    const opts: ResolvedTrainLmOptions = {
+      lmSize,
+      lmModel,
+      ditModel,
+      variantKey,
+      tensorsDir: tensorsPath,
+      codesPath: path.join(tensorsPath, 'lm_codes.jsonl'),
+      adapterName,
+      adapterDir,
+      targetLoss,
+      epochs: Math.trunc(epochs),
+      rank: Math.trunc(rank),
+      alpha: Math.trunc(alpha),
+      learningRate,
+      gradAccum: Math.trunc(gradAccum),
+      gradClip,
+      warmupRatio,
+      weightDecay,
+      maxLen: Math.trunc(maxLen),
+      seed: Math.trunc(seed),
+      lossOnCot: body.lossOnCot !== false,
+      order: body.order === 'fixed' ? 'fixed' : 'shuffle',
+      milestoneStep,
+      milestoneKeep: Math.trunc(milestoneKeep),
+      stages: resolvedStages,
+      overwrite: body.overwrite === true,
+      stopEngine: body.stopEngine !== false,
+    };
+
+    const job = queue.startTrainLmJob(ds.id, opts);
+    console.log(
+      `[Training] train-lm job ${job.id} queued — ${lmSize} ${lmModel}, variant ${variantKey} → ${adapterDir}`);
+    res.status(202).json({ jobId: job.id });
+  } catch (err: any) {
+    console.error(`[Training] train-lm start failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/datasets/:id/train-lm', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const lmSizeQuery = req.query.lmSize === '1.7B' ? '1.7B' : req.query.lmSize === '0.6B' ? '0.6B' : undefined;
+    // `[]`, not `await buildSamples(ds)`: readTrainLmStatus names the parameter
+    // `_samples` and never reads it (its counters are measured against the tensor
+    // cache, not the dataset). buildSamples walks the whole source tree, stats
+    // every audio file and reads every sidecar — a full recursive scan per poll,
+    // thrown away, on the same process relaying the training JSONL.
+    res.json(readTrainLmStatus(ds, [], {
+      variantKey: typeof req.query.variantKey === 'string' ? req.query.variantKey : undefined,
+      adapterName: typeof req.query.adapterName === 'string' ? req.query.adapterName : undefined,
+      lmSize: lmSizeQuery,
+    }));
+  } catch (err: any) {
+    console.error(`[Training] train-lm status failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

@@ -1,0 +1,389 @@
+#pragma once
+// lm-graph.h — trainable, cache-free, unfused Qwen3 LM forward.
+//
+// Five load-bearing properties (plan §3.4), all validated by the Phase-0 spike:
+//
+//  1. NO KV cache        — GGML_OP_SET_ROWS has no backward. Never call
+//                          qw3lm_forward*.
+//  2. NO flash attention — GGML_OP_FLASH_ATTN_EXT has no backward. We use
+//                          qwen3_attn_f32() with an explicit [S,S] causal
+//                          0/-INF F32 mask. Exact: soft_max_ext's backward
+//                          uses the softmax OUTPUT, so the mask and scale are
+//                          correctly baked in and masked positions get exactly
+//                          zero gradient.
+//  3. NO fused QKV / gate_up — g_qwen3_load_no_fuse = true around qw3lm_load()
+//                          (L18), restored afterwards.
+//  4. ggml_swiglu_split() — the fused form has no backward.
+//  5. F32 weight mirror, allocated once, BF16 buffer released — ggml_out_prod
+//     (the backward of mul_mat w.r.t. its ACTIVATION input) is F32-only on
+//     CUDA and GGML_ABORTs for BF16 on CPU. A quantized base therefore cannot
+//     be trained against and is rejected at mirror time.
+//
+// docs/plans/2026-07-27-lm-trainer-implementation.md §3.4
+
+#include "qwen3-lm.h"
+#include "qwen3-lora.h"
+#include "train/lm-common.h"
+
+#include <string>
+#include <vector>
+
+// ─── BF16/F16 -> F32 weight mirror ──────────────────────────────────────────
+
+struct LmF32Mirror {
+    ggml_context *        ctx   = nullptr;
+    ggml_backend_buffer_t buf   = nullptr;
+    size_t                bytes = 0;
+    int                   n_tensors = 0;
+};
+
+static void lm_mirror_free(LmF32Mirror * M) {
+    if (M->buf) {
+        ggml_backend_buffer_free(M->buf);
+    }
+    if (M->ctx) {
+        ggml_free(M->ctx);
+    }
+    *M = LmF32Mirror{};
+}
+
+// Mirror every weight the training graph touches into F32, then drop the
+// original weight buffer. `err` is set on failure (unsupported dtype = a
+// quantized base -> caller emits fatal reason "model-load").
+static bool lm_build_f32_mirror(Qwen3LM * lm, LmF32Mirror * M, std::string * err) {
+    const int L = lm->cfg.n_layers;
+    const int n = 2 + L * 11 + 16;
+
+    ggml_init_params p = { (size_t) n * ggml_tensor_overhead() + 4096, nullptr, true };
+    M->ctx             = ggml_init(p);
+    if (!M->ctx) {
+        *err = "cannot create the F32 mirror context";
+        return false;
+    }
+
+    struct Slot {
+        ggml_tensor ** slot;  // pointer to the Qwen3LM field
+        ggml_tensor *  src;
+        ggml_tensor *  dst;
+    };
+    std::vector<Slot> slots;
+    slots.reserve((size_t) (2 + L * 11));
+
+    auto add = [&](ggml_tensor ** field) {
+        if (!field || !*field) {
+            return;  // fused slots are NULL under no-fuse; nothing to mirror
+        }
+        ggml_tensor * s = *field;
+        ggml_tensor * d = ggml_new_tensor_4d(M->ctx, GGML_TYPE_F32, s->ne[0], s->ne[1], s->ne[2], s->ne[3]);
+        ggml_set_name(d, s->name);
+        M->bytes += ggml_nbytes(d);
+        slots.push_back({ field, s, d });
+    };
+
+    add(&lm->embed_tokens);
+    add(&lm->final_norm);
+    for (int i = 0; i < L; i++) {
+        Qwen3Layer & ly = lm->layers[i];
+        add(&ly.input_layernorm);
+        add(&ly.post_attn_layernorm);
+        add(&ly.q_proj);
+        add(&ly.k_proj);
+        add(&ly.v_proj);
+        add(&ly.o_proj);
+        add(&ly.q_norm);
+        add(&ly.k_norm);
+        add(&ly.gate_proj);
+        add(&ly.up_proj);
+        add(&ly.down_proj);
+    }
+
+    // Reject fused / missing projections up front — the trainer needs every
+    // LoRA site individually addressable.
+    for (int i = 0; i < L; i++) {
+        const Qwen3Layer & ly = lm->layers[i];
+        if (!ly.q_proj || !ly.k_proj || !ly.v_proj || !ly.o_proj || !ly.gate_proj || !ly.up_proj || !ly.down_proj) {
+            char b[160];
+            snprintf(b, sizeof(b), "layer %d has fused projections — the trainer requires an unfused load", i);
+            *err = b;
+            return false;
+        }
+    }
+
+    M->buf = ggml_backend_alloc_ctx_tensors(M->ctx, lm->backend);
+    if (!M->buf) {
+        char b[160];
+        snprintf(b, sizeof(b), "F32 weight mirror allocation failed (%.1f MB)", M->bytes / 1048576.0);
+        *err = b;
+        return false;
+    }
+    ggml_backend_buffer_set_usage(M->buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+    std::vector<uint8_t> raw;
+    std::vector<float>   f32;
+    for (size_t i = 0; i < slots.size(); i++) {
+        ggml_tensor * s  = slots[i].src;
+        ggml_tensor * d  = slots[i].dst;
+        const size_t  ne = (size_t) ggml_nelements(s);
+        raw.resize(ggml_nbytes(s));
+        ggml_backend_tensor_get(s, raw.data(), 0, raw.size());
+
+        if (s->type == GGML_TYPE_F32) {
+            ggml_backend_tensor_set(d, raw.data(), 0, raw.size());
+        } else if (s->type == GGML_TYPE_BF16) {
+            f32.resize(ne);
+            const uint16_t * u = (const uint16_t *) raw.data();
+            for (size_t j = 0; j < ne; j++) {
+                const uint32_t b = (uint32_t) u[j] << 16;
+                float          v;
+                memcpy(&v, &b, 4);
+                f32[j] = v;
+            }
+            ggml_backend_tensor_set(d, f32.data(), 0, ne * sizeof(float));
+        } else if (s->type == GGML_TYPE_F16) {
+            f32.resize(ne);
+            ggml_fp16_to_fp32_row((const ggml_fp16_t *) raw.data(), f32.data(), (int64_t) ne);
+            ggml_backend_tensor_set(d, f32.data(), 0, ne * sizeof(float));
+        } else {
+            char b[256];
+            snprintf(b, sizeof(b),
+                     "base weight '%s' is %s — LM training needs a BF16/F16/F32 base "
+                     "(quantized bases cannot be trained: ggml_out_prod is F32-only)",
+                     s->name, ggml_type_name(s->type));
+            *err = b;
+            return false;
+        }
+        *slots[i].slot = d;
+    }
+
+    M->n_tensors = (int) slots.size();
+
+    // Drop the original weight buffer: the mirror fully replaces it.
+    if (lm->wctx.buffer) {
+        ggml_backend_buffer_free(lm->wctx.buffer);
+        lm->wctx.buffer = nullptr;
+    }
+    fprintf(stderr, "[train-lm] F32 weight mirror: %d tensors, %.1f MB (base weight buffer released)\n", M->n_tensors,
+            M->bytes / 1048576.0);
+    return true;
+}
+
+// ─── trainable LoRA bank ────────────────────────────────────────────────────
+
+struct LmLora {
+    ggml_context *             ctx = nullptr;
+    ggml_backend_buffer_t      buf = nullptr;
+    QwLoraLayer                layers[QW3LM_MAX_LAYERS];
+    std::vector<ggml_tensor *> params;  // A0,B0,A1,B1,… in layer-major slot order
+    int                        rank      = 0;
+    int                        layer_lo  = 0;
+    int                        layer_hi  = 0;
+    float                      alpha     = 0.0f;
+    float                      scale     = 1.0f;
+    size_t                     n_params  = 0;
+};
+
+static void lm_lora_free(LmLora * L) {
+    if (L->buf) {
+        ggml_backend_buffer_free(L->buf);
+    }
+    if (L->ctx) {
+        ggml_free(L->ctx);
+    }
+    L->buf = nullptr;
+    L->ctx = nullptr;
+    L->params.clear();
+}
+
+static void lm_slot_dims(const Qwen3LMConfig & c, int slot, int * in_dim, int * out_dim) {
+    const int H = c.hidden_size, D = c.head_dim, Nh = c.n_heads, Nkv = c.n_kv_heads, F = c.intermediate_size;
+    switch (slot) {
+        case QW_LORA_Q:    *in_dim = H;      *out_dim = Nh * D;  break;
+        case QW_LORA_K:    *in_dim = H;      *out_dim = Nkv * D; break;
+        case QW_LORA_V:    *in_dim = H;      *out_dim = Nkv * D; break;
+        case QW_LORA_O:    *in_dim = Nh * D; *out_dim = H;       break;
+        case QW_LORA_GATE: *in_dim = H;      *out_dim = F;       break;
+        case QW_LORA_UP:   *in_dim = H;      *out_dim = F;       break;
+        default:           *in_dim = F;      *out_dim = H;       break;  // DOWN
+    }
+}
+
+static const char * lm_slot_peft_name(int slot) {
+    switch (slot) {
+        case QW_LORA_Q:    return "self_attn.q_proj";
+        case QW_LORA_K:    return "self_attn.k_proj";
+        case QW_LORA_V:    return "self_attn.v_proj";
+        case QW_LORA_O:    return "self_attn.o_proj";
+        case QW_LORA_GATE: return "mlp.gate_proj";
+        case QW_LORA_UP:   return "mlp.up_proj";
+        default:           return "mlp.down_proj";
+    }
+}
+
+// True PEFT init: A ~ N(0, 1/sqrt(in)), B = 0. b_sigma > 0 breaks that (the
+// self-test needs it: with B == 0, dL/dA is identically zero by construction).
+// The LoRA tensors live in their OWN plain buffer — ggml_opt_step_adamw writes
+// into them, so they must not share the mirror's WEIGHTS-usage buffer.
+static bool lm_lora_init(LmLora * L, Qwen3LM * lm, int layer_lo, int layer_hi, int rank, float alpha, uint64_t seed,
+                         float b_sigma, std::string * err) {
+    const Qwen3LMConfig & c = lm->cfg;
+    L->rank     = rank;
+    L->alpha    = alpha;
+    L->scale    = alpha / (float) rank;
+    L->layer_lo = layer_lo;
+    L->layer_hi = layer_hi;
+
+    const int n_lay = layer_hi - layer_lo;
+    const int n_ten = n_lay * QW_LORA_NSLOTS * 2;
+    ggml_init_params p = { (size_t) (n_ten + 8) * ggml_tensor_overhead(), nullptr, true };
+    L->ctx             = ggml_init(p);
+    if (!L->ctx) {
+        *err = "cannot create the LoRA context";
+        return false;
+    }
+
+    for (int i = 0; i < QW3LM_MAX_LAYERS; i++) {
+        L->layers[i] = QwLoraLayer{};
+    }
+
+    for (int l = layer_lo; l < layer_hi; l++) {
+        for (int s = 0; s < QW_LORA_NSLOTS; s++) {
+            int in_dim = 0, out_dim = 0;
+            lm_slot_dims(c, s, &in_dim, &out_dim);
+            QwLoraPair & pr = L->layers[l].p[s];
+            pr.A            = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, in_dim, rank);
+            pr.B            = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, rank, out_dim);
+            pr.scale        = L->scale;
+            char nm[96];
+            snprintf(nm, sizeof(nm), "L%d.s%d.lora_A", l, s);
+            ggml_set_name(pr.A, nm);
+            snprintf(nm, sizeof(nm), "L%d.s%d.lora_B", l, s);
+            ggml_set_name(pr.B, nm);
+            ggml_set_param(pr.A);
+            ggml_set_param(pr.B);
+            L->params.push_back(pr.A);
+            L->params.push_back(pr.B);
+        }
+    }
+
+    L->buf = ggml_backend_alloc_ctx_tensors(L->ctx, lm->backend);
+    if (!L->buf) {
+        *err = "LoRA parameter buffer allocation failed";
+        return false;
+    }
+
+    LmRng rng;
+    lm_rng_seed(&rng, seed);
+    size_t             n_par = 0;
+    std::vector<float> a, b;
+    for (int l = layer_lo; l < layer_hi; l++) {
+        for (int s = 0; s < QW_LORA_NSLOTS; s++) {
+            QwLoraPair & pr = L->layers[l].p[s];
+            a.assign((size_t) ggml_nelements(pr.A), 0.0f);
+            b.assign((size_t) ggml_nelements(pr.B), 0.0f);
+            lm_rng_fill_normal(&rng, a, 1.0f / sqrtf((float) pr.A->ne[0]));
+            if (b_sigma > 0.0f) {
+                lm_rng_fill_normal(&rng, b, b_sigma);
+            }
+            ggml_backend_tensor_set(pr.A, a.data(), 0, a.size() * sizeof(float));
+            ggml_backend_tensor_set(pr.B, b.data(), 0, b.size() * sizeof(float));
+            n_par += a.size() + b.size();
+        }
+        lm->layers[l].lora = &L->layers[l];
+    }
+    L->n_params = n_par;
+    fprintf(stderr, "[train-lm] LoRA layers %d..%d rank %d alpha %.0f -> %zu trainable params (%.1f MB f32)\n",
+            layer_lo, layer_hi, rank, (double) alpha, n_par, (double) n_par * 4.0 / 1048576.0);
+    return true;
+}
+
+// Detach the LoRA slots from the model (used by the self-test between phases).
+static void lm_lora_detach(LmLora * L, Qwen3LM * lm) {
+    for (int l = L->layer_lo; l < L->layer_hi; l++) {
+        lm->layers[l].lora = nullptr;
+    }
+}
+
+// ─── graph builders ─────────────────────────────────────────────────────────
+
+static ggml_tensor * lm_linear(ggml_context * ctx, ggml_tensor * w, const QwLoraPair * pr, ggml_tensor * x) {
+    ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    if (pr && pr->A && pr->B) {
+        ggml_tensor * t = ggml_mul_mat(ctx, pr->A, x);  // [r, S]
+        t               = ggml_scale(ctx, t, pr->scale);
+        y               = ggml_add(ctx, y, ggml_mul_mat(ctx, pr->B, t));
+    }
+    return y;
+}
+
+static ggml_tensor * lm_rms(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, float eps) {
+    return ggml_mul(ctx, ggml_rms_norm(ctx, x, eps), qwen3_f32(ctx, w));
+}
+
+// One transformer layer, cache-free, manual attention. hidden: [H, S]
+static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c, Qwen3Layer * ly, ggml_tensor * hidden,
+                                    ggml_tensor * positions, ggml_tensor * mask, int S) {
+    const int           D  = c.head_dim, Nh = c.n_heads, Nkv = c.n_kv_heads;
+    const QwLoraLayer * ll = ly->lora;
+
+    ggml_tensor * x = lm_rms(ctx, hidden, ly->input_layernorm, c.rms_norm_eps);
+
+    ggml_tensor * q = lm_linear(ctx, ly->q_proj, qwen3_lora_slot(ll, QW_LORA_Q), x);
+    ggml_tensor * k = lm_linear(ctx, ly->k_proj, qwen3_lora_slot(ll, QW_LORA_K), x);
+    ggml_tensor * v = lm_linear(ctx, ly->v_proj, qwen3_lora_slot(ll, QW_LORA_V), x);
+
+    q = ggml_reshape_3d(ctx, q, D, Nh, S);
+    k = ggml_reshape_3d(ctx, k, D, Nkv, S);
+    v = ggml_reshape_3d(ctx, v, D, Nkv, S);
+
+    q = ggml_mul(ctx, ggml_rms_norm(ctx, q, c.rms_norm_eps), qwen3_f32(ctx, ly->q_norm));
+    k = ggml_mul(ctx, ggml_rms_norm(ctx, k, c.rms_norm_eps), qwen3_f32(ctx, ly->k_norm));
+
+    q = ggml_rope_ext(ctx, q, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    k = ggml_rope_ext(ctx, k, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+    q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh]
+    k = ggml_permute(ctx, k, 0, 2, 1, 3);
+    v = ggml_permute(ctx, v, 0, 2, 1, 3);
+
+    ggml_tensor * attn = qwen3_attn_f32(ctx, q, k, v, mask, 1.0f / sqrtf((float) D));
+    attn               = ggml_reshape_2d(ctx, attn, Nh * D, S);
+
+    ggml_tensor * ao = lm_linear(ctx, ly->o_proj, qwen3_lora_slot(ll, QW_LORA_O), attn);
+    hidden           = ggml_add(ctx, hidden, ao);
+
+    ggml_tensor * xm = lm_rms(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
+    ggml_tensor * g  = lm_linear(ctx, ly->gate_proj, qwen3_lora_slot(ll, QW_LORA_GATE), xm);
+    ggml_tensor * u  = lm_linear(ctx, ly->up_proj, qwen3_lora_slot(ll, QW_LORA_UP), xm);
+    ggml_tensor * ff = ggml_swiglu_split(ctx, g, u);  // fused ggml_swiglu has NO backward
+    ggml_tensor * dn = lm_linear(ctx, ly->down_proj, qwen3_lora_slot(ll, QW_LORA_DOWN), ff);
+    return ggml_add(ctx, hidden, dn);
+}
+
+// `t_msk_flat` is the persistent [S_MAX*S_MAX] mask buffer; the graph views a
+// CONTIGUOUS [S, S] block of it (nb1 = S*4), because ggml_soft_max_ext asserts
+// ggml_is_contiguous(mask) && mask->ne[0] == scores->ne[0].
+//
+// layer_lo/layer_hi let the self-test build a 2-layer slice (T5).
+static ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * tokens, ggml_tensor * pos,
+                                    ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi) {
+    const Qwen3LMConfig & c = lm->cfg;
+
+    // `tokens` / `pos` are persistent buffers sized for the LONGEST sample, so
+    // every shorter song must view only its own prefix — otherwise get_rows
+    // emits [H, max_seq] and the per-head reshape trips
+    // GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2).
+    ggml_tensor * tok_v = (tokens->ne[0] == S) ? tokens : ggml_view_1d(ctx, tokens, S, 0);
+    ggml_tensor * pos_v = (pos->ne[0] == S) ? pos : ggml_view_1d(ctx, pos, S, 0);
+
+    ggml_tensor * mask = ggml_view_2d(ctx, t_msk_flat, S, S, (size_t) S * sizeof(float), 0);
+    ggml_tensor * h    = ggml_get_rows(ctx, lm->embed_tokens, tok_v);  // [H, S]
+    for (int l = layer_lo; l < layer_hi; l++) {
+        h = lm_train_layer(ctx, c, &lm->layers[l], h, pos_v, mask, S);
+    }
+    return lm_rms(ctx, h, lm->final_norm, c.rms_norm_eps);
+}
+
+static inline ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * tokens, ggml_tensor * pos,
+                                           ggml_tensor * t_msk_flat, int S) {
+    return lm_build_trunk(ctx, lm, tokens, pos, t_msk_flat, S, 0, lm->cfg.n_layers);
+}
