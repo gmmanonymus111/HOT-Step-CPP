@@ -17,8 +17,9 @@ import {
 import { useTranslation } from 'react-i18next';
 import type { TrainDitOptions, TrainLmOptions } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
+import { formatEtaMs } from '../../utils/trainingEta';
 import { JobProgress } from './JobProgress';
-import { LossSparkline } from './LossSparkline';
+import { TrainingChart } from './TrainingChart';
 import { TRAIN_DIT_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
 import { TRAIN_LM_DEFAULTS, TrainLmForm, type TrainLmFormState } from './TrainLmForm';
 import { useTrainingStream } from './useTrainingStream';
@@ -33,14 +34,6 @@ function formatBytes(bytes: number): string {
   let i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
-}
-
-function formatEtaMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '';
-  const m = Math.round(ms / 60000);
-  if (m < 1) return '<1m';
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 export const TrainPanel: React.FC = () => {
@@ -61,6 +54,9 @@ export const TrainPanel: React.FC = () => {
   const trainDitLoading = useTrainingStore(s => s.trainDitLoading);
   const trainDitEpochs = useTrainingStore(s => s.trainDitEpochs);
   const trainDitLast = useTrainingStore(s => s.trainDitLast);
+  const trainStepSeries = useTrainingStore(s => s.trainStepSeries);
+  const trainMilestones = useTrainingStore(s => s.trainMilestones);
+  const trainMaxEpochs = useTrainingStore(s => s.trainMaxEpochs);
   const openDataset = useTrainingStore(s => s.openDataset);
   const setPhase = useTrainingStore(s => s.setPhase);
   const loadCapabilities = useTrainingStore(s => s.loadCapabilities);
@@ -499,9 +495,18 @@ export const TrainPanel: React.FC = () => {
             </div>
           )}
 
-          {trainLmEpochs.length >= 2 && (
+          {/* The step layer arrives long before the second epoch does, so the
+              chart is worth showing from the first handful of optimizer steps —
+              on a long-epoch run that is the only live feedback there is. */}
+          {(trainLmEpochs.length >= 2 || trainStepSeries.length >= 2) && (
             <div className={`${CARD} flex flex-col gap-2`}>
-              <LossSparkline epochs={trainLmEpochs} target={form.targetLoss} />
+              <TrainingChart
+                epochs={trainLmEpochs}
+                steps={trainStepSeries}
+                milestones={trainMilestones}
+                target={form.targetLoss}
+                maxEpochs={trainMaxEpochs || form.epochs}
+              />
             </div>
           )}
 
@@ -582,8 +587,15 @@ export const TrainPanel: React.FC = () => {
             )}
           </div>
 
+          {/* Done state: only the epoch series survives to disk, so no step
+              layer here — TrainingChart degrades to the epoch + MA5 curves. */}
           {status.epochs.length >= 2 && (
-            <LossSparkline epochs={status.epochs} target={status.targetLoss} />
+            <TrainingChart
+              epochs={status.epochs}
+              milestones={status.milestones}
+              target={status.targetLoss}
+              maxEpochs={status.epochsRun}
+            />
           )}
 
           {status.milestones.length > 0 && (
@@ -699,9 +711,15 @@ export const TrainPanel: React.FC = () => {
         <div className="flex flex-col gap-3">
           <JobProgress />
 
-          {trainDitEpochs.length >= 2 && (
+          {(trainDitEpochs.length >= 2 || trainStepSeries.length >= 2) && (
             <div className={`${CARD} flex flex-col gap-2`}>
-              <LossSparkline epochs={trainDitEpochs} target={ditForm.targetLoss} />
+              <TrainingChart
+                epochs={trainDitEpochs}
+                steps={trainStepSeries}
+                milestones={trainMilestones}
+                target={ditForm.targetLoss}
+                maxEpochs={trainMaxEpochs || ditForm.epochs}
+              />
             </div>
           )}
 
@@ -827,7 +845,12 @@ export const TrainPanel: React.FC = () => {
           </div>
 
           {ditStatus.epochs.length >= 2 && (
-            <LossSparkline epochs={ditStatus.epochs} target={ditStatus.targetLoss} />
+            <TrainingChart
+              epochs={ditStatus.epochs}
+              milestones={ditStatus.milestones}
+              target={ditStatus.targetLoss}
+              maxEpochs={ditStatus.epochsRun}
+            />
           )}
 
           {ditStatus.milestones.length > 0 && (

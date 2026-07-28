@@ -34,6 +34,24 @@ import type {
 
 const JOB_LOG_CAP = 200;
 const EDIT_DEBOUNCE_MS = 500;
+/** Points kept for the chart's per-step layer. A 500-song LM run emits ~25 000
+ *  `metric:'step'` frames, so the series is decimated rather than truncated. */
+const TRAIN_STEP_CAP = 2000;
+
+/** One `metric:'step'` frame, reduced to what TrainingChart plots. */
+export interface TrainStepPoint {
+  step: number;
+  loss: number;
+  /** Fractional epoch position — the x-domain the epoch series also lives in. */
+  ep: number;
+}
+
+/** One `metric:'milestone'` frame — a tick on the chart's x-axis. */
+export interface TrainMilestonePoint {
+  epoch: number;
+  loss: number;
+  path: string;
+}
 
 /** Fields the grid/drawer may edit inline. */
 export type EditableField = keyof PatchSampleInput;
@@ -60,6 +78,45 @@ let trainDitSeq = 0;
 // fabricated 0.0000 loss on the metric strip. Park them here instead and fold them
 // into every later trainDitLast write.
 let ditVram = { crop: 0, layers: 0 };
+// The per-step series is decimated, so "do I already have this step?" cannot be
+// answered by scanning it — a replayed frame that was thinned away would be
+// re-inserted, out of order and double-counted. Steps are monotonic within a
+// run, so the high-water mark is the idempotency key instead.
+let lastStepSeen = -1;
+
+/** The chart slice, blanked. Every place that starts or swaps a job spreads
+ *  this, and it is the only thing that may reset `lastStepSeen`. */
+function blankTrainSeries(): {
+  trainStepSeries: TrainStepPoint[];
+  trainMilestones: TrainMilestonePoint[];
+  trainTargetLoss: number;
+  trainMaxEpochs: number;
+  trainStepsPerEpoch: number;
+} {
+  lastStepSeen = -1;
+  return {
+    trainStepSeries: [],
+    trainMilestones: [],
+    trainTargetLoss: 0,
+    trainMaxEpochs: 0,
+    trainStepsPerEpoch: 0,
+  };
+}
+
+/**
+ * Append one step point, halving the series once it outgrows the cap by
+ * dropping every other retained point. The curve then keeps spanning the whole
+ * run and simply gets coarser — a trailing window would throw away the shape of
+ * everything before it, which is the part of a loss curve people read.
+ */
+function appendStepPoint(prev: TrainStepPoint[], point: TrainStepPoint): TrainStepPoint[] {
+  const next = [...prev, point];
+  if (next.length <= TRAIN_STEP_CAP) return next;
+  const thinned = next.filter((_, i) => i % 2 === 0);
+  // The newest point must survive the thin or the line stops tracking "now".
+  if (thinned[thinned.length - 1]?.step !== point.step) thinned.push(point);
+  return thinned;
+}
 
 function timerKey(sampleId: string, field: string): string {
   return `${sampleId}:${field}`;
@@ -115,6 +172,22 @@ interface TrainingState {
     loss: number; ma5: number; lr: number; gradNorm: number;
     crop: number; layers: number; etaMs: number;
   } | null;
+
+  // train (chart + ETA, shared by both kinds — only one job owns a dataset)
+  /** Per-step loss for the chart's noise layer. Capped + decimated, replay-safe. */
+  trainStepSeries: TrainStepPoint[];
+  /** Milestone ticks, deduped by path (the SSE buffer is replayed on reconnect). */
+  trainMilestones: TrainMilestonePoint[];
+  /** Target loss of the RUNNING job, captured at start; 0 = auto-stop disabled.
+   *  Not recoverable after a page reload mid-run — the ETA then falls back to
+   *  the epoch cap, which is still true, just less useful. */
+  trainTargetLoss: number;
+  /** Epoch cap of the running job: from the start options, then confirmed by the
+   *  `epochs` field the engine stamps on every epoch/step metric. */
+  trainMaxEpochs: number;
+  /** From the one `data` metric — turns a global step number into an epoch
+   *  position so the step and epoch layers share one x-axis. */
+  trainStepsPerEpoch: number;
 
   // grid
   selectedSampleIds: Set<string>;
@@ -204,6 +277,12 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainDitEpochs: [],
   trainDitLast: null,
 
+  trainStepSeries: [],
+  trainMilestones: [],
+  trainTargetLoss: 0,
+  trainMaxEpochs: 0,
+  trainStepsPerEpoch: 0,
+
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
   pendingEdits: {},
@@ -238,6 +317,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainDitLoading: false,
     trainDitEpochs: [],
     trainDitLast: null,
+    ...blankTrainSeries(),
     selectedSampleIds: new Set<string>(),
     openSampleId: null,
     pendingEdits: {},
@@ -306,6 +386,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainDitLoading: false,
               trainDitEpochs: [],
               trainDitLast: null,
+              ...blankTrainSeries(),
             }
           : {}),
       });
@@ -587,7 +668,12 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     try {
       const { jobId } = await trainingApi.startTrainLm(id, opts);
       set({ jobLog: [], error: null, trainLmEpochs: [], trainLmLast: null, trainLmSkippedLong: 0,
-        trainLmVram: null });
+        trainLmVram: null,
+        // Seeded from the options the run actually started with; the engine's
+        // own `epochs` field confirms the cap on the first epoch metric.
+        ...blankTrainSeries(),
+        trainTargetLoss: opts.targetLoss ?? 0,
+        trainMaxEpochs: opts.epochs ?? 0 });
       await adoptJob(set, get, jobId);
     } catch (err) {
       set({ error: errMessage(err) });
@@ -623,7 +709,10 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     try {
       const { jobId } = await trainingApi.startTrainDit(id, opts);
       ditVram = { crop: 0, layers: 0 };
-      set({ jobLog: [], error: null, trainDitEpochs: [], trainDitLast: null });
+      set({ jobLog: [], error: null, trainDitEpochs: [], trainDitLast: null,
+        ...blankTrainSeries(),
+        trainTargetLoss: opts.targetLoss ?? 0,
+        trainMaxEpochs: opts.epochs ?? 0 });
       await adoptJob(set, get, jobId);
     } catch (err) {
       set({ error: errMessage(err) });
@@ -702,6 +791,42 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
       }
 
       case 'metric': {
+        // ── Chart series, shared by both training kinds ────────────────────
+        // Only one job can own a dataset, so a single set of series is enough
+        // and neither kind needs its own copy. Everything below is idempotent:
+        // the SSE buffer is replayed on every reconnect.
+        const chartKind = get().activeJob?.kind;
+        if (chartKind === 'train-lm' || chartKind === 'train-dit') {
+          if (ev.metric === 'data' && typeof ev.stepsPerEpoch === 'number' && ev.stepsPerEpoch > 0) {
+            set({ trainStepsPerEpoch: ev.stepsPerEpoch });
+          }
+          if ((ev.metric === 'epoch' || ev.metric === 'step')
+            && typeof ev.epochs === 'number' && ev.epochs > 0
+            && ev.epochs !== get().trainMaxEpochs) {
+            set({ trainMaxEpochs: ev.epochs });
+          }
+          if (ev.metric === 'step' && typeof ev.step === 'number' && typeof ev.loss === 'number'
+            && ev.step > lastStepSeen) {
+            lastStepSeen = ev.step;
+            const perEpoch = get().trainStepsPerEpoch;
+            // Without stepsPerEpoch the integer epoch is the best x available;
+            // the layer then draws as short flat runs rather than a smooth line.
+            const epPos = perEpoch > 0 ? ev.step / perEpoch : (ev.epoch ?? 0);
+            set({
+              trainStepSeries: appendStepPoint(
+                get().trainStepSeries, { step: ev.step, loss: ev.loss, ep: epPos },
+              ),
+            });
+          }
+          if (ev.metric === 'milestone') {
+            const path = typeof ev.path === 'string' ? ev.path : '';
+            const known = get().trainMilestones;
+            if (path && !known.some(m => m.path === path)) {
+              set({ trainMilestones: [...known, { epoch: ev.epoch ?? 0, loss: ev.loss ?? 0, path }] });
+            }
+          }
+        }
+
         // train-dit writes its own slices. Same event shape, same omit-vs-zero
         // discipline as the LM path below; only the destination differs.
         if (get().activeJob?.kind === 'train-dit') {
@@ -759,7 +884,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
         // a metric field the engine did not send (trainLmRunner optNum: "a metric
         // field defaulted to 0 is indistinguishable from a real 0 in the loss
         // curve"). Defaulting here re-introduces exactly that: a loss-less epoch
-        // frame would plot at 0.0000, drag LossSparkline's y-range and the target
+        // frame would plot at 0.0000, drag TrainingChart's y-range and the target
         // line to the floor, and read as "converged". So an epoch with no loss is
         // not plotted, and trainLmLast keeps its previous value per field.
         const prev = get().trainLmLast;
