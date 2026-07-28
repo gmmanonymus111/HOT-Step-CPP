@@ -44,7 +44,7 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmModel: '',
   adapterName: '',
   targetLoss: 4.0,
-  epochs: 16,
+  epochs: 75,
   rank: 16,
   alpha: 32,
   learningRate: 0.0001,
@@ -56,7 +56,7 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   seed: 42,
   order: 'shuffle',
   lossOnCot: true,
-  milestoneStep: 0.1,
+  milestoneStep: 1,
   milestoneKeep: 6,
   stages: ['extract', 'train', 'export'],
   overwrite: false,
@@ -233,7 +233,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={1}
             value={value.epochs}
             disabled={lock}
-            onChange={(e) => onChange({ epochs: num(e.target.value, 16) })}
+            onChange={(e) => onChange({ epochs: num(e.target.value, 75) })}
             className={FIELD}
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>

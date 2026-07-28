@@ -34,7 +34,7 @@ struct LmTrainArgs {
 
     int   rank = 16, alpha = 32;
     float lr = 1e-4f;
-    int   epochs = 16, grad_accum = 2;   // GA2 = Side-Step parity (GA4 halves optimizer steps/epoch)
+    int   epochs = 75, grad_accum = 2;   // GA2 = Side-Step parity (GA4 halves optimizer steps/epoch)
     float warmup_ratio = 0.05f, grad_clip = 1.0f, weight_decay = 0.01f;
     int   seed         = 42;
     float target_loss  = 4.0f;   // parity: Side-Step's own electriccallboy run used 4.0 and stopped at epoch 29
@@ -49,7 +49,7 @@ struct LmTrainArgs {
     int         attn_head_block = -1;      // -1 = engine picks (lm_ckpt_default_head_block)
     int         chunk           = 128;
 
-    float milestone_step = 0.1f;
+    float milestone_step = 1.0f;
     int   milestone_keep = 6;
 
     bool overwrite = false;

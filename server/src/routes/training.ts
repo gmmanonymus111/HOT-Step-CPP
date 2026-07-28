@@ -1364,7 +1364,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
-    const epochs = numOpt(body.epochs, 16);
+    const epochs = numOpt(body.epochs, 75);
     const targetLoss = numOpt(body.targetLoss, 4.0);
     const rank = numOpt(body.rank, 16);
     const alpha = numOpt(body.alpha, 32);
@@ -1375,7 +1375,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const weightDecay = numOpt(body.weightDecay, 0.01);
     const maxLen = numOpt(body.maxLen, 0);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 0.1);
+    const milestoneStep = numOpt(body.milestoneStep, 1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
 
     const rangeFailure =
