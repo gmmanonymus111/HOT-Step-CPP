@@ -196,7 +196,10 @@ endif()
 # CMAKE_CUDA_ARCHITECTURES, so on cached re-configures CUDAToolkit_FOUND
 # may be unset. Ensure it's always available for CUDA EP support.
 find_package(CUDAToolkit QUIET)
-option(HOT_STEP_SUPERSEP "Enable SuperSep stem separation (requires ONNX Runtime)" ON)
+# SuperSep itself is pure GGML and always built. This option now only controls
+# whether the ONNX Runtime-dependent paths (StableStep's ONNX backend and the
+# ONNX VAE/text-encoder) are compiled — they are the last ORT consumers.
+option(HOT_STEP_SUPERSEP "Build the ONNX Runtime paths (StableStep ONNX backend, ONNX VAE)" ON)
 
 set(ORT_ROOT "" CACHE PATH "Path to ONNX Runtime pre-built package")
 if(NOT ORT_ROOT AND DEFINED ENV{ONNXRUNTIME_ROOT})
@@ -313,12 +316,16 @@ link_ggml_backends(acestep-core)
 # vae-enc-ort. This used to arrive transitively from supersep, which is now
 # pure GGML — so acestep-core declares it directly.
 if(SUPERSEP_ENABLED)
+    target_compile_definitions(acestep-core PUBLIC HOT_STEP_ORT)
     target_include_directories(acestep-core PUBLIC "${ORT_ROOT}/include")
     target_link_directories(acestep-core PUBLIC "${ORT_ROOT}/lib")
     target_link_libraries(acestep-core PUBLIC onnxruntime)
     if(APPLE)
         target_link_libraries(acestep-core PUBLIC "-framework CoreML" "-framework Foundation")
     endif()
+    message(STATUS "ONNX Runtime paths: ENABLED (ORT at ${ORT_ROOT})")
+else()
+    message(STATUS "ONNX Runtime paths: DISABLED (StableStep uses its GGML backend)")
 endif()
 
 # TRT native linkage for DiT acceleration (shared across platforms)

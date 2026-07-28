@@ -11,7 +11,7 @@
 //
 // Thread safety: none. Caller serialises access (single GPU worker thread).
 //
-// Guarded by HOT_STEP_SUPERSEP because ORT headers and libraries are only
+// Guarded by HOT_STEP_ORT because ORT headers and libraries are only
 // available when the SuperSep feature is compiled in (shared ORT dependency).
 //
 // Part of HOT-Step CPP. MIT license.
@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef HOT_STEP_SUPERSEP
+#ifdef HOT_STEP_ORT
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -400,27 +400,27 @@ static inline int vae_ort_decode_tiled(VaeOrt *      ctx,
     return audio_write_pos;
 }
 
-#else  // !HOT_STEP_SUPERSEP — stubs
+#else  // !HOT_STEP_ORT — stubs
 
 struct VaeOrt {};
 
 static inline bool vae_ort_load(VaeOrt *, const char *, int = 0) {
-    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return false;
 }
 
 static inline void vae_ort_free(VaeOrt *) {}
 
 static inline int vae_ort_decode(VaeOrt *, const float *, int, float *, int) {
-    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return -1;
 }
 
 static inline int vae_ort_decode_tiled(VaeOrt *, const float *, int, float *, int, int = 256, int = 64) {
-    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[VAE-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return -1;
 }
 
-#endif  // HOT_STEP_SUPERSEP
+#endif  // HOT_STEP_ORT
 
 #endif  // VAE_ORT_H

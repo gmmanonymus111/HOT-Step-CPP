@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-#ifdef HOT_STEP_SUPERSEP
+#ifdef HOT_STEP_ORT
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -250,7 +250,7 @@ static inline int cond_enc_ort_forward(CondEncOrt *          ctx,
     return 0;
 }
 
-#else  // !HOT_STEP_SUPERSEP — stubs
+#else  // !HOT_STEP_ORT — stubs
 
 struct CondEncOrt {
     int hidden_size = 2048;
@@ -258,7 +258,7 @@ struct CondEncOrt {
 };
 
 static inline bool cond_enc_ort_load(CondEncOrt *, const char *, const char * = nullptr, int = 0) {
-    fprintf(stderr, "[CondEnc-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[CondEnc-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return false;
 }
 
@@ -271,6 +271,6 @@ static inline int cond_enc_ort_forward(CondEncOrt *, const float *, int,
     return -1;
 }
 
-#endif  // HOT_STEP_SUPERSEP
+#endif  // HOT_STEP_ORT
 
 #endif  // COND_ENC_ORT_H

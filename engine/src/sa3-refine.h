@@ -11,7 +11,7 @@
 // assembly) is backend-agnostic: it drives an Sa3Backend interface with five
 // operations. Two implementations exist:
 //
-//   ONNX (Sa3Refine + Sa3OrtBackend, HOT_STEP_SUPERSEP builds only) — five
+//   ONNX (Sa3Refine + Sa3OrtBackend, HOT_STEP_ORT builds only) — five
 //   ORT graphs in one directory (see tools/onnx-export/export_sa3_*.py):
 //     sa3-text_encoder.onnx     [1,256]i64 + [1,256]bool -> [1,256,768]   (fp32!)
 //     sa3-seconds_embedder.onnx [1]f32                   -> [1,768]
@@ -41,7 +41,7 @@
 // tokenizer.json); the endpoint receives 256 padded token ids + valid count.
 //
 // Thread safety: none. Caller serialises access (single GPU worker thread).
-// ONNX path guarded by HOT_STEP_SUPERSEP (shared ORT dependency); the GGML
+// ONNX path guarded by HOT_STEP_ORT (shared ORT dependency); the GGML
 // path is always available.
 //
 // Part of HOT-Step CPP. MIT license.
@@ -390,10 +390,10 @@ static inline bool sa3_refine_run_ggml(Sa3GgmlRefine * m,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ONNX Runtime backend (TRT/CUDA EP), HOT_STEP_SUPERSEP builds only
+// ONNX Runtime backend (TRT/CUDA EP), HOT_STEP_ORT builds only
 // ═══════════════════════════════════════════════════════════════════════
 
-#ifdef HOT_STEP_SUPERSEP
+#ifdef HOT_STEP_ORT
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -641,7 +641,7 @@ static inline bool sa3_refine_run(Sa3Refine * ctx,
                                   strength, steps, pingpong, seed, zero_noise, out);
 }
 
-#else  // !HOT_STEP_SUPERSEP — ORT stubs (GGML backend above remains available)
+#else  // !HOT_STEP_ORT — ORT stubs (GGML backend above remains available)
 
 struct Sa3Refine {};
 static inline bool sa3_load(Sa3Refine *, const char *, int = 0) { return false; }
@@ -650,5 +650,5 @@ static inline bool sa3_refine_run(Sa3Refine *, const float *, int, const int64_t
                                   float, int, bool, uint64_t, bool,
                                   std::vector<float> &) { return false; }
 
-#endif // HOT_STEP_SUPERSEP
+#endif // HOT_STEP_ORT
 #endif // SA3_REFINE_H

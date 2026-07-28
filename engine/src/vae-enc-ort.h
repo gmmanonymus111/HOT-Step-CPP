@@ -14,7 +14,7 @@
 //
 // Thread safety: none. Caller serialises access (single GPU worker thread).
 //
-// Guarded by HOT_STEP_SUPERSEP because ORT headers and libraries are only
+// Guarded by HOT_STEP_ORT because ORT headers and libraries are only
 // available when the SuperSep feature is compiled in (shared ORT dependency).
 //
 // Part of HOT-Step CPP. MIT license.
@@ -35,7 +35,7 @@
 // Type alias for clarity in the model store.
 using VaeEncOrt = VaeOrt;
 
-#ifdef HOT_STEP_SUPERSEP
+#ifdef HOT_STEP_ORT
 
 // ── Encode ─────────────────────────────────────────────────────────────
 //
@@ -275,18 +275,18 @@ static inline int vae_enc_ort_encode_tiled(VaeEncOrt *   ctx,
     return latent_write_pos;
 }
 
-#else  // !HOT_STEP_SUPERSEP — stubs
+#else  // !HOT_STEP_ORT — stubs
 
 static inline int vae_enc_ort_encode(VaeEncOrt *, const float *, int, float *, int) {
-    fprintf(stderr, "[VAE-Enc-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[VAE-Enc-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return -1;
 }
 
 static inline int vae_enc_ort_encode_tiled(VaeEncOrt *, const float *, int, float *, int, int = 256, int = 64) {
-    fprintf(stderr, "[VAE-Enc-ORT] Not compiled (HOT_STEP_SUPERSEP not defined)\n");
+    fprintf(stderr, "[VAE-Enc-ORT] Not compiled (HOT_STEP_ORT not defined)\n");
     return -1;
 }
 
-#endif  // HOT_STEP_SUPERSEP
+#endif  // HOT_STEP_ORT
 
 #endif  // VAE_ENC_ORT_H
