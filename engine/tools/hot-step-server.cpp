@@ -1135,12 +1135,25 @@ static void synth_worker(std::shared_ptr<Job>    job,
                 path = adapter->path;
             } else {
                 // HOT-STEP: absolute-path fallback for adapters not in the registry
-                // (e.g. user provides a full path to a safetensors file)
+                // — a bare .safetensors file, or a PEFT DIRECTORY (the per-base
+                // adapter layout stores every trained adapter as one). fopen()
+                // fails on a directory, so probe the canonical weights file
+                // inside it and pass the DIRECTORY through — that is the shape
+                // registry_scan_adapters() produces, which the merge/runtime
+                // loaders are proven on. Mirrors resolve_lm_adapter_path().
                 FILE * test = fopen(ar.name.c_str(), "rb");
                 if (test) {
                     fclose(test);
                     fprintf(stderr, "[Server] Adapter absolute path: %s\n", ar.name.c_str());
                     path = ar.name;
+                } else {
+                    const std::string peft = ar.name + "/adapter_model.safetensors";
+                    FILE * inner = fopen(peft.c_str(), "rb");
+                    if (inner) {
+                        fclose(inner);
+                        fprintf(stderr, "[Server] Adapter PEFT dir: %s\n", ar.name.c_str());
+                        path = ar.name;
+                    }
                 }
             }
             if (path.empty()) {
