@@ -56,6 +56,7 @@ export const TrainPanel: React.FC = () => {
   const trainLmEpochs = useTrainingStore(s => s.trainLmEpochs);
   const trainLmLast = useTrainingStore(s => s.trainLmLast);
   const trainLmSkippedLong = useTrainingStore(s => s.trainLmSkippedLong);
+  const trainLmVram = useTrainingStore(s => s.trainLmVram);
   const trainDitStatus = useTrainingStore(s => s.trainDitStatus);
   const trainDitLoading = useTrainingStore(s => s.trainDitLoading);
   const trainDitEpochs = useTrainingStore(s => s.trainDitEpochs);
@@ -476,6 +477,7 @@ export const TrainPanel: React.FC = () => {
         <TrainLmForm
           capabilities={capabilities}
           value={form}
+          vram={trainLmVram}
           onChange={patchForm}
           disabled={jobActive || starting}
           starting={starting}

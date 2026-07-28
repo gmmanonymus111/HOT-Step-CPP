@@ -115,6 +115,130 @@ static LmVramFit lm_vram_fit(const LmVramModel & m, ggml_backend_t backend, int 
     return r;
 }
 
+// ─── low-VRAM footprint model (4B plan §3.8) ────────────────────────────────
+//
+// PURELY ADDITIVE. Everything above this line is byte-identical to the shipped
+// header (dit-vram.h reuses LmVramTracker, and gate (e) compares the naive
+// maxLen integer bit-for-bit).
+//
+//   resident(S) = base_bytes                       // BF16 base, never mirrored
+//               + emb_t_bytes                      // [V,H] transpose for dL/dh
+//               + L * H * S * 4                    // checkpoints C[0..L-1]
+//               + 3 * H * S * 4                    // t_H, t_G(==Gh0), Gh1
+//               + Nh * D * S * 4                   // t_zero_attn (0 when hb off)
+//               + S*S*4 + 2*S*4                    // causal mask + tok/pos
+//               + V * chunk * 4                    // per-chunk one-hot labels
+//               + 4 * n_lora * 4                   // params + acc + m + v
+//
+//   seg_bwd(S)  = w_layer_f32 + 3*hb*S*S*4 + 2*(c2f*F + c2h*H)*S*4 + 2*Nh*D*S*4
+//   seg_fwd(S)  = w_layer_f32 + 2*hb*S*S*4 +   (c2f*F + c2h*H)*S*4 + 2*Nh*D*S*4
+//   head        = 3 * V * chunk * 4
+//   bytes       = resident + max(seg_bwd, seg_fwd, head)
+//
+// c2f/c2h are the [M]-calibrated constants of the naive model, reused verbatim.
+// The 3x/2x multipliers and the hb*S^2 term are DERIVED from the op-level
+// analysis in D6 (soft_max_ext_back holds `sm`, `grad_sm` and `d_scores` live
+// simultaneously), NOT fitted. Honest uncertainty band: +-15 %.
+//
+// DEVIATION vs plan §1.1: LmVramLowCfg carries `head_dim` and `layer_w_bytes`
+// in addition to the four fields the plan lists. LmVramModel has no head_dim
+// field and the plan requires it to stay byte-identical, so the geometry the
+// low-VRAM terms need has to live here.
+
+enum LmVramMode { LM_VRAM_NAIVE, LM_VRAM_LOWVRAM };
+
+struct LmVramLowCfg {
+    int    attn_head_block = 0;
+    int    chunk           = 128;
+    int    head_dim        = 0;
+    size_t base_bytes      = 0;  // ggml_backend_buffer_get_size(lm.wctx.buffer)
+    size_t emb_t_bytes     = 0;  // V * H * ggml_type_size(embed dtype)
+    size_t layer_w_bytes   = 0;  // lm_layer_weight_bytes(cfg) — the F32 window
+};
+
+static double lm_vram_lowvram_resident(const LmVramModel & m, const LmVramLowCfg & lc, int S) {
+    const double dS = (double) S;
+    const double hbz =
+        (lc.attn_head_block > 0) ? (double) m.n_heads * (double) lc.head_dim * dS * 4.0 : 0.0;  // t_zero_attn
+    return (double) lc.base_bytes + (double) lc.emb_t_bytes                                //
+           + (double) m.n_layers * (double) m.hidden * dS * 4.0                            // C[0..L-1]
+           + 3.0 * (double) m.hidden * dS * 4.0                                            // t_H, t_G, Gh1
+           + hbz                                                                           //
+           + lm_vram_static_bytes(S)                                                       // mask + tok/pos
+           + (double) m.vocab * (double) lc.chunk * 4.0                                    // t_labc
+           + 4.0 * (double) m.lora_params * 4.0;                                           // param/acc/m/v
+}
+
+static double lm_vram_lowvram_transient(const LmVramModel & m, const LmVramLowCfg & lc, int S) {
+    const double dS  = (double) S;
+    const double hb  = (lc.attn_head_block > 0) ? (double) lc.attn_head_block : (double) m.n_heads;
+    const double s2  = hb * dS * dS * 4.0;
+    const double non = (LmVramModel::c2f * (double) m.ffn + LmVramModel::c2h * (double) m.hidden) * dS * 4.0;
+    const double qkv = 2.0 * (double) m.n_heads * (double) lc.head_dim * dS * 4.0;  // acc + cont churn
+    const double seg_bwd = (double) lc.layer_w_bytes + 3.0 * s2 + 2.0 * non + qkv;
+    const double seg_fwd = (double) lc.layer_w_bytes + 2.0 * s2 + non + qkv;
+    const double head    = 3.0 * (double) m.vocab * (double) lc.chunk * 4.0;
+    return std::max(seg_bwd, std::max(seg_fwd, head));
+}
+
+// `s_tr` is accepted for signature symmetry with lm_vram_bytes(); the low-VRAM
+// label buffer is `chunk`-sized, so it genuinely does not depend on s_tr.
+static double lm_vram_bytes_lowvram(const LmVramModel & m, const LmVramLowCfg & lc, int S, int s_tr) {
+    (void) s_tr;
+    return lm_vram_lowvram_resident(m, lc, S) + lm_vram_lowvram_transient(m, lc, S);
+}
+
+// Same binary search as lm_vram_fit(). `fb` is queried BEFORE any mirror exists
+// but the base buffer is already allocated and therefore already subtracted from
+// it, while lm_vram_bytes_lowvram() charges base_bytes — so, exactly as in the
+// naive fit, the budget has to add it back.
+static LmVramFit lm_vram_fit_lowvram(const LmVramModel & m, const LmVramLowCfg & lc, ggml_backend_t backend,
+                                     int reserve_mb, int user_len) {
+    LmVramFit r;
+    size_t    fb = 0, tb = 0;
+    lm_vram_query(backend, &fb, &tb);
+    r.free_mb  = fb / (1024 * 1024);
+    r.total_mb = tb / (1024 * 1024);
+
+    const double budget = (double) fb + (double) lc.base_bytes - (double) reserve_mb * 1048576.0;
+
+    if (user_len > 0) {
+        r.max_len   = user_len;
+        r.est_bytes = lm_vram_bytes_lowvram(m, lc, user_len, lm_vram_str_est(user_len));
+        r.ok        = r.est_bytes <= budget;
+        return r;
+    }
+
+    int best = 0;
+    for (int S = 1024; S <= 8192; S += 64) {
+        if (lm_vram_bytes_lowvram(m, lc, S, lm_vram_str_est(S)) <= budget) {
+            best = S;
+        } else {
+            break;
+        }
+    }
+    r.max_len   = best > 0 ? best : 1024;
+    r.est_bytes = lm_vram_bytes_lowvram(m, lc, r.max_len, lm_vram_str_est(r.max_len));
+    r.ok        = best > 0;
+    return r;
+}
+
+// §3.2 step 6. `naive_max_len` is the integer the SHIPPED fit produces; passing
+// 0 means "not evaluated" (the caller already forced a mode).
+static inline LmVramMode lm_vram_pick_mode(const std::string & flag, const std::string & size_label,
+                                           int naive_max_len) {
+    if (flag == "on") {
+        return LM_VRAM_LOWVRAM;
+    }
+    if (flag == "off") {
+        return LM_VRAM_NAIVE;
+    }
+    if (size_label == "4B") {
+        return LM_VRAM_LOWVRAM;
+    }
+    return (naive_max_len > 0 && naive_max_len < 2048) ? LM_VRAM_LOWVRAM : LM_VRAM_NAIVE;
+}
+
 // ─── leak counter (L10 / G3) ────────────────────────────────────────────────
 
 // TRAINER-OWNED accounting, not device-wide.

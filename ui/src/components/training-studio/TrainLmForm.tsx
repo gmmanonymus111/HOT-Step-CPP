@@ -64,7 +64,7 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
 };
 
 const ALL_STAGES: TrainLmStage[] = ['extract', 'train', 'export'];
-const LM_SIZES: LmSize[] = ['0.6B', '1.7B'];
+const LM_SIZES: LmSize[] = ['0.6B', '1.7B', '4B'];
 
 const FIELD =
   'rounded-lg px-3 py-2 text-sm bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed';
@@ -78,21 +78,27 @@ interface Props {
   disabled?: boolean;
   starting?: boolean;
   onStart: () => void;
+  /** The one `vram` metric event of the live/last run (4B plan §1.3). null
+   *  before the engine has reported, in which case the static per-size hint
+   *  stands on its own. */
+  vram?: {
+    mode: string; maxLen: number; estMb: number; freeMb: number;
+    baseMb: number; ckptMb: number; segPeakMb: number;
+  } | null;
 }
 
 export const TrainLmForm: React.FC<Props> = ({
-  capabilities, value, onChange, disabled, starting, onStart,
+  capabilities, value, onChange, disabled, starting, onStart, vram,
 }) => {
   const { t } = useTranslation();
 
   const tl = capabilities?.trainLm;
   const sizes = tl?.sizes?.length ? tl.sizes : LM_SIZES;
   // Only bases whose name carries the selected size token — the same `-<size>-`
-  // rule pickLmFor() uses. The raw registry also holds the 4B files, and the
-  // server's 4B guard only inspects `body.lmSize`: picking a 4B base at size
-  // 0.6B is accepted, the runner then STOPS ace-server, and only then does
-  // ace-train infer 4B from the weights and exit 1. §4.5 step 4 is explicit that
-  // a 4B request must not reach the engine.
+  // rule pickLmFor() uses. All three sizes are now trainable, but the base file
+  // must still match the declared size: picking a 4B base at size 0.6B is
+  // accepted by the route, the runner then STOPS ace-server, and only then does
+  // ace-train infer the real size from the weights and exit 1.
   const sizeToken = new RegExp(`-${value.lmSize.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-`, 'i');
   const lmModels = (tl?.lmModels ?? []).filter(n => sizeToken.test(n));
   // '' means "no installed base matches this size" — the server would 400.
@@ -152,6 +158,25 @@ export const TrainLmForm: React.FC<Props> = ({
             );
           })}
         </div>
+        {value.lmSize === '4B' && (
+          <span className="text-[11px] text-zinc-500">
+            {t('trainingStudio.train.lmSizeHint4B')}
+          </span>
+        )}
+        {/* §1.3: the measured line, once the engine has reported. Replaces
+            nothing — the static hint above is what a user sees before a run. */}
+        {vram && (
+          <span className="text-[11px] text-zinc-500">
+            {vram.mode === 'lowvram'
+              ? t('trainingStudio.train.lmVramHintLow', {
+                  est: vram.estMb, free: vram.freeMb, maxLen: vram.maxLen,
+                  base: vram.baseMb, ckpt: vram.ckptMb, seg: vram.segPeakMb,
+                })
+              : t('trainingStudio.train.lmVramHintNaive', {
+                  est: vram.estMb, free: vram.freeMb, maxLen: vram.maxLen,
+                })}
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -64,6 +64,14 @@ struct LmExportMeta {
 
     size_t    vram_free_mb = 0, vram_total_mb = 0, vram_mirror_mb = 0, vram_est_mb = 0, vram_peak_mb = 0;
     long long total_ms = 0;
+
+    // 4B low-VRAM path (2026-07-28 plan §2.3). Purely additive; every reader
+    // defaults each field individually.
+    bool        low_vram        = false;
+    int         attn_head_block = 0;
+    int         chunk           = 0;
+    std::string vram_mode       = "naive";
+    size_t      vram_base_mb = 0, vram_ckpt_mb = 0, vram_seg_peak_mb = 0;
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -139,6 +147,9 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_strcpy(doc, cfg, "max_len_source", m.max_len_source.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "codes", m.codes_path.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "tensors", m.tensors_dir.c_str());
+    yyjson_mut_obj_add_bool(doc, cfg, "low_vram", m.low_vram);
+    yyjson_mut_obj_add_int(doc, cfg, "attn_head_block", m.attn_head_block);
+    yyjson_mut_obj_add_int(doc, cfg, "chunk", m.chunk);
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epoch_log.size(); i++) {
@@ -176,6 +187,10 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_int(doc, vr, "mirror_mb", (int64_t) m.vram_mirror_mb);
     yyjson_mut_obj_add_int(doc, vr, "est_mb", (int64_t) m.vram_est_mb);
     yyjson_mut_obj_add_int(doc, vr, "peak_mb", (int64_t) m.vram_peak_mb);
+    yyjson_mut_obj_add_strcpy(doc, vr, "mode", m.vram_mode.c_str());
+    yyjson_mut_obj_add_int(doc, vr, "base_mb", (int64_t) m.vram_base_mb);
+    yyjson_mut_obj_add_int(doc, vr, "ckpt_mb", (int64_t) m.vram_ckpt_mb);
+    yyjson_mut_obj_add_int(doc, vr, "seg_peak_mb", (int64_t) m.vram_seg_peak_mb);
 
     yyjson_mut_obj_add_int(doc, root, "total_ms", (int64_t) m.total_ms);
 

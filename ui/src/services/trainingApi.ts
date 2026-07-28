@@ -173,11 +173,12 @@ export interface PreprocessStatus {
 }
 
 // ── LM training ──────────────────────────────────────────────────────────
-export type LmSize = '0.6B' | '1.7B';
+export type LmSize = '0.6B' | '1.7B' | '4B';
 export type TrainLmStage = 'extract' | 'train' | 'export';
 
 export interface TrainLmOptions {
-  /** Base LM size. v1 supports 0.6B and 1.7B only; 4B is rejected with 400. */
+  /** Base LM size. 4B trains through the engine's low-VRAM path (per-layer
+   *  gradient checkpointing + chunked CE); 0.6B/1.7B stay on the naive path. */
   lmSize?: LmSize;                 // default '0.6B'
   /** Explicit LM GGUF name from capabilities.trainLm.lmModels. Omit to let the
    *  server pick the BF16 model matching lmSize. */
@@ -205,6 +206,12 @@ export interface TrainLmOptions {
   stages?: TrainLmStage[];         // default ['extract','train','export']
   overwrite?: boolean;             // default false — re-extract every song
   stopEngine?: boolean;            // default TRUE — stop ace-server for the job
+  /** Per-layer gradient checkpointing + chunked CE. 'auto' (default) turns it on
+   *  for 4B, and for smaller bases only when the naive path would have to skip
+   *  full-song samples. */
+  lowVram?: 'auto' | 'on' | 'off';   // default 'auto'
+  attnHeadBlock?: number;            // default 0 = engine picks
+  chunk?: number;                    // default 0 = engine default (128)
 }
 
 export interface TrainLmEpoch {
@@ -243,7 +250,7 @@ export interface TrainLmStatus {
 export interface TrainLmCapabilities {
   available: boolean;              // ace-train binary found
   lmModels: string[];              // from the cached /props snapshot (models.lm)
-  /** Sizes this build can train. v1: ['0.6B','1.7B']. */
+  /** Sizes this build can train: ['0.6B','1.7B','4B']. */
   sizes: LmSize[];
   /** size -> preferred BF16 model name; '' when none is installed. */
   defaultLmBySize: Record<string, string>;
@@ -408,6 +415,11 @@ export interface TrainingMetricEvent {
   t?: number;         // last micro-step timestep (telemetry)
   ma5?: number;       // 5-epoch moving average (the target-loss quantity)
   rawLoss?: number;   // unweighted MSE, for telemetry
+  // train-lm low-VRAM additions (4B plan §2.2). All optional, additive.
+  mode?: string;      // 'naive' | 'lowvram'
+  baseMb?: number;    // resident base weights
+  ckptMb?: number;    // per-layer checkpoint buffers
+  segPeakMb?: number; // transient peak of one segment graph
 }
 
 export type TrainingStreamEvent =

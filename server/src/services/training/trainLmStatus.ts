@@ -279,7 +279,8 @@ export function readTrainLmStatus(
   _samples: TrainingSample[],
   q: { variantKey?: string; adapterName?: string; lmSize?: LmSize },
 ): TrainLmStatus {
-  const lmSize: LmSize = q.lmSize === '1.7B' ? '1.7B' : '0.6B';
+  const lmSize: LmSize =
+    q.lmSize === '1.7B' ? '1.7B' : q.lmSize === '4B' ? '4B' : '0.6B';
   const requested = typeof q.variantKey === 'string' ? q.variantKey.trim() : '';
   // A requested key that does not exist falls back to nothing rather than
   // reporting the newest variant's codes under the wrong name.

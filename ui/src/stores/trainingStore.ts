@@ -100,6 +100,12 @@ interface TrainingState {
    *  length. Surfaced in the panel; without it the only trace is a warn line
    *  in the scrolling log tail (§5.6 mandates the string). */
   trainLmSkippedLong: number;
+  /** From the one `vram` metric (4B plan §1.3/§2.2). Drives the per-size VRAM
+   *  hint line in TrainLmForm; null until the engine has reported. */
+  trainLmVram: {
+    mode: string; maxLen: number; estMb: number; freeMb: number;
+    baseMb: number; ckptMb: number; segPeakMb: number;
+  } | null;
 
   // train (DiT)
   trainDitStatus: TrainDitStatus | null;
@@ -191,6 +197,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainLmEpochs: [],
   trainLmLast: null,
   trainLmSkippedLong: 0,
+  trainLmVram: null,
 
   trainDitStatus: null,
   trainDitLoading: false,
@@ -226,6 +233,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainLmEpochs: [],
     trainLmLast: null,
     trainLmSkippedLong: 0,
+    trainLmVram: null,
     trainDitStatus: null,
     trainDitLoading: false,
     trainDitEpochs: [],
@@ -293,6 +301,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainLmEpochs: [],
               trainLmLast: null,
               trainLmSkippedLong: 0,
+              trainLmVram: null,
               trainDitStatus: null,
               trainDitLoading: false,
               trainDitEpochs: [],
@@ -577,7 +586,8 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     if (!id) return;
     try {
       const { jobId } = await trainingApi.startTrainLm(id, opts);
-      set({ jobLog: [], error: null, trainLmEpochs: [], trainLmLast: null, trainLmSkippedLong: 0 });
+      set({ jobLog: [], error: null, trainLmEpochs: [], trainLmLast: null, trainLmSkippedLong: 0,
+        trainLmVram: null });
       await adoptJob(set, get, jobId);
     } catch (err) {
       set({ error: errMessage(err) });
@@ -780,8 +790,19 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
           }
         } else if (ev.metric === 'data' && typeof ev.skippedLong === 'number') {
           set({ trainLmSkippedLong: ev.skippedLong });
+        } else if (ev.metric === 'vram') {
+          // 4B plan §1.3: the per-size VRAM hint is driven by this one event.
+          // Fires once, before the first step. `mode`/`baseMb`/`ckptMb`/
+          // `segPeakMb` only exist for low-VRAM runs, so they default to 0/''.
+          set({
+            trainLmVram: {
+              mode: typeof ev.mode === 'string' ? ev.mode : '',
+              maxLen: ev.maxLen ?? 0, estMb: ev.estMb ?? 0, freeMb: ev.freeMb ?? 0,
+              baseMb: ev.baseMb ?? 0, ckptMb: ev.ckptMb ?? 0, segPeakMb: ev.segPeakMb ?? 0,
+            },
+          });
         }
-        // 'vram' / 'milestone' carry their own log line — nothing to store.
+        // 'milestone' carries its own log line — nothing to store.
         break;
       }
 

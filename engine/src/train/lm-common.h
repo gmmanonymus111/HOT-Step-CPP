@@ -410,6 +410,30 @@ static std::string lm_size_label_from_config(const Qwen3LMConfig & c) {
     return "custom";
 }
 
+// ─── low-VRAM defaults (4B plan §2.1 / D6) ──────────────────────────────────
+
+// `g` is legal iff it divides n_heads AND every block still owns >= 1 kv head
+// (g * Nkv must be a whole multiple of Nh, so the GQA broadcast factor Nh/Nkv
+// survives the split). g == 0 means "off".
+static inline bool lm_ckpt_head_block_ok(const Qwen3LMConfig & c, int g) {
+    if (g == 0) {
+        return true;
+    }
+    if (g < 0 || g >= c.n_heads || c.n_heads % g != 0) {
+        return false;
+    }
+    return ((int64_t) g * (int64_t) c.n_kv_heads) % (int64_t) c.n_heads == 0;
+}
+
+// Default heads-per-attention-block when --low-vram is active:
+//   n_heads <= 16 -> 0 (off), else 8.
+static inline int lm_ckpt_default_head_block(const Qwen3LMConfig & c) {
+    if (c.n_heads <= 16) {
+        return 0;
+    }
+    return lm_ckpt_head_block_ok(c, 8) ? 8 : 0;
+}
+
 // ─── misc ───────────────────────────────────────────────────────────────────
 
 // Write `text` to `path` via tmp + stw_replace_file (never leaves a partial file).

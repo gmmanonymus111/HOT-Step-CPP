@@ -303,10 +303,49 @@ static void lm_lora_detach(LmLora * L, Qwen3LM * lm) {
     }
 }
 
+// ─── layer build options (low-VRAM path, 4B plan §1.1 / D3 / D6) ────────────
+//
+// A default-constructed LmLayerOpts reproduces the shipped naive graph EXACTLY:
+//   * cast_weights is documentation only — lm_linear()/lm_rms() route every
+//     weight through qwen3_f32(), which returns an already-F32 tensor unchanged
+//     (qwen3-enc.h:87-92), so the naive path (F32 mirror) emits no cast node.
+//   * attn_head_block == 0 selects the verbatim whole-head attention span.
+struct LmLayerOpts {
+    bool          cast_weights    = false;    // true when the base is BF16/F16 and
+                                              // the per-segment F32 window is live
+    int           attn_head_block = 0;        // q heads per attention block; 0 = off
+    ggml_tensor * attn_zero       = nullptr;  // persistent, permanently-zero
+                                              // [Nh*D, S_max] F32 base for ggml_acc
+};
+
+// F32 bytes of ONE transformer layer's trainable-graph weights (7 projections +
+// 4 norms) — the size of the per-segment F32 window (§3.8 `w_layer_f32`).
+static size_t lm_layer_weight_bytes(const Qwen3LMConfig & c) {
+    const size_t H = (size_t) c.hidden_size, F = (size_t) c.intermediate_size;
+    const size_t D = (size_t) c.head_dim, Nh = (size_t) c.n_heads, Nkv = (size_t) c.n_kv_heads;
+    size_t       p = 0;
+    p += H * (Nh * D);          // q_proj
+    p += H * (Nkv * D) * 2;     // k_proj, v_proj
+    p += (Nh * D) * H;          // o_proj
+    p += H * F * 2;             // gate_proj, up_proj
+    p += F * H;                 // down_proj
+    p += 2 * H + 2 * D;         // input/post-attn layernorm + q_norm/k_norm
+    return p * sizeof(float);
+}
+
+// Bytes actually held by the loaded base weight buffer (BF16 in low-VRAM mode).
+static size_t lm_base_weight_bytes(const Qwen3LM & lm) {
+    return lm.wctx.buffer ? ggml_backend_buffer_get_size(lm.wctx.buffer) : 0;
+}
+
 // ─── graph builders ─────────────────────────────────────────────────────────
 
 static ggml_tensor * lm_linear(ggml_context * ctx, ggml_tensor * w, const QwLoraPair * pr, ggml_tensor * x) {
-    ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    // qwen3_f32() is a NO-OP for an F32 weight, so the naive path's graph is
+    // byte-identical to the shipped one. On a BF16 base it emits the in-graph
+    // cast that ggml_out_prod (the mul_mat activation backward) requires — and
+    // ggml_gallocr frees it with the segment. Plan D2/D3.
+    ggml_tensor * y = ggml_mul_mat(ctx, qwen3_f32(ctx, w), x);
     if (pr && pr->A && pr->B) {
         ggml_tensor * t = ggml_mul_mat(ctx, pr->A, x);  // [r, S]
         t               = ggml_scale(ctx, t, pr->scale);
@@ -319,9 +358,66 @@ static ggml_tensor * lm_rms(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w
     return ggml_mul(ctx, ggml_rms_norm(ctx, x, eps), qwen3_f32(ctx, w));
 }
 
+// ─── head-blocked attention (plan §3.7, D6/D7) ──────────────────────────────
+//
+// Replaces the reshape -> qk-norm -> rope -> permute -> qwen3_attn_f32 ->
+// reshape span with `Nh/gq` independent blocks, so at most `3 * gq * S^2 * 4`
+// bytes of [S,S] score/softmax state is live at once instead of `3 * Nh * S^2`.
+// Blocks are reassembled with ggml_acc into a persistent ZERO base:
+// GGML_OP_CONCAT has no backward (it would hit ggml_compute_backward's
+// GGML_ABORT default), GGML_OP_ACC does, and its src1 branch already inserts a
+// ggml_cont before ggml_reshape so the strided gradient view is legal.
+//
+// o_proj (and its LoRA) then runs ONCE on the assembled [Nh*D, S] tensor.
+static ggml_tensor * lm_attn_head_blocked(ggml_context * ctx, const Qwen3LMConfig & c, Qwen3Layer * ly,
+                                          ggml_tensor * q, ggml_tensor * k, ggml_tensor * v, ggml_tensor * positions,
+                                          ggml_tensor * mask, int S, const LmLayerOpts & opts) {
+    const int D = c.head_dim, Nh = c.n_heads, Nkv = c.n_kv_heads;
+    const int gq = opts.attn_head_block;
+
+    GGML_ASSERT(gq > 0 && gq < Nh && Nh % gq == 0);
+    GGML_ASSERT(((int64_t) gq * (int64_t) Nkv) % (int64_t) Nh == 0);
+    const int gkv = gq * Nkv / Nh;
+    GGML_ASSERT(gkv >= 1);
+    GGML_ASSERT(opts.attn_zero != nullptr);
+    GGML_ASSERT(opts.attn_zero->ne[0] == (int64_t) Nh * (int64_t) D && opts.attn_zero->ne[1] >= (int64_t) S);
+
+    // Contiguous ne1-prefix view of the permanently-zero base. Starting from a
+    // garbage leaf would poison the rows the first ggml_acc does not write.
+    ggml_tensor * acc = ggml_view_2d(ctx, opts.attn_zero, (int64_t) Nh * D, S, opts.attn_zero->nb[1], 0);
+
+    for (int b = 0; b < Nh / gq; b++) {
+        ggml_tensor * qb =
+            ggml_cont(ctx, ggml_view_2d(ctx, q, (int64_t) gq * D, S, q->nb[1], (size_t) b * gq * D * sizeof(float)));
+        ggml_tensor * kb =
+            ggml_cont(ctx, ggml_view_2d(ctx, k, (int64_t) gkv * D, S, k->nb[1], (size_t) b * gkv * D * sizeof(float)));
+        ggml_tensor * vb =
+            ggml_cont(ctx, ggml_view_2d(ctx, v, (int64_t) gkv * D, S, v->nb[1], (size_t) b * gkv * D * sizeof(float)));
+
+        qb = ggml_reshape_3d(ctx, qb, D, gq, S);
+        kb = ggml_reshape_3d(ctx, kb, D, gkv, S);
+        vb = ggml_reshape_3d(ctx, vb, D, gkv, S);
+
+        qb = ggml_mul(ctx, ggml_rms_norm(ctx, qb, c.rms_norm_eps), qwen3_f32(ctx, ly->q_norm));
+        kb = ggml_mul(ctx, ggml_rms_norm(ctx, kb, c.rms_norm_eps), qwen3_f32(ctx, ly->k_norm));
+
+        qb = ggml_rope_ext(ctx, qb, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        kb = ggml_rope_ext(ctx, kb, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+        qb = ggml_permute(ctx, qb, 0, 2, 1, 3);
+        kb = ggml_permute(ctx, kb, 0, 2, 1, 3);
+        vb = ggml_permute(ctx, vb, 0, 2, 1, 3);
+
+        ggml_tensor * ab = qwen3_attn_f32(ctx, qb, kb, vb, mask, 1.0f / sqrtf((float) D));  // [D, gq, S]
+        ab               = ggml_reshape_2d(ctx, ab, (int64_t) gq * D, S);
+        acc = ggml_acc(ctx, acc, ab, acc->nb[1], acc->nb[2], acc->nb[3], (size_t) b * gq * D * sizeof(float));
+    }
+    return acc;  // [Nh*D, S]
+}
+
 // One transformer layer, cache-free, manual attention. hidden: [H, S]
 static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c, Qwen3Layer * ly, ggml_tensor * hidden,
-                                    ggml_tensor * positions, ggml_tensor * mask, int S) {
+                                    ggml_tensor * positions, ggml_tensor * mask, int S, const LmLayerOpts & opts) {
     const int           D  = c.head_dim, Nh = c.n_heads, Nkv = c.n_kv_heads;
     const QwLoraLayer * ll = ly->lora;
 
@@ -331,22 +427,27 @@ static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c,
     ggml_tensor * k = lm_linear(ctx, ly->k_proj, qwen3_lora_slot(ll, QW_LORA_K), x);
     ggml_tensor * v = lm_linear(ctx, ly->v_proj, qwen3_lora_slot(ll, QW_LORA_V), x);
 
-    q = ggml_reshape_3d(ctx, q, D, Nh, S);
-    k = ggml_reshape_3d(ctx, k, D, Nkv, S);
-    v = ggml_reshape_3d(ctx, v, D, Nkv, S);
+    ggml_tensor * attn = nullptr;
+    if (opts.attn_head_block > 0 && opts.attn_head_block < Nh) {
+        attn = lm_attn_head_blocked(ctx, c, ly, q, k, v, positions, mask, S, opts);
+    } else {
+        q = ggml_reshape_3d(ctx, q, D, Nh, S);
+        k = ggml_reshape_3d(ctx, k, D, Nkv, S);
+        v = ggml_reshape_3d(ctx, v, D, Nkv, S);
 
-    q = ggml_mul(ctx, ggml_rms_norm(ctx, q, c.rms_norm_eps), qwen3_f32(ctx, ly->q_norm));
-    k = ggml_mul(ctx, ggml_rms_norm(ctx, k, c.rms_norm_eps), qwen3_f32(ctx, ly->k_norm));
+        q = ggml_mul(ctx, ggml_rms_norm(ctx, q, c.rms_norm_eps), qwen3_f32(ctx, ly->q_norm));
+        k = ggml_mul(ctx, ggml_rms_norm(ctx, k, c.rms_norm_eps), qwen3_f32(ctx, ly->k_norm));
 
-    q = ggml_rope_ext(ctx, q, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    k = ggml_rope_ext(ctx, k, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        q = ggml_rope_ext(ctx, q, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        k = ggml_rope_ext(ctx, k, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
-    q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh]
-    k = ggml_permute(ctx, k, 0, 2, 1, 3);
-    v = ggml_permute(ctx, v, 0, 2, 1, 3);
+        q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh]
+        k = ggml_permute(ctx, k, 0, 2, 1, 3);
+        v = ggml_permute(ctx, v, 0, 2, 1, 3);
 
-    ggml_tensor * attn = qwen3_attn_f32(ctx, q, k, v, mask, 1.0f / sqrtf((float) D));
-    attn               = ggml_reshape_2d(ctx, attn, Nh * D, S);
+        attn = qwen3_attn_f32(ctx, q, k, v, mask, 1.0f / sqrtf((float) D));
+        attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
+    }
 
     ggml_tensor * ao = lm_linear(ctx, ly->o_proj, qwen3_lora_slot(ll, QW_LORA_O), attn);
     hidden           = ggml_add(ctx, hidden, ao);
@@ -359,11 +460,34 @@ static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c,
     return ggml_add(ctx, hidden, dn);
 }
 
+// Shipped 7-argument form — a default LmLayerOpts, i.e. the naive graph.
+static inline ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c, Qwen3Layer * ly,
+                                           ggml_tensor * hidden, ggml_tensor * positions, ggml_tensor * mask, int S) {
+    const LmLayerOpts opts;
+    return lm_train_layer(ctx, c, ly, hidden, positions, mask, S, opts);
+}
+
 // `t_msk_flat` is the persistent [S_MAX*S_MAX] mask buffer; the graph views a
 // CONTIGUOUS [S, S] block of it (nb1 = S*4), because ggml_soft_max_ext asserts
 // ggml_is_contiguous(mask) && mask->ne[0] == scores->ne[0].
 //
 // layer_lo/layer_hi let the self-test build a 2-layer slice (T5).
+static ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * tokens, ggml_tensor * pos,
+                                    ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi,
+                                    const LmLayerOpts & opts) {
+    const Qwen3LMConfig & c = lm->cfg;
+
+    ggml_tensor * tok_v = (tokens->ne[0] == S) ? tokens : ggml_view_1d(ctx, tokens, S, 0);
+    ggml_tensor * pos_v = (pos->ne[0] == S) ? pos : ggml_view_1d(ctx, pos, S, 0);
+
+    ggml_tensor * mask = ggml_view_2d(ctx, t_msk_flat, S, S, (size_t) S * sizeof(float), 0);
+    ggml_tensor * h    = ggml_get_rows(ctx, lm->embed_tokens, tok_v);  // [H, S]
+    for (int l = layer_lo; l < layer_hi; l++) {
+        h = lm_train_layer(ctx, c, &lm->layers[l], h, pos_v, mask, S, opts);
+    }
+    return lm_rms(ctx, h, lm->final_norm, c.rms_norm_eps);
+}
+
 static ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * tokens, ggml_tensor * pos,
                                     ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi) {
     const Qwen3LMConfig & c = lm->cfg;

@@ -210,6 +210,13 @@ export interface ResolvedTrainLmOptions {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** 'auto' = the engine's own default (ON for 4B, and for smaller bases only
+   *  when the naive fit would drop full-song samples). */
+  lowVram: 'auto' | 'on' | 'off';
+  /** 0 = engine picks (n_heads <= 16 -> off, else 8). */
+  attnHeadBlock: number;
+  /** 0 = engine default (128 trained positions per CE chunk). */
+  chunk: number;
 }
 
 /** Full argv for `ace-train train-lm` (§2.1 order). */
@@ -248,6 +255,13 @@ export function buildTrainLmArgs(input: {
     '--milestone-step', String(o.milestoneStep),
     '--milestone-keep', String(o.milestoneKeep),
   ];
+  // Low-VRAM knobs: every default here IS the CLI default, so a normal run
+  // emits none of them and the argv stays byte-identical to the pre-4B build.
+  // That keeps an older ace-train.exe (no --low-vram flag) working for the
+  // untouched 0.6B/1.7B path.
+  if (o.lowVram && o.lowVram !== 'auto') args.push('--low-vram', o.lowVram);
+  if (o.attnHeadBlock > 0) args.push('--attn-head-block', String(o.attnHeadBlock));
+  if (o.chunk > 0) args.push('--lm-chunk', String(o.chunk));
   // `--loss-on-cot` is the CLI default; only the negation needs emitting.
   if (!o.lossOnCot) args.push('--no-loss-on-cot');
   if (o.overwrite) args.push('--overwrite');

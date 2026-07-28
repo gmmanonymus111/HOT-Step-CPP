@@ -10,6 +10,7 @@
 
 #include "backend.h"
 #include "bpe.h"
+#include "train/lm-ckpt.h"
 #include "train/lm-common.h"
 #include "train/lm-data.h"
 #include "train/lm-export.h"
@@ -42,6 +43,11 @@ struct LmTrainArgs {
     int  max_len         = 0;
     int  vram_reserve_mb = 1024;
     bool loss_on_cot     = true;
+
+    // 4B low-VRAM path (2026-07-28 plan §2.1)
+    std::string low_vram        = "auto";  // auto|on|off
+    int         attn_head_block = -1;      // -1 = engine picks (lm_ckpt_default_head_block)
+    int         chunk           = 128;
 
     float milestone_step = 0.1f;
     int   milestone_keep = 6;
@@ -79,16 +85,9 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     const int64_t t_stage0 = ggml_time_ms();
     jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"begin\",\"total\":%d}", a.epochs);
 
-    // ── 4B refusal BEFORE loading any weights (L7 / §3.7) ────────────────
-    const bool          is_st = !ends_with_gguf(a.lm_path.c_str());
-    const Qwen3LMConfig probe_cfg = qw3lm_load_config(a.lm_path.c_str(), is_st);
-    if (probe_cfg.hidden_size >= 2560 || probe_cfg.n_layers >= 36) {
-        lm_fatal("unsupported-size",
-                 "4B LM training needs ~54 GB; this build supports 0.6B and 1.7B. See "
-                 "docs/plans/2026-07-27-lm-trainer-implementation.md §3.7.",
-                 ",\"lmSize\":\"4B\"");
-        return 1;
-    }
+    // ── D11: the hard `hidden_size >= 2560 || n_layers >= 36` refusal is GONE.
+    // Refusal is now purely the generic VRAM refusal against whichever footprint
+    // model the selected mode uses; `fatal reason:"unsupported-size"` is retired.
 
     // ── load the LM, unfused (L18) ───────────────────────────────────────
     const int64_t t_lm0 = ggml_time_ms();
@@ -105,9 +104,27 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     jl("{\"type\":\"model\",\"stage\":\"lm\",\"path\":\"%s\",\"ms\":%lld,\"layers\":%d,\"hidden\":%d,\"vocab\":%d}",
        lm_json_escape(a.lm_path).c_str(), (long long) (ggml_time_ms() - t_lm0), c.n_layers, H, V);
 
+    // ── mode selection (§3.2) ────────────────────────────────────────────
+    //
+    // DEVIATION vs §3.2's step order, with justification. The plan evaluates the
+    // naive fit BEFORE the mirror exists, relying on the lemma that the mirror
+    // term cancels out of the budget. That lemma is arithmetically right but its
+    // inputs are not stable: `free` is a live CUDA reading that moves with every
+    // other process on the card, and allocator padding makes
+    // free_after_mirror + mirror_bytes only approximately free0 + base_bytes.
+    // Gate (e) demands the naive maxLen INTEGER be unchanged, so instead of
+    // re-deriving it we simply run the shipped code path untouched whenever the
+    // mode could still be naive, and only switch afterwards. 4B (and
+    // --low-vram on) skip the mirror entirely and never enter that path.
+    const std::string size_label = lm_size_label_from_config(c);
+    const bool        auto_mode  = (a.low_vram != "on" && a.low_vram != "off");
+    LmVramMode        mode       = lm_vram_pick_mode(a.low_vram, size_label, /*naive_max_len=*/0);
+
+    size_t base_bytes = lm_base_weight_bytes(lm);
+
     // ── F32 mirror; a quantized base is refused here ─────────────────────
     LmF32Mirror mirror;
-    {
+    if (mode == LM_VRAM_NAIVE) {
         std::string err;
         if (!lm_build_f32_mirror(&lm, &mirror, &err)) {
             lm_fatal("model-load", err);
@@ -115,6 +132,15 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
             qw3lm_free(&lm);
             return 1;
         }
+    } else {
+        std::string err;
+        if (!lm_ckpt_check_base(&lm, &err)) {
+            lm_fatal("model-load", err);
+            qw3lm_free(&lm);
+            return 1;
+        }
+        fprintf(stderr, "[train-lm] low-vram mode: base stays %s resident (%.1f MB), no F32 mirror\n",
+                ggml_type_name(lm.embed_tokens->type), base_bytes / 1048576.0);
     }
 
     // ── tokenizer ────────────────────────────────────────────────────────
@@ -144,11 +170,73 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         vm.lora_params = np * (size_t) c.n_layers;
     }
 
-    const LmVramFit fit = lm_vram_fit(vm, lm.backend, a.vram_reserve_mb, a.max_len);
+    int head_block = (a.attn_head_block >= 0) ? a.attn_head_block : lm_ckpt_default_head_block(c);
+    if (!lm_ckpt_head_block_ok(c, head_block)) {
+        char b[192];
+        snprintf(b, sizeof(b), "--attn-head-block %d is not valid for n_heads %d / n_kv_heads %d — falling back to %d",
+                 head_block, c.n_heads, c.n_kv_heads, lm_ckpt_default_head_block(c));
+        lm_log("warn", b);
+        head_block = lm_ckpt_default_head_block(c);
+    }
+    LmVramLowCfg lc;
+    lc.attn_head_block = head_block;
+    lc.chunk           = a.chunk;
+    lc.head_dim        = c.head_dim;
+    lc.base_bytes      = base_bytes;
+    lc.emb_t_bytes     = (size_t) V * (size_t) H * ggml_type_size(lm.embed_tokens->type);
+    lc.layer_w_bytes   = lm_layer_weight_bytes(c);
+
+    LmVramFit fit;
+    if (mode == LM_VRAM_NAIVE) {
+        fit = lm_vram_fit(vm, lm.backend, a.vram_reserve_mb, a.max_len);
+        // §3.2 step 6, second clause: auto turns low-vram ON for smaller bases
+        // when the naive path would have to skip full-song samples. On this
+        // machine the shipped fit yields ~3200 (0.6B) and ~2515 (1.7B), so this
+        // branch is unreachable there and Rob's behaviour is unchanged.
+        //
+        // `a.max_len <= 0` is load-bearing: D5 words the rule as "the shipped
+        // naive AUTO-FIT yields max_len < 2048", but lm_vram_fit() returns
+        // `user_len` VERBATIM when the user pinned --max-len (lm-vram.h:97-102).
+        // Without this guard any user value in [512, 2047] — a plain
+        // Training-Studio field, always emitted by buildTrainLmArgs — silently
+        // flipped 0.6B/1.7B onto the checkpointed path, violating D5's "Do
+        // 0.6B/1.7B change? No." A pinned length is a user statement about
+        // sequence length, not about VRAM.
+        if (auto_mode && a.max_len <= 0 && fit.max_len < 2048) {
+            char b[192];
+            snprintf(b, sizeof(b), "naive auto-fit yields max_len %d (< 2048) — switching to low-VRAM mode",
+                     fit.max_len);
+            lm_log("info", b);
+            lm_mirror_free(&mirror);
+            qw3lm_free(&lm);
+            g_qwen3_load_no_fuse = true;
+            const bool re        = qw3lm_load(&lm, a.lm_path.c_str(), /*max_seq_len=*/64, /*n_kv_sets=*/1);
+            g_qwen3_load_no_fuse = false;
+            if (!re) {
+                lm_fatal("model-load", "cannot re-load the LM base for low-VRAM mode " + a.lm_path);
+                return 1;
+            }
+            std::string err;
+            if (!lm_ckpt_check_base(&lm, &err)) {
+                lm_fatal("model-load", err);
+                qw3lm_free(&lm);
+                return 1;
+            }
+            base_bytes      = lm_base_weight_bytes(lm);
+            lc.base_bytes   = base_bytes;
+            vm.mirror_bytes = 0;
+            mode            = LM_VRAM_LOWVRAM;
+        }
+    }
+    if (mode == LM_VRAM_LOWVRAM) {
+        fit = lm_vram_fit_lowvram(vm, lc, lm.backend, a.vram_reserve_mb, a.max_len);
+    }
+
     if (!fit.ok) {
-        char extra[192];
-        snprintf(extra, sizeof(extra), ",\"needMb\":%lld,\"freeMb\":%lld,\"lmSize\":\"%s\"",
-                 (long long) (fit.est_bytes / 1048576.0), (long long) fit.free_mb, a.lm_size.c_str());
+        char extra[224];
+        snprintf(extra, sizeof(extra), ",\"needMb\":%lld,\"freeMb\":%lld,\"lmSize\":\"%s\",\"mode\":\"%s\"",
+                 (long long) (fit.est_bytes / 1048576.0), (long long) fit.free_mb, a.lm_size.c_str(),
+                 mode == LM_VRAM_LOWVRAM ? "lowvram" : "naive");
         lm_fatal("vram",
                  "not enough free VRAM for LM training: need ~" + std::to_string((long long) (fit.est_bytes / 1048576.0)) +
                      " MB, " + std::to_string((long long) fit.free_mb) + " MB free",
@@ -238,12 +326,23 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     // estMb is the predicted PEAK, i.e. the footprint at the LONGEST ACCEPTED
     // sequence — not at maxLen, which is only the skip threshold. That is the
     // quantity G4 compares against the observed peak.
-    const double est_bytes = lm_vram_bytes(vm, max_seq, s_tr_max);
+    const bool   low  = (mode == LM_VRAM_LOWVRAM);
+    const double est_bytes =
+        low ? lm_vram_bytes_lowvram(vm, lc, max_seq, s_tr_max) : lm_vram_bytes(vm, max_seq, s_tr_max);
+    const double ckpt_bytes = low ? (double) c.n_layers * (double) H * (double) max_seq * 4.0 : 0.0;
+    const double seg_bytes  = low ? lm_vram_lowvram_transient(vm, lc, max_seq) : 0.0;
+
+    // §2.2: five additive fields. In "naive" mode they read "naive", the mirror
+    // size and three zeros, so the event stays byte-compatible with [P] §2.9.
     jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"reserveMb\":%d,\"mirrorMb\":%lld,\"maxLen\":%d,"
-       "\"estMb\":%lld,\"source\":\"%s\"}",
+       "\"estMb\":%lld,\"source\":\"%s\",\"mode\":\"%s\",\"baseMb\":%lld,\"ckptMb\":%lld,\"segPeakMb\":%lld,"
+       "\"attnHeadBlock\":%d,\"chunk\":%d}",
        (long long) fit.free_mb, (long long) fit.total_mb, a.vram_reserve_mb,
-       (long long) (mirror.bytes / 1048576), max_len, (long long) (est_bytes / 1048576.0),
-       a.max_len > 0 ? "user" : "auto");
+       (long long) (low ? 0 : mirror.bytes / 1048576), max_len, (long long) (est_bytes / 1048576.0),
+       a.max_len > 0 ? "user" : "auto", low ? "lowvram" : "naive",
+       (long long) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0),
+       (long long) (ckpt_bytes / 1048576.0), (long long) (seg_bytes / 1048576.0), low ? lc.attn_head_block : 0,
+       low ? lc.chunk : 0);
 
     // `skippedBad` is additive (§2.2: consumers ignore unknown fields) and keeps
     // `skippedLong` meaning what its name says.
@@ -264,19 +363,25 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         ggml_init_params p = { 32 * ggml_tensor_overhead(), nullptr, true };
         ctx_static         = ggml_init(p);
     }
-    ggml_tensor * t_tok      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, max_seq);
-    ggml_tensor * t_pos      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, max_seq);
-    ggml_tensor * t_msk      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) max_seq * max_seq);
-    ggml_tensor * t_lab      = ggml_new_tensor_2d(ctx_static, GGML_TYPE_F32, V, s_tr_max);
+    ggml_tensor * t_tok = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, max_seq);
+    ggml_tensor * t_pos = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, max_seq);
+    ggml_tensor * t_msk = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) max_seq * max_seq);
+    // The [V, s_tr_max] label buffer is a naive-path structure: 1,184 MiB at
+    // 4B / s_tr 1556. Low-vram sparse-writes a [V, chunk] buffer instead (D4).
+    ggml_tensor * t_lab      = low ? nullptr : ggml_new_tensor_2d(ctx_static, GGML_TYPE_F32, V, s_tr_max);
     ggml_tensor * t_adamw    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 7);
     ggml_tensor * t_lossgrad = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_clip     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_eps      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_gnorm2   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_gs       = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_one      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_set_input(t_tok);
     ggml_set_input(t_pos);
     ggml_set_input(t_msk);
-    ggml_set_input(t_lab);
+    if (t_lab) {
+        ggml_set_input(t_lab);
+    }
 
     ggml_backend_buffer_t buf_static = ggml_backend_alloc_ctx_tensors(ctx_static, lm.backend);
     if (!buf_static) {
@@ -291,9 +396,14 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         const float lg = 1.0f / (float) a.grad_accum;  // == Side-Step's loss/(n_tok*grad_accum)
         const float cl = a.grad_clip;
         const float ep = 1e-6f;
+        // D9: the low-vram trunk surrogate's loss gradient is EXACTLY 1.0 —
+        // 1/grad_accum is already folded into the per-chunk `gs`. Using
+        // t_lossgrad here would scale every gradient by 1/grad_accum^2.
+        const float on = 1.0f;
         ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
         ggml_backend_tensor_set(t_clip, &cl, 0, sizeof(float));
         ggml_backend_tensor_set(t_eps, &ep, 0, sizeof(float));
+        ggml_backend_tensor_set(t_one, &on, 0, sizeof(float));
     }
 
     LmLora lora;
@@ -330,6 +440,32 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     opt.total_steps  = total_steps;
     opt.warmup_steps = warmup_steps;
 
+    // ── low-vram persistent state (§3.3) ─────────────────────────────────
+    LmCkptState ckpt;
+    LmCkptRun   run;
+    if (low) {
+        LmCkptCfg cc;
+        cc.chunk           = lc.chunk;
+        cc.attn_head_block = lc.attn_head_block;
+        cc.s_max           = max_seq;
+        cc.layer_lo        = 0;
+        cc.layer_hi        = c.n_layers;
+        std::string err;
+        if (!lm_ckpt_alloc(&ckpt, &lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt, &err)) {
+            lm_fatal("vram", err.empty() ? std::string("low-vram allocation failed") : err);
+            return 1;
+        }
+        run.lm         = &lm;
+        run.opt        = &opt;
+        run.st         = &ckpt;
+        run.t_tok      = t_tok;
+        run.t_pos      = t_pos;
+        run.t_msk      = t_msk;
+        run.t_gs       = t_gs;
+        run.t_one      = t_one;
+        run.grad_accum = a.grad_accum;
+    }
+
     // ── graph arena + scheduler sized from a real node count ─────────────
     std::vector<uint8_t> arena((size_t) 128 << 20);
 
@@ -346,7 +482,16 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
 
     // Build (but do not run) the largest graph to size the scheduler.
     int graph_nodes = 0, graph_leafs = 0;
-    {
+    if (low) {
+        // The worst low-vram graph is one backward segment at S = max_seq: the
+        // trunk is never built whole, so sizing from it would over-allocate the
+        // sched by ~L x. Reuse of a single sched across ~110 graph computes per
+        // micro-step is what keeps the allocator arena stable (T13).
+        upload_mask(max_seq);
+        run.sched   = nullptr;
+        graph_nodes = lm_ckpt_probe_segment_nodes(run, max_seq);
+        graph_leafs = 0;
+    } else {
         ggml_init_params ip  = { arena.size(), arena.data(), true };
         ggml_context *   ctx = ggml_init(ip);
         ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, /*grads=*/true);
@@ -368,17 +513,21 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         graph_leafs = 0;  // ggml_cgraph is opaque; size the sched from nodes + headroom
         ggml_free(ctx);
     }
-    fprintf(stderr, "[train-lm] fwd+bwd graph: %d nodes\n", graph_nodes);
+    fprintf(stderr, "[train-lm] %s graph: %d nodes\n", low ? "worst segment fwd+bwd" : "fwd+bwd", graph_nodes);
 
     BackendPair bp;
     bp.backend     = lm.backend;
     bp.cpu_backend = lm.cpu_backend;
     bp.has_gpu     = lm.backend != lm.cpu_backend;
     ggml_backend_sched_t sched = backend_sched_new(bp, std::max(8192, graph_nodes + graph_nodes / 2 + 2048));
+    if (low) {
+        run.sched = sched;
+    }
 
     // ── one micro-step ───────────────────────────────────────────────────
     LmVramTracker tracker;
-    auto micro_step = [&](const LmSample & s, bool count_loss, double * ce_out) -> bool {
+    // The shipped naive lambda, MOVED but not edited.
+    auto micro_step_naive = [&](const LmSample & s, bool count_loss, double * ce_out) -> bool {
         const int S    = (int) s.tokens.size();
         const int s_tr = s.s_tr;
 
@@ -425,6 +574,10 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         return ok;
     };
 
+    auto micro_step = [&](const LmSample & s, bool count_loss, double * ce_out) -> bool {
+        return low ? lm_ckpt_micro_step(run, s, count_loss, ce_out) : micro_step_naive(s, count_loss, ce_out);
+    };
+
     // ── high-water probe (§3.7) ──────────────────────────────────────────
     //
     // The probe must bound the run's PEAK allocation, not merely its longest
@@ -462,7 +615,8 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         // Trainer-owned footprint: the buffers we allocated plus the scheduler's
         // own compute arena. Device-wide (total - free) would fold in every other
         // process on the card and is not comparable with estMb.
-        size_t fixed = mirror.buf ? ggml_backend_buffer_get_size(mirror.buf) : mirror.bytes;
+        size_t fixed = low ? (base_bytes + ckpt.fixed_bytes())
+                           : (mirror.buf ? ggml_backend_buffer_get_size(mirror.buf) : mirror.bytes);
         fixed += ggml_backend_buffer_get_size(buf_static);
         if (lora.buf) {
             fixed += ggml_backend_buffer_get_size(lora.buf);
@@ -493,6 +647,14 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     meta->vram_total_mb  = fit.total_mb;
     meta->vram_mirror_mb = mirror.bytes / 1048576;
     meta->vram_est_mb    = (size_t) (est_bytes / 1048576.0);
+
+    meta->low_vram        = low;
+    meta->attn_head_block = low ? lc.attn_head_block : 0;
+    meta->chunk           = low ? lc.chunk : 0;
+    meta->vram_mode       = low ? "lowvram" : "naive";
+    meta->vram_base_mb    = (size_t) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0);
+    meta->vram_ckpt_mb    = (size_t) (ckpt_bytes / 1048576.0);
+    meta->vram_seg_peak_mb = (size_t) (seg_bytes / 1048576.0);
 
     double    ladder      = 0.0;
     bool      ladder_seed = false;
@@ -675,6 +837,7 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     lm_optim_free(&opt);
     lm_lora_detach(&lora, &lm);
     lm_lora_free(&lora);
+    lm_ckpt_free(&ckpt);
     ggml_backend_buffer_free(buf_static);
     ggml_free(ctx_static);
     lm_mirror_free(&mirror);

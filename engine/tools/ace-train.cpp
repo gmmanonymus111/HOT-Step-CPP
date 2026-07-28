@@ -153,7 +153,7 @@ static void print_usage(void) {
             "    --dit <name|path>           FSQ-tokenizer source for `extract`\n"
             "                                (default: dit_path from <tensors>/preprocess_meta.json)\n"
             "    --lm <name|path>            LM base GGUF (required for `train`)\n"
-            "    --lm-size <0.6B|1.7B>       label written into adapter_config/base_model_name_or_path\n"
+            "    --lm-size <0.6B|1.7B|4B>    label written into adapter_config/base_model_name_or_path\n"
             "                                (default: inferred from the LM's hidden_size/n_layers)\n"
             "\n"
             "  LoRA:\n"
@@ -174,6 +174,14 @@ static void print_usage(void) {
             "  Sequence / memory:\n"
             "    --max-len <n>               0           0 = auto-fit from free VRAM\n"
             "    --vram-reserve-mb <n>       1024        headroom left unallocated\n"
+            "    --low-vram <auto|on|off>    auto        per-layer checkpointing + chunked CE;\n"
+            "                                            auto = ON iff --lm-size is 4B, or the naive\n"
+            "                                            auto-fit would yield max-len < 2048\n"
+            "    --attn-head-block <n>       -1          heads per attention block inside a segment;\n"
+            "                                            0 = whole-head attention (naive behaviour),\n"
+            "                                            -1 = engine picks (<=16 heads -> 0, else 8).\n"
+            "                                            Must divide n_heads AND n*n_kv/n_heads >= 1\n"
+            "    --lm-chunk <n>              128         trained positions per CE chunk (low-vram only)\n"
             "    --loss-on-cot                           default ON\n"
             "    --no-loss-on-cot\n"
             "\n"
@@ -780,6 +788,9 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--order") && i + 1 < argc) a.order = argv[++i];
         else if (!strcmp(argv[i], "--max-len") && i + 1 < argc) a.max_len = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--low-vram") && i + 1 < argc) a.low_vram = argv[++i];
+        else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) a.limit = atoi(argv[++i]);
@@ -823,6 +834,14 @@ static int cmd_train_lm(int argc, char ** argv) {
     }
     if (a.order != "shuffle" && a.order != "fixed") {
         fprintf(stderr, "ace-train train-lm: --order must be shuffle|fixed\n");
+        return 2;
+    }
+    if (a.low_vram != "auto" && a.low_vram != "on" && a.low_vram != "off") {
+        fprintf(stderr, "ace-train train-lm: --low-vram must be auto|on|off\n");
+        return 2;
+    }
+    if (a.attn_head_block < -1 || a.attn_head_block > 128 || a.chunk < 16 || a.chunk > 1024) {
+        fprintf(stderr, "ace-train train-lm: --attn-head-block must be -1..128 and --lm-chunk 16..1024\n");
         return 2;
     }
 

@@ -113,8 +113,22 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, state: RelayState)
         totalMb: optNum(ev, 'totalMb'),
         estMb: optNum(ev, 'estMb'),
         maxLen: optNum(ev, 'maxLen'),
+        // 4B plan §2.2 additive fields. DEVIATION vs §1.2, which pins this file
+        // at "No change — the JSONL relay is kind-agnostic": it is not. `vram`
+        // is relayed through an explicit whitelist, so without these four lines
+        // the `mode`/`baseMb`/`ckptMb`/`segPeakMb` that §2.4 mandates on
+        // TrainingMetricEvent could never be non-undefined at runtime, and
+        // §1.3's VRAM hint line would be unimplementable.
+        mode: typeof ev.mode === 'string' ? ev.mode : undefined,
+        baseMb: optNum(ev, 'baseMb'),
+        ckptMb: optNum(ev, 'ckptMb'),
+        segPeakMb: optNum(ev, 'segPeakMb'),
       });
-      log(job, 'info', `VRAM ${int(ev.freeMb)} MB free — max sequence ${int(ev.maxLen)} tokens`);
+      log(job, 'info',
+        ev.mode === 'lowvram'
+          ? `VRAM ${int(ev.freeMb)} MB free — max sequence ${int(ev.maxLen)} tokens ` +
+            `(low-VRAM: ${int(ev.baseMb)} MB base + ${int(ev.ckptMb)} MB checkpoints, est ${int(ev.estMb)} MB peak)`
+          : `VRAM ${int(ev.freeMb)} MB free — max sequence ${int(ev.maxLen)} tokens`);
       break;
     }
     case 'data': {

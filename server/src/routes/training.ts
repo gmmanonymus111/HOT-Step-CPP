@@ -226,8 +226,8 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       engineSuspended: false,
     },
     trainLm: {
-      available: false, lmModels: [], sizes: ['0.6B', '1.7B'],
-      defaultLmBySize: { '0.6B': '', '1.7B': '' }, adaptersRoot: '',
+      available: false, lmModels: [], sizes: ['0.6B', '1.7B', '4B'],
+      defaultLmBySize: { '0.6B': '', '1.7B': '', '4B': '' }, adaptersRoot: '',
     },
     trainDit: {
       available: false, adapterTypes: ['lora'], adaptersRoot: '', minVramMb: 16384,
@@ -294,6 +294,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
     caps.trainLm.defaultLmBySize = {
       '0.6B': pickLmFor('0.6B', snap.lm),
       '1.7B': pickLmFor('1.7B', snap.lm),
+      '4B': pickLmFor('4B', snap.lm),
     };
   } catch { /* stays empty */ }
 
@@ -1314,15 +1315,12 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── base size ────────────────────────────────────────────────────────
-    // 4B is refused HERE, not by the engine: the engine's own refusal (§3.7)
-    // arrives only after the runner has already stopped the app's engine.
-    if (body.lmSize !== undefined && body.lmSize !== '0.6B' && body.lmSize !== '1.7B') {
-      res.status(400).json({
-        error: '4B LM training needs more VRAM than this build supports — use 0.6B or 1.7B',
-      });
-      return;
-    }
-    const lmSize: LmSize = body.lmSize === '1.7B' ? '1.7B' : '0.6B';
+    // All three sizes are accepted: 4B trains through the engine's low-VRAM
+    // path (per-layer checkpointing + chunked CE). An unaffordable 4B request
+    // is now refused by ace-train's own VRAM solve with real numbers, not by a
+    // blanket 400 here.
+    const lmSize: LmSize =
+      body.lmSize === '1.7B' ? '1.7B' : body.lmSize === '4B' ? '4B' : '0.6B';
 
     // ── models ───────────────────────────────────────────────────────────
     // Same never-probed race fix as preprocess: a fresh boot would otherwise
@@ -1406,6 +1404,26 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── low-VRAM knobs (4B §2.5) ─────────────────────────────────────────
+    // 'auto' is the engine's own default, so an omitted field emits no flag at
+    // all (see buildTrainLmArgs) and the argv stays byte-identical to today.
+    const lowVram = body.lowVram === undefined ? 'auto' : body.lowVram;
+    if (lowVram !== 'auto' && lowVram !== 'on' && lowVram !== 'off') {
+      res.status(400).json({ error: 'lowVram must be auto, on or off' });
+      return;
+    }
+    const attnHeadBlock = numOpt(body.attnHeadBlock, 0);
+    const chunk = numOpt(body.chunk, 0);
+    if (!Number.isFinite(attnHeadBlock) || attnHeadBlock < 0 || attnHeadBlock > 128) {
+      res.status(400).json({ error: 'attnHeadBlock must be between 0 and 128' });
+      return;
+    }
+    // 0 = "engine default (128)"; any explicit value must be a usable chunk.
+    if (chunk !== 0 && (chunk < 16 || chunk > 1024)) {
+      res.status(400).json({ error: 'chunk must be between 16 and 1024' });
+      return;
+    }
+
     // ── stages ───────────────────────────────────────────────────────────
     const requestedStages = Array.isArray(body.stages) ? body.stages : [];
     const stages = TRAIN_LM_STAGES.filter(s => requestedStages.includes(s));
@@ -1445,6 +1463,9 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
+      lowVram,
+      attnHeadBlock: Math.trunc(attnHeadBlock),
+      chunk: Math.trunc(chunk),
     };
 
     const job = queue.startTrainLmJob(ds.id, opts);
@@ -1464,7 +1485,11 @@ router.get('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Dataset not found' });
       return;
     }
-    const lmSizeQuery = req.query.lmSize === '1.7B' ? '1.7B' : req.query.lmSize === '0.6B' ? '0.6B' : undefined;
+    const lmSizeQuery: LmSize | undefined =
+      req.query.lmSize === '1.7B' ? '1.7B'
+        : req.query.lmSize === '4B' ? '4B'
+          : req.query.lmSize === '0.6B' ? '0.6B'
+            : undefined;
     // `[]`, not `await buildSamples(ds)`: readTrainLmStatus names the parameter
     // `_samples` and never reads it (its counters are measured against the tensor
     // cache, not the dataset). buildSamples walks the whole source tree, stats
