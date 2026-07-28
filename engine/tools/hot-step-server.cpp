@@ -2169,6 +2169,272 @@ static void handle_vae(const httplib::Request & req, httplib::Response & res) {
     res.set_content(body, "application/json");
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// /codes-decode endpoint: 5 Hz LM audio codes -> audio, straight through the
+// FSQ detokenizer and the VAE. Zero DiT, zero sound adapter, zero sampler —
+// this renders the planner LM's plan literally, which is what the Training
+// Studio's codes audition plays. docs/plans/2026-07-28-codes-preview.md §4.
+// ────────────────────────────────────────────────────────────────────────
+
+// codes-decode worker: FSQ-detokenize the codes into VAE-ready latents, then
+// tail-call vae_decode_worker UNMODIFIED. detok_ggml_decode writes ggml
+// [64, T_25Hz] where element (c, t) = data[t * 64 + c] (fsq-detok.h) — that is
+// byte-identical to the [T, 64] time-major buffer /vae's src_latents part
+// already hands vae_decode_worker, so there is no transpose and no new decode
+// code. The DiT mask channel (ctx_ch = Oc*2, pipeline-synth-ops.cpp) is DiT
+// conditioning applied *after* the detokenizer, so its absence here is exactly
+// what "zero DiT influence" means.
+static void codes_decode_worker(std::shared_ptr<Job> job,
+                                AceRequest           ace_req,
+                                std::vector<int>     codes,
+                                std::string          dit_path,
+                                bool                 output_wav,
+                                WavFormat            wav_fmt,
+                                int                  peak_clip) {
+    if (job->cancel.load()) {
+        job->status.store(3);
+        return;
+    }
+
+    const int T_5Hz  = (int) codes.size();
+    const int T_25Hz = T_5Hz * 5;
+
+    // Keyed on the DiT path exactly as pipeline-synth.cpp keys its
+    // fsq_detok_key — the detokenizer weights live inside the DiT file.
+    ModelKey k;
+    k.kind = MODEL_FSQ_DETOK;
+    k.path = dit_path;
+
+    auto t_start = std::chrono::steady_clock::now();
+
+    std::vector<float> latents((size_t) T_25Hz * LATENT_CHANNELS);
+    int                rc = -1;
+    {
+        DetokGGML * detok = store_require_fsq_detok(g_store, k);
+        if (!detok) {
+            fprintf(stderr, "[Server] codes-decode: store_require_fsq_detok failed (%s)\n", dit_path.c_str());
+            job->status.store(2);
+            return;
+        }
+        // Released before vae_decode_worker requires the VAE: under
+        // EVICT_STRICT a live refcount on the detokenizer would abort the store.
+        ModelHandle detok_guard(g_store, detok);
+        if (!g_synth_params.use_fa) {
+            detok->use_flash_attn = false;
+        }
+        rc = detok_ggml_decode(detok, codes.data(), T_5Hz, latents.data());
+    }
+    if (rc < 0) {
+        fprintf(stderr, "[Server] codes-decode: detok_ggml_decode failed\n");
+        job->status.store(2);
+        return;
+    }
+    auto  t_end    = std::chrono::steady_clock::now();
+    float detok_ms = (float) std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count() / 1000.0f;
+    fprintf(stderr, "[Server] codes-decode: %d codes -> %d latent frames, detok %.0f ms\n", T_5Hz, T_25Hz, detok_ms);
+
+    // The shipped VAE decode path, called not copied. Cancellation,
+    // g_loaded_vae stickiness, audio_normalize, peak_clip, wav/mp3 encoding and
+    // every job->status transition are inherited, not reimplemented.
+    vae_decode_worker(job, std::move(ace_req), std::move(latents), T_25Hz, output_wav, wav_fmt, peak_clip);
+}
+
+// POST /codes-decode — body is an AceRequest JSON (the same parser as /lm).
+// Fields read, all others ignored:
+//   audio_codes    REQUIRED. Comma-separated 5 Hz FSQ indices, the exact string
+//                  /lm returns and lm_codes.jsonl stores.
+//   synth_model    DiT registry name — the FSQ detokenizer weights live inside
+//                  the DiT file. Empty -> resolve_name default.
+//   vae            VAE registry name. Empty -> resolve_name default.
+//   output_format  mp3 | wav16 | wav24 | wav32. Default mp3 (request_init).
+//   peak_clip      int, default 10.
+// Returns {"id":"N"}; poll GET /job?id=N and fetch GET /job?id=N&result=1,
+// exactly like /vae's decode path — the result IS that code path's result.
+static void handle_codes_decode(const httplib::Request & req, httplib::Response & res) {
+    if (g_registry.dit.empty() || g_registry.vae.empty()) {
+        json_error(res, 501, "codes-decode requires DiT and VAE models");
+        return;
+    }
+
+    AceRequest ace_req;
+    request_init(&ace_req);
+    if (!request_parse_json(&ace_req, req.body.c_str())) {
+        json_error(res, 400, "Invalid JSON");
+        return;
+    }
+    if (ace_req.audio_codes.empty()) {
+        json_error(res, 400, "audio_codes is required");
+        return;
+    }
+
+    // Local CSV -> int parse. parse_csv<int> is a file-local template in
+    // pipeline-synth-ops.cpp, not exported, so this is a local loop with the
+    // same separator set (',' and ' ' only — a tab/newline bails there too, and
+    // silently accepting them here would make a preview disagree with what the
+    // /synth path would have consumed from the identical string).
+    //
+    // It is deliberately STRICTER than parse_csv in one respect: parse_csv stops
+    // at the first non-numeric token, and this endpoint's whole product is "the
+    // LM's plan rendered literally". Stopping early would decode a 150-code plan
+    // as its first 2 codes and still return 200 with a 0.4 s WAV, while the
+    // caller computes duration from its own codes.split(',').length and renders
+    // "150 codes / 30.0s" over it. There is no field in the {"id":"N"} reply or
+    // in the raw-audio job result that could expose the truncation, so a
+    // malformed token is a 400 here, not a silent short decode.
+    std::vector<int> codes;
+    {
+        // Codebook cardinality from the ONE FSQ definition (fsq-quant.h, visible
+        // via model-store.h -> fsq-detok.h). Computed, never hardcoded, so a
+        // levels change cannot leave a stale 64000 behind.
+        int64_t fsq_codebook = 1;
+        for (int d = 0; d < FSQ_NDIMS; d++) {
+            fsq_codebook *= (int64_t) FSQ_LEVELS[d];
+        }
+
+        size_t    out_of_codebook = 0;
+        long long first_bad_code  = LLONG_MIN;
+
+        const char * base = ace_req.audio_codes.c_str();
+        const char * p    = base;
+        const char * end  = p + ace_req.audio_codes.size();
+        while (p < end) {
+            while (p < end && (*p == ',' || *p == ' ')) {
+                p++;
+            }
+            if (p >= end) {
+                break;
+            }
+            char *    next = nullptr;
+            long long v    = strtoll(p, &next, 10);
+            if (next == p) {
+                std::string msg = "audio_codes has a malformed token at offset " + std::to_string(p - base) +
+                                  " (expected comma-separated base-10 integers)";
+                json_error(res, 400, msg.c_str());
+                return;
+            }
+            // Overflow is unambiguously malformed — no LM emits this, and the
+            // (int) cast below would otherwise silently truncate it to an
+            // implementation-defined, possibly negative value.
+            if (v < INT32_MIN || v > INT32_MAX) {
+                std::string msg = "audio_codes has an out-of-range token " + std::to_string(v) + " at offset " +
+                                  std::to_string(p - base);
+                json_error(res, 400, msg.c_str());
+                return;
+            }
+            // Out-of-CODEBOOK is only WARNED about, deliberately not rejected.
+            // fsq_decode_index does (index / stride) % L with no clamp, so a code
+            // >= the codebook wraps to a different entry and a negative one puts
+            // out[d] below -1 — both feed out-of-distribution latents to the
+            // detokenizer. Tempting to 400. But the LM's audio-code band is
+            // AUDIO_CODE_COUNT = 65535 wide (prompt.h) while the codebook is only
+            // 64000, and metadata-fsm.h's mask spans the FULL band — so codes
+            // 64000..65534 are samplable and may well appear in legitimate output.
+            // Rejecting them would fail a real audition outright, which is far
+            // worse than the wrapped audio it prevents. This stays a log line
+            // (enough to identify a wrong-vocabulary adapter) until a measurement
+            // shows whether real LM output ever exceeds the codebook.
+            if (v < 0 || v >= fsq_codebook) {
+                out_of_codebook++;
+                if (first_bad_code == LLONG_MIN) {
+                    first_bad_code = v;
+                }
+            }
+            codes.push_back((int) v);
+            p = next;
+        }
+
+        if (out_of_codebook > 0) {
+            fprintf(stderr,
+                    "[Server] codes-decode: WARNING %zu/%zu codes are outside the FSQ codebook 0..%lld "
+                    "(first: %lld) — these wrap in fsq_decode_index and will decode as noise; a "
+                    "wrong-vocabulary LM adapter is the usual cause\n",
+                    out_of_codebook, codes.size(), (long long) (fsq_codebook - 1), first_bad_code);
+        }
+    }
+    if (codes.empty()) {
+        json_error(res, 400, "audio_codes contains no valid codes");
+        return;
+    }
+    if ((int64_t) codes.size() * 5 > (int64_t) MAX_T_LATENT) {
+        json_error(res, 413, "audio_codes exceeds max duration (10 min)");
+        return;
+    }
+
+    bool      output_wav = false;
+    WavFormat wav_fmt    = WAV_S16;
+    {
+        bool is_mp3 = true;
+        if (!audio_parse_format(ace_req.output_format.c_str(), is_mp3, wav_fmt)) {
+            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32)");
+            return;
+        }
+        output_wav = !is_mp3;
+    }
+    int peak_clip = ace_req.peak_clip;
+
+    // Resolve the DiT here, not in the worker, so an ONNX DiT is a 400 with an
+    // explanation instead of a silent job failure: the FSQ detokenizer weights
+    // are not part of an ONNX export. dit_ends_with_onnx comes from dit.h,
+    // already visible via model-store.h — no new include in this TU.
+    //
+    // The sticky hint is deliberately EMPTY (not g_loaded_dit). synth_worker
+    // overwrites g_loaded_dit on every /synth completion under EVICT_NEVER —
+    // and the audition flow posts /lm?keep_loaded=1, which latches EVICT_NEVER
+    // for the process lifetime, so that global is very much live here. With the
+    // sticky hint in play, two identical requests carrying synth_model:"" either
+    // side of one Create-panel generation would decode through two different FSQ
+    // detokenizers and produce different audio — exactly what an A/B audition
+    // cannot tolerate, and what a back-to-back determinism check cannot detect.
+    // Empty hint => registry[0], which is stable for the process lifetime.
+    std::string        dit_name = resolve_name(g_registry.dit, ace_req.synth_model, std::string());
+    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
+    if (!dit) {
+        std::string msg = "DiT not found: " + dit_name;
+        json_error(res, 400, msg.c_str());
+        return;
+    }
+    if (dit_ends_with_onnx(dit->path.c_str())) {
+        json_error(res, 400,
+                   "codes-decode needs a GGUF or safetensors DiT — the FSQ detokenizer weights are not in an "
+                   "ONNX export");
+        return;
+    }
+    std::string dit_path = dit->path;
+
+    // Same treatment for the VAE, for the same two reasons. vae_decode_worker
+    // resolves with plain registry_find against the sticky g_loaded_vae, so
+    // (a) an ONNX VAE — registry_scan does put those in reg->vae — would reach
+    // store_require_vae_dec and fail the job with nothing but a log line, which
+    // is precisely the opaque failure the DiT check three lines up exists to
+    // prevent, and (b) an empty `vae` would inherit whatever the last /synth
+    // latched. Resolving to a non-ONNX entry HERE and pinning the resolved name
+    // back into the request makes the worker's resolve_name return it verbatim
+    // (a non-empty request field always wins) without modifying the worker.
+    // registry_find_non_onnx(bucket, nullptr) already means "first non-ONNX".
+    const ModelEntry * vae = registry_find_non_onnx(g_registry.vae, ace_req.vae.empty() ? nullptr : ace_req.vae.c_str());
+    if (!vae) {
+        std::string msg = ace_req.vae.empty()
+                              ? std::string("codes-decode needs a GGUF or safetensors VAE — no non-ONNX VAE is "
+                                            "registered")
+                              : ("VAE not found (or is an ONNX export, which has no usable decoder here): " +
+                                 ace_req.vae);
+        json_error(res, 400, msg.c_str());
+        return;
+    }
+    ace_req.vae = vae->name;
+
+    auto job = job_create();
+    fprintf(stderr, "[Server] Job %s created (codes-decode, %zu codes, dit=%s)\n", job->id.c_str(), codes.size(),
+            dit_name.c_str());
+
+    work_push([job, ace_req, codes = std::move(codes), dit_path, output_wav, wav_fmt, peak_clip]() mutable {
+        codes_decode_worker(job, std::move(ace_req), std::move(codes), dit_path, output_wav, wav_fmt, peak_clip);
+    });
+
+    std::string body = "{\"id\":\"" + job->id + "\"}";
+    res.set_content(body, "application/json");
+}
+
 // warm worker: same setup as synth_worker through ace_synth_load, then stops.
 // Under EVICT_NEVER (set by `--keep-loaded` or a prior `?keep_loaded=1`) the
 // modules stay resident, so the next /synth using the same DiT + adapter combo
@@ -2784,6 +3050,7 @@ int main(int argc, char ** argv) {
     svr.Post("/synth", handle_synth);
     svr.Post("/understand", handle_understand);
     svr.Post("/vae", handle_vae);
+    svr.Post("/codes-decode", handle_codes_decode);
     svr.Post("/warm", handle_warm);
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");

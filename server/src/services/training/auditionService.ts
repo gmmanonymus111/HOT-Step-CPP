@@ -1,0 +1,548 @@
+// training/auditionService.ts — the codes-audition brain
+//
+// Resolves every default in ONE place, builds the /lm request field by field,
+// runs one A/B side, and decodes stored codes for the synchronous sample
+// audition. The only module that knows the shape of an LM request.
+//
+// ── THE LM ECHO SIDEBAND TRAP (read before touching runOneSide) ─────────────
+// The known failure mode is reusing the AceRequest that /lm ECHOED BACK as the
+// basis for the next engine call: server-only fields do not survive the round
+// trip. This module never does that. The /lm response is read for exactly six
+// values (audio_codes, caption, lyrics, bpm, keyscale, timesignature) and then
+// discarded; the /codes-decode request is built fresh from
+// {audio_codes, synth_model, vae, output_format, peak_clip} and nothing else.
+// DO NOT "optimise" this by forwarding the echoed request object.
+//
+// Spec: docs/plans/2026-07-28-codes-preview.md §5.3, C5, C12, C13, C14
+//
+// Read-only reuse: trainLmStatus.ts (newestVariantKey, variantDitModel),
+// aceTrain.ts (tensorsRoot), labelStore.ts (readLabel). None of those files is
+// edited by this plan.
+
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { randomUUID } from 'crypto';
+import { aceClient, type AceRequest } from '../aceClient.js';
+import { getModelSnapshot, pickLmFor, tensorsRoot } from './aceTrain.js';
+import { readLabel } from './labelStore.js';
+import { newestVariantKey, variantDitModel, variantExists } from './trainLmStatus.js';
+import { writePreview, type PreviewAudio } from './auditionStore.js';
+import type {
+  AuditionKind, AuditionOptions, AuditionPreview, AuditionSideResult, AuditionSideSpec,
+  LmSize, SampleAuditionResponse, TrainingDatasetRow,
+} from './types.js';
+
+const CODES_FILE = 'lm_codes.jsonl';
+
+/** Wall-clock bound on one /lm run. A 4B planner measures ~18 s of LM phase
+ *  plus up to ~20 s of cold load, so 10 min is ~15x headroom — this is a
+ *  "the engine is wedged" tripwire, not a performance budget. Deliberately a
+ *  local constant: config.ts is outside this plan's editable set. */
+const LM_DEADLINE_MS = 10 * 60_000;
+
+/** An error the route can map straight onto an HTTP status. */
+export class AuditionError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'AuditionError';
+  }
+}
+
+function clamp(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function str(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function num(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function sha1(text: string): string {
+  return crypto.createHash('sha1').update(text, 'utf8').digest('hex');
+}
+
+/** codesCount / 5, rounded to 0.1 (§3.1). */
+function codesDuration(codesCount: number): number {
+  return Math.round((codesCount / 5) * 10) / 10;
+}
+
+// ── Codes-row lookup ──────────────────────────────────────────────────────
+
+export interface CodesRow {
+  file: string;
+  caption: string;
+  lyrics: string;
+  bpm: number;
+  keyscale: string;
+  timesignature: string;
+  duration: number;
+  codes: number[];
+  id: string;
+}
+
+/**
+ * The lm_codes.jsonl row for one dataset sample.
+ *
+ * `sampleId` is the studio's 16-hex TrainingSample id; the codes file stores the
+ * 8-hex `datasetSampleId` (= the same sha1, first 8) — the identical `_id` /
+ * `-([0-9a-f]{8}).safetensors` pair trainLmStatus.countCodes matches on. Falls
+ * back to the id embedded in `row.file` when `_id` is missing (legacy rows).
+ */
+export function findCodesRow(slug: string, variantKey: string, sampleId: string): CodesRow | null {
+  const id8 = String(sampleId ?? '').toLowerCase().slice(0, 8);
+  if (!id8 || !variantKey) return null;
+  const codesPath = path.join(tensorsRoot(slug), variantKey, CODES_FILE);
+  let raw = '';
+  try {
+    if (!fs.existsSync(codesPath)) return null;
+    raw = fs.readFileSync(codesPath, 'utf-8');
+  } catch {
+    return null;
+  }
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;   // a torn line is not a row
+    }
+    if (!row || typeof row !== 'object') continue;
+
+    const rowId = str(row._id).toLowerCase();
+    let hit = rowId === id8;
+    if (!hit) {
+      const m = /-([0-9a-f]{8})\.safetensors$/i.exec(str(row.file));
+      hit = !!m && m[1].toLowerCase() === id8;
+    }
+    if (!hit) continue;
+
+    const codes = Array.isArray(row.codes)
+      ? (row.codes as unknown[]).map(v => Math.trunc(num(v, -1))).filter(v => v >= 0)
+      : [];
+    return {
+      file: str(row.file),
+      caption: str(row.caption),
+      lyrics: str(row.lyrics),
+      bpm: Math.trunc(num(row.bpm)),
+      keyscale: str(row.keyscale),
+      timesignature: str(row.timesignature),
+      duration: Math.trunc(num(row.duration)),
+      codes,
+      id: rowId || id8,
+    };
+  }
+  return null;
+}
+
+// ── Resolution ────────────────────────────────────────────────────────────
+
+export interface ResolvedAudition {
+  datasetId: string;
+  slug: string;
+  kind: AuditionKind;
+  sides: AuditionSideSpec[];
+  caption: string;
+  lyrics: string;
+  seed: number;
+  durationSec: number;
+  lmModel: string;
+  ditModel: string;
+  vaeModel: string;
+  variantKey: string;
+  sampleId: string;
+  temperature: number;
+  topP: number;
+  cfgScale: number;
+  repPenalty: number;
+  format: 'wav16' | 'mp3';
+  coResident: boolean;
+}
+
+/**
+ * ONE place decides every default (§5.3).
+ *
+ * `lmModel`: when empty, derived from the adapter's size suffix via pickLmFor —
+ * letting the engine's resolve_name pick the sticky/first LM put a 4B adapter on
+ * the 0.6B base ("36 layers but model has 28 — mismatch, refusing", found live
+ * by Rob). An explicit lmModel that contradicts the adapter's size is a 400.
+ */
+export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOptions): ResolvedAudition {
+  const variantKey = (typeof opts.variantKey === 'string' && variantExists(ds.slug, opts.variantKey))
+    ? opts.variantKey
+    : newestVariantKey(ds.slug);
+
+  const sampleId = str(opts.sampleId);
+  const row = sampleId ? findCodesRow(ds.slug, variantKey, sampleId) : null;
+
+  // The literal strings the trainer conditioned on (C12a) fill the gaps, but
+  // never override what the user actually typed. The fallback can only fire when
+  // opts.sampleId is set — the free-text and "let the LM write it" sources never
+  // send one, so an intentionally empty `lyrics` is never silently repopulated.
+  const caption = str(opts.caption).trim() || (row ? row.caption : '');
+  const lyrics = str(opts.lyrics) || (row ? row.lyrics : '');
+
+  // The route lets caption be empty when a sampleId is present, precisely so the
+  // fallback above can supply the TAGGED trainer caption. If the row is missing
+  // or has no caption, there is nothing to fall back to and an empty prompt would
+  // run two meaningless LM passes — fail loudly instead.
+  if (!caption) {
+    throw new AuditionError(409, sampleId
+      ? `Sample ${sampleId} has no caption in ${CODES_FILE} for variant ${variantKey} — ` +
+        'run Preprocess + Extract for this variant, or type a caption instead'
+      : 'caption is required');
+  }
+
+  // Never -1: the audition must be re-runnable from what we record (C14).
+  const seed = Number.isFinite(Number(opts.seed)) && Number(opts.seed) >= 0
+    ? Math.trunc(Number(opts.seed))
+    : Math.floor(Math.random() * 2 ** 31);
+
+  const ditModel = str(opts.ditModel) || variantDitModel(ds.slug, variantKey) || '';
+
+  const sides: AuditionSideSpec[] = (Array.isArray(opts.sides) ? opts.sides : []).map(s => ({
+    slot: s.slot === 'adapter' ? 'adapter' : 'base',
+    label: str(s.label).slice(0, 64) || (s.slot === 'adapter' ? 'Adapter' : 'Base LM'),
+    lmAdapter: str(s.lmAdapter),
+    lmAdapterScale: clamp(s.lmAdapterScale, 1.0, 0, 2),
+  }));
+
+  // Base-LM pinning. An empty lmModel used to fall through to the engine's
+  // resolve_name (sticky loaded LM, else registry[0] = the 0.6B), which made a
+  // 4B adapter meet a 28-layer base and die with "36 layers but model has 28 —
+  // mismatch, refusing" AFTER a full load cycle. Derive the base from the
+  // adapter's size suffix instead, and reject an explicit mismatch up front —
+  // both sides of an A/B must run the SAME base for the comparison to mean
+  // anything, so this is seed-discipline, not just ergonomics.
+  let lmModel = str(opts.lmModel);
+  const adapterSide = sides.find(s => s.lmAdapter);
+  const sizeMatch = adapterSide ? /-(0\.6B|1\.7B|4B)$/i.exec(adapterSide.lmAdapter) : null;
+  const adapterSize = sizeMatch ? sizeMatch[1] : '';
+  if (adapterSize) {
+    if (!lmModel) {
+      lmModel = pickLmFor(adapterSize as LmSize, getModelSnapshot().lm);
+      if (!lmModel) {
+        throw new AuditionError(409,
+          `Adapter ${adapterSide!.lmAdapter} needs a ${adapterSize} LM base, but none is installed`);
+      }
+    } else if (!new RegExp(`-${adapterSize.replace('.', '\\.')}(-|$)`, 'i').test(lmModel)) {
+      throw new AuditionError(400,
+        `Adapter ${adapterSide!.lmAdapter} is ${adapterSize} but lmModel "${lmModel}" is not — ` +
+        'pick a matching base or clear the base-model field');
+    }
+  }
+
+  return {
+    datasetId: ds.id,
+    slug: ds.slug,
+    kind: opts.kind === 'milestone' ? 'milestone' : 'ab',
+    sides,
+    caption,
+    lyrics,
+    seed,
+    durationSec: Math.trunc(clamp(opts.durationSec, 30, 10, 120)),
+    lmModel,
+    ditModel,
+    vaeModel: str(opts.vaeModel),
+    variantKey,
+    sampleId,
+    temperature: clamp(opts.temperature, 0.85, 0.1, 2),
+    topP: clamp(opts.topP, 0.9, 0.05, 1),
+    cfgScale: clamp(opts.cfgScale, 2.0, 0, 10),
+    repPenalty: clamp(opts.repPenalty, 1.0, 1, 1.5),
+    format: opts.format === 'mp3' ? 'mp3' : 'wav16',
+    coResident: opts.coResident !== false,
+  };
+}
+
+// ── The LM request ────────────────────────────────────────────────────────
+
+/**
+ * The ONLY place an LM request is constructed. Every field written explicitly;
+ * nothing inherited from a previous request object (see the module header).
+ *
+ * `lm_seed` is set explicitly as well as `seed` because an explicit lm_seed
+ * always wins over the seed fallback in the engine — which is what makes both
+ * sides of an A/B literally the same LM run apart from the adapter (C5/C14).
+ */
+export function buildLmRequest(
+  resolved: ResolvedAudition,
+  side: AuditionSideSpec,
+): AceRequest & { lm_mode: string } {
+  // `lm_mode` is a real engine field (request.cpp:132, default LM_MODE_NAME_GENERATE)
+  // that AceRequest does not declare — submitLm only injects it for the
+  // 'inspire'/'format' modes. Written explicitly here so the audition never
+  // depends on the engine's default staying 'generate'.
+  return {
+    caption: resolved.caption,
+    lyrics: resolved.lyrics,
+    duration: resolved.durationSec,
+    seed: resolved.seed,
+    lm_seed: resolved.seed,
+    lm_mode: 'generate',
+    lm_batch_size: 1,
+    lm_temperature: resolved.temperature,
+    lm_top_p: resolved.topP,
+    lm_cfg_scale: resolved.cfgScale,
+    lm_rep_penalty: resolved.repPenalty,
+    lm_model: resolved.lmModel,
+    lm_adapter: side.lmAdapter,
+    lm_adapter_scale: side.lmAdapterScale,
+  };
+}
+
+export interface SideHooks {
+  /** Set the job phase — 'audition-decode' between the LM and the decode.
+   *  A callback rather than the TrainingJob itself so this module never imports
+   *  labelingQueue (auditionRunner already does, and a cycle would be a lazy
+   *  import for no gain). */
+  onPhase?: (phase: string) => void;
+  isCancelled?: () => boolean;
+}
+
+export interface SideOutcome {
+  result: AuditionSideResult;
+  audio: PreviewAudio | null;
+}
+
+/**
+ * One A/B side: /lm → /codes-decode.
+ *
+ * NEVER throws. A failed side lands in `.error` with `ok:false` and the other
+ * side still runs — half an A/B is still evidence.
+ */
+export async function runOneSide(
+  resolved: ResolvedAudition,
+  side: AuditionSideSpec,
+  hooks: SideHooks = {},
+): Promise<SideOutcome> {
+  const result: AuditionSideResult = {
+    slot: side.slot,
+    label: side.label,
+    lmAdapter: side.lmAdapter,
+    lmAdapterScale: side.lmAdapterScale,
+    ok: false,
+    error: '',
+    audioUrl: '',
+    codesCount: 0,
+    codesSha1: '',
+    durationSec: 0,
+    caption: '',
+    lyrics: '',
+    bpm: 0,
+    keyscale: '',
+    timesignature: '',
+    lmMs: 0,
+    decodeMs: 0,
+  };
+
+  try {
+    // ── 1. /lm ───────────────────────────────────────────────────────────
+    const t0 = Date.now();
+    const lmJobId = await aceClient.submitLm(
+      buildLmRequest(resolved, side), undefined, resolved.coResident);
+
+    // A deadline is not optional here. labelingQueue runs every training job
+    // kind — label, enhance, build, preprocess, train-lm, train-dit — on ONE
+    // global promise chain (`queueTail = queueTail.then(...)`), so an unbounded
+    // wait in this loop does not just hang the audition: it wedges that chain
+    // for the rest of the server's lifetime, leaving every subsequent job for
+    // EVERY dataset stuck at 'queued' with no error and no log line. A wedged
+    // engine LM job (OOM-stall, driver hang, or a worker that died without ever
+    // setting status 2) is exactly how that happens. Bound + cancel, mirroring
+    // understandClient's deadline/abort handling.
+    const lmDeadline = Date.now() + LM_DEADLINE_MS;
+    for (;;) {
+      // Cancel the ENGINE job too, not just our wait. Abandoning it leaves the
+      // GPU working on a result nobody will fetch, and with ?keep_loaded=1 the
+      // 4B stays pinned — the next train-lm run then kills ace-server mid-flight.
+      if (hooks.isCancelled?.()) {
+        await aceClient.cancelJob(lmJobId).catch(() => { /* engine may already be gone */ });
+        throw new Error('Cancelled');
+      }
+      if (Date.now() > lmDeadline) {
+        await aceClient.cancelJob(lmJobId).catch(() => { /* best effort */ });
+        throw new Error(`LM job timed out after ${Math.round(LM_DEADLINE_MS / 60_000)} min`);
+      }
+      const status = await aceClient.pollJob(lmJobId);
+      if (status.status === 'done') break;
+      if (status.status === 'failed') throw new Error('LM job failed — see ace_engine.log');
+      if (status.status === 'cancelled') throw new Error('LM job cancelled');
+      await new Promise(r => setTimeout(r, 200));
+    }
+    const lmRes = await aceClient.getJobResult(lmJobId);
+    if (!lmRes.ok) throw new Error(`LM result fetch failed (${lmRes.status})`);
+    const echoed = await lmRes.json() as AceRequest[];
+    result.lmMs = Date.now() - t0;
+
+    // Exactly six values are read out of the echo. It is then DISCARDED.
+    const plan = Array.isArray(echoed) ? echoed[0] : undefined;
+    const audioCodes = str(plan?.audio_codes);
+    result.caption = str(plan?.caption);
+    result.lyrics = str(plan?.lyrics);
+    result.bpm = Math.trunc(num(plan?.bpm));
+    result.keyscale = str(plan?.keyscale);
+    result.timesignature = str(plan?.timesignature);
+
+    // ── 2. no codes → a soft failure, not a thrown job ───────────────────
+    if (!audioCodes.trim()) {
+      result.error = 'LM returned no audio codes';
+      return { result, audio: null };
+    }
+
+    result.codesSha1 = sha1(audioCodes);
+    result.codesCount = audioCodes.split(',').filter(t => t.trim().length > 0).length;
+    result.durationSec = codesDuration(result.codesCount);
+
+    // ── 3. /codes-decode — request built FRESH, never from `plan` ─────────
+    hooks.onPhase?.('audition-decode');
+    const t1 = Date.now();
+    const buf = await aceClient.codesDecode({
+      audio_codes: audioCodes,
+      synth_model: resolved.ditModel,
+      vae: resolved.vaeModel,
+      output_format: resolved.format,
+    }, undefined, hooks.isCancelled);
+    result.decodeMs = Date.now() - t1;
+
+    result.ok = true;
+    return {
+      result,
+      audio: { slot: side.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav' },
+    };
+  } catch (err: any) {
+    result.ok = false;
+    result.error = err instanceof Error ? err.message : String(err);
+    return { result, audio: null };
+  }
+}
+
+// ── The synchronous sample audition ───────────────────────────────────────
+
+/**
+ * Stored codes → audio, no /lm at all — which is exactly why it is fast enough
+ * to be synchronous (C7).
+ *
+ * Precedence (FROZEN, C12):
+ *   1. lm_codes.jsonl's `codes` array — the canonical source, literally the
+ *      token stream the trainer conditioned on.
+ *   2. labelStore's SampleLabelRecord.audioCodes — the legacy /understand payload.
+ *   3. Neither → 409. Codes are NEVER silently synthesised.
+ *
+ * The `source` field says which was used: (1) and (2) can disagree if the DiT
+ * changed since labelling, and the user must be able to see which they heard.
+ */
+export async function decodeStoredCodes(
+  ds: TrainingDatasetRow,
+  sampleId: string,
+  format: 'wav16' | 'mp3',
+): Promise<SampleAuditionResponse> {
+  const variantKey = newestVariantKey(ds.slug);
+  const row = findCodesRow(ds.slug, variantKey, sampleId);
+
+  let codesCsv = '';
+  let source: 'lm_codes' | 'label' = 'lm_codes';
+  let caption = '';
+  let lyrics = '';
+  let bpm = 0;
+  let keyscale = '';
+  let timesignature = '';
+
+  if (row && row.codes.length > 0) {
+    codesCsv = row.codes.join(',');
+    source = 'lm_codes';
+    caption = row.caption;
+    lyrics = row.lyrics;
+    bpm = row.bpm;
+    keyscale = row.keyscale;
+    timesignature = row.timesignature;
+  } else {
+    const label = readLabel(ds.slug, sampleId);
+    const stored = str(label?.audioCodes).trim();
+    if (stored) {
+      codesCsv = stored;
+      source = 'label';
+      caption = str(label?.understand?.caption);
+      lyrics = str(label?.understand?.lyrics);
+      bpm = Math.trunc(num(label?.understand?.bpm));
+      keyscale = str(label?.understand?.keyscale);
+      timesignature = str(label?.understand?.timesignature);
+    }
+  }
+
+  if (!codesCsv) {
+    throw new AuditionError(409,
+      'This sample has no stored codes — run Preprocess + Extract, or label it with Understand');
+  }
+
+  const codesCount = codesCsv.split(',').filter(t => t.trim().length > 0).length;
+  const ditModel = variantDitModel(ds.slug, variantKey) || '';
+
+  const t0 = Date.now();
+  const buf = await aceClient.codesDecode({
+    audio_codes: codesCsv,
+    synth_model: ditModel,
+    vae: '',
+    output_format: format,
+  });
+  const decodeMs = Date.now() - t0;
+
+  const previewId = randomUUID();
+  const ext: 'wav' | 'mp3' = format === 'mp3' ? 'mp3' : 'wav';
+  const durationSec = codesDuration(codesCount);
+
+  const sideResult: AuditionSideResult = {
+    slot: 'base',
+    label: source === 'lm_codes' ? 'Stored codes (lm_codes.jsonl)' : 'Stored codes (Understand)',
+    lmAdapter: '',
+    lmAdapterScale: 1,
+    ok: true,
+    error: '',
+    audioUrl: `/api/training/previews/${previewId}/base`,
+    codesCount,
+    codesSha1: sha1(codesCsv),
+    durationSec,
+    caption,
+    lyrics,
+    bpm,
+    keyscale,
+    timesignature,
+    lmMs: 0,
+    decodeMs,
+  };
+
+  const preview: AuditionPreview = {
+    previewId,
+    datasetId: ds.id,
+    kind: 'sample',
+    createdAt: new Date().toISOString(),
+    seed: 0,
+    caption,
+    lyrics,
+    durationSec,
+    lmModel: '',
+    ditModel,
+    vaeModel: '',
+    sampleId,
+    variantKey: source === 'lm_codes' ? variantKey : '',
+    sides: [sideResult],
+  };
+
+  const wrote = writePreview(preview, [{ slot: 'base', buf, ext }]);
+  if (!wrote) {
+    // The audio decoded but could not be stored — say so rather than handing
+    // back a URL that 404s.
+    preview.sides[0].audioUrl = '';
+    preview.sides[0].error = 'Decoded, but the preview could not be written to disk';
+  }
+
+  return { preview, source };
+}

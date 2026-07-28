@@ -12,14 +12,16 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, Copy, Cpu, Database, FileCode2, Flag, Layers, Loader2, PauseCircle, Target, Waves, XCircle,
+  AlertTriangle, Check, Copy, Cpu, Database, FileCode2, Flag, Headphones, Layers, Loader2, PauseCircle, Target, Waves, XCircle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TrainDitOptions, TrainLmOptions } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
-import { formatEtaMs } from '../../utils/trainingEta';
+import { formatDurationMs, totalEpochMs } from '../../utils/trainingEta';
+import { AuditionCard, type MilestoneAuditionRequest } from './AuditionCard';
 import { JobProgress } from './JobProgress';
 import { TrainingChart } from './TrainingChart';
+import { TrainingRunStats } from './TrainingRunStats';
 import { TRAIN_DIT_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
 import { TRAIN_LM_DEFAULTS, TrainLmForm, type TrainLmFormState } from './TrainLmForm';
 import { useTrainingStream } from './useTrainingStream';
@@ -77,6 +79,17 @@ export const TrainPanel: React.FC = () => {
   // the needs-preprocess gate below are both skipped and the fully enabled form
   // renders for that window. Seeded true so the hole never exists.
   const [statusPending, setStatusPending] = useState(true);
+  // A milestone badge cannot start an audition on its own — the prompt lives in
+  // the AuditionCard. Clicking one hands the milestone dir down; the nonce lets
+  // a repeat click on the SAME milestone re-trigger.
+  const [milestoneRequest, setMilestoneRequest] = useState<MilestoneAuditionRequest | null>(null);
+  const auditionMilestone = (path: string, loss: number, epoch: number) => {
+    setMilestoneRequest(prev => ({
+      path,
+      label: `loss ${loss.toFixed(1)} · #${epoch}`,
+      nonce: (prev?.nonce ?? 0) + 1,
+    }));
+  };
   // Same hole on the DiT side, and it is worse there: with trainDitStatus null the
   // card's `variantKey === ''` gate is falsy, so the form rendered fully enabled
   // with an EMPTY base-model chip, and handleStartDit then omits variantKey and
@@ -396,7 +409,9 @@ export const TrainPanel: React.FC = () => {
 
   // ── Gate 5: another kind of job owns this dataset ───────────────────────
   // train-dit is NOT "another kind" — it is the second card on this very panel.
-  if (jobActive && jobKind !== 'train-lm' && jobKind !== 'train-dit') {
+  // Neither is 'audition': the AuditionCard lives here too, and bailing out
+  // here would unmount the card (and its players) for the whole run.
+  if (jobActive && jobKind !== 'train-lm' && jobKind !== 'train-dit' && jobKind !== 'audition') {
     return (
       <div className="flex flex-col gap-4">
         {header}
@@ -414,8 +429,11 @@ export const TrainPanel: React.FC = () => {
   const status = trainLmStatus;
   const ditStatus = trainDitStatus;
   const ditStatusLoading = trainDitLoading || ditStatusPending;
-  const etaLabel = formatEtaMs(trainLmLast?.etaMs ?? 0);
-  const ditEtaLabel = formatEtaMs(trainDitLast?.etaMs ?? 0);
+  // NOTE: trainLmLast.etaMs / trainDitLast.etaMs (the engine's own
+  // mean-epoch-ms x epochs-to-CAP) are deliberately NOT rendered any more. They
+  // sat under the chart labelled "ETA" while JobProgress showed a loss-curve
+  // estimate labelled the same thing, and the two answered different questions.
+  // TrainingRunStats above the chart is now the single source (§Task 1b).
 
   return (
     <div className="flex flex-col gap-4">
@@ -502,9 +520,12 @@ export const TrainPanel: React.FC = () => {
 
           {/* The step layer arrives long before the second epoch does, so the
               chart is worth showing from the first handful of optimizer steps —
-              on a long-epoch run that is the only live feedback there is. */}
-          {(trainLmEpochs.length >= 2 || trainStepSeries.length >= 2) && (
-            <div className={`${CARD} flex flex-col gap-2`}>
+              on a long-epoch run that is the only live feedback there is. The
+              stats strip renders from the first frame either way: elapsed time
+              is useful before any curve exists. */}
+          <div className={`${CARD} flex flex-col gap-2`}>
+            <TrainingRunStats />
+            {(trainLmEpochs.length >= 2 || trainStepSeries.length >= 2) && (
               <TrainingChart
                 epochs={trainLmEpochs}
                 steps={trainStepSeries}
@@ -512,11 +533,12 @@ export const TrainPanel: React.FC = () => {
                 target={form.targetLoss}
                 maxEpochs={trainMaxEpochs || form.epochs}
               />
-            </div>
-          )}
+            )}
+          </div>
 
+          {/* No ETA tile: the run's only ETA lives in TrainingRunStats above. */}
           {trainLmLast && (
-            <div className={`${CARD} grid grid-cols-2 sm:grid-cols-4 gap-3`}>
+            <div className={`${CARD} grid grid-cols-2 sm:grid-cols-3 gap-3`}>
               <div className="flex flex-col">
                 <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.epochLoss')}</span>
                 <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{trainLmLast.loss.toFixed(4)}</span>
@@ -528,10 +550,6 @@ export const TrainPanel: React.FC = () => {
               <div className="flex flex-col">
                 <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.gradNorm')}</span>
                 <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{trainLmLast.gradNorm.toFixed(3)}</span>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.eta')}</span>
-                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{etaLabel || '—'}</span>
               </div>
             </div>
           )}
@@ -578,6 +596,17 @@ export const TrainPanel: React.FC = () => {
                 </span>
               </>
             )}
+            {/* Time taken, summed from the persisted per-epoch durations — the
+                job (and its startedAt) is long gone by the time this card is
+                read off disk. Train stage only; extract/export are not in it. */}
+            {totalEpochMs(status.epochs) > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.timeTaken')}: <strong>{formatDurationMs(totalEpochMs(status.epochs))}</strong>
+                </span>
+              </>
+            )}
             {status.adapterBytes > 0 && (
               <>
                 <span className="text-zinc-400 dark:text-zinc-600">·</span>
@@ -608,13 +637,15 @@ export const TrainPanel: React.FC = () => {
               <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.milestones')}</span>
               <div className="flex items-center gap-2 flex-wrap">
                 {status.milestones.map(m => (
-                  <span
+                  <button
                     key={m.path}
-                    title={m.path}
-                    className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-sky-500 bg-sky-500/10 border-sky-500/20 tabular-nums"
+                    onClick={() => auditionMilestone(m.path, m.loss, m.epoch)}
+                    title={`${m.path}\n${t('trainingStudio.audition.milestoneButton')}`}
+                    className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-sky-500 bg-sky-500/10 border-sky-500/20 hover:bg-sky-500/20 transition-colors tabular-nums"
                   >
                     <Flag size={10} /> {m.loss.toFixed(1)} · #{m.epoch}
-                  </span>
+                    <Headphones size={10} className="text-amber-500" />
+                  </button>
                 ))}
               </div>
             </div>
@@ -623,6 +654,11 @@ export const TrainPanel: React.FC = () => {
           <p className="text-xs text-emerald-600 dark:text-emerald-400">{t('trainingStudio.train.visibleNow')}</p>
         </div>
       )}
+
+      {/* ── Codes audition ───────────────────────────────────────────────── */}
+      {/* Auto-expanded once an adapter exists; collapsed-but-openable before
+          that, because an A/B with nothing to compare against is noise (§6.2). */}
+      <AuditionCard milestoneRequest={milestoneRequest} />
 
       {/* ── DiT card ─────────────────────────────────────────────────────── */}
       <div className={`${CARD} flex flex-col gap-4`}>
@@ -716,8 +752,9 @@ export const TrainPanel: React.FC = () => {
         <div className="flex flex-col gap-3">
           <JobProgress />
 
-          {(trainDitEpochs.length >= 2 || trainStepSeries.length >= 2) && (
-            <div className={`${CARD} flex flex-col gap-2`}>
+          <div className={`${CARD} flex flex-col gap-2`}>
+            <TrainingRunStats />
+            {(trainDitEpochs.length >= 2 || trainStepSeries.length >= 2) && (
               <TrainingChart
                 epochs={trainDitEpochs}
                 steps={trainStepSeries}
@@ -725,8 +762,8 @@ export const TrainPanel: React.FC = () => {
                 target={ditForm.targetLoss}
                 maxEpochs={trainMaxEpochs || ditForm.epochs}
               />
-            </div>
-          )}
+            )}
+          </div>
 
           {trainDitLast && (
             <div className={`${CARD} grid grid-cols-2 sm:grid-cols-4 gap-3`}>
@@ -760,10 +797,7 @@ export const TrainPanel: React.FC = () => {
                   {trainDitLast.layers > 0 ? trainDitLast.layers : '—'}
                 </span>
               </div>
-              <div className="flex flex-col">
-                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.eta')}</span>
-                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{ditEtaLabel || '—'}</span>
-              </div>
+              {/* No ETA tile — TrainingRunStats above the chart owns it. */}
             </div>
           )}
         </div>
@@ -822,6 +856,14 @@ export const TrainPanel: React.FC = () => {
                 <span className="text-zinc-400 dark:text-zinc-600">·</span>
                 <span className="tabular-nums">
                   {t('trainingStudio.train.dit.epochsRun')}: <strong>{ditStatus.epochsRun}</strong>
+                </span>
+              </>
+            )}
+            {totalEpochMs(ditStatus.epochs) > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.timeTaken')}: <strong>{formatDurationMs(totalEpochMs(ditStatus.epochs))}</strong>
                 </span>
               </>
             )}

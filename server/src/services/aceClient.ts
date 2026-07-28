@@ -796,4 +796,68 @@ export const aceClient = {
     const arrayBuf = await resultRes.arrayBuffer();
     return Buffer.from(arrayBuf);
   },
+
+  /** POST /codes-decode — 5 Hz FSQ codes straight to audio through the
+   *  detokenizer + VAE. No DiT, no sampler, no adapter: this is the LM's plan
+   *  rendered literally. Polls the engine job and returns the encoded audio.
+   *
+   *  The request is built FRESH by the caller from {audio_codes, synth_model,
+   *  vae, output_format, peak_clip} — never from an AceRequest that /lm echoed
+   *  back. Server-only sideband fields do not survive that round trip, and
+   *  forwarding the echo is the known way to lose them. */
+  async codesDecode(
+    request: {
+      audio_codes: string; synth_model?: string; vae?: string;
+      output_format?: string; peak_clip?: number;
+    },
+    timeoutMs = 90_000,
+    isCancelled?: () => boolean,
+  ): Promise<Buffer> {
+    const started = Date.now();
+    const res = await acePost('/codes-decode', request);
+    const data = await res.json() as { id: string };
+    const jobId = data.id;
+
+    for (;;) {
+      // Both exits cancel the ENGINE job. Throwing without cancelling leaves the
+      // GPU decoding a result nobody will fetch, and the finished WAV then sits
+      // in the engine's in-memory job ring until a restart.
+      if (isCancelled?.()) {
+        await this.cancelJob(jobId).catch(() => { /* engine may already be gone */ });
+        throw new Error('codes-decode cancelled');
+      }
+      if (Date.now() - started > timeoutMs) {
+        await this.cancelJob(jobId).catch(() => { /* best effort */ });
+        throw new Error('codes-decode timed out');
+      }
+      const status = await this.pollJob(jobId);
+      if (status.status === 'done') break;
+      if (status.status === 'failed') throw new Error('codes-decode failed');
+      if (status.status === 'cancelled') throw new Error('codes-decode cancelled');
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    const resultRes = await this.getJobResult(jobId);
+    if (!resultRes.ok) throw new Error(`codes-decode result fetch failed (${resultRes.status})`);
+    const arrayBuf = await resultRes.arrayBuffer();
+    return Buffer.from(arrayBuf);
+  },
+
+  /** POST /models/unload — evict one ModelStore label ('LM', 'DiT', 'VAE-Dec',
+   *  'FSQ-Detok', …). Best-effort: a false/failed reply is not an error. */
+  async unloadLabel(label: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${BASE}/models/unload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+        signal: AbortSignal.timeout(TIMEOUT_QUICK),
+      });
+      if (!res.ok) return false;
+      const body = await res.json().catch(() => ({})) as { ok?: boolean; unloaded?: boolean };
+      return body.ok !== false && body.unloaded !== false;
+    } catch {
+      return false;
+    }
+  },
 };

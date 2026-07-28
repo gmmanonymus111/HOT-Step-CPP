@@ -230,9 +230,9 @@ static void print_usage(void) {
             "\n"
             "  Adapter:\n"
             "    --adapter-type <lora>       lora            (lokr reserved, D22 — rejected in v1)\n"
-            "    --rank <n>                  16\n"
-            "    --alpha <n>                 32\n"
-            "    --target-mlp                off             also LoRA mlp gate/up/down\n"
+            "    --rank <n>                  128\n"
+            "    --alpha <n>                 256\n"
+            "    --target-mlp / --no-target-mlp   default ON  also LoRA mlp gate/up/down\n"
             "    --layers <n>                0               0 = auto; else train the top n layers\n"
             "\n"
             "  Objective (design 4.5):\n"
@@ -245,11 +245,11 @@ static void print_usage(void) {
             "    --t-min <f>                 0.0             interval-expert window (rejection resample)\n"
             "    --t-max <f>                 1.0\n"
             "    --cfg-ratio <f>             0.15\n"
-            "    --genre-ratio <n>           0               percent, 0-100\n"
+            "    --genre-ratio <n>           30              percent, 0-100\n"
             "\n"
             "  Optimizer / schedule:\n"
             "    --lr <f>                    5e-4\n"
-            "    --epochs <n>                100         hard cap; target-loss usually stops earlier\n"
+            "    --epochs <n>                400         hard cap; target-loss usually stops earlier\n"
             "    --grad-accum <n>            4\n"
             "    --warmup-ratio <f>          0.05\n"
             "    --grad-clip <f>             1.0         0 = disabled\n"
@@ -1021,6 +1021,7 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
+        else if (!strcmp(argv[i], "--no-target-mlp")) a.target_mlp = false;
         else if (!strcmp(argv[i], "--loss-weighting") && i + 1 < argc) a.loss_weighting = argv[++i];
         else if (!strcmp(argv[i], "--snr-gamma") && i + 1 < argc) a.snr_gamma = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--t-bias") && i + 1 < argc) a.t_bias = (float) atof(argv[++i]);

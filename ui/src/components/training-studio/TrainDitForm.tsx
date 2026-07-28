@@ -58,16 +58,19 @@ export interface TrainDitFormState {
   stopEngine: boolean;
 }
 
-/** §2.6 defaults, verbatim. */
+/** §2.6 defaults, with the DiT retune applied: 400 epochs, r128/a256, 30 %
+ *  genre conditioning and the MLP projections trained. Kept in lockstep with
+ *  the train-dit route's own numOpt fallbacks (server/src/routes/training.ts)
+ *  and DitTrainArgs (engine/src/train/dit-train-run.h). */
 export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   adapterName: '',
   quality: 'balanced',
   targetLoss: 0.4,
-  epochs: 100,
+  epochs: 400,
   adapterType: 'lora',
-  rank: 16,
-  alpha: 32,
-  targetMlp: false,
+  rank: 128,
+  alpha: 256,
+  targetMlp: true,
   layers: 0,
   crop: 0,
   cropMin: 375,
@@ -86,7 +89,7 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   tMin: 0,
   tMax: 1,
   cfgRatio: 0.15,
-  genreRatio: 0,
+  genreRatio: 30,
   seed: 42,
   order: 'shuffle',
   milestoneStep: 0.1,
@@ -100,10 +103,14 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
 /** §5.2 quality dial. Each preset patches the SAME key set so flipping back and
  *  forth is reversible — the plan names targetLoss only under Thorough, which on
  *  its own would leave 0.3 stuck after switching away from it. */
+// Balanced IS the default state, so its epoch count has to be the new default
+// (400) — leaving it at 100 would mean the dial silently undid the retune the
+// moment anyone clicked the button that was already highlighted. Fast and
+// Thorough are re-spaced around it to keep the dial monotone.
 const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
-  fast:     { epochs: 40,  cropMax: 750,  milestoneStep: 0.2, targetLoss: 0.4 },
-  balanced: { epochs: 100, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.4 },
-  thorough: { epochs: 400, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.3 },
+  fast:     { epochs: 100, cropMax: 750,  milestoneStep: 0.2, targetLoss: 0.4 },
+  balanced: { epochs: 400, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.4 },
+  thorough: { epochs: 800, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.3 },
 };
 
 const ALL_STAGES: TrainDitStage[] = ['train', 'export'];
@@ -256,7 +263,7 @@ export const TrainDitForm: React.FC<Props> = ({
             step={1}
             value={value.epochs}
             disabled={lock}
-            onChange={(e) => onChange({ epochs: num(e.target.value, 100) })}
+            onChange={(e) => onChange({ epochs: num(e.target.value, 400) })}
             className={FIELD}
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>
@@ -279,7 +286,7 @@ export const TrainDitForm: React.FC<Props> = ({
             <input
               type="number" min={1} max={256} step={1}
               value={value.rank} disabled={lock}
-              onChange={(e) => onChange({ rank: num(e.target.value, 16) })}
+              onChange={(e) => onChange({ rank: num(e.target.value, 128) })}
               className={FIELD}
             />
           </label>
@@ -289,7 +296,7 @@ export const TrainDitForm: React.FC<Props> = ({
             <input
               type="number" min={1} max={1024} step={1}
               value={value.alpha} disabled={lock}
-              onChange={(e) => onChange({ alpha: num(e.target.value, 32) })}
+              onChange={(e) => onChange({ alpha: num(e.target.value, 256) })}
               className={FIELD}
             />
           </label>
@@ -483,7 +490,7 @@ export const TrainDitForm: React.FC<Props> = ({
             <input
               type="number" min={0} max={100} step={1}
               value={value.genreRatio} disabled={lock}
-              onChange={(e) => onChange({ genreRatio: num(e.target.value, 0) })}
+              onChange={(e) => onChange({ genreRatio: num(e.target.value, 30) })}
               className={FIELD}
             />
           </label>

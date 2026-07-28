@@ -31,18 +31,20 @@ struct DitTrainArgs {
     std::string tensors_dir, out_dir, models_dir, dit_path, dit_name;
 
     std::string adapter_type = "lora";
-    int         rank = 16, alpha = 32;
-    bool        target_mlp = false;
+    int         rank = 128, alpha = 256;
+    // ON by default: an attention-only LoRA leaves the MLP projections — where
+    // most of the timbre lives — frozen. --no-target-mlp turns it back off.
+    bool        target_mlp = true;
     int         layers     = 0;  // 0 = auto (top-K depth)
 
     std::string loss_weighting = "flow_snr";
     float       snr_gamma = 5.0f, t_bias = 0.5f;
     bool        channel_balance = true;
     float       timestep_mu = -0.4f, timestep_sigma = 1.0f, t_min = 0.0f, t_max = 1.0f, cfg_ratio = 0.15f;
-    int         genre_ratio = 0;
+    int         genre_ratio = 30;
 
     float       lr = 5e-4f;
-    int         epochs = 100, grad_accum = 4;
+    int         epochs = 400, grad_accum = 4;
     float       warmup_ratio = 0.05f, grad_clip = 1.0f, weight_decay = 0.01f;
     int         seed        = 42;
     float       target_loss = 0.4f;

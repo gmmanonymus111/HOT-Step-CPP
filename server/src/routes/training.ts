@@ -40,6 +40,10 @@
 //   GET    /datasets/:id/train-lm                       — LM adapter / codes status
 //   POST   /datasets/:id/train-dit                      — start a DiT LoRA training job
 //   GET    /datasets/:id/train-dit                      — DiT adapter / variant status
+//   GET    /previews/:previewId/:slot                   — stream a codes preview (Range aware)
+//   POST   /datasets/:id/audition                       — start an A/B codes-audition job
+//   GET    /datasets/:id/audition                       — recent previews for a dataset
+//   POST   /datasets/:id/samples/:sampleId/audition     — SYNC decode of a sample's stored codes
 
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
@@ -77,7 +81,13 @@ import {
 import {
   adapterDitDirFor, adapterDitRoot, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
+import {
+  deleteDatasetPreviews, isPreviewId, isPreviewSlot, listPreviews, previewsRoot,
+  prunePreviews, resolvePreviewFile,
+} from '../services/training/auditionStore.js';
+import { AuditionError, decodeStoredCodes } from '../services/training/auditionService.js';
 import type {
+  AuditionListResponse, AuditionOptions, AuditionSideSpec,
   BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, LmSize,
   PatchSampleInput, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetDetail, TrainingDatasetRow, TrainingSample,
@@ -503,6 +513,64 @@ router.get('/jobs/:jobId/stream', (req: Request, res: Response) => {
   }
 });
 
+// ── Codes-audition preview streaming (codes-preview §3.2) ────────────────
+//
+// Declared here, in the static-first-segment block, per [DS] §2 — `/previews`
+// cannot collide with `/datasets/:id`, but the house rule is the house rule.
+//
+// The served path is BUILT SERVER-SIDE from two validated tokens (a uuid v4 and
+// `base|adapter`) and re-checked with isInside(previewsRoot(), file). No
+// client-supplied path ever reaches fs.
+//
+// Range handling is a verbatim clone of the sample-audio route below with
+// sample.audioPath swapped for the validated preview path. Deliberately NOT
+// refactored into a shared helper: the sample route is outside this plan's
+// editable set and a shared helper would drag it in.
+router.get('/previews/:previewId/:slot', (req: Request, res: Response) => {
+  try {
+    const previewId = req.params.previewId;
+    const slot = req.params.slot;
+    if (!isPreviewId(previewId) || !isPreviewSlot(slot)) {
+      res.status(404).json({ error: 'Preview not found' });
+      return;
+    }
+    const file = resolvePreviewFile(previewId, slot);
+    if (!file || !isInside(previewsRoot(), file) || !fs.existsSync(file)) {
+      res.status(404).json({ error: 'Preview not found' });
+      return;
+    }
+
+    const stat = fs.statSync(file);
+    const mime = MIME_BY_EXT[path.extname(file).toLowerCase()] || 'application/octet-stream';
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store');
+
+    const range = req.headers.range;
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range);
+      if (m) {
+        const start = m[1] ? parseInt(m[1], 10) : 0;
+        const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+        if (Number.isFinite(start) && start < stat.size && end >= start) {
+          const last = Math.min(end, stat.size - 1);
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${start}-${last}/${stat.size}`);
+          res.setHeader('Content-Length', last - start + 1);
+          fs.createReadStream(file, { start, end: last }).pipe(res);
+          return;
+        }
+      }
+    }
+
+    res.setHeader('Content-Length', stat.size);
+    fs.createReadStream(file).pipe(res);
+  } catch (err: any) {
+    console.error(`[Training] Preview stream failed: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Dataset detail / patch / rescan / delete (§2.3) ───────────────────────
 
 router.get('/datasets/:id', async (req: Request, res: Response) => {
@@ -638,6 +706,7 @@ router.delete('/datasets/:id', (req: Request, res: Response) => {
     // sidecars and dataset.json are their files and are never touched.
     repo.deleteDataset(ds.id);
     deleteLabels(ds.slug);
+    deleteDatasetPreviews(ds.id);
     console.log(`[Training] Deleted dataset ${ds.slug} (source folder untouched: ${ds.sourceDir})`);
     res.json({ ok: true });
   } catch (err: any) {
@@ -1651,10 +1720,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     }
 
     // ── 7. numeric clamps (§4.5 step 7) ──────────────────────────────────
-    const epochs = numOpt(body.epochs, 100);
+    // train-dit defaults. These are what the UI path actually gets: TrainDitForm
+    // sends every field, but any client that omits one lands here.
+    const epochs = numOpt(body.epochs, 400);
     const targetLoss = numOpt(body.targetLoss, 0.4);
-    const rank = numOpt(body.rank, 16);
-    const alpha = numOpt(body.alpha, 32);
+    const rank = numOpt(body.rank, 128);
+    const alpha = numOpt(body.alpha, 256);
     const layers = numOpt(body.layers, 0);
     const crop = numOpt(body.crop, 0);
     const cropMin = numOpt(body.cropMin, 375);
@@ -1671,7 +1742,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const tMin = numOpt(body.tMin, 0);
     const tMax = numOpt(body.tMax, 1);
     const cfgRatio = numOpt(body.cfgRatio, 0.15);
-    const genreRatio = numOpt(body.genreRatio, 0);
+    // Percent of micro-steps conditioned on the dataset's genre text instead of
+    // the caption (D14). Default 30 — enough for the adapter to learn the genre
+    // handle without the caption path going untrained.
+    const genreRatio = numOpt(body.genreRatio, 30);
     const seed = numOpt(body.seed, 42);
     const milestoneStep = numOpt(body.milestoneStep, 0.1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
@@ -1749,7 +1823,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       adapterType: 'lora',
       rank: Math.trunc(rank),
       alpha: Math.trunc(alpha),
-      targetMlp: body.targetMlp === true,
+      // Default ON: an attention-only DiT LoRA leaves the MLP projections —
+      // where most of the timbre lives — frozen. Same !== false shape as
+      // channelBalance/stopEngine, so an omitting client gets the default.
+      targetMlp: body.targetMlp !== false,
       layers: Math.trunc(layers),
       crop: Math.trunc(crop),
       cropMin: Math.trunc(cropMin),
@@ -1805,6 +1882,245 @@ router.get('/datasets/:id/train-dit', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(`[Training] train-dit status failed: ${err.message}`);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Codes audition (codes-preview §3.2) ──────────────────────────────────
+
+const AUDITION_SLOTS: readonly string[] = ['base', 'adapter'];
+
+/**
+ * C16 — stricter than the Create panel, which accepts any absolute path.
+ *
+ * An lmAdapter is either '' (base LM), a bare registry name, or a directory
+ * INSIDE adapters/lm that actually holds an adapter_model.safetensors. The third
+ * clause is what lets a milestone dir
+ * (`<adapters>/lm/<name>-<size>/milestones/loss_<v>`) through while refusing an
+ * arbitrary absolute path. A Training-Studio route has no reason to be as
+ * permissive as the Create panel.
+ */
+function auditionAdapterError(value: string): string | null {
+  if (value === '') return null;
+  // The regex alone accepts '.', '..', '...' and '-'. Both other adapter-name
+  // validators in this file (train-lm and train-dit) pair it with the
+  // safeAdapterName cross-check for exactly that reason; being the one looser
+  // validator in the file is how a future change to the engine's
+  // resolve_lm_adapter_path heuristic turns into a real traversal. Today it is
+  // contained — the engine only takes its path-fallback branch when the value
+  // holds a '/' or '\' — but C16 is this plan's stated security clause and it
+  // should not be the weakest of the three.
+  if (ADAPTER_NAME_RE.test(value)) {
+    return safeAdapterName(value) === value
+      ? null
+      : 'lmAdapter must match [A-Za-z0-9._-]{1,64} and cannot start with a dot';
+  }
+  const root = adapterLmRoot();
+  const resolved = path.resolve(value);
+  if (!isInside(root, resolved) || path.resolve(root) === resolved) {
+    return `lmAdapter must be a registry name or a directory inside ${root}`;
+  }
+  if (!fs.existsSync(path.join(resolved, 'adapter_model.safetensors'))) {
+    return `lmAdapter has no adapter_model.safetensors: ${resolved}`;
+  }
+  return null;
+}
+
+router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
+  try {
+    const body = (req.body || {}) as AuditionOptions;
+
+    // ── 1. dataset + queue ───────────────────────────────────────────────
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (queue.activeJobForDataset(ds.id)) {
+      res.status(409).json({ error: 'A job is already running for this dataset' });
+      return;
+    }
+
+    // ── 2. the engine must be UP — the opposite of every ace-train job ───
+    if (isEngineSuspended()) {
+      res.status(503).json({
+        error: 'Engine is stopped for a training run — audition needs ace-server up',
+      });
+      return;
+    }
+    // Suspended and down are different things, and this feature's own list
+    // response already reports them separately (engineReady, engineSuspended) so
+    // the client can tell them apart. Without this check a crashed ace-server
+    // whose 3 s respawn has not landed yields a 202 + jobId, and ~15 s later the
+    // job dies carrying the bare string 'fetch failed' — an error the user
+    // cannot act on, where an immediate 503 is actionable.
+    if (!engineReady) {
+      res.status(503).json({
+        error: 'Engine is not running — audition needs ace-server up',
+      });
+      return;
+    }
+
+    // ── 3. caption ───────────────────────────────────────────────────────
+    // An EMPTY caption is legal when a sampleId is supplied, and that is not a
+    // loophole — it is the only way §5.3's documented fallback can ever fire.
+    // C12(a) says a sample-sourced audition must use "the literal strings the
+    // trainer conditioned on", which is the lm_codes.jsonl row's caption, i.e.
+    // lm_apply_tag(sidecar caption, custom_tag, position) — the TAGGED string
+    // carrying the trigger word. The dataset sidecar caption the client can see
+    // is the UNTAGGED one; sending it would run the adapter's prompt without its
+    // trigger, both sides would emit near-identical plans, and the UI would
+    // report "the adapter had no effect" — the exact misattribution C14 exists
+    // to prevent. With an unconditional 400 here, resolveAuditionInputs' row
+    // fallback was dead code for this route.
+    const caption = typeof body.caption === 'string' ? body.caption.trim() : '';
+    const hasSampleId = typeof body.sampleId === 'string' && body.sampleId.trim() !== '';
+    if (!caption && !hasSampleId) {
+      res.status(400).json({ error: 'caption is required' });
+      return;
+    }
+    if (caption.length > 4000) {
+      res.status(400).json({ error: 'caption must be at most 4000 characters' });
+      return;
+    }
+
+    // ── 4. sides ─────────────────────────────────────────────────────────
+    const rawSides = Array.isArray(body.sides) ? body.sides : [];
+    if (rawSides.length < 1 || rawSides.length > 2) {
+      res.status(400).json({ error: 'sides must hold 1 or 2 entries' });
+      return;
+    }
+    const seenSlots = new Set<string>();
+    const sides: AuditionSideSpec[] = [];
+    for (const raw of rawSides) {
+      const slot = typeof raw?.slot === 'string' ? raw.slot : '';
+      if (!AUDITION_SLOTS.includes(slot)) {
+        res.status(400).json({ error: "every side needs a slot of 'base' or 'adapter'" });
+        return;
+      }
+      if (seenSlots.has(slot)) {
+        res.status(400).json({ error: 'sides must have distinct slots' });
+        return;
+      }
+      seenSlots.add(slot);
+
+      const label = typeof raw?.label === 'string' ? raw.label : '';
+      if (label.length > 64) {
+        res.status(400).json({ error: 'side label must be at most 64 characters' });
+        return;
+      }
+
+      // ── 5. adapter path safety (C16) ───────────────────────────────────
+      const lmAdapter = typeof raw?.lmAdapter === 'string' ? raw.lmAdapter.trim() : '';
+      const adapterFailure = auditionAdapterError(lmAdapter);
+      if (adapterFailure) {
+        res.status(400).json({ error: adapterFailure });
+        return;
+      }
+
+      sides.push({
+        slot: slot as AuditionSideSpec['slot'],
+        label,
+        lmAdapter,
+        lmAdapterScale: numOpt(raw?.lmAdapterScale, 1.0),
+      });
+    }
+
+    // ── 6. variantKey ────────────────────────────────────────────────────
+    const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
+    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+      res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
+      return;
+    }
+
+    // ── 7. numeric fields clamp silently in resolveAuditionInputs (§3.2.7).
+    // They never 400: an out-of-range temperature is a slider mishap, not a
+    // reason to refuse an audition.
+    const opts: AuditionOptions = {
+      ...body,
+      caption,
+      sides,
+      variantKey: requestedVariant || undefined,
+    };
+
+    const job = queue.startAuditionJob(ds.id, opts);
+    console.log(
+      `[Training] audition job ${job.id} queued — ${sides.length} side(s), dataset ${ds.slug}`);
+    res.status(202).json({ jobId: job.id });
+  } catch (err: any) {
+    console.error(`[Training] audition start failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/datasets/:id/audition', (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    // Lazy prune (C11) — there is deliberately no boot hook.
+    prunePreviews();
+
+    const limit = numOpt(req.query.limit, 20);
+    const payload: AuditionListResponse = {
+      previews: listPreviews(ds.id, limit),
+      engineReady,
+      engineSuspended: isEngineSuspended(),
+    };
+    res.json(payload);
+  } catch (err: any) {
+    console.error(`[Training] audition list failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * SYNCHRONOUS (C7) — stored codes straight through the detokenizer + VAE. There
+ * is no /lm call, which is exactly why this is fast enough not to be a job.
+ * If gate V4 ever measures a warm total over 10 s, promote it to the 'audition'
+ * job kind (the runner already handles a single-sided decode-only job).
+ */
+router.post('/datasets/:id/samples/:sampleId/audition', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (isEngineSuspended()) {
+      res.status(503).json({
+        error: 'Engine is stopped for a training run — audition needs ace-server up',
+      });
+      return;
+    }
+
+    const samples = await buildSamples(ds);
+    const sample = samples.find(s => s.sampleId === req.params.sampleId);
+    if (!sample) {
+      res.status(404).json({ error: 'Sample not found' });
+      return;
+    }
+
+    const format = (req.body || {}).format === 'mp3' ? 'mp3' : 'wav16';
+    res.json(await decodeStoredCodes(ds, sample.sampleId, format));
+  } catch (err: any) {
+    if (err instanceof AuditionError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    const message = err?.message || String(err);
+    // aceClient.codesDecode throws these two by exact text.
+    if (/timed out/i.test(message)) {
+      res.status(504).json({ error: 'Decode timed out after 90s' });
+      return;
+    }
+    if (/fetch failed|ECONNREFUSED|unreachable|aborted/i.test(message)) {
+      res.status(503).json({ error: `Engine unreachable: ${message}` });
+      return;
+    }
+    console.error(`[Training] sample audition failed: ${message}`);
+    res.status(500).json({ error: message });
   }
 });
 

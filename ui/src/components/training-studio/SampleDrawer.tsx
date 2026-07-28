@@ -5,10 +5,11 @@
 // store because these files are not library songs.
 
 import React, { useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Headphones, Loader2, X, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { sampleAudioUrl } from '../../services/trainingApi';
 import { mergedSample, useTrainingStore } from '../../stores/trainingStore';
+import { AuditionPlayer } from './AuditionPlayer';
 
 interface SampleDrawerProps {
   sampleId: string;
@@ -25,6 +26,11 @@ export const SampleDrawer: React.FC<SampleDrawerProps> = ({ sampleId }) => {
   const flushSample = useTrainingStore(s => s.flushSample);
   const revertSampleField = useTrainingStore(s => s.revertSampleField);
   const setOpenSampleId = useTrainingStore(s => s.setOpenSampleId);
+  const auditionSample = useTrainingStore(s => s.auditionSample);
+  const preview = useTrainingStore(s => s.samplePreviews[sampleId]);
+  const previewSource = useTrainingStore(s => s.samplePreviewSources[sampleId]);
+  const previewPending = useTrainingStore(s => !!s.samplePreviewPending[sampleId]);
+  const previewError = useTrainingStore(s => s.samplePreviewErrors[sampleId]);
 
   const sample = useMemo(() => mergedSample(sampleRaw, pending), [sampleRaw, pending]);
   const idx = sampleOrder.indexOf(sampleId);
@@ -82,6 +88,42 @@ export const SampleDrawer: React.FC<SampleDrawerProps> = ({ sampleId }) => {
         {!sample.fileMissing && (
           <audio src={sampleAudioUrl(datasetId, sampleId)} controls className="w-full h-9" preload="none" />
         )}
+
+        {/* Codes audition — the plan next to the truth, two players, one panel.
+            The button is NOT gated on `hasAudioCodes`: that flag is the legacy
+            /understand payload only, and the primary codes source is the
+            variant's lm_codes.jsonl, which the browser cannot see. The server
+            owns the precedence and answers 409 when neither exists. */}
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={() => void auditionSample(sampleId)}
+            disabled={previewPending}
+            className="flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 disabled:opacity-40 transition-colors"
+          >
+            {previewPending
+              ? <Loader2 size={12} className="animate-spin" />
+              : <Headphones size={12} />}
+            {t('trainingStudio.audition.sampleButton')}
+          </button>
+
+          {previewError && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-[11px] text-red-500 dark:text-red-400">
+              <XCircle size={12} className="mt-0.5 flex-shrink-0" />
+              <span className="min-w-0 break-words">{previewError}</span>
+            </div>
+          )}
+
+          {preview?.sides[0] && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-zinc-500">
+                {t(previewSource === 'label'
+                  ? 'trainingStudio.audition.source.label'
+                  : 'trainingStudio.audition.source.lmCodes')}
+              </span>
+              <AuditionPlayer side={preview.sides[0]} />
+            </div>
+          )}
+        </div>
 
         {/* Caption */}
         <label className="flex flex-col gap-1.5">

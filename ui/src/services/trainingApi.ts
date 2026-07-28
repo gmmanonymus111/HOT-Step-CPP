@@ -17,7 +17,8 @@ export type MergePolicy =
 
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
-  | 'preprocess' | 'train-lm' | 'train-dit';
+  | 'preprocess' | 'train-lm' | 'train-dit'
+  | 'audition';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -276,15 +277,15 @@ export interface TrainDitOptions {
   /** Adapter directory name under <adapters>/. Omit = the dataset slug. */
   adapterName?: string;
   adapterType?: DitAdapterType;    // default 'lora'
-  rank?: number;                   // default 16
-  alpha?: number;                  // default 32
-  targetMlp?: boolean;             // default false
+  rank?: number;                   // default 128
+  alpha?: number;                  // default 256
+  targetMlp?: boolean;             // default true
   layers?: number;                 // default 0 = auto (top-K depth)
   crop?: number;                   // default 0 = auto-fit
   cropMin?: number;                // default 375
   cropMax?: number;                // default 1250
   targetLoss?: number;             // default 0.4;  0 disables auto-stop
-  epochs?: number;                 // default 100 (hard cap)
+  epochs?: number;                 // default 400 (hard cap)
   learningRate?: number;           // default 0.0005
   gradAccum?: number;              // default 4
   gradClip?: number;               // default 1.0;  0 disables
@@ -299,7 +300,7 @@ export interface TrainDitOptions {
   tMin?: number;                   // default 0
   tMax?: number;                   // default 1
   cfgRatio?: number;               // default 0.15
-  genreRatio?: number;             // default 0 (percent)
+  genreRatio?: number;             // default 30 (percent)
   seed?: number;                   // default 42
   order?: 'shuffle' | 'fixed';     // default 'shuffle'
   milestoneStep?: number;          // default 0.1;  0 disables
@@ -736,4 +737,123 @@ export const jobStreamUrl = (jobId: string) => `${API_BASE}/jobs/${encodeURIComp
 /** Built dataset.json, parsed. */
 export async function getDatasetJson(id: string): Promise<{ path: string; builtAt: string; dataset: unknown }> {
   return request<{ path: string; builtAt: string; dataset: unknown }>(`/datasets/${encodeURIComponent(id)}/dataset-json`);
+}
+
+// ─── Codes audition (pure-LM preview) ─────────────────────────────────────
+
+/** Which half of an A/B a preview file belongs to. A single-sided audition
+ *  (sample codes, or a milestone with no baseline) always uses 'base'. */
+export type AuditionSlot = 'base' | 'adapter';
+
+export type AuditionKind = 'ab' | 'sample' | 'milestone';
+
+/** One LM run to perform. Both sides of an A/B are identical except lmAdapter. */
+export interface AuditionSideSpec {
+  slot: AuditionSlot;
+  label: string;            // free text shown on the player, e.g. 'Base 4B' / 'abba-4B'
+  lmAdapter: string;        // '' = base LM; else a registry name or a path inside adapters/lm
+  lmAdapterScale: number;   // default 1.0, clamp 0..2
+}
+
+export interface AuditionSideResult {
+  slot: AuditionSlot;
+  label: string;
+  lmAdapter: string;
+  lmAdapterScale: number;
+  ok: boolean;
+  error: string;            // '' when ok
+  audioUrl: string;         // '' when !ok — /api/training/previews/<id>/<slot>
+  codesCount: number;       // number of 5 Hz codes the LM emitted
+  codesSha1: string;        // sha1 of the raw audio_codes string — the determinism receipt
+  durationSec: number;      // codesCount / 5, rounded to 0.1
+  caption: string;          // the plan the LM handed back (C13)
+  lyrics: string;
+  bpm: number;              // 0 = not reported
+  keyscale: string;
+  timesignature: string;
+  lmMs: number;             // wall clock of the /lm job
+  decodeMs: number;         // wall clock of the /codes-decode job
+}
+
+export interface AuditionPreview {
+  previewId: string;        // uuid v4
+  datasetId: string;
+  kind: AuditionKind;
+  createdAt: string;        // ISO
+  seed: number;             // the lm_seed actually used — never -1
+  caption: string;          // the prompt that went IN
+  lyrics: string;           // '' = the LM was asked to write its own
+  durationSec: number;      // requested duration
+  lmModel: string;
+  ditModel: string;         // the DiT whose FSQ detokenizer decoded the codes
+  vaeModel: string;
+  sampleId: string;         // '' unless kind === 'sample' or the prompt came from a sample
+  variantKey: string;       // '' when the prompt was free text
+  sides: AuditionSideResult[];
+}
+
+export interface AuditionOptions {
+  sides: AuditionSideSpec[];      // 1..2 entries, slots must be distinct
+  caption: string;                // required, 1..4000 chars
+  lyrics?: string;                // default ''
+  seed?: number;                  // >= 0; omitted or < 0 → the server picks one and records it
+  durationSec?: number;           // default 30, clamp 10..120
+  lmModel?: string;               // default: the newest variant's LM, else registry[0]
+  ditModel?: string;              // default: variantDitModel(slug, variantKey)
+  vaeModel?: string;              // default: engine's resolve_name default
+  variantKey?: string;            // default: newestVariantKey(slug)
+  sampleId?: string;              // when set, caption/lyrics default from its lm_codes.jsonl row
+  temperature?: number;           // default 0.85, clamp 0.1..2
+  topP?: number;                  // default 0.9,  clamp 0.05..1
+  cfgScale?: number;              // default 2.0,  clamp 0..10
+  repPenalty?: number;            // default 1.0,  clamp 1..1.5
+  format?: 'wav16' | 'mp3';       // default 'wav16' (C10)
+  coResident?: boolean;           // default true (C15)
+  kind?: 'ab' | 'milestone';      // default 'ab'
+}
+
+export interface AuditionListResponse {
+  previews: AuditionPreview[];    // newest first, max 20
+  engineReady: boolean;
+  engineSuspended: boolean;       // true while a preprocess/train job owns the GPU
+}
+
+/** Sync response of the sample-codes audition. */
+export interface SampleAuditionResponse {
+  preview: AuditionPreview;       // kind 'sample', exactly one side, slot 'base'
+  source: 'lm_codes' | 'label';   // which stored-codes source was used (C12 / §5.3)
+}
+
+/** POST the A/B (or milestone) audition. Returns the training job id — the two
+ *  `/lm` runs are far too slow for a synchronous response (C6). */
+export async function startAudition(id: string, opts: AuditionOptions): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>(
+    `/datasets/${encodeURIComponent(id)}/audition`,
+    { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+/** Preview history for one dataset, newest first. */
+export async function getAuditions(id: string, limit = 20): Promise<AuditionListResponse> {
+  return request<AuditionListResponse>(
+    `/datasets/${encodeURIComponent(id)}/audition?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+/** Decode a sample's STORED codes. Synchronous (C7) — no `/lm` call happens. */
+export async function auditionSample(
+  id: string,
+  sampleId: string,
+  format?: 'wav16' | 'mp3',
+): Promise<SampleAuditionResponse> {
+  return request<SampleAuditionResponse>(
+    `/datasets/${encodeURIComponent(id)}/samples/${encodeURIComponent(sampleId)}/audition`,
+    { method: 'POST', ...jsonBody(format ? { format } : {}) },
+  );
+}
+
+/** Range-served preview audio. `AuditionSideResult.audioUrl` already carries
+ *  this string; this helper exists for callers that only hold id + slot. */
+export function previewAudioUrl(previewId: string, slot: AuditionSlot): string {
+  return `${API_BASE}/previews/${encodeURIComponent(previewId)}/${encodeURIComponent(slot)}`;
 }

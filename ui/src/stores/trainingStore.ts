@@ -7,7 +7,10 @@
 
 import { create } from 'zustand';
 import * as trainingApi from '../services/trainingApi';
+import { computeTrainingEta, type TrainingEta } from '../utils/trainingEta';
 import type {
+  AuditionOptions,
+  AuditionPreview,
   BulkSetInput,
   CaptionOptions,
   CreateDatasetInput,
@@ -189,6 +192,20 @@ interface TrainingState {
    *  position so the step and epoch layers share one x-axis. */
   trainStepsPerEpoch: number;
 
+  // audition (codes preview) — §6.6
+  /** Preview history for the open dataset, newest first. */
+  auditions: AuditionPreview[];
+  /** True from the POST until the job is adopted; the job's own status owns the
+   *  rest of the run, so this is deliberately short-lived. */
+  auditionRunning: boolean;
+  auditionError: string | null;
+  /** Sample-drawer previews, keyed by sampleId (the sync path). */
+  samplePreviews: Record<string, AuditionPreview>;
+  /** Which stored-codes source each sample preview came from (C12 precedence). */
+  samplePreviewSources: Record<string, 'lm_codes' | 'label'>;
+  samplePreviewPending: Record<string, boolean>;
+  samplePreviewErrors: Record<string, string>;
+
   // grid
   selectedSampleIds: Set<string>;
   openSampleId: string | null;
@@ -230,6 +247,9 @@ interface TrainingState {
   startTrainLm(opts: TrainLmOptions): Promise<void>;
   loadTrainDitStatus(q?: { variantKey?: string; adapterName?: string }): Promise<void>;
   startTrainDit(opts: TrainDitOptions): Promise<void>;
+  loadAuditions(): Promise<void>;
+  startAudition(opts: AuditionOptions): Promise<void>;
+  auditionSample(sampleId: string): Promise<void>;
   cancelJob(): Promise<void>;
   applyStreamEvent(ev: TrainingStreamEvent): void;   // called by useTrainingStream
 }
@@ -283,6 +303,14 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainMaxEpochs: 0,
   trainStepsPerEpoch: 0,
 
+  auditions: [],
+  auditionRunning: false,
+  auditionError: null,
+  samplePreviews: {},
+  samplePreviewSources: {},
+  samplePreviewPending: {},
+  samplePreviewErrors: {},
+
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
   pendingEdits: {},
@@ -318,6 +346,15 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainDitEpochs: [],
     trainDitLast: null,
     ...blankTrainSeries(),
+    // Previews are per-dataset (and their URLs point at that dataset's files),
+    // so carrying them over would attribute A's auditions to B.
+    auditions: [],
+    auditionRunning: false,
+    auditionError: null,
+    samplePreviews: {},
+    samplePreviewSources: {},
+    samplePreviewPending: {},
+    samplePreviewErrors: {},
     selectedSampleIds: new Set<string>(),
     openSampleId: null,
     pendingEdits: {},
@@ -387,6 +424,13 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainDitEpochs: [],
               trainDitLast: null,
               ...blankTrainSeries(),
+              auditions: [],
+              auditionRunning: false,
+              auditionError: null,
+              samplePreviews: {},
+              samplePreviewSources: {},
+              samplePreviewPending: {},
+              samplePreviewErrors: {},
             }
           : {}),
       });
@@ -719,6 +763,64 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     }
   },
 
+  loadAuditions: async () => {
+    const id = get().selectedDatasetId;
+    if (!id) { set({ auditions: [] }); return; }
+    try {
+      const res = await trainingApi.getAuditions(id);
+      // A slow read must not attribute one dataset's previews to the next.
+      if (get().selectedDatasetId !== id) return;
+      set({ auditions: res.previews });
+    } catch (err) {
+      // Advisory — the history list is not worth blanking the card for. The
+      // route does not exist until the server workstream lands, and a 404 here
+      // must leave the Run button perfectly usable.
+      console.warn('[Training] audition list failed:', errMessage(err));
+      if (get().selectedDatasetId === id) set({ auditions: [] });
+    }
+  },
+
+  startAudition: async (opts) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    set({ auditionRunning: true, auditionError: null });
+    try {
+      const { jobId } = await trainingApi.startAudition(id, opts);
+      set({ jobLog: [], error: null });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      // The audition's own errors belong on the audition card — `error` is the
+      // panel-wide banner and would outlive the card the user is looking at.
+      set({ auditionError: errMessage(err) });
+    } finally {
+      set({ auditionRunning: false });
+    }
+  },
+
+  auditionSample: async (sampleId) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    set({
+      samplePreviewPending: { ...get().samplePreviewPending, [sampleId]: true },
+      samplePreviewErrors: { ...get().samplePreviewErrors, [sampleId]: '' },
+    });
+    try {
+      const res = await trainingApi.auditionSample(id, sampleId);
+      if (get().selectedDatasetId !== id) return;
+      set({
+        samplePreviews: { ...get().samplePreviews, [sampleId]: res.preview },
+        samplePreviewSources: { ...get().samplePreviewSources, [sampleId]: res.source },
+      });
+    } catch (err) {
+      if (get().selectedDatasetId !== id) return;
+      set({ samplePreviewErrors: { ...get().samplePreviewErrors, [sampleId]: errMessage(err) } });
+    } finally {
+      const pending = { ...get().samplePreviewPending };
+      delete pending[sampleId];
+      set({ samplePreviewPending: pending });
+    }
+  },
+
   cancelJob: async () => {
     const job = get().activeJob;
     if (!job) return;
@@ -957,6 +1059,10 @@ function refreshAfterJob(get: () => TrainingState, jobId: string): void {
   // run usually leaves one on disk, so this refresh matters on every terminal
   // status, not just 'done'.
   if (get().activeJob?.kind === 'train-dit') void get().loadTrainDitStatus();
+  // A finished audition wrote data/training/previews/<id>/ — the card renders
+  // its players from the list, so re-read it. Placed here rather than inline in
+  // applyStreamEvent's `status` case so a cancelled job refreshes too (§6.6).
+  if (get().activeJob?.kind === 'audition') void get().loadAuditions();
 }
 
 /**
@@ -1037,6 +1143,46 @@ async function flushFields(
     });
   }
 }
+
+// ── Training ETA: ONE computation, ONE renderer ────────────────────────────
+// Every training-run time estimate in the studio comes from here. Two used to
+// exist — JobProgress's loss-curve estimate ("6m to target") and the engine's
+// own `etaMs` on the metric tile ("ETA 19m", which is time to the epoch CAP,
+// not to the target the run stops on) — and they disagreed by design. The
+// engine field is still carried in trainLmLast/trainDitLast (it costs nothing
+// and the log lines use it), but nothing renders it any more.
+//
+// Memoised on the identity of the inputs: zustand re-runs a selector on every
+// store change and compares the result with Object.is, so returning a fresh
+// object each time would re-render the stats strip on every log line.
+let etaMemo: { key: readonly unknown[]; value: TrainingEta } | null = null;
+
+/** The live run's ETA, or `{kind:'none'}` when no training job is active. */
+export function selectTrainingEta(s: TrainingState): TrainingEta {
+  const kind = s.activeJob?.kind;
+  if (kind !== 'train-lm' && kind !== 'train-dit') return NO_ETA;
+  const series = kind === 'train-dit' ? s.trainDitEpochs : s.trainLmEpochs;
+  const key = [kind, series, s.trainTargetLoss, s.trainMaxEpochs] as const;
+  if (etaMemo && etaMemo.key.length === key.length && etaMemo.key.every((v, i) => v === key[i])) {
+    return etaMemo.value;
+  }
+  const value = computeTrainingEta(series, s.trainTargetLoss, s.trainMaxEpochs, kind);
+  etaMemo = { key, value };
+  return value;
+}
+
+/** Stable identity so the "nothing to estimate" case never re-renders either. */
+const NO_ETA: TrainingEta = { kind: 'none' };
+
+/** The live run's epoch series, whichever kind owns the dataset. */
+export function selectTrainingEpochs(s: TrainingState): Array<TrainLmEpoch | TrainDitEpoch> {
+  const kind = s.activeJob?.kind;
+  if (kind === 'train-dit') return s.trainDitEpochs;
+  if (kind === 'train-lm') return s.trainLmEpochs;
+  return EMPTY_EPOCHS;
+}
+
+const EMPTY_EPOCHS: Array<TrainLmEpoch | TrainDitEpoch> = [];
 
 /** Row as the UI should render it: server truth + any un-saved optimistic edit. */
 export function mergedSample(

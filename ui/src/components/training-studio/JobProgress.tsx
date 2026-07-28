@@ -8,7 +8,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Loader2, RotateCcw, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
-import { computeTrainingEta, formatEtaMs } from '../../utils/trainingEta';
 
 const CARD ='rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
 
@@ -38,6 +37,12 @@ const PHASE_KEYS: Record<string, string> = {
   // DiT run its own wording; every other phase falls through to the plain key.
   'train-dit:train': 'trainingStudio.job.phaseTrainDit',
   'train-dit:export': 'trainingStudio.job.phaseExportDit',
+  // audition phases (codes-preview plan §5.4). Frozen strings; without these
+  // the raw kebab-case enum is interpolated into the translated sentence.
+  'audition-lm-base': 'trainingStudio.job.phaseAuditionLmBase',
+  'audition-lm-adapter': 'trainingStudio.job.phaseAuditionLmAdapter',
+  'audition-decode': 'trainingStudio.job.phaseAuditionDecode',
+  'audition-writing': 'trainingStudio.job.phaseAuditionWriting',
 };
 
 function formatEta(seconds: number): string {
@@ -62,10 +67,6 @@ export const JobProgress: React.FC = () => {
   const startLabel = useTrainingStore(s => s.startLabel);
   const startBuild = useTrainingStore(s => s.startBuild);
   const samplesById = useTrainingStore(s => s.samplesById);
-  const trainLmEpochs = useTrainingStore(s => s.trainLmEpochs);
-  const trainDitEpochs = useTrainingStore(s => s.trainDitEpochs);
-  const trainTargetLoss = useTrainingStore(s => s.trainTargetLoss);
-  const trainMaxEpochs = useTrainingStore(s => s.trainMaxEpochs);
 
   // Rolling per-sample durations, used for the ETA once 3 have completed.
   const marksRef = useRef<{ jobId: string; lastAt: number; lastDone: number; deltas: number[] }>({
@@ -114,24 +115,13 @@ export const JobProgress: React.FC = () => {
   const phaseLabel = phaseKey ? t(phaseKey) : job.phase;
   const errorLines = jobLog.filter(l => l.level === 'error').slice(-10);
 
-  // ETA. Training runs read theirs off the loss curve (§Feature 1); everything
-  // else keeps the per-item pace estimate computed in the effect above.
-  let etaLabel = eta ? t('trainingStudio.job.eta', { eta }) : t('trainingStudio.job.etaEstimating');
-  if (isTrainingKind(job.kind)) {
-    const series = job.kind === 'train-dit' ? trainDitEpochs : trainLmEpochs;
-    const est = computeTrainingEta(series, trainTargetLoss, trainMaxEpochs);
-    const at = formatEtaMs(est.kind === 'estimating' || est.kind === 'none' ? 0 : est.etaMs);
-    etaLabel =
-      est.kind === 'target' && at
-        ? t('trainingStudio.job.etaToTarget', { eta: at, target: est.target.toFixed(2) })
-        : est.kind === 'stalled'
-          ? at
-            ? t('trainingStudio.job.etaTargetStalled', { eta: at, target: est.target.toFixed(2) })
-            : t('trainingStudio.job.etaTargetStalledOpen', { target: est.target.toFixed(2) })
-          : est.kind === 'cap' && at
-            ? t('trainingStudio.job.etaCap', { eta: at })
-            : t('trainingStudio.job.etaEstimating');
-  }
+  // ETA. Per-ITEM pace only, and ONLY for the kinds whose done/total counts
+  // files. Training runs render theirs once, in TrainingRunStats above the loss
+  // curve — a second number here disagreed with it by construction (that one
+  // answers "when does the loss reach the target", the tile row's old one
+  // answered "when does the epoch cap arrive") and both were labelled "ETA".
+  const etaLabel = eta ? t('trainingStudio.job.eta', { eta }) : t('trainingStudio.job.etaEstimating');
+  const showEta = active && !isTrainingKind(job.kind);
 
   // Retry has to re-run the job the card is actually showing. The enhance kinds
   // carry provider/model options this card does not have, so they use the
@@ -161,9 +151,7 @@ export const JobProgress: React.FC = () => {
                   : t('trainingStudio.job.failed')}
         </div>
 
-        {/* The target-loss wording is a sentence, not a token — cap its share of
-            the header so it truncates instead of crushing the title. */}
-        {active && (
+        {showEta && (
           <span className="text-[11px] text-zinc-500 truncate max-w-[55%]" title={etaLabel}>
             {etaLabel}
           </span>

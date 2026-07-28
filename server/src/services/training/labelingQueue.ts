@@ -1131,3 +1131,22 @@ export function startTrainDitJob(datasetId: string, opts: unknown): TrainingJob 
   });
   return job;
 }
+
+/**
+ * Codes audition (pure-LM preview) — the ONE training-studio job that needs
+ * ace-server UP: /lm is the only adapter-capable LM host and /codes-decode lives
+ * in the same process, so this runner never stops the engine. Same lazy import
+ * as the trainers: auditionRunner imports emitProgress/finishJob/isCancelled
+ * from this module, and a top-level import both ways is a cycle.
+ *
+ * `sampleIds` is empty — an audition's input is a caption/lyrics pair plus an
+ * adapter, not a set of dataset rows.
+ */
+export function startAuditionJob(datasetId: string, opts: unknown): TrainingJob {
+  const job = createJob('audition', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runAuditionJob } = await import('./auditionRunner.js');
+    await runAuditionJob(j);
+  });
+  return job;
+}

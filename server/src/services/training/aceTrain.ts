@@ -398,7 +398,12 @@ export function buildTrainDitArgs(input: {
     '--milestone-keep', String(o.milestoneKeep),
   ];
   // Flag-shaped options: only the non-default side is emitted (§2.1).
-  if (o.targetMlp) args.push('--target-mlp');
+  // target-mlp is the exception — it is emitted on BOTH sides. Its default
+  // flipped to ON, so "omit when false" would silently train the MLP anyway,
+  // and the checkbox in TrainDitForm would be dead. Needs an ace-train that
+  // knows --no-target-mlp (added alongside the default flip); an older binary
+  // rejects the unknown option loudly rather than doing the wrong thing.
+  args.push(o.targetMlp ? '--target-mlp' : '--no-target-mlp');
   if (!o.channelBalance) args.push('--no-channel-balance');
   if (o.overwrite) args.push('--overwrite');
   args.push('--jsonl');
