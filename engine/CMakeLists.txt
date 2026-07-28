@@ -236,24 +236,21 @@ else()
     target_compile_options(supersep PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-sign-conversion)
 endif()
 
-if(SUPERSEP_ENABLED)
-    target_compile_definitions(supersep PUBLIC HOT_STEP_SUPERSEP)
-    target_include_directories(supersep PUBLIC "${ORT_ROOT}/include")
-    target_link_directories(supersep PUBLIC "${ORT_ROOT}/lib")
-    target_link_libraries(supersep PUBLIC onnxruntime)
-    message(STATUS "SuperSep: ENABLED (ORT at ${ORT_ROOT})")
-else()
-    message(STATUS "SuperSep: DISABLED (set ORT_ROOT to enable)")
-endif()
+# SuperSep is now pure GGML (bs-roformer-ggml.h / mdx23c-ggml.h) — no ONNX
+# Runtime, so it builds and runs on every backend including Vulkan, Metal and
+# plain CPU. The definition is kept because supersep.cpp/.h still guard on it.
+target_compile_definitions(supersep PUBLIC HOT_STEP_SUPERSEP)
+message(STATUS "SuperSep: ENABLED (native GGML)")
 
 if(CUDAToolkit_FOUND)
     target_compile_definitions(supersep PUBLIC GGML_USE_CUDA)
 endif()
 
-# macOS: CoreML EP requires Apple frameworks
-if(APPLE AND SUPERSEP_ENABLED)
-    target_link_libraries(supersep PUBLIC "-framework CoreML" "-framework Foundation")
-endif()
+# NOTE: SUPERSEP_ENABLED below is now a misnomer kept for the ORT plumbing that
+# OTHER features still need. SuperSep itself no longer touches ONNX Runtime —
+# but sa3-refine.h (StableStep's ONNX backend) and model-store.h's
+# vae-ort / cond-enc-ort / text-enc-ort / vae-enc-ort do, so ace-server still
+# links ORT and the runtime DLLs are still required by those paths.
 # TensorRT Native SDK (DiT TRT acceleration + LoRA refitting)
 # ─────────────────────────────────────────────────────────────────────────────
 # Platform-specific TRT detection:
@@ -310,6 +307,19 @@ add_library(acestep-core STATIC
 )
 target_link_libraries(acestep-core PUBLIC yyjson lua54 supersep)
 link_ggml_backends(acestep-core)
+
+# ONNX Runtime for the paths that still use it: sa3-refine.h (StableStep's ONNX
+# backend) and model-store.h's vae-ort / cond-enc-ort / text-enc-ort /
+# vae-enc-ort. This used to arrive transitively from supersep, which is now
+# pure GGML — so acestep-core declares it directly.
+if(SUPERSEP_ENABLED)
+    target_include_directories(acestep-core PUBLIC "${ORT_ROOT}/include")
+    target_link_directories(acestep-core PUBLIC "${ORT_ROOT}/lib")
+    target_link_libraries(acestep-core PUBLIC onnxruntime)
+    if(APPLE)
+        target_link_libraries(acestep-core PUBLIC "-framework CoreML" "-framework Foundation")
+    endif()
+endif()
 
 # TRT native linkage for DiT acceleration (shared across platforms)
 if(TRT_ENABLED)
@@ -523,6 +533,10 @@ link_ggml_backends(sa3-ggml-test)
 # separation) vs PyTorch goldens. See scripts/dump_bs_roformer_goldens.py.
 add_executable(bs-roformer-test tools/bs-roformer-test.cpp)
 link_ggml_backends(bs-roformer-test)
+
+# mdx23c-test: parity test for the GGML MDX23C drum separator (SuperSep stage 3).
+add_executable(mdx23c-test tools/mdx23c-test.cpp)
+link_ggml_backends(mdx23c-test)
 
 # ace-midi: MuScriptor audio->MIDI transcription (GGML port, in development —
 # docs/plans/muscriptor-cpp-port.md). Standalone tool, no acestep-core needed.

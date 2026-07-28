@@ -5,6 +5,7 @@
 #include "supersep.h"
 #include "supersep-stft.h"
 #include "bs-roformer-ggml.h"
+#include "mdx23c-ggml.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,30 +25,26 @@
 #include <windows.h>
 #endif
 
-#include <onnxruntime_cxx_api.h>
 
 // ── Internal types ──────────────────────────────────────────────────────
 
 struct SuperSep {
     std::string   model_dir;
     int           device_id;
-    Ort::Env      env;
     BsRoformer *  s1_bs_roformer;      // Stage 1 — GGML
     BsRoformer *  s2_mel_band;         // Stage 2 - GGML
-    Ort::Session *s3_mdx23c;           // Stage 3
+    Mdx23c *      s3_mdx23c;           // Stage 3 - GGML
     // Leap Xe pair (SUPERSEP_STABLESTEP) — GGML, not ONNX Runtime.
     BsRoformer * leap_voc;             // vocal-target
     BsRoformer * leap_inst;            // instrumental-target
-    Ort::SessionOptions session_opts;
 
-    SuperSep() : env(ORT_LOGGING_LEVEL_WARNING, "supersep"),
-                 s1_bs_roformer(nullptr), s2_mel_band(nullptr),
+    SuperSep() : s1_bs_roformer(nullptr), s2_mel_band(nullptr),
                  s3_mdx23c(nullptr),
                  leap_voc(nullptr), leap_inst(nullptr) {}
     ~SuperSep() {
         if (s1_bs_roformer) { bsr_free(s1_bs_roformer); delete s1_bs_roformer; }
         if (s2_mel_band) { bsr_free(s2_mel_band); delete s2_mel_band; }
-        delete s3_mdx23c;
+        if (s3_mdx23c) { mdx_free(s3_mdx23c); delete s3_mdx23c; }
         if (leap_voc)  { bsr_free(leap_voc);  delete leap_voc;  }
         if (leap_inst) { bsr_free(leap_inst); delete leap_inst; }
     }
@@ -157,153 +154,6 @@ static bool is_silent(const float *audio, int n_frames, int n_ch) {
     float db = 20.0f * log10f(peak);
     return db < SILENCE_THRESHOLD_DB;
 }
-
-static Ort::Session * load_onnx_model(SuperSep *ctx, const char *filename) {
-    std::string path = ctx->model_dir + "/" + filename;
-    fprintf(stderr, "[SuperSep] Loading ONNX model: %s\n", path.c_str());
-
-#ifdef _WIN32
-    // Convert to wide string for Windows
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    std::vector<wchar_t> wpath(wlen);
-    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
-    return new Ort::Session(ctx->env, wpath.data(), ctx->session_opts);
-#else
-    return new Ort::Session(ctx->env, path.c_str(), ctx->session_opts);
-#endif
-}
-
-// Run ONNX inference on a spectrogram-based model (stages 1-3).
-// Input: complex spectrogram [1, n_ch, n_freqs, n_time, 2]
-// Output: masks [1, n_stems, n_freqs, n_time] or similar
-static std::vector<float> run_spec_model(
-    Ort::Session *session,
-    const ComplexSpec &spec,
-    std::vector<int64_t> &out_shape
-) {
-    Ort::AllocatorWithDefaultOptions alloc;
-    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    // Prepare input tensor: [1, channels, freqs, time, 2]
-    std::vector<int64_t> input_shape = {1, spec.n_channels, spec.n_freqs, spec.n_frames, 2};
-    size_t input_size = 1;
-    for (auto d : input_shape) input_size *= (size_t)d;
-
-    auto input_tensor = Ort::Value::CreateTensor<float>(
-        mem, const_cast<float*>(spec.data), input_size, input_shape.data(), input_shape.size());
-
-    // Get input/output names
-    auto in_name = session->GetInputNameAllocated(0, alloc);
-    auto out_name = session->GetOutputNameAllocated(0, alloc);
-    const char *in_names[] = { in_name.get() };
-    const char *out_names[] = { out_name.get() };
-
-    // Run inference
-    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
-
-    // Extract output
-    auto &out_tensor = outputs[0];
-    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
-    out_shape = type_info.GetShape();
-    size_t out_size = type_info.GetElementCount();
-    const float *out_data = out_tensor.GetTensorData<float>();
-
-    return std::vector<float>(out_data, out_data + out_size);
-}
-
-// Run ONNX inference on a waveform-based model (stage 4: HTDemucs).
-// Input: waveform [1, 2, n_samples]
-// Output: sources [1, n_sources, 2, n_samples]
-static std::vector<float> run_wave_model(
-    Ort::Session *session,
-    const float *interleaved,
-    int n_frames,
-    std::vector<int64_t> &out_shape
-) {
-    Ort::AllocatorWithDefaultOptions alloc;
-    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    // Deinterleave: [1, 2, n_samples]
-    std::vector<float> input_data(2 * n_frames);
-    for (int i = 0; i < n_frames; i++) {
-        input_data[i]            = interleaved[i * 2 + 0]; // L
-        input_data[n_frames + i] = interleaved[i * 2 + 1]; // R
-    }
-
-    std::vector<int64_t> input_shape = {1, 2, (int64_t)n_frames};
-    auto input_tensor = Ort::Value::CreateTensor<float>(
-        mem, input_data.data(), input_data.size(), input_shape.data(), input_shape.size());
-
-    auto in_name = session->GetInputNameAllocated(0, alloc);
-    auto out_name = session->GetOutputNameAllocated(0, alloc);
-    const char *in_names[] = { in_name.get() };
-    const char *out_names[] = { out_name.get() };
-
-    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
-
-    auto &out_tensor = outputs[0];
-    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
-    out_shape = type_info.GetShape();
-    size_t out_size = type_info.GetElementCount();
-    const float *out_data = out_tensor.GetTensorData<float>();
-
-    return std::vector<float>(out_data, out_data + out_size);
-}
-
-// Extract a single stem from model output (interleaved stereo).
-// Returns malloc'd buffer. Caller must free.
-static float * extract_stem_interleaved(
-    const std::vector<float> &model_output,
-    const std::vector<int64_t> &shape,
-    int stem_idx,
-    int n_frames
-) {
-    // Assuming shape is [1, n_sources, 2, n_samples]
-    int n_sources = (int)shape[1];
-    int n_ch = (int)shape[2];
-    int n_samp = (int)shape[3];
-    if (stem_idx >= n_sources) return nullptr;
-
-    int actual_frames = std::min(n_samp, n_frames);
-    float *out = (float *)malloc((size_t)actual_frames * 2 * sizeof(float));
-    if (!out) return nullptr;
-
-    size_t base = (size_t)stem_idx * n_ch * n_samp;
-    for (int i = 0; i < actual_frames; i++) {
-        out[i * 2 + 0] = model_output[base + i];               // L
-        out[i * 2 + 1] = model_output[base + (size_t)n_samp + i]; // R
-    }
-    return out;
-}
-
-// Apply spectrogram mask and iSTFT to extract a stem.
-static float * extract_stem_from_mask(
-    const ComplexSpec &input_spec,
-    const float *mask,
-    int mask_offset,   // offset into mask buffer for this stem
-    int n_frames_audio,
-    int *out_frames
-) {
-    // Clone the input spectrogram
-    size_t spec_size = (size_t)input_spec.n_channels * input_spec.n_freqs * input_spec.n_frames * 2;
-    ComplexSpec masked;
-    masked.data = (float *)malloc(spec_size * sizeof(float));
-    masked.n_channels = input_spec.n_channels;
-    masked.n_freqs = input_spec.n_freqs;
-    masked.n_frames = input_spec.n_frames;
-    masked.n_fft = input_spec.n_fft;
-    masked.hop_length = input_spec.hop_length;
-    memcpy(masked.data, input_spec.data, spec_size * sizeof(float));
-
-    // Apply mask
-    stft_apply_mask(&masked, mask + mask_offset);
-
-    // Inverse STFT
-    float *audio = stft_inverse(masked, n_frames_audio, out_frames);
-    stft_free(&masked);
-    return audio;
-}
-
 static void add_stem(std::vector<SuperSepStem> &stems, const StemDef &def,
                      float *samples, int n_frames, bool hidden = false) {
     if (!samples) return;
@@ -795,12 +645,12 @@ static bool mel_band_process_chunk(
 //
 
 static bool mdx_process_chunk(
-    Ort::Session *session,
+    Mdx23c *model,
     const float *chunk,       // interleaved stereo PCM
     int chunk_frames,         // per-channel frame count
     int n_fft,
     int hop,
-    int dim_f,                // freq truncation (1024 for MDX23C, 2048 for HTDemucs)
+    int dim_f,                // freq truncation (1024 for MDX23C)
     int n_stems,              // max stems to extract
     std::vector<float *> &stem_outputs,
     std::vector<int> &stem_counts) {
@@ -835,86 +685,18 @@ static bool mdx_process_chunk(
         }
     }
 
-    // 3. Run inference — handle both single-input (MDX23C) and dual-input (HTDemucs) models
-    Ort::AllocatorWithDefaultOptions alloc;
-    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    size_t n_inputs = session->GetInputCount();
-    size_t n_outputs = session->GetOutputCount();
-
-    std::vector<int64_t> stft_shape = {1, 4, (int64_t)dim_f, (int64_t)T};
-    auto stft_tensor = Ort::Value::CreateTensor<float>(
-        mem, model_input.data(), model_input.size(), stft_shape.data(), stft_shape.size());
-
-    // Build raw_audio tensor for hybrid models (HTDemucs)
-    // raw_audio shape: [1, 2, chunk_frames] (planar stereo)
-    std::vector<float> raw_audio;
-    Ort::Value raw_tensor{nullptr};
-    std::vector<int64_t> raw_shape;
-    if (n_inputs >= 2) {
-        // Get expected raw audio length from model input shape
-        auto inp1_info = session->GetInputTypeInfo(1).GetTensorTypeAndShapeInfo();
-        auto inp1_shape = inp1_info.GetShape();
-        int64_t raw_len = (inp1_shape.size() >= 3 && inp1_shape[2] > 0) ? inp1_shape[2] : chunk_frames;
-
-        raw_audio.resize(2 * raw_len, 0.0f);
-        // De-interleave: interleaved [L R L R ...] → planar [L L L ... R R R ...]
-        int copy_frames = std::min((int)raw_len, chunk_frames);
-        for (int i = 0; i < copy_frames; i++) {
-            raw_audio[i]           = chunk[i * 2];      // Left
-            raw_audio[raw_len + i] = chunk[i * 2 + 1];  // Right
-        }
-        raw_shape = {1, 2, raw_len};
-        raw_tensor = Ort::Value::CreateTensor<float>(
-            mem, raw_audio.data(), raw_audio.size(), raw_shape.data(), raw_shape.size());
-    }
-
-    // Collect input names and tensors
-    std::vector<Ort::AllocatedStringPtr> in_name_ptrs;
-    std::vector<const char *> in_names;
-    std::vector<Ort::Value> in_tensors;
-    for (size_t i = 0; i < n_inputs; i++) {
-        in_name_ptrs.push_back(session->GetInputNameAllocated(i, alloc));
-        in_names.push_back(in_name_ptrs.back().get());
-    }
-    in_tensors.push_back(std::move(stft_tensor));
-    if (n_inputs >= 2) in_tensors.push_back(std::move(raw_tensor));
-
-    // Collect output names
-    std::vector<Ort::AllocatedStringPtr> out_name_ptrs;
-    std::vector<const char *> out_names;
-    for (size_t i = 0; i < n_outputs; i++) {
-        out_name_ptrs.push_back(session->GetOutputNameAllocated(i, alloc));
-        out_names.push_back(out_name_ptrs.back().get());
-    }
-
-    fprintf(stderr, "[SuperSep] MDX: %zu inputs, %zu outputs\n", n_inputs, n_outputs);
-
-    auto outputs = session->Run(Ort::RunOptions{nullptr},
-                                 in_names.data(), in_tensors.data(), in_tensors.size(),
-                                 out_names.data(), out_names.size());
-
-    auto &out_tensor = outputs[0];
-    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
-    auto out_shape = type_info.GetShape();
-    const float *out_data = out_tensor.GetTensorData<float>();
-
-    fprintf(stderr, "[SuperSep] MDX output shape: [");
-    for (size_t i = 0; i < out_shape.size(); i++)
-        fprintf(stderr, "%s%lld", i ? "," : "", (long long)out_shape[i]);
-    fprintf(stderr, "]\n");
-
-    // 4. Parse output format
-    //    MDX23C: [1, stems, 4, dim_f, T]  (5D)
-    //    HTDemucs: [1, stems*4, dim_f, T] (4D)
-    bool is_5d = (out_shape.size() == 5);
-    int out_T = is_5d ? (int)out_shape[4] : (int)out_shape[3];
-    int out_df = is_5d ? (int)out_shape[3] : (int)out_shape[2];
-    int actual_stems = is_5d ? (int)out_shape[1] : (int)out_shape[1] / 4;
+    // 3. Run GGML inference. Input packing above is already [c][f][t] with t
+    //    fastest, which is exactly the layout mdx_forward expects.
+    const int n_inst = model->cfg.n_instruments;
+    const int out_T = T, out_df = dim_f;
+    std::vector<float> out_buf((size_t) n_inst * 4 * dim_f * T);
+    mdx_forward(model, model_input.data(), T, out_buf.data());
+    const float *out_data = out_buf.data();
+    int actual_stems = n_inst;
     if (actual_stems > n_stems) actual_stems = n_stems;
 
-    fprintf(stderr, "[SuperSep] MDX: %d stems, %s format, out_df=%d, out_T=%d\n",
-            actual_stems, is_5d ? "5D" : "4D", out_df, out_T);
+    fprintf(stderr, "[SuperSep] MDX (GGML): %d stems, dim_f=%d, T=%d\n",
+            actual_stems, out_df, out_T);
 
     // 5. iSTFT each stem
     for (int s = 0; s < actual_stems; s++) {
@@ -929,17 +711,10 @@ static bool mdx_process_chunk(
         for (int ch = 0; ch < n_ch; ch++) {
             for (int f = 0; f < out_df && f < full_freqs; f++) {
                 for (int t = 0; t < out_T; t++) {
-                    float re, im;
-                    if (is_5d) {
-                        // [1, s, ch*2+0, f, t] and [1, s, ch*2+1, f, t]
-                        size_t base = (size_t)s * 4 * out_df * out_T;
-                        re = out_data[base + (size_t)(ch*2) * out_df * out_T + (size_t)f * out_T + t];
-                        im = out_data[base + (size_t)(ch*2+1) * out_df * out_T + (size_t)f * out_T + t];
-                    } else {
-                        // [1, s*4+ch*2, f, t] and [1, s*4+ch*2+1, f, t]
-                        re = out_data[(size_t)(s*4 + ch*2) * out_df * out_T + (size_t)f * out_T + t];
-                        im = out_data[(size_t)(s*4 + ch*2 + 1) * out_df * out_T + (size_t)f * out_T + t];
-                    }
+                    // out_data is [stem][ch*2+{re,im}][f][t], t fastest.
+                    const size_t base = (size_t)s * 4 * out_df * out_T;
+                    float re = out_data[base + (size_t)(ch*2)   * out_df * out_T + (size_t)f * out_T + t];
+                    float im = out_data[base + (size_t)(ch*2+1) * out_df * out_T + (size_t)f * out_T + t];
                     float *dst = stem_spec.at(ch, f, t);
                     dst[0] = re;
                     dst[1] = im;
@@ -951,24 +726,6 @@ static bool mdx_process_chunk(
         float *audio = stft_inverse(stem_spec, chunk_frames, &out_frames);
         stft_free(&stem_spec);
 
-        // For hybrid models (HTDemucs): add time-domain output (output_xt)
-        // output_xt shape: [batch, stems*2, samples] where stems*2 = planar stereo per stem
-        if (outputs.size() >= 2) {
-            auto &xt_tensor = outputs[1];
-            auto xt_info = xt_tensor.GetTensorTypeAndShapeInfo();
-            auto xt_shape = xt_info.GetShape();
-            const float *xt_data = xt_tensor.GetTensorData<float>();
-
-            if (xt_shape.size() >= 3) {
-                int xt_samples = (int)xt_shape[2];
-                int add_frames = std::min(out_frames, xt_samples);
-                // xt layout: [1, s*2+0, :] = left, [1, s*2+1, :] = right
-                for (int i = 0; i < add_frames; i++) {
-                    audio[i * 2 + 0] += xt_data[(size_t)(s * 2) * xt_samples + i];
-                    audio[i * 2 + 1] += xt_data[(size_t)(s * 2 + 1) * xt_samples + i];
-                }
-            }
-        }
 
         stem_outputs.push_back(audio);
         stem_counts.push_back(out_frames);
@@ -985,46 +742,8 @@ SuperSep * supersep_init(const char * model_dir, int device_id) {
     ctx->model_dir = model_dir;
     ctx->device_id = device_id;
 
-    // Configure session options
-    ctx->session_opts.SetIntraOpNumThreads(4);
-    ctx->session_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-    // Enable GPU acceleration if requested.
-    if (device_id >= 0) {
-#ifdef __APPLE__
-        // macOS: CoreML EP (uses Apple Neural Engine + GPU via Metal).
-        // CoreML works with standard ONNX models — no re-export needed.
-        try {
-            std::unordered_map<std::string, std::string> provider_options;
-            provider_options["ModelFormat"] = "MLProgram";
-            ctx->session_opts.AppendExecutionProvider("CoreML", provider_options);
-            fprintf(stderr, "[SuperSep] CoreML EP enabled\n");
-        } catch (const std::exception &e) {
-            fprintf(stderr, "[SuperSep] CoreML EP failed: %s — falling back to CPU\n", e.what());
-        }
-#elif defined(GGML_USE_CUDA)
-        // Windows/Linux: CUDA EP. The ORT GPU SDK bundles its own CUDA EP
-        // (onnxruntime_providers_cuda.dll) so this doesn't depend on the system
-        // CUDA Toolkit that CMake's CUDAToolkit_FOUND checks for.
-        try {
-            OrtCUDAProviderOptions cuda_opts;
-            memset(&cuda_opts, 0, sizeof(cuda_opts));
-            cuda_opts.device_id = device_id;
-            // Prevent exponential arena growth — allocate only what's needed
-            cuda_opts.arena_extend_strategy = 1;  // kSameAsRequested (not kNextPowerOfTwo)
-            // No hard memory cap — the model's attention layers need ~3GB per MatMul.
-            // VRAM is reclaimed after job completion via supersep_release_models().
-            ctx->session_opts.AppendExecutionProvider_CUDA(cuda_opts);
-            fprintf(stderr, "[SuperSep] CUDA EP enabled (device %d, arena=exact)\n", device_id);
-        } catch (const std::exception &e) {
-            fprintf(stderr, "[SuperSep] CUDA EP failed: %s — falling back to CPU\n", e.what());
-        }
-#else
-        fprintf(stderr, "[SuperSep] No GPU EP available — using CPU (device_id=%d ignored)\n", device_id);
-#endif
-    } else {
-        fprintf(stderr, "[SuperSep] CPU mode (device_id=%d)\n", device_id);
-    }
+    // Backend selection (CUDA / Vulkan / Metal / CPU) is handled by GGML via
+    // backend_init(); device_id is retained for API compatibility.
 
     fprintf(stderr, "[SuperSep] Initialized (models: %s)\n", model_dir);
     return ctx;
@@ -1497,7 +1216,12 @@ SuperSepResult * supersep_run(
 
         try {
             if (!ctx->s3_mdx23c) {
-                ctx->s3_mdx23c = load_onnx_model(ctx, "mdx23c_drumsep.onnx");
+                Mdx23c *mm = new Mdx23c();
+                if (!mdx_load(mm, (ctx->model_dir + "/mdx23c_drumsep-F32.gguf").c_str())) {
+                    delete mm;
+                    throw std::runtime_error("cannot load mdx23c_drumsep-F32.gguf");
+                }
+                ctx->s3_mdx23c = mm;
             }
 
             cb(3, "Splitting drums...", 0.55f);
@@ -1621,7 +1345,7 @@ void supersep_release_models(SuperSep * ctx) {
     if (!ctx) return;
     if (ctx->s1_bs_roformer) { bsr_free(ctx->s1_bs_roformer); delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
     if (ctx->s2_mel_band)    { bsr_free(ctx->s2_mel_band); delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
-    if (ctx->s3_mdx23c)      { delete ctx->s3_mdx23c;      ctx->s3_mdx23c      = nullptr; }
+    if (ctx->s3_mdx23c)      { mdx_free(ctx->s3_mdx23c); delete ctx->s3_mdx23c; ctx->s3_mdx23c = nullptr; }
     if (ctx->leap_voc)  { bsr_free(ctx->leap_voc);  delete ctx->leap_voc;  ctx->leap_voc  = nullptr; }
     if (ctx->leap_inst) { bsr_free(ctx->leap_inst); delete ctx->leap_inst; ctx->leap_inst = nullptr; }
     fprintf(stderr, "[SuperSep] Released all ONNX sessions (VRAM freed)\n");

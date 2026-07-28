@@ -1773,16 +1773,16 @@
     },
     {
       "id": "supersep-bs-roformer",
-      "filename": "bs_roformer_sw.onnx",
+      "filename": "bs_roformer_sw-F32.gguf",
       "role": "supersep",
       "subdir": "supersep",
-      "displayName": "BS-Roformer 6-Stem",
+      "displayName": "BS-Roformer 6-Stem (GGML)",
       "scale": null,
       "variant": "stage-1",
-      "quant": "FP32",
-      "sizeBytes": 704536949,
+      "quant": "F32",
+      "sizeBytes": 698724704,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "Stage 1: Primary 6-stem separation (vocals, drums, bass, guitar, piano, other). BS-Roformer architecture.",
+      "description": "Stage 1: primary 6-stem separation. Native GGML - no ONNX Runtime.",
       "tags": [
         "essential"
       ]
@@ -1817,32 +1817,32 @@
     },
     {
       "id": "supersep-mel-band",
-      "filename": "mel_band_roformer_karaoke.onnx",
+      "filename": "mel_band_karaoke-F32.gguf",
       "role": "supersep",
       "subdir": "supersep",
-      "displayName": "Mel-Band RoFormer Karaoke",
+      "displayName": "Mel-Band RoFormer Karaoke (GGML)",
       "scale": null,
       "variant": "stage-2",
-      "quant": "FP32",
-      "sizeBytes": 917744739,
+      "quant": "F32",
+      "sizeBytes": 912848032,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "Stage 2: Vocal sub-separation into lead and backing vocals. Mel-Band RoFormer architecture.",
+      "description": "Stage 2: vocal sub-separation into lead and backing. Native GGML - no ONNX Runtime.",
       "tags": [
         "essential"
       ]
     },
     {
       "id": "supersep-mdx23c",
-      "filename": "mdx23c_drumsep.onnx",
+      "filename": "mdx23c_drumsep-F32.gguf",
       "role": "supersep",
       "subdir": "supersep",
-      "displayName": "MDX23C DrumSep",
+      "displayName": "MDX23C DrumSep (GGML)",
       "scale": null,
       "variant": "stage-3",
-      "quant": "FP32",
-      "sizeBytes": 437702626,
+      "quant": "F32",
+      "sizeBytes": 437533952,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
-      "description": "Stage 3: Drum sub-separation (kick, snare, toms, hi-hat, cymbals). MDX23C architecture.",
+      "description": "Stage 3: drum sub-separation (kick, snare, toms, hi-hat, ride, crash). Native GGML - no ONNX Runtime.",
       "tags": [
         "essential"
       ]
