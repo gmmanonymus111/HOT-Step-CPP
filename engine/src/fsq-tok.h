@@ -41,28 +41,15 @@ struct TokGGML {
     WeightCtx            wctx;
 };
 
-// FSQ encode: 6 raw values from project_in -> flat integer index
-// Matches Python vector_quantize_pytorch FSQ.symmetry_preserving_bound() + codes_to_indices()
-// QL(x) = 2/(L-1) * floor((L-1)*(tanh(x)+1)/2 + 0.5) - 1
-// code = floor((L-1) * (tanh(x) + 1) / 2 + 0.5)  ->  integer [0, L-1]
-static int fsq_encode_index(const float * raw_vals) {
-    int index = 0;
-    int mult  = 1;
-    for (int d = 0; d < FSQ_NDIMS; d++) {
-        int   L    = FSQ_LEVELS[d];
-        float t    = tanhf(raw_vals[d]);
-        int   code = (int) floorf((float) (L - 1) * (t + 1.0f) / 2.0f + 0.5f);
-        if (code < 0) {
-            code = 0;
-        }
-        if (code >= L) {
-            code = L - 1;
-        }
-        index += code * mult;
-        mult *= L;
-    }
-    return index;
-}
+// HOT-Step hook: fsq_encode_index() is defined in fsq-quant.h (pulled in via
+// fsq-detok.h above). It implements the vector_quantize_pytorch ResidualFSQ
+// (preserve_symmetry=True, bound_hard_clamp=True) reference path — soft clamp
+// tanh(z/c)*c with c = 1 + 1/(L-1), then hard clamp, then
+// floor((L-1)*(w+1)/2 + 0.5).
+//
+// The plain-tanh version that used to live here reproduced only 40.19% of the
+// reference indices. If an upstream sync re-adds it you will get a redefinition
+// error against fsq-quant.h — delete the re-added copy, do not delete the hook.
 
 // Load tokenizer weights from DiT GGUF or safetensors directory
 static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
@@ -145,12 +132,16 @@ static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
 // latents: [T_25Hz, 64] time-major (from VAE encoder)
 // codes_out: caller-allocated, at least (T_25Hz + 4) / 5 ints
 // silence_latent: [15000, 64] time-major (for padding to multiple of 5)
+// raw_out: optional, HOT-Step addition. When non-NULL receives T_5Hz * FSQ_NDIMS
+//          floats — the pre-quantization `quantizer.project_in` outputs, for FSQ
+//          conformance checks against a PyTorch dump (see fsq-quant.h).
 // Returns T_5Hz (number of codes) or -1 on error
 static int tok_ggml_encode(TokGGML *     m,
                            const float * latents,
                            int           T_25Hz,
                            int *         codes_out,
-                           const float * silence_latent) {
+                           const float * silence_latent,
+                           float *       raw_out = NULL) {
     int P = 5;                   // pool_window_size
     int S = 6;                   // sequence length per group (1 CLS + 5 patches)
     int H = m->cfg.hidden_size;  // 2048
@@ -246,6 +237,9 @@ static int tok_ggml_encode(TokGGML *     m,
 
         // Read 6 FSQ values, encode to integer index
         ggml_backend_tensor_get(t_out, fsq_buf, 0, FSQ_NDIMS * sizeof(float));
+        if (raw_out) {
+            memcpy(raw_out + (size_t) g * FSQ_NDIMS, fsq_buf, FSQ_NDIMS * sizeof(float));
+        }
         codes_out[g] = fsq_encode_index(fsq_buf);
     }
 

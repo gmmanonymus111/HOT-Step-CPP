@@ -13,22 +13,11 @@
 #include "hot-step-build-flags.h"
 #include "weight-source.h"
 
-// FSQ constants
-static const int FSQ_NDIMS     = 6;
-static const int FSQ_LEVELS[6] = { 8, 8, 8, 5, 5, 5 };
-
-// FSQ decode: integer index -> 6 normalized float values
-// Each dimension: level_idx / ((L-1)/2) - 1.0  (maps to [-1, 1])
-static void fsq_decode_index(int index, float * out) {
-    int stride = 1;
-    for (int d = 0; d < FSQ_NDIMS; d++) {
-        int   L         = FSQ_LEVELS[d];
-        int   level_idx = (index / stride) % L;
-        float half_L    = (float) (L - 1) / 2.0f;
-        out[d]          = (float) level_idx / half_L - 1.0f;
-        stride *= L;
-    }
-}
+// HOT-Step hook: FSQ_NDIMS / FSQ_LEVELS / fsq_encode_index / fsq_decode_index
+// live in fsq-quant.h, which implements the vector_quantize_pytorch
+// ResidualFSQ(preserve_symmetry=True, bound_hard_clamp=True) reference path.
+// Do NOT let an upstream sync re-add local copies here (see fsq-quant.h).
+#include "fsq-quant.h"
 
 // Detokenizer config: same Qwen3 arch as lyric/timbre encoders, 2 layers
 static Qwen3Config detok_config() {

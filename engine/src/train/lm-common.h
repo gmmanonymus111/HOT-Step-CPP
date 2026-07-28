@@ -261,8 +261,11 @@ static std::string sha1_16(const std::string & s) {
 // Bump whenever the extract stage's float -> code mapping changes: it is folded
 // into `_tok`, so every cached lm_codes.jsonl row is invalidated and re-encoded.
 //   v1 — fsq-tok.h::fsq_encode_index (old vqp symmetry-preserving bound)
-//   v2 — train/lm-fsq.h::fsq_encode_index_ref (vqp >= 1.27.21 ResidualFSQ:
-//        soft clamp + hard clamp), 100% match vs the PyTorch reference
+//   v2 — reference-conformant encoder (vqp >= 1.27.21 ResidualFSQ: soft clamp +
+//        hard clamp), 100% match vs the PyTorch reference. Originally lived in
+//        train/lm-fsq.h::fsq_encode_index_ref; that file is gone — the same
+//        formula is now the ENGINE-WIDE encoder in src/fsq-quant.h, so extract
+//        calls the shared tok_ggml_encode and codes stay bit-identical to v2.
 #define LM_FSQ_ENCODER_VERSION "fsq-v2"
 
 // _tok = sha1(dit_path + "\0" + size + "\0" + mtime_ms + "\0" + encoder)[0:16]  (§2.3)

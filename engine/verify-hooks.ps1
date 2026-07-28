@@ -58,7 +58,31 @@ if ($content -match '#include\s+"hot-step-params\.h"') {
     $errors++
 }
 
-# ── Hook 5: linker sentinel present in hot-step-sampler.h ─────────────
+# ── Hook 5: fsq-detok.h must include fsq-quant.h, and neither fsq-detok.h
+#            nor fsq-tok.h may carry upstream's own FSQ quantizer copies ──
+$content = Get-Content "$src\fsq-detok.h" -Raw
+if ($content -match '#include\s+"fsq-quant\.h"') {
+    Write-Host "  [OK] fsq-detok.h -> fsq-quant.h" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] fsq-detok.h missing fsq-quant.h include" -ForegroundColor Red
+    Write-Host "         Upstream's FSQ encode/decode are NOT reference-conformant" -ForegroundColor Yellow
+    Write-Host "         (plain tanh, no ResidualFSQ soft clamp = 40% index match)." -ForegroundColor Yellow
+    $errors++
+}
+if ($content -match 'static\s+void\s+fsq_decode_index' -or $content -match 'static\s+const\s+int\s+FSQ_LEVELS') {
+    Write-Host "  [FAIL] fsq-detok.h re-declares FSQ_LEVELS/fsq_decode_index (upstream copy is back)" -ForegroundColor Red
+    $errors++
+}
+$content = Get-Content "$src\fsq-tok.h" -Raw
+if ($content -match 'static\s+int\s+fsq_encode_index') {
+    Write-Host "  [FAIL] fsq-tok.h re-declares fsq_encode_index (upstream copy is back)" -ForegroundColor Red
+    Write-Host "         Delete it; the conformant one lives in src/fsq-quant.h" -ForegroundColor Yellow
+    $errors++
+} else {
+    Write-Host "  [OK] fsq-tok.h uses shared fsq_encode_index" -ForegroundColor Green
+}
+
+# ── Hook 6: linker sentinel present in hot-step-sampler.h ─────────────
 $content = Get-Content "$src\hot-step-sampler.h" -Raw
 if ($content -match 'hotstep_sampler_linked_') {
     Write-Host "  [OK] hot-step-sampler.h has linker sentinel" -ForegroundColor Green
