@@ -75,12 +75,13 @@ import {
 } from '../services/training/aceTrain.js';
 import { countPreprocessedVariants, readPreprocessStatus } from '../services/training/preprocessStatus.js';
 import {
-  adapterDirFor, adapterLmRoot, newestVariantKey, readTrainLmStatus,
+  adapterLmRoot, lmRunDirFor, newestVariantKey, readTrainLmStatus,
   safeAdapterName, variantDitModel, variantExists,
 } from '../services/training/trainLmStatus.js';
 import {
-  adapterDitDirFor, adapterDitRoot, readTrainDitStatus,
+  adapterDitRoot, ditRunDirFor, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
+import { lmAdapterRoots } from '../services/training/adapterLayout.js';
 import {
   deleteDatasetPreviews, isPreviewId, isPreviewSlot, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
@@ -1423,11 +1424,16 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
       return;
     }
-    const adaptersRoot = adapterLmRoot();
-    const adapterDir = adapterDirFor(adapterName, lmSize);
-    // Containment, same rule the preprocess outputDir uses (§7.8): this path is
-    // mkdir'd and written into by a spawned process.
-    if (!isInside(adaptersRoot, adapterDir) || path.resolve(adaptersRoot) === path.resolve(adapterDir)) {
+    // Per-base + per-run layout: every run writes a FRESH
+    // <adapters>/lm-<sizeSlug>/<name>/<stamp> dir, so retraining an artist
+    // never overwrites an earlier adapter. Contain against the adapters root,
+    // refusing the root itself and any size root — this path is mkdir'd and
+    // written into by a spawned process (§7.8).
+    const adaptersRoot = config.aceServer.adapters;
+    const adapterDir = lmRunDirFor(adapterName, lmSize);
+    const isARoot = [adaptersRoot, adapterLmRoot(), ...lmAdapterRoots().map(r => r.dir)]
+      .some(r => path.resolve(r) === path.resolve(adapterDir));
+    if (!isInside(adaptersRoot, adapterDir) || isARoot) {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
       return;
     }
@@ -1701,20 +1707,20 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       return;
     }
     const adaptersRoot = adapterDitRoot();
-    const adapterDir = adapterDitDirFor(adapterName);
+    // Per-base + per-run layout: <adapters>/dit-<shorthand>/<name>/<stamp>,
+    // the shorthand coming from the variant's base resolved above
+    // (adapterLayout.ts). A fresh stamped dir per run — retraining an artist
+    // never overwrites an earlier adapter.
+    const adapterDir = ditRunDirFor(adapterName, ditModel);
     // Containment, same rule the preprocess outputDir uses (§7.8): this path is
     // mkdir'd and written into by a spawned process. The root itself is refused
     // — a run writing adapter_model.safetensors into the adapters root would
-    // put a nameless adapter in every user's dropdown.
-    // ...and so is the LM adapter root: adapterDitDirFor('lm') resolves to exactly
-    // adapterLmRoot(), so a dataset slugged 'lm' would drop a DiT PEFT dir into
-    // <adapters>/lm, where GET /adapters/lm lists its bare .safetensors as a
-    // planner-LM adapter and POST /scan lists the directory itself as a top-level one.
-    if (
-      !isInside(adaptersRoot, adapterDir) ||
-      path.resolve(adaptersRoot) === path.resolve(adapterDir) ||
-      path.resolve(adapterLmRoot()) === path.resolve(adapterDir)
-    ) {
+    // put a nameless adapter in every user's dropdown — and so are the LM
+    // adapter roots (legacy flat `lm/` and the per-size `lm-*` dirs), where a
+    // DiT PEFT dir would show up in the planner-adapter dropdown.
+    const clashesRoot = [adaptersRoot, adapterLmRoot(), ...lmAdapterRoots().map(r => r.dir)]
+      .some(r => path.resolve(r) === path.resolve(adapterDir));
+    if (!isInside(adaptersRoot, adapterDir) || clashesRoot) {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
       return;
     }
@@ -1914,10 +1920,13 @@ function auditionAdapterError(value: string): string | null {
       ? null
       : 'lmAdapter must match [A-Za-z0-9._-]{1,64} and cannot start with a dot';
   }
-  const root = adapterLmRoot();
+  // Any planner-adapter root counts: the per-size lm-* dirs plus the legacy
+  // flat lm/ (adapterLayout.ts). Milestone dirs inside an adapter dir pass too.
+  const roots = lmAdapterRoots().map(r => r.dir);
   const resolved = path.resolve(value);
-  if (!isInside(root, resolved) || path.resolve(root) === resolved) {
-    return `lmAdapter must be a registry name or a directory inside ${root}`;
+  const insideSome = roots.some(r => isInside(r, resolved) && path.resolve(r) !== resolved);
+  if (!insideSome) {
+    return `lmAdapter must be a registry name or a directory inside ${roots.join(' | ')}`;
   }
   if (!fs.existsSync(path.join(resolved, 'adapter_model.safetensors'))) {
     return `lmAdapter has no adapter_model.safetensors: ${resolved}`;

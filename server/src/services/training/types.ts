@@ -438,8 +438,8 @@ export interface TrainLmStatus {
   codesCount: number;              // rows in lm_codes.jsonl
   codesStale: number;              // rows whose tensor file changed since extract
   codesMissing: number;            // cached tensors with no codes row
-  adapterName: string;             // stem, without the -<size> suffix
-  adapterDir: string;              // absolute; where the next run would write
+  adapterName: string;             // artist name (per-base layout: unsuffixed)
+  adapterDir: string;              // absolute; the newest trained run, else the artist dir
   adapterExists: boolean;          // adapter_model.safetensors present
   adapterBytes: number;
   lmSize: string;                  // from lm_train_log.json, '' if unknown
@@ -524,7 +524,7 @@ export interface TrainDitStatus {
   sampleCount: number;             // usable cached songs in the variant
   channelStats: boolean;           // channel_stats.json present
   adapterName: string;
-  adapterDir: string;              // absolute; where the next run would write
+  adapterDir: string;              // absolute; the newest trained run, else the artist dir
   adapterExists: boolean;          // adapter_model.safetensors present
   adapterBytes: number;
   trainedAt: string;               // ISO, '' if unknown

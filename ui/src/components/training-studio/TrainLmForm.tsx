@@ -209,8 +209,10 @@ export const TrainLmForm: React.FC<Props> = ({
               className={`${FIELD} flex-1 min-w-0 rounded-r-none border-r-0${
                 value.adapterName.trim() && !adapterNameOk ? ' border-red-500/50' : ''}`}
             />
+            {/* Per-base layout: the size lives in the parent folder, not a
+                name suffix — show where the adapter will land. */}
             <span className="flex items-center px-2.5 rounded-r-lg border border-l-0 border-zinc-300 dark:border-white/10 bg-zinc-200/60 dark:bg-white/5 text-[11px] font-mono font-semibold text-zinc-500 whitespace-nowrap">
-              -{value.lmSize}
+              → lm-{value.lmSize.toLowerCase().replace('.', '')}/
             </span>
           </div>
           {value.adapterName.trim() && !adapterNameOk && (

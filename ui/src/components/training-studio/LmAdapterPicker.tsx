@@ -54,8 +54,12 @@ export const LmAdapterPicker: React.FC<LmAdapterPickerProps> = ({
     adapterApi.lmList().then(
       (res) => {
         if (!alive) return;
+        // Per-base + per-run layout: names are unsuffixed and an artist can
+        // have several sizes and several training runs — tag both so every
+        // entry stays distinguishable.
         setRegistry(res.adapters.map(a => ({
-          label: a.name, value: a.path, kind: a.kind, size: a.size,
+          label: [a.name, a.lmSize, a.run].filter(Boolean).join(' · '),
+          value: a.path, kind: a.kind, size: a.size,
         })));
         setLoading(false);
       },

@@ -310,9 +310,14 @@ export const adapterApi = {
   scan: (folder: string) =>
     post<{ files: AdapterFile[] }>('/adapters/scan', { folder }),
   /** Planner-LM adapters (local HOT-Step feature). Scans `folder` when given,
-   *  else the adapters root's lm/ subtree. */
+   *  else every per-size root (lm-06b/lm-17b/lm-4b) plus the legacy flat lm/.
+   *  `lmSize` comes from the parent folder (new layout) or the legacy -<size>
+   *  name suffix; `trigger` is the embedded trigger word when present. */
   lmList: (folder?: string) =>
-    get<{ root: string; adapters: { name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }[] }>(
+    get<{ root: string; adapters: {
+      name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
+      lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | '';
+    }[] }>(
       `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 };
 

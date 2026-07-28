@@ -12,6 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import { config } from '../../config.js';
+import { latestRunDir, lmSizeSlug, newRunDir } from './adapterLayout.js';
 import { tensorsRoot } from './aceTrain.js';
 import type {
   LmSize, TrainLmEpoch, TrainLmStatus, TrainingDatasetRow, TrainingSample,
@@ -28,8 +29,9 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-/** `<config.aceServer.adapters>/lm` — the dir GET /api/adapters/lm scans, which
- *  is why a freshly trained adapter needs no engine restart (L12). */
+/** The LEGACY flat planner-adapter dir (`<adapters>/lm`, names suffixed
+ *  `-<size>`). Still scanned/validated so pre-migration installs keep working;
+ *  nothing new is written here — see adapterLayout.ts for the per-size dirs. */
 export function adapterLmRoot(): string {
   return path.join(config.aceServer.adapters, 'lm');
 }
@@ -41,9 +43,29 @@ export function safeAdapterName(name: string): string {
   return cleaned || 'adapter';
 }
 
-/** `<adapters>/lm/<name>-<size>` — matches the naming of the existing dirs. */
+/** `<adapters>/lm-<sizeSlug>/<name>` — the ARTIST folder of the per-base
+ *  layout (2026-07-28). Runs live in stamped subfolders beneath it. */
+export function lmArtistDirFor(name: string, size: LmSize): string {
+  return path.join(config.aceServer.adapters, lmSizeSlug(size), safeAdapterName(name));
+}
+
+/** A fresh `<artist>/<YYYY-MM-DD_HH-MM-SS>` dir for a NEW training run to
+ *  write into — retraining never overwrites an earlier adapter. */
+export function lmRunDirFor(name: string, size: LmSize): string {
+  return newRunDir(lmArtistDirFor(name, size));
+}
+
+/** The newest trained adapter for status/audition READS: latest stamped run,
+ *  else an unversioned adapter directly in the artist folder, else the legacy
+ *  flat `lm/<name>-<size>` dir — so pre-migration installs keep reporting as
+ *  trained. '' only when nothing exists anywhere; callers wanting a display
+ *  path for "not trained yet" use lmArtistDirFor(). */
 export function adapterDirFor(name: string, size: LmSize): string {
-  return path.join(adapterLmRoot(), `${safeAdapterName(name)}-${size}`);
+  const latest = latestRunDir(lmArtistDirFor(name, size));
+  if (latest) return latest;
+  const legacy = path.join(adapterLmRoot(), `${safeAdapterName(name)}-${size}`);
+  if (fs.existsSync(path.join(legacy, 'adapter_model.safetensors'))) return legacy;
+  return lmArtistDirFor(name, size);  // nothing trained yet — where runs will go
 }
 
 /**

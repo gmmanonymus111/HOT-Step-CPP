@@ -25,6 +25,7 @@ import crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import { aceClient, type AceRequest } from '../aceClient.js';
 import { getModelSnapshot, pickLmFor, tensorsRoot } from './aceTrain.js';
+import { lmSizeOfAdapterPath } from './adapterLayout.js';
 import { readLabel } from './labelStore.js';
 import { newestVariantKey, variantDitModel, variantExists } from './trainLmStatus.js';
 import { writePreview, type PreviewAudio } from './auditionStore.js';
@@ -219,13 +220,22 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
   // resolve_name (sticky loaded LM, else registry[0] = the 0.6B), which made a
   // 4B adapter meet a 28-layer base and die with "36 layers but model has 28 —
   // mismatch, refusing" AFTER a full load cycle. Derive the base from the
-  // adapter's size suffix instead, and reject an explicit mismatch up front —
-  // both sides of an A/B must run the SAME base for the comparison to mean
-  // anything, so this is seed-discipline, not just ergonomics.
+  // adapter's own layout instead — its lm-<size> parent folder in the per-base
+  // layout, the legacy -<size> name suffix otherwise — and reject an explicit
+  // mismatch up front. Both sides of an A/B must run the SAME base for the
+  // comparison to mean anything, so this is seed-discipline, not ergonomics.
+  // Milestone dirs sit one level deeper (<adapter>/milestones/loss_x), so walk
+  // up until a size is found or the adapters root is reached.
   let lmModel = str(opts.lmModel);
   const adapterSide = sides.find(s => s.lmAdapter);
-  const sizeMatch = adapterSide ? /-(0\.6B|1\.7B|4B)$/i.exec(adapterSide.lmAdapter) : null;
-  const adapterSize = sizeMatch ? sizeMatch[1] : '';
+  let adapterSize: string = '';
+  if (adapterSide) {
+    let probe = adapterSide.lmAdapter;
+    for (let hops = 0; hops < 4 && probe && !adapterSize; hops++) {
+      adapterSize = lmSizeOfAdapterPath(probe);
+      probe = path.dirname(probe);
+    }
+  }
   if (adapterSize) {
     if (!lmModel) {
       lmModel = pickLmFor(adapterSize as LmSize, getModelSnapshot().lm);

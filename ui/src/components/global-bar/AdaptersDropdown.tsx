@@ -61,7 +61,7 @@ export const AdaptersDropdown: React.FC = () => {
   // the Node route so freshly trained adapters appear WITHOUT an engine
   // restart — selection sends the absolute path, which the engine's
   // path-fallback resolver loads directly.
-  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number }[]>([]);
+  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number; lmSize?: string; run?: string }[]>([]);
   const refreshLmAdapters = useCallback(() => {
     adapterApi.lmList(gp.lmAdapterFolder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
   }, [gp.lmAdapterFolder]);
@@ -472,6 +472,20 @@ export const AdaptersDropdown: React.FC = () => {
                   <span className={`text-xs truncate flex-1 ${isActive ? 'text-violet-400 font-medium' : 'text-zinc-600 dark:text-zinc-400'}`}>
                     {a.name}
                   </span>
+                  {/* Per-base + per-run layout: names are unsuffixed, the
+                      parent lm-* folder carries the size and each training run
+                      sits in a stamped subfolder — show both so same-artist
+                      entries stay distinguishable. */}
+                  {a.run && (
+                    <span className="text-zinc-500 flex-shrink-0 font-mono" style={{ fontSize: '9px' }} title={a.run}>
+                      {a.run.slice(0, 10)}
+                    </span>
+                  )}
+                  {a.lmSize && (
+                    <span className="text-violet-400/70 flex-shrink-0 font-mono" style={{ fontSize: '10px' }}>
+                      {a.lmSize}
+                    </span>
+                  )}
                   <span className="text-zinc-600 flex-shrink-0" style={{ fontSize: '10px' }}>
                     {formatSize(a.size)}
                   </span>

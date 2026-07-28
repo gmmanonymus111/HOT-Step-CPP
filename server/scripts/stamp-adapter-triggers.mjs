@@ -25,6 +25,7 @@
  *   --position <p>       prepend|append fallback when no dataset says otherwise
  *   --only <lm|dit|all>  which subtree to walk (default all)
  *   --no-backup          skip the .bak copy (not recommended)
+ *   --keep-backup        keep every .bak instead of releasing it after verify
  *   --force              restamp adapters that already carry a trigger
  */
 import fs from 'fs';
@@ -46,6 +47,10 @@ const opt = (name, dflt) => {
 const APPLY = flag('apply');
 const FORCE = flag('force');
 const BACKUP = !flag('no-backup');
+// A .bak is taken per file and released as soon as that file verifies, so peak
+// extra disk is one adapter rather than a second copy of the whole corpus.
+// --keep-backup retains them all instead.
+const KEEP_BACKUP = flag('keep-backup');
 const POSITION = opt('position', 'prepend');
 const ONLY = opt('only', 'all');
 const ADAPTERS_ROOT = path.resolve(opt('adapters', path.join(HERE, '..', '..', 'adapters')));
@@ -105,6 +110,11 @@ function stamp(file, metadata) {
   const lenBuf = Buffer.allocUnsafe(8);
   lenBuf.writeBigUInt64LE(BigInt(padded.length), 0);
 
+  const originalSize = fs.statSync(file).size;
+  const payloadBytes = originalSize - 8 - head.headerLen;
+  const expectedSize = 8 + padded.length + payloadBytes;
+  const originalNames = Object.keys(head.json).filter(k => k !== '__metadata__').sort().join('\n');
+
   const tmp = `${file}.stamping`;
   const out = fs.openSync(tmp, 'w');
   const src = fs.openSync(file, 'r');
@@ -124,14 +134,42 @@ function stamp(file, metadata) {
     fs.closeSync(out);
   }
 
-  if (BACKUP) fs.copyFileSync(file, `${file}.bak`);
+  const bak = `${file}.bak`;
+  if (BACKUP) fs.copyFileSync(file, bak);
   fs.rmSync(file);
   fs.renameSync(tmp, file);
+
+  // Verify the swapped file before moving on. The payload is a verbatim byte
+  // copy, so an exact size match plus an identical tensor-entry set is enough
+  // to catch truncation, a short write or a mangled header — the only ways this
+  // operation can go wrong. On failure, put the original back.
+  try {
+    const size = fs.statSync(file).size;
+    const check = readHeader(file);
+    if (size !== expectedSize) throw new Error(`size ${size} != expected ${expectedSize}`);
+    if (!check) throw new Error('rewritten header does not parse');
+    if (check.json.__metadata__?.hot_step_trigger !== metadata.hot_step_trigger) {
+      throw new Error('trigger missing from the rewritten header');
+    }
+    const names = Object.keys(check.json).filter(k => k !== '__metadata__').sort().join('\n');
+    if (names !== originalNames) throw new Error('tensor entry set changed');
+  } catch (e) {
+    if (BACKUP && fs.existsSync(bak)) {
+      fs.rmSync(file, { force: true });
+      fs.renameSync(bak, file);
+      throw new Error(`${e.message} — ORIGINAL RESTORED from .bak`);
+    }
+    throw new Error(`${e.message} — NO BACKUP TO RESTORE (ran with --no-backup)`);
+  }
+
+  if (BACKUP && !KEEP_BACKUP) fs.rmSync(bak, { force: true });
 }
 
 // ── discovery ───────────────────────────────────────────────────────────────
 
-/** Every adapter under `root`: PEFT dirs and bare .safetensors files. */
+/** Every adapter under `root`: PEFT dirs (unversioned, and each stamped run
+ *  subfolder — per-run layout) plus bare .safetensors files. `name` stays the
+ *  ARTIST name for runs, which is what the trigger proposal keys on. */
 function findAdapters(root, kind) {
   const out = [];
   if (!fs.existsSync(root)) return out;
@@ -141,6 +179,11 @@ function findAdapters(root, kind) {
     if (e.isDirectory()) {
       const model = path.join(full, 'adapter_model.safetensors');
       if (fs.existsSync(model)) out.push({ name: e.name, file: model, kind });
+      for (const run of fs.readdirSync(full, { withFileTypes: true })) {
+        if (!run.isDirectory() || run.name.startsWith('.') || run.name === 'milestones') continue;
+        const runModel = path.join(full, run.name, 'adapter_model.safetensors');
+        if (fs.existsSync(runModel)) out.push({ name: e.name, file: runModel, kind });
+      }
     } else if (e.isFile() && e.name.endsWith('.safetensors')) {
       out.push({ name: e.name.replace(/\.safetensors$/i, ''), file: full, kind });
     }
@@ -207,8 +250,32 @@ function proposeTrigger(name, datasetTags) {
 
 const datasetTags = loadDatasetTags();
 const targets = [];
-if (ONLY === 'all' || ONLY === 'dit') targets.push(...findAdapters(ADAPTERS_ROOT, 'dit'));
-if (ONLY === 'all' || ONLY === 'lm') targets.push(...findAdapters(path.join(ADAPTERS_ROOT, 'lm'), 'lm'));
+// Per-base layout (adapterLayout.ts): planner adapters under lm/ (legacy) and
+// lm-06b/lm-17b/lm-4b; DiT adapters at the root (legacy) and under dit-*.
+if (ONLY === 'all' || ONLY === 'dit') {
+  // Root level: LEGACY bare files / PEFT dirs only. The lm*/dit-* trees are
+  // walked by their own passes — descending into them here double-counts.
+  for (const e of fs.existsSync(ADAPTERS_ROOT) ? fs.readdirSync(ADAPTERS_ROOT, { withFileTypes: true }) : []) {
+    if (e.name.startsWith('.') || /^(lm|lm-|dit-)/i.test(e.name)) continue;
+    const full = path.join(ADAPTERS_ROOT, e.name);
+    if (e.isDirectory()) {
+      const model = path.join(full, 'adapter_model.safetensors');
+      if (fs.existsSync(model)) targets.push({ name: e.name, file: model, kind: 'dit' });
+    } else if (e.isFile() && e.name.endsWith('.safetensors')) {
+      targets.push({ name: e.name.replace(/\.safetensors$/i, ''), file: full, kind: 'dit' });
+    }
+  }
+  for (const e of fs.existsSync(ADAPTERS_ROOT) ? fs.readdirSync(ADAPTERS_ROOT, { withFileTypes: true }) : []) {
+    if (e.isDirectory() && /^dit-/i.test(e.name)) {
+      targets.push(...findAdapters(path.join(ADAPTERS_ROOT, e.name), 'dit'));
+    }
+  }
+}
+if (ONLY === 'all' || ONLY === 'lm') {
+  for (const sub of ['lm', 'lm-06b', 'lm-17b', 'lm-4b']) {
+    targets.push(...findAdapters(path.join(ADAPTERS_ROOT, sub), 'lm'));
+  }
+}
 
 if (!targets.length) {
   console.error(`No adapters found under ${ADAPTERS_ROOT} (--only ${ONLY}).`);

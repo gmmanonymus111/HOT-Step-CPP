@@ -13,6 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { config } from '../../config.js';
+import { ditShorthand, latestRunDir, newRunDir } from './adapterLayout.js';
 import { tensorsRoot } from './aceTrain.js';
 import {
   newestVariantKey, safeAdapterName, variantDitModel, variantExists,
@@ -42,9 +43,31 @@ export function adapterDitRoot(): string {
   return config.aceServer.adapters;
 }
 
-/** `<adapters>/<name>` — a PEFT directory, not a bare .safetensors file. */
-export function adapterDitDirFor(name: string): string {
-  return path.join(adapterDitRoot(), safeAdapterName(name));
+/** `<adapters>/dit-<shorthand>/<name>` — the ARTIST folder of the per-base
+ *  layout (2026-07-28). `ditModel` is the base the variant was preprocessed
+ *  against; adapters trained on different bases are not interchangeable, so
+ *  each base gets its own folder (adapterLayout.ts). Runs live in stamped
+ *  subfolders beneath it. */
+export function ditArtistDirFor(name: string, ditModel: string): string {
+  return path.join(adapterDitRoot(), ditShorthand(ditModel), safeAdapterName(name));
+}
+
+/** A fresh `<artist>/<YYYY-MM-DD_HH-MM-SS>` dir for a NEW training run to
+ *  write into — retraining never overwrites an earlier adapter. */
+export function ditRunDirFor(name: string, ditModel: string): string {
+  return newRunDir(ditArtistDirFor(name, ditModel));
+}
+
+/** The newest trained adapter for status READS: latest stamped run, else an
+ *  unversioned adapter directly in the artist folder, else the legacy
+ *  top-level `<adapters>/<name>` dir — so pre-migration adapters keep
+ *  reporting as trained. */
+export function adapterDitDirFor(name: string, ditModel: string): string {
+  const latest = latestRunDir(ditArtistDirFor(name, ditModel));
+  if (latest) return latest;
+  const legacy = path.join(adapterDitRoot(), safeAdapterName(name));
+  if (fs.existsSync(path.join(legacy, 'adapter_config.json'))) return legacy;
+  return ditArtistDirFor(name, ditModel);  // nothing trained yet
 }
 
 /** `.safetensors` files in a variant dir. The sidecars (preprocess_meta.json,
@@ -159,12 +182,18 @@ export function readTrainDitStatus(
 
   const rawName = typeof q.adapterName === 'string' ? q.adapterName.trim() : '';
   const adapterName = rawName || ds.slug;
-  const adapterDir = adapterDitDirFor(adapterName);
+  // The base decides which dit-<shorthand> folder the adapter lives in, so it
+  // must be resolved before the dir (adapterLayout.ts).
+  let ditModel = '';
+  if (dir) {
+    try { ditModel = variantDitModel(ds.slug, variantKey); } catch { /* stays '' */ }
+  }
+  const adapterDir = adapterDitDirFor(adapterName, ditModel);
 
   const status: TrainDitStatus = {
     variantKey,
     tensorsDir: dir,
-    ditModel: '',
+    ditModel,
     sampleCount: 0,
     channelStats: false,
     adapterName,
@@ -185,7 +214,6 @@ export function readTrainDitStatus(
   };
 
   if (dir) {
-    try { status.ditModel = variantDitModel(ds.slug, variantKey); } catch { /* stays '' */ }
     try { status.sampleCount = countTensorFiles(dir); } catch { /* stays 0 */ }
     try {
       status.channelStats = fs.existsSync(path.join(dir, 'channel_stats.json'));

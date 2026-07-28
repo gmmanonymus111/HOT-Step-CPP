@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { readAdapterTrigger } from '../services/adapters/stMetadata.js';
+import { lmAdapterRoots } from '../services/training/adapterLayout.js';
 
 const router = Router();
 
@@ -136,16 +137,47 @@ router.post('/scan', (req, res) => {
     // PEFT directories, mirroring GET /adapters/lm. Both files are required:
     // a dir with weights but no adapter_config.json loads with its alpha/rank
     // scale silently degraded to 1.0, so it must not be offered as ready.
+    const pushPeftDir = (dir: string, displayName: string) => {
+      const model = path.join(dir, 'adapter_model.safetensors');
+      if (!fs.existsSync(model) || !fs.existsSync(path.join(dir, 'adapter_config.json'))) return;
+      try {
+        const tg = readAdapterTrigger(dir);
+        files.push({ name: displayName, path: dir, size: fs.statSync(model).size, trigger: tg.trigger,
+                     triggerPosition: tg.position });
+      } catch { /* skip */ }
+    };
     for (const e of rawEntries) {
       if (!e.isDirectory() || e.name.startsWith('.')) continue;
       const dir = path.join(dirPath, e.name);
-      const model = path.join(dir, 'adapter_model.safetensors');
-      if (!fs.existsSync(model) || !fs.existsSync(path.join(dir, 'adapter_config.json'))) continue;
+      pushPeftDir(dir, e.name);
+      // Per-base layout (adapterLayout.ts): DiT adapters live one level down in
+      // dit-<shorthand> folders. Descend into those — and only those; lm-* is
+      // the planner-adapter tree and arbitrary subfolders are not ours to walk.
+      if (!/^dit-/i.test(e.name)) continue;
       try {
-        const tg = readAdapterTrigger(dir);
-        files.push({ name: e.name, path: dir, size: fs.statSync(model).size, trigger: tg.trigger,
-                     triggerPosition: tg.position });
-      } catch { /* skip */ }
+        for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (sub.name.startsWith('.')) continue;
+          const subPath = path.join(dir, sub.name);
+          if (sub.isDirectory()) {
+            // Unversioned adapter directly in the artist dir (legacy)…
+            pushPeftDir(subPath, `${e.name}/${sub.name}`);
+            // …and every stamped training run beneath it (per-run layout).
+            try {
+              for (const run of fs.readdirSync(subPath, { withFileTypes: true })) {
+                if (!run.isDirectory() || run.name.startsWith('.')) continue;
+                pushPeftDir(path.join(subPath, run.name), `${e.name}/${sub.name}/${run.name}`);
+              }
+            } catch { /* unreadable artist dir — skip its runs */ }
+          } else if (sub.isFile() && sub.name.endsWith('.safetensors')) {
+            try {
+              const stat = fs.statSync(subPath);
+              const tg = readAdapterTrigger(subPath);
+              files.push({ name: `${e.name}/${sub.name}`, path: subPath, size: stat.size,
+                           trigger: tg.trigger, triggerPosition: tg.position });
+            } catch { /* skip */ }
+          }
+        }
+      } catch { /* unreadable subdir — skip */ }
     }
     files.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -169,38 +201,80 @@ router.post('/scan', (req, res) => {
  */
 router.get('/lm', (req, res) => {
   const folderParam = (req.query.folder as string) || '';
-  const root = folderParam ? path.resolve(folderParam) : path.join(config.aceServer.adapters, 'lm');
-  const adapters: Array<{
+  type LmAdapterEntry = {
     name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
+    /** '0.6B' | '1.7B' | '4B' — from the lm-<size> parent folder, else the
+     *  legacy -<size> name suffix, else ''. */
+    lmSize: string;
+    /** Training-run stamp (YYYY-MM-DD_HH-MM-SS subfolder); '' for an
+     *  unversioned/legacy adapter. Every run of an artist is listed. */
+    run: string;
     trigger: string; triggerPosition: 'prepend' | 'append' | '';
-  }> = [];
-  try {
-    if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
-      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-        if (entry.name.startsWith('.')) continue;
-        const fullPath = path.join(root, entry.name);
-        try {
-          if (entry.isDirectory()) {
-            const model = path.join(fullPath, 'adapter_model.safetensors');
-            if (fs.existsSync(model)) {
-              const stat = fs.statSync(model);
-              const tg = readAdapterTrigger(fullPath);
-              adapters.push({ name: entry.name, path: fullPath, kind: 'peft', size: stat.size, mtime: stat.mtimeMs,
-                              trigger: tg.trigger, triggerPosition: tg.position });
-            }
-          } else if (entry.isFile() && entry.name.endsWith('.safetensors')) {
-            const stat = fs.statSync(fullPath);
-            const tg = readAdapterTrigger(fullPath);
-            adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size,
-                            mtime: stat.mtimeMs, trigger: tg.trigger, triggerPosition: tg.position });
+  };
+  const adapters: LmAdapterEntry[] = [];
+
+  const pushPeft = (dir: string, name: string, lmSize: string, run: string) => {
+    const model = path.join(dir, 'adapter_model.safetensors');
+    if (!fs.existsSync(model)) return false;
+    const stat = fs.statSync(model);
+    const tg = readAdapterTrigger(dir);
+    adapters.push({ name, path: dir, kind: 'peft', size: stat.size, mtime: stat.mtimeMs,
+                    lmSize, run, trigger: tg.trigger, triggerPosition: tg.position });
+    return true;
+  };
+
+  const scanOne = (dir: string, size: string) => {
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      try {
+        // Legacy flat layout carries the size in the name; per-size dirs carry
+        // it in `size`.
+        const suffix = /-(0\.6B|1\.7B|4B)$/i.exec(entry.name.replace(/\.safetensors$/i, ''));
+        const lmSize = size || (suffix ? suffix[1] : '');
+        if (entry.isDirectory()) {
+          // Unversioned adapter directly in the artist dir (legacy)…
+          pushPeft(fullPath, entry.name, lmSize, '');
+          // …and every stamped training run beneath it (per-run layout).
+          for (const runEntry of fs.readdirSync(fullPath, { withFileTypes: true })) {
+            if (!runEntry.isDirectory() || runEntry.name.startsWith('.')) continue;
+            pushPeft(path.join(fullPath, runEntry.name), entry.name, lmSize, runEntry.name);
           }
-        } catch { /* skip unreadable entries */ }
-      }
+        } else if (entry.isFile() && entry.name.endsWith('.safetensors')) {
+          const stat = fs.statSync(fullPath);
+          const tg = readAdapterTrigger(fullPath);
+          adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size,
+                          mtime: stat.mtimeMs, lmSize, run: '', trigger: tg.trigger, triggerPosition: tg.position });
+        }
+      } catch { /* skip unreadable entries */ }
     }
-    adapters.sort((a, b) => a.name.localeCompare(b.name));
+  };
+
+  let root: string;
+  try {
+    if (folderParam) {
+      // Explicit folder (the user's archive override). Scan it flat, and when
+      // it contains lm-* per-size subdirs — e.g. the adapters root itself —
+      // scan those too so the override survives the layout change.
+      root = path.resolve(folderParam);
+      scanOne(root, '');
+      for (const r of lmAdapterRoots()) {
+        const sub = path.join(root, path.basename(r.dir));
+        if (path.resolve(sub) !== root && fs.existsSync(sub)) scanOne(sub, r.size);
+      }
+    } else {
+      // Default: every planner-adapter root — the per-size lm-06b/lm-17b/lm-4b
+      // dirs plus the legacy flat lm/ (adapterLayout.ts).
+      root = config.aceServer.adapters;
+      for (const r of lmAdapterRoots()) scanOne(r.dir, r.size);
+    }
+    // Alphabetical by artist; within an artist, newest run first.
+    adapters.sort((a, b) =>
+      a.name.localeCompare(b.name) || a.lmSize.localeCompare(b.lmSize) || b.run.localeCompare(a.run));
     res.json({ root, adapters });
   } catch (err: any) {
-    res.json({ root, adapters: [], error: err.message });
+    res.json({ root: folderParam || config.aceServer.adapters, adapters: [], error: err.message });
   }
 });
 
