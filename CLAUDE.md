@@ -89,6 +89,7 @@ Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable
 | **Any maintenance task — start here** (per-domain procedures, gotchas, distilled institutional knowledge) | [.claude/skills/README.md](.claude/skills/README.md) — 13 fact-checked skills |
 | Full feature catalogue (100+) | [FEATURES.md](FEATURES.md) |
 | Engine internals, CLI, request JSON, generation modes | [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) |
+| **Training system** (dataset→preprocess→LM/DiT training→audition; ace-train, FSQ, ggml training gotchas) | [docs/TRAINING.md](docs/TRAINING.md) |
 | Writing a Lua plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
 | Build / install / releases | [README.md](README.md) |
 | Cutting & publishing a release (agent runbook) | [docs/RELEASING.md](docs/RELEASING.md) |

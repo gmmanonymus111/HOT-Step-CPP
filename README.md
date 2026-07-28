@@ -10,10 +10,10 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 
 💬 **Questions, feedback, or want to share what you've made?** [Join the Discord](https://discord.gg/ezVtmg9GKX) — it's where I'm most active for HOT-Step discussion and support.
 
-> ### 🧱 New: Song Builder *(in development — try it out!)*
-> Build a song **section by section**, Udio-style. Generate an intro, then generate several options for the next section (verse, pre-chorus, chorus…), audition them, pick your favourite, and extend — one piece at a time. You can prepend an intro after the fact, set per-section lyrics and bar counts, choose where each section attaches, and even seed a repeated section from an earlier one to follow its chords.
+> ### 🎓 New: Training Studio *(highly experimental — for the adventurous!)*
+> Train your own **style adapters entirely inside HOT-Step** — no Python, no external tools. Point it at a folder of songs and it walks you through the whole pipeline: **dataset creation** (local BPM/key analysis, lyrics from Genius, AI captions that actually listen to the audio), **tensor preprocessing**, and native **training** of both planner (LM LoRA, 0.6B/1.7B/4B) and **DiT LoRA** adapters — all in C++/GGML on your own GPU. There's even a pure-LM **audition mode** that lets you hear what the planner learned, A/B against the base model, with zero DiT influence.
 >
-> It's a **new feature still in active development and testing**, so expect rough edges — but we'd love for you to try it and share feedback. Find it in the sidebar as **Song Builder**.
+> This is **very much experimental right now** — it's brand new, GPU-hungry (16 GB+ recommended, 24 GB+ for full-depth DiT training), and rough edges are guaranteed. If you try it, we'd love to hear how it goes on the Discord. Find it in the sidebar as **Training**.
 
 ## Download
 
