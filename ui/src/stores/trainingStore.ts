@@ -19,8 +19,10 @@ import type {
   PatchDatasetInput,
   PatchSampleInput,
   LmSize,
+  PipelineSummary,
   PreprocessOptions,
   PreprocessStatus,
+  StartPipelineInput,
   TrainDitEpoch,
   TrainDitOptions,
   TrainDitStatus,
@@ -206,6 +208,10 @@ interface TrainingState {
   samplePreviewPending: Record<string, boolean>;
   samplePreviewErrors: Record<string, string>;
 
+  // batch pipeline (monitor phase)
+  pipelines: PipelineSummary[];
+  pipelinesLoading: boolean;
+
   // grid
   selectedSampleIds: Set<string>;
   openSampleId: string | null;
@@ -252,6 +258,9 @@ interface TrainingState {
   auditionSample(sampleId: string): Promise<void>;
   cancelJob(): Promise<void>;
   applyStreamEvent(ev: TrainingStreamEvent): void;   // called by useTrainingStream
+  loadPipelines(): Promise<void>;
+  startPipeline(input: StartPipelineInput): Promise<PipelineSummary>;
+  cancelPipeline(id: string): Promise<void>;
 }
 
 /** Split a detail payload into the row map + display order. */
@@ -310,6 +319,9 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   samplePreviewSources: {},
   samplePreviewPending: {},
   samplePreviewErrors: {},
+
+  pipelines: [],
+  pipelinesLoading: false,
 
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
@@ -830,6 +842,33 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
       // That status change unmounts the EventSource, so the server's terminal
       // `status` frame may never arrive — run the authoritative refresh here.
       refreshAfterJob(get, job.id);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  loadPipelines: async () => {
+    set({ pipelinesLoading: true });
+    try {
+      const pipelines = await trainingApi.listPipelines();
+      set({ pipelines, pipelinesLoading: false });
+    } catch (err) {
+      // Advisory — a failed poll must never blank the monitor panel mid-run.
+      console.warn('[Training] pipelines failed:', errMessage(err));
+      set({ pipelinesLoading: false });
+    }
+  },
+
+  startPipeline: async (input) => {
+    const pipeline = await trainingApi.startPipeline(input);
+    await get().loadPipelines();
+    return pipeline;
+  },
+
+  cancelPipeline: async (id) => {
+    try {
+      await trainingApi.cancelPipeline(id);
+      await get().loadPipelines();
     } catch (err) {
       set({ error: errMessage(err) });
     }

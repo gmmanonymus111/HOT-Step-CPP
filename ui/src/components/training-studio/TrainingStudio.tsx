@@ -13,6 +13,7 @@ import { useTrainingStore } from '../../stores/trainingStore';
 import { CapabilityBanner } from './CapabilityBanner';
 import { DatasetDetail } from './DatasetDetail';
 import { DatasetList } from './DatasetList';
+import { MonitorPanel } from './MonitorPanel';
 import { PhaseStepper } from './PhaseStepper';
 import { PreprocessPanel } from './PreprocessPanel';
 import { TrainPanel } from './TrainPanel';
@@ -68,9 +69,7 @@ export const TrainingStudio: React.FC = () => {
         ) : phase === 'train' ? (
           <TrainPanel />
         ) : (
-          <div className="rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-8 text-center text-sm text-zinc-500">
-            {t('trainingStudio.phase.comingSoon')}
-          </div>
+          <MonitorPanel />
         )}
       </div>
     </div>

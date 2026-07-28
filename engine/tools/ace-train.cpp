@@ -236,9 +236,16 @@ static void print_usage(void) {
             "                                variant the latents were made against)\n"
             "\n"
             "  Adapter:\n"
-            "    --adapter-type <lora>       lora            (lokr reserved, D22 — rejected in v1)\n"
-            "    --rank <n>                  128\n"
-            "    --alpha <n>                 256\n"
+            "    --adapter-type <lora|lokr>  lora\n"
+            "    --rank <n>                  128             lora only\n"
+            "    --alpha <n>                 256             lora only\n"
+            "    --lokr-dim <n>              512             lokr only, 4-4096\n"
+            "    --lokr-alpha <f>            512             lokr only, 0-8192; 0 = dim. LyCORIS\n"
+            "                                                forces alpha = dim (scale 1) wherever\n"
+            "                                                both kron factors are monolithic.\n"
+            "    --lokr-factor <n>           6               lokr only, -1 or 2-64\n"
+            "    --lokr-decompose-both / --no-lokr-decompose-both   default ON (parity knob;\n"
+            "                                                inert at dim 512 — w1 is always monolithic)\n"
             "    --target-mlp / --no-target-mlp   default ON  also LoRA mlp gate/up/down\n"
             "    --layers <n>                0               0 = auto; else train the top n layers\n"
             "\n"
@@ -1045,6 +1052,11 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
         else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-decompose-both")) a.lokr_decompose_both = true;
+        else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
         else if (!strcmp(argv[i], "--no-target-mlp")) a.target_mlp = false;
@@ -1134,6 +1146,17 @@ static int cmd_train_dit(int argc, char ** argv) {
     }
     if (a.loss_weighting != "none" && a.loss_weighting != "flow_snr") {
         fprintf(stderr, "ace-train train-dit: --loss-weighting must be none|flow_snr\n");
+        return 2;
+    }
+    // Validated HERE (§2.1): dit_train_main keeps a belt-and-braces check, but a
+    // typo must not cost a model load first.
+    if (a.adapter_type != "lora" && a.adapter_type != "lokr") {
+        fprintf(stderr, "ace-train train-dit: --adapter-type must be lora|lokr\n");
+        return 2;
+    }
+    if (a.lokr_dim < 4 || a.lokr_dim > 4096 || a.lokr_alpha < 0.0f || a.lokr_alpha > 8192.0f ||
+        (a.lokr_factor != -1 && (a.lokr_factor < 2 || a.lokr_factor > 64))) {
+        fprintf(stderr, "ace-train train-dit: --lokr-dim 4-4096, --lokr-alpha 0-8192, --lokr-factor -1 or 2-64\n");
         return 2;
     }
 

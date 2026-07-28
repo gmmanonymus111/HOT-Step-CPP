@@ -291,6 +291,9 @@ export interface ResolvedTrainDitOptions {
   ditModel: string; ditPath: string;
   adapterName: string; adapterDir: string;
   adapterType: DitAdapterType; rank: number; alpha: number; targetMlp: boolean;
+  // LyCORIS LoKR factors (K2 / plan §2.1). Always resolved regardless of
+  // adapterType — buildTrainDitArgs only emits them when adapterType==='lokr'.
+  lokrDim: number; lokrAlpha: number; lokrFactor: number; lokrDecomposeBoth: boolean;
   layers: number; crop: number; cropMin: number; cropMax: number;
   targetLoss: number; epochs: number; learningRate: number;
   gradAccum: number; gradClip: number; warmupRatio: number; weightDecay: number;
@@ -369,8 +372,20 @@ export function buildTrainDitArgs(input: {
     // engine.
     ...(o.ditPath ? ['--dit', o.ditPath] : []),
     '--adapter-type', o.adapterType,
-    '--rank', String(o.rank),
-    '--alpha', String(o.alpha),
+    // §2.1: lora trains via --rank/--alpha; lokr via the four --lokr-* flags.
+    // The two are mutually exclusive on the CLI side, so only one set is ever
+    // emitted — sending both would be harmless (ace-train ignores the unused
+    // side) but would misreport the run in logs/JSONL relays that echo argv.
+    ...(o.adapterType === 'lokr'
+      ? [
+          '--lokr-dim', String(o.lokrDim),
+          '--lokr-alpha', String(o.lokrAlpha),
+          '--lokr-factor', String(o.lokrFactor),
+          // Flag-shaped, default on (§2.1) — same "only the non-default side
+          // is emitted" convention as --channel-balance below.
+          ...(o.lokrDecomposeBoth ? [] : ['--no-lokr-decompose-both']),
+        ]
+      : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
     '--layers', String(o.layers),
     '--crop', String(o.crop),
     '--crop-min', String(o.cropMin),

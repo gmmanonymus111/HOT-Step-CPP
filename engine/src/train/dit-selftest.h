@@ -13,9 +13,17 @@
 //  T10 crop sampler               support + alignment + uniformity to +-3 sigma
 //  T11 AdamW + clip               rel err < 1e-5 / ratio 0.1 +- 1e-3
 //
+// LoKR (docs/plans/2026-07-28-lokr-dit-training.md §2.6):
+//  LK1 factorization              ported loop == derived reference, host-only
+//  LK2 untrained identity         max |apply(x) - W.x| <= 1e-6 at w2 = 0
+//  LK3 kron equivalence           matvec == materialized kron, rel < 1e-5
+//  LK4 finite differences         same bars as T4, probing w1 AND w2
+//  LK5 export/parse roundtrip     keys, shapes, alpha, lokr_config.linear_dim
+//
 // Non-zero exit on any failure. The ENGINE implementer may not hand off before
 // every check passes.
 
+#include "train/dit-adapter-lokr.h"
 #include "train/dit-data.h"
 #include "train/dit-train-graph.h"
 #include "train/dit-vram.h"
@@ -27,6 +35,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#    include <direct.h>
 #    include <process.h>
 #    include <windows.h>
 #else
@@ -156,6 +165,85 @@ static void dit_st_crop(std::vector<DitSelfTestResult> & rs, uint64_t seed) {
              n_draws, (int) (sizeof(cases) / sizeof(cases[0])), per_case.c_str(), ok_support ? "ok" : "BAD",
              ok_align ? "ok" : "BAD", ok_len ? "ok" : "BAD", ok_unif ? "ok" : "BAD", worst_all);
     dit_st_report(rs, "T10", ok_support && ok_align && ok_len && ok_unif, d);
+}
+
+// ─── LK1: the LyCORIS factorization, host-only ──────────────────────────────
+//
+// Runs before the data scan and the model load so a machine with no tensors dir
+// and no GPU still gets a verdict on the one piece of pure math the whole LoKR
+// parameterization is built on.
+//
+// The reference is derived, not transcribed: LyCORIS walks the divisors of `n`
+// upward while m < n and stops at the first one above the factor cap, which is
+// exactly "the largest divisor m <= min(cap, sqrt(n))". Comparing the ported
+// loop against that closed form catches a mis-ported loop guard, which a table
+// of hardcoded expectations would not.
+static void dit_st_factorization_ref(int64_t dimension, int factor, int64_t * out_m, int64_t * out_n) {
+    if (factor > 0 && (dimension % (int64_t) factor) == 0) {
+        int64_t m = (int64_t) factor, n = dimension / (int64_t) factor;
+        if (m > n) {
+            std::swap(m, n);
+        }
+        *out_m = m;
+        *out_n = n;
+        return;
+    }
+    const int64_t cap  = (factor < 0) ? dimension : (int64_t) factor;
+    int64_t       best = 1;
+    for (int64_t m = 1; m * m <= dimension; m++) {
+        if (dimension % m == 0 && m <= cap) {
+            best = m;
+        }
+    }
+    *out_m = best;
+    *out_n = dimension / best;
+}
+
+static void dit_st_lokr_factorization(std::vector<DitSelfTestResult> & rs) {
+    const int64_t dims[]    = { 1, 2, 4, 127, 128, 250, 360, 512, 1024, 2048, 4096, 6144, 8192 };
+    const int     factors[] = { -1, 2, 4, 6, 8, 16, 64 };
+    int           mismatch  = 0;
+    std::string   worst;
+    for (size_t i = 0; i < sizeof(dims) / sizeof(dims[0]); i++) {
+        for (size_t j = 0; j < sizeof(factors) / sizeof(factors[0]); j++) {
+            int64_t pm = 0, pn = 0, rm = 0, rn = 0;
+            dit_lokr_factorization(dims[i], factors[j], &pm, &pn);
+            dit_st_factorization_ref(dims[i], factors[j], &rm, &rn);
+            if (pm != rm || pn != rn) {
+                mismatch++;
+                if (worst.empty()) {
+                    char b[128];
+                    snprintf(b, sizeof(b), "(%lld,%d)->port(%lld,%lld) ref(%lld,%lld)", (long long) dims[i],
+                             factors[j], (long long) pm, (long long) pn, (long long) rm, (long long) rn);
+                    worst = b;
+                }
+            }
+        }
+    }
+    // The four the plan names, spelled out so the line is readable at a glance.
+    struct Named {
+        int64_t n;
+        int     f, em, en;
+    };
+    const Named named[] = { { 2048, 6, 4, 512 }, { 1024, 6, 4, 256 }, { 6144, 6, 6, 1024 }, { 2048, -1, 32, 64 } };
+    std::string table;
+    int         bad_named = 0;
+    for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+        int64_t m = 0, n = 0;
+        dit_lokr_factorization(named[i].n, named[i].f, &m, &n);
+        const bool ok = (m == named[i].em && n == named[i].en);
+        bad_named += ok ? 0 : 1;
+        char b[96];
+        snprintf(b, sizeof(b), "(%lld,%d)->(%lld,%lld)%s ", (long long) named[i].n, named[i].f, (long long) m,
+                 (long long) n, ok ? "" : "!=EXPECTED");
+        table += b;
+    }
+    const std::string first = worst.empty() ? std::string() : (" first=" + worst);
+    char              d[352];
+    snprintf(d, sizeof(d), "%s| %d (dim,factor) pairs vs a derived reference: %d mismatch%s%s", table.c_str(),
+             (int) ((sizeof(dims) / sizeof(dims[0])) * (sizeof(factors) / sizeof(factors[0]))), mismatch,
+             mismatch == 1 ? "" : "es", first.c_str());
+    dit_st_report(rs, "LK1", mismatch == 0 && bad_named == 0, d);
 }
 
 // ─── T9: the convention fingerprint ─────────────────────────────────────────
@@ -299,6 +387,181 @@ static void dit_st_adamw(std::vector<DitSelfTestResult> & rs, ggml_backend_t bac
     ggml_free(tctx);
 }
 
+// ─── LK5: export / parse roundtrip ──────────────────────────────────────────
+//
+// Parses the written file with yyjson directly rather than through the engine's
+// safetensors reader: the point of the rung is that the BYTES on disk are what
+// adapter-merge.h expects, so it must not share a reader with the thing it is
+// checking.
+static std::string dit_st_temp_dir() {
+    const char * t = getenv("TEMP");
+    if (!t || !*t) {
+        t = getenv("TMPDIR");
+    }
+    if (!t || !*t) {
+        t = ".";
+    }
+    return std::string(t) + "/hot-step-lokr-selftest";
+}
+
+static void dit_st_lokr_export(std::vector<DitSelfTestResult> & rs, const DitAdapterLoKr & lk, int layer) {
+    const std::string dir = dit_st_temp_dir();
+    DitExportMeta     meta;
+    meta.producer = std::string("ace-train ") + ACE_VERSION;
+    DitExportResult xr;
+    std::string     err;
+    if (!lk.exportDir(dir.c_str(), meta, &xr, &err)) {
+        dit_st_report(rs, "LK5", false, "export failed: " + err);
+        return;
+    }
+    const std::string sf = lm_join(dir, "lokr_weights.safetensors");
+
+    std::vector<char> raw;
+    {
+        FILE * f = fopen(sf.c_str(), "rb");
+        if (!f) {
+            dit_st_report(rs, "LK5", false, "cannot re-open " + sf);
+            return;
+        }
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        raw.resize((size_t) std::max(0L, n));
+        const size_t got = raw.empty() ? 0 : fread(raw.data(), 1, raw.size(), f);
+        fclose(f);
+        if (got != raw.size() || raw.size() < 8) {
+            dit_st_report(rs, "LK5", false, "short read on " + sf);
+            return;
+        }
+    }
+    uint64_t hdr_len = 0;
+    for (int i = 7; i >= 0; i--) {
+        hdr_len = (hdr_len << 8) | (uint64_t) (uint8_t) raw[(size_t) i];
+    }
+    if (hdr_len + 8 > raw.size()) {
+        dit_st_report(rs, "LK5", false, "safetensors header length overruns the file");
+        return;
+    }
+    const size_t data0 = 8 + (size_t) hdr_len;
+    yyjson_doc * doc   = yyjson_read(raw.data() + 8, (size_t) hdr_len, 0);
+    if (!doc) {
+        dit_st_report(rs, "LK5", false, "safetensors header is not valid JSON");
+        return;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+
+    int         bad = 0, checked = 0, cfg_dim = 0;
+    std::string why;
+    auto        fail = [&](const std::string & m) {
+        bad++;
+        if (why.empty()) {
+            why = m;
+        }
+    };
+
+    // __metadata__.lokr_config — the #1 silent-breakage trap (K8).
+    {
+        yyjson_val * md = yyjson_obj_get(root, "__metadata__");
+        yyjson_val * cf = md ? yyjson_obj_get(md, "lokr_config") : nullptr;
+        if (!cf || !yyjson_is_str(cf)) {
+            fail("__metadata__.lokr_config missing or not a string");
+        } else {
+            yyjson_doc * sub = yyjson_read(yyjson_get_str(cf), yyjson_get_len(cf), 0);
+            yyjson_val * ld  = sub ? yyjson_obj_get(yyjson_doc_get_root(sub), "linear_dim") : nullptr;
+            if (!ld || !yyjson_is_int(ld)) {
+                fail("lokr_config does not parse to an object with an integer linear_dim");
+            } else {
+                cfg_dim = (int) yyjson_get_int(ld);
+                if (cfg_dim != lk.dim) {
+                    fail("lokr_config.linear_dim != the configured dim");
+                }
+            }
+            if (sub) {
+                yyjson_doc_free(sub);
+            }
+        }
+    }
+
+    for (int s = 0; s < lk.nSites(); s++) {
+        const DitLokrSite * k = lk.site(layer, s);
+        if (!k) {
+            fail("site missing from the adapter");
+            continue;
+        }
+        const std::string stem = DitAdapterLoKr::lokr_key_stem(layer, s);
+        struct Want {
+            std::string name;
+            int64_t     rows, cols;
+        };
+        std::vector<Want> want;
+        want.push_back({ stem + ".alpha", 1, 0 });
+        want.push_back({ stem + ".lokr_w1", k->out_l, k->in_m });
+        if (k->mono) {
+            want.push_back({ stem + ".lokr_w2", k->out_k, k->in_n });
+        } else {
+            want.push_back({ stem + ".lokr_w2_a", k->out_k, (int64_t) lk.dim });
+            want.push_back({ stem + ".lokr_w2_b", (int64_t) lk.dim, k->in_n });
+        }
+        for (size_t i = 0; i < want.size(); i++) {
+            yyjson_val * e = yyjson_obj_get(root, want[i].name.c_str());
+            if (!e) {
+                fail("missing key " + want[i].name);
+                continue;
+            }
+            checked++;
+            yyjson_val * dt = yyjson_obj_get(e, "dtype");
+            if (!dt || !yyjson_is_str(dt) || strcmp(yyjson_get_str(dt), "F32") != 0) {
+                fail(want[i].name + " is not F32");
+            }
+            yyjson_val * sh   = yyjson_obj_get(e, "shape");
+            const size_t nd   = sh ? yyjson_arr_size(sh) : 0;
+            const int64_t d0  = nd > 0 ? yyjson_get_sint(yyjson_arr_get(sh, 0)) : -1;
+            const int64_t d1  = nd > 1 ? yyjson_get_sint(yyjson_arr_get(sh, 1)) : -1;
+            const bool    ok1 = (want[i].cols == 0) ? (nd == 1 && d0 == 1)
+                                                    : (nd == 2 && d0 == want[i].rows && d1 == want[i].cols);
+            if (!ok1) {
+                char b[192];
+                snprintf(b, sizeof(b), "%s shape [%lld,%lld] != expected [%lld,%lld]", want[i].name.c_str(),
+                         (long long) d0, (long long) d1, (long long) want[i].rows, (long long) want[i].cols);
+                fail(b);
+            }
+            if (want[i].cols == 0 && ok1) {
+                yyjson_val * off = yyjson_obj_get(e, "data_offsets");
+                const size_t o0  = (off && yyjson_arr_size(off) == 2)
+                                       ? (size_t) yyjson_get_uint(yyjson_arr_get(off, 0))
+                                       : SIZE_MAX;
+                float        av  = 0.0f;
+                if (o0 == SIZE_MAX || data0 + o0 + sizeof(float) > raw.size()) {
+                    fail(want[i].name + " data_offsets out of range");
+                } else {
+                    memcpy(&av, raw.data() + data0 + o0, sizeof(float));
+                    if (av != k->alpha_eff) {
+                        char b[160];
+                        snprintf(b, sizeof(b), "%s = %.6g but the site's effective alpha is %.6g",
+                                 want[i].name.c_str(), (double) av, (double) k->alpha_eff);
+                        fail(b);
+                    }
+                }
+            }
+        }
+    }
+    yyjson_doc_free(doc);
+
+    remove(sf.c_str());
+#ifdef _WIN32
+    _rmdir(dir.c_str());
+#else
+    rmdir(dir.c_str());
+#endif
+
+    char d[416];
+    snprintf(d, sizeof(d),
+             "%d tensors written (%lld bytes), %d keys re-parsed on L%d: dtypes/shapes/alpha ok, "
+             "lokr_config.linear_dim=%d%s%s",
+             xr.tensors, xr.bytes, checked, layer, cfg_dim, bad ? " | FIRST FAILURE: " : "", why.c_str());
+    dit_st_report(rs, "LK5", bad == 0 && checked > 0, d);
+}
+
 // ─── the driver ─────────────────────────────────────────────────────────────
 
 static int dit_self_test_impl(const std::string & dit_path, const std::string & tensors_dir, uint64_t seed,
@@ -309,6 +572,7 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
     if (!fd_only) {
         dit_st_flow_snr(rs);
         dit_st_crop(rs, seed);
+        dit_st_lokr_factorization(rs);
     }
 
     // ── data ─────────────────────────────────────────────────────────────
@@ -771,31 +1035,207 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
         dit_st_report(rs, "T6", ok && worst_a == 0.0 && min_b > 0.0 && all_finite, d);
     }
 
-    // ── T4: finite differences on a real DiT layer ───────────────────────
+    // ── LK2 / LK3 / LK5: the LoKR parameterization ───────────────────────
+    //
+    // One site on the top layer: gate_proj, the non-square worst case
+    // (out 6144 -> (6,1024), in 2048 -> (4,512), so w1 [6,4] and w2 [1024,512]).
+    if (!fd_only) {
+        DitAdapterLoKr lk;
+        bool           lk_ready = false;
+        {
+            DitAdapterCfg lcfg;
+            lcfg.target_mlp          = true;
+            lcfg.seed                = seed ^ 0x10c8badc0ffeeull;
+            lcfg.lokr_dim            = 512;
+            lcfg.lokr_alpha          = 512.0f;
+            lcfg.lokr_factor         = 6;
+            lcfg.lokr_decompose_both = true;
+            std::string lerr;
+            lk_ready = lk.init(&M.m, M.backend, L - 1, L, lcfg, &lerr);
+            if (!lk_ready) {
+                dit_st_report(rs, "LK2", false, lerr);
+                dit_st_report(rs, "LK3", false, lerr);
+                dit_st_report(rs, "LK5", false, lerr);
+            }
+        }
+        // A failed init has already reported all three rungs. Its site tensors
+        // may exist but be unallocated (init fails after ggml_new_tensor_2d but
+        // before the backend buffer), so running on would write into nothing AND
+        // report LK2/LK3/LK5 a second time.
+        const int           li = L - 1;
+        const DitLokrSite * ks = lk_ready ? lk.site(li, DIT_MLP_GATE) : nullptr;
+        if (ks) {
+            ggml_tensor * wg   = dit_site_weight(&M.m.layers[li], DIT_MLP_GATE);
+            const int64_t in_f = wg->ne[0], out_f = wg->ne[1], S_lk = 8;
+
+            ggml_context * ctxx;
+            {
+                ggml_init_params p = { 8 * ggml_tensor_overhead(), nullptr, true };
+                ctxx               = ggml_init(p);
+            }
+            ggml_tensor * xt = ggml_new_tensor_2d(ctxx, GGML_TYPE_F32, in_f, S_lk);
+            ggml_set_input(xt);
+            ggml_backend_buffer_t bufx = ggml_backend_alloc_ctx_tensors(ctxx, M.backend);
+
+            // Integer-valued operands (see LK3): every partial sum stays an exact
+            // f32 integer, so BOTH paths are bit-exact and the comparison is
+            // immune to the cuBLAS TF32 floor that forces T4 into a child process.
+            LmRng xr;
+            lm_rng_seed(&xr, seed ^ 0xfeedfaceull);
+            std::vector<float> xh((size_t) in_f * (size_t) S_lk);
+            for (size_t i = 0; i < xh.size(); i++) {
+                xh[i] = (float) ((int) lm_rng_below(&xr, 3) - 1);  // {-1,0,1}
+            }
+            if (bufx) {
+                ggml_backend_tensor_set(xt, xh.data(), 0, xh.size() * sizeof(float));
+            }
+
+            // ── LK2: untrained identity (w2 == 0 => delta == 0) ───────────
+            bool   ok2 = (bufx != nullptr);
+            double lk2 = 0.0;
+            if (ok2) {
+                ggml_init_params ip   = { arena.size(), arena.data(), true };
+                ggml_context *   ctxg = ggml_init(ip);
+                ggml_cgraph *    gf   = ggml_new_graph_custom(ctxg, 65536, false);
+                ggml_tensor *    ya   = lk.apply(ctxg, wg, li, DIT_MLP_GATE, xt);
+                ggml_tensor *    yb   = ggml_mul_mat(ctxg, wg, xt);
+                ggml_set_output(ya);
+                ggml_set_output(yb);
+                ggml_build_forward_expand(gf, ya);
+                ggml_build_forward_expand(gf, yb);
+                ggml_backend_sched_reset(M.sched);
+                ok2 = ggml_backend_sched_graph_compute(M.sched, gf) == GGML_STATUS_SUCCESS;
+                if (ok2) {
+                    std::vector<float> va((size_t) ggml_nelements(ya)), vb(va.size());
+                    ggml_backend_tensor_get(ya, va.data(), 0, va.size() * sizeof(float));
+                    ggml_backend_tensor_get(yb, vb.data(), 0, vb.size() * sizeof(float));
+                    for (size_t i = 0; i < va.size(); i++) {
+                        lk2 = std::max(lk2, fabs((double) va[i] - (double) vb[i]));
+                    }
+                }
+                ggml_free(ctxg);
+            }
+            {
+                char d[256];
+                snprintf(d, sizeof(d),
+                         "L%d %s [out %lld, in %lld] x [%lld,%lld]: max |apply(x) - W.x| = %.3e (bar 1e-6)", li,
+                         dit_site_peft(DIT_MLP_GATE), (long long) out_f, (long long) in_f, (long long) in_f,
+                         (long long) S_lk, lk2);
+                dit_st_report(rs, "LK2", ok2 && lk2 <= 1e-6, d);
+            }
+
+            // ── LK3: kron-matvec vs a materialized kron (the arbiter) ─────
+            //
+            // BOTH w2 forms are arbitrated. LyCORIS only keeps w2 monolithic
+            // while dim >= max(out_k,in_n)/2, which on the real XL base holds
+            // for the attention sites and is FALSE for every MLP site (gate_proj
+            // is 9728x2560 -> w2 [2432,512], factorized). Gating the rung on
+            // `mono` therefore made the arbiter permanently unrunnable on
+            // exactly the site the plan aimed it at — the factorized branch is
+            // the one carrying most of the adapter, so it is the one that most
+            // needs proving.
+            bool   ok3 = ok2;
+            double lk3 = 0.0, ref_mag = 0.0;
+            if (ok3) {
+                // Integer fills (see LK2) — the products stay exact f32 integers
+                // through both paths, so the comparison survives TF32.
+                std::vector<float> wh;
+                auto               fill_int = [&](ggml_tensor * t, int span) {
+                    wh.resize((size_t) ggml_nelements(t));
+                    for (size_t i = 0; i < wh.size(); i++) {
+                        wh[i] = (float) ((int) lm_rng_below(&xr, span) - span / 2);
+                    }
+                    ggml_backend_tensor_set(t, wh.data(), 0, wh.size() * sizeof(float));
+                };
+                fill_int(ks->w1, 5);  // {-2..2}
+                if (ks->mono) {
+                    fill_int(ks->w2, 3);  // {-1,0,1}
+                } else {
+                    fill_int(ks->w2_a, 3);
+                    fill_int(ks->w2_b, 3);
+                }
+
+                ggml_init_params ip   = { arena.size(), arena.data(), true };
+                ggml_context *   ctxg = ggml_init(ip);
+                ggml_cgraph *    gf   = ggml_new_graph_custom(ctxg, 65536, false);
+                // (a) the §2.3 matvec path, isolated from the base projection
+                ggml_tensor * dm = ggml_sub(ctxg, lk.apply(ctxg, wg, li, DIT_MLP_GATE, xt),
+                                            ggml_mul_mat(ctxg, wg, xt));
+                // (b) the PROVEN merge recipe (adapter-merge.h's LoKr kron),
+                //     re-created here so the test does not depend on that header.
+                //     A factorized site is first collapsed to its monolithic
+                //     equivalent W2[in_n, out_k] = w2_b . w2_a, which is what the
+                //     merge loader materializes before the kron.
+                const int64_t a = ks->out_l, b = ks->in_m, cc = ks->out_k, dd = ks->in_n;
+                ggml_tensor * w1s = ggml_scale(ctxg, ks->w1, ks->scale);
+                ggml_tensor * w2m = ks->mono ? ks->w2
+                                             : ggml_mul_mat(ctxg, ggml_cont(ctxg, ggml_transpose(ctxg, ks->w2_b)),
+                                                            ks->w2_a);
+                ggml_tensor * ou  = ggml_mul_mat(ctxg, ggml_reshape_2d(ctxg, w1s, 1, a * b),
+                                                 ggml_reshape_2d(ctxg, w2m, 1, cc * dd));
+                ggml_tensor * kp  = ggml_cont(ctxg, ggml_permute(ctxg, ggml_reshape_4d(ctxg, ou, b, a, dd, cc),
+                                                                 1, 3, 0, 2));
+                ggml_tensor * dr  = ggml_mul_mat(ctxg, ggml_reshape_2d(ctxg, kp, b * dd, a * cc), xt);
+                ggml_set_output(dm);
+                ggml_set_output(dr);
+                ggml_build_forward_expand(gf, dm);
+                ggml_build_forward_expand(gf, dr);
+                ggml_backend_sched_reset(M.sched);
+                ok3 = ggml_backend_sched_graph_compute(M.sched, gf) == GGML_STATUS_SUCCESS;
+                if (ok3) {
+                    std::vector<float> va((size_t) ggml_nelements(dm)), vb((size_t) ggml_nelements(dr));
+                    ok3 = (va.size() == vb.size());
+                    if (ok3) {
+                        ggml_backend_tensor_get(dm, va.data(), 0, va.size() * sizeof(float));
+                        ggml_backend_tensor_get(dr, vb.data(), 0, vb.size() * sizeof(float));
+                        double num = 0.0;
+                        for (size_t i = 0; i < va.size(); i++) {
+                            num     = std::max(num, fabs((double) va[i] - (double) vb[i]));
+                            ref_mag = std::max(ref_mag, fabs((double) vb[i]));
+                        }
+                        lk3 = num / std::max(1e-6, ref_mag);
+                    }
+                }
+                ggml_free(ctxg);
+            }
+            {
+                char d[352];
+                snprintf(d, sizeof(d),
+                         "w1[%lld,%lld] w2[%lld,%lld] %s scale %.4g, integer operands (TF32-exact): matvec vs "
+                         "materialized kron max rel err %.3e (bar 1e-5), reference max |delta| %.1f",
+                         (long long) ks->out_l, (long long) ks->in_m, (long long) ks->out_k, (long long) ks->in_n,
+                         ks->mono ? "monolithic" : "FACTORIZED", (double) ks->scale, lk3, ref_mag);
+                dit_st_report(rs, "LK3", ok3 && lk3 <= 1e-5 && ref_mag > 0.0, d);
+            }
+
+            // ── LK5: export / re-parse ────────────────────────────────────
+            dit_st_lokr_export(rs, lk, li);
+
+            if (bufx) {
+                ggml_backend_buffer_free(bufx);
+            }
+            ggml_free(ctxx);
+        }
+        lk.free();
+    }
+
+    // ── T4 / LK4: finite differences on a real DiT layer ─────────────────
     //
     // Measured in a CHILD process with NVIDIA_TF32_OVERRIDE=0 (dit_st_spawn_fd).
     // In DIT_ST_NO_FD this process only relays that child's verdict, so the
-    // summary and the exit code still carry T4.
-    if (mode == DIT_ST_NO_FD) {
-        dit_st_report(rs, "T4", fd_child_rc == 0,
-                      fd_child_rc == 0 ?
-                          "finite differences measured in the full-f32 child process (NVIDIA_TF32_OVERRIDE=0) — passed"
-                          :
-                          "finite differences FAILED in the full-f32 child process — see its T4 line above");
-    } else {
-        DitAdapterLora fd;
-        DitAdapterCfg  cfg;
-        cfg.rank    = 16;
-        cfg.alpha   = 32.0f;
-        cfg.seed    = seed ^ 0x1234ull;
-        cfg.b_sigma = 1e-2f;  // otherwise T6 makes dL/dA trivially zero
+    // summary and the exit code still carry both.
+    //
+    // The gate itself is parameterization-agnostic — it probes whatever the
+    // adapter puts in params() — so T4 (LoRA) and LK4 (LoKR) are the same code
+    // with different labels. Both parameterizations put exactly two trained
+    // tensors on every site, which is what the slot -> (layer, site, tensor)
+    // mapping below assumes.
+    auto fd_gate = [&](const char * check, DitAdapter & fd, const char * lbl0, const char * lbl1) {
         std::string err;
-        if (!fd.init(&M.m, M.backend, L - 2, L, cfg, &err)) {
-            dit_st_report(rs, "T4", false, err);
-        } else {
+        {
             LmOptim fopt;
             if (!lm_optim_init(&fopt, fd.params(), M.backend, &err)) {
-                dit_st_report(rs, "T4", false, err);
+                dit_st_report(rs, check, false, err);
             } else {
                 fopt.t_adamw    = t_adamw;
                 fopt.t_lossgrad = t_lossgrad;
@@ -941,7 +1381,7 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
                         // A probe that misses the bar prints its whole step sweep, so
                         // "truncation that never converges" can be told apart from
                         // "a systematic gradient error" without guessing.
-                        fprintf(stderr, "[self-test] T4 sweep slot %zu (rel vs dL target): %s\n", slot,
+                        fprintf(stderr, "[self-test] %s sweep slot %zu (rel vs dL target): %s\n", check, slot,
                                 sweep.c_str());
                     }
 
@@ -965,11 +1405,11 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
                     rels.push_back(probes[i].rel);
                     rels2.push_back(probes[i].rel2);
                     fprintf(stderr,
-                            "[self-test] T4 probe %2zu  L%-2d %-18s %s n=%-7zu dL=%.3g h=%.3e  analytic=% .6e  "
+                            "[self-test] %s probe %2zu  L%-2d %-18s %-4s n=%-7zu dL=%.3g h=%.3e  analytic=% .6e  "
                             "fd=% .6e  rel=%.3e (2nd %.3e)\n",
-                            i, probes[i].layer, dit_site_peft(probes[i].site), probes[i].is_b ? "B" : "A", probes[i].n,
-                            probes[i].delta, probes[i].step, probes[i].an, probes[i].fd, probes[i].rel,
-                            probes[i].rel2);
+                            check, i, probes[i].layer, dit_site_peft(probes[i].site),
+                            probes[i].is_b ? lbl1 : lbl0, probes[i].n, probes[i].delta, probes[i].step, probes[i].an,
+                            probes[i].fd, probes[i].rel, probes[i].rel2);
                 }
                 std::sort(rels.begin(), rels.end());
                 std::sort(rels2.begin(), rels2.end());
@@ -979,15 +1419,67 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
                 const double median2 = rels2.empty() ? 1e9 : rels2[rels2.size() / 2];
                 char         d[416];
                 snprintf(d, sizeof(d),
-                         "%d directional probes on real layers %d-%d (8 sites x A/B), f32 ULP floor %.2e, "
+                         "%d directional probes on real layers %d-%d (8 sites x %s/%s), f32 ULP floor %.2e, "
                          "forward repeatability |f-f'|=%.3e on loss %.6f: max rel=%.4e (bar 2e-2), "
                          "median rel=%.4e (bar 5e-3) [runner-up step: max=%.4e median=%.4e], all finite=%s",
-                         (int) probes.size(), L - 2, L - 1, noise_floor, repeat_abs, l0, maxrel, median, maxrel2,
-                         median2, fin ? "yes" : "NO");
-                dit_st_report(rs, "T4", fin && maxrel < 2e-2 && median < 5e-3, d);
+                         (int) probes.size(), L - 2, L - 1, lbl0, lbl1, noise_floor, repeat_abs, l0, maxrel, median,
+                         maxrel2, median2, fin ? "yes" : "NO");
+                dit_st_report(rs, check, fin && maxrel < 2e-2 && median < 5e-3, d);
                 lm_optim_free(&fopt);
             }
-            fd.free();
+        }
+    };
+
+    if (mode == DIT_ST_NO_FD) {
+        const char * pass_msg =
+            "finite differences measured in the full-f32 child process (NVIDIA_TF32_OVERRIDE=0) — passed";
+        const char * fail_msg = "finite differences FAILED in the full-f32 child process — see its line above";
+        dit_st_report(rs, "T4", fd_child_rc == 0, fd_child_rc == 0 ? pass_msg : fail_msg);
+        dit_st_report(rs, "LK4", fd_child_rc == 0, fd_child_rc == 0 ? pass_msg : fail_msg);
+    } else {
+        {
+            DitAdapterLora fd;
+            DitAdapterCfg  cfg;
+            cfg.rank    = 16;
+            cfg.alpha   = 32.0f;
+            cfg.seed    = seed ^ 0x1234ull;
+            cfg.b_sigma = 1e-2f;  // otherwise T6 makes dL/dA trivially zero
+            std::string err;
+            if (!fd.init(&M.m, M.backend, L - 2, L, cfg, &err)) {
+                dit_st_report(rs, "T4", false, err);
+            } else {
+                fd_gate("T4", fd, "A", "B");
+                fd.free();
+            }
+        }
+        {
+            DitAdapterLoKr fk;
+            DitAdapterCfg  cfg;
+            cfg.seed                = seed ^ 0x5678ull;
+            cfg.lokr_dim            = 512;
+            cfg.lokr_alpha          = 512.0f;
+            cfg.lokr_factor         = 6;
+            cfg.lokr_decompose_both = true;
+            // w2 is zero-initialised, which would make dL/dw1 identically zero.
+            // 2e-3 puts the delta in the same ballpark as the LoRA gate's, where
+            // the loss is still well conditioned.
+            cfg.b_sigma = 2e-3f;
+            std::string err;
+            const size_t want_slots = (size_t) DIT_NSITES_ATTN * 2 * 2;
+            if (!fk.init(&M.m, M.backend, L - 2, L, cfg, &err)) {
+                dit_st_report(rs, "LK4", false, err);
+            } else if (fk.params().size() != want_slots) {
+                char b[192];
+                snprintf(b, sizeof(b),
+                         "this base factorizes w2 at dim %d, so the adapter has %zu trained tensors over 2 layers "
+                         "instead of %zu — the probe's slot mapping does not apply",
+                         cfg.lokr_dim, fk.params().size(), want_slots);
+                dit_st_report(rs, "LK4", false, b);
+                fk.free();
+            } else {
+                fd_gate("LK4", fk, "w1", "w2");
+                fk.free();
+            }
         }
         const float lg1 = 1.0f;
         ggml_backend_tensor_set(t_lossgrad, &lg1, 0, sizeof(float));

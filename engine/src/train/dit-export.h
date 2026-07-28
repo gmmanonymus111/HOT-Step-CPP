@@ -4,6 +4,8 @@
 //
 // <out>/adapter_config.json          written FIRST (D19)
 // <out>/adapter_model.safetensors    2 * sites * K tensors, F32, format "pt"
+//                                    (LoKR writes <out>/lokr_weights.safetensors
+//                                    instead — dit-adapter-lokr.h owns the layout)
 // <out>/dit_train_log.json           rewritten after every epoch
 // <out>/milestones/loss_<v>/         optional snapshots, pruned to --milestone-keep
 
@@ -37,6 +39,12 @@ struct DitTrainLog {
     // config (§2.4, snake_case to mirror Side-Step's logs)
     std::string adapter_type = "lora";
     int         rank = 16, alpha = 32;
+    // LoKR geometry, written only when adapter_type == "lokr".
+    bool  is_lokr             = false;
+    int   lokr_dim            = 512;
+    float lokr_alpha          = 512.0f;
+    int   lokr_factor         = 6;
+    bool  lokr_decompose_both = true;
     bool        target_mlp = false;
     int         layers = 0, n_layers_total = 0;
     std::string layers_source = "auto";
@@ -85,6 +93,12 @@ static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) 
     yyjson_mut_obj_add_strcpy(doc, cfg, "adapter_type", m.adapter_type.c_str());
     yyjson_mut_obj_add_int(doc, cfg, "rank", m.rank);
     yyjson_mut_obj_add_int(doc, cfg, "alpha", m.alpha);
+    if (m.is_lokr) {
+        yyjson_mut_obj_add_int(doc, cfg, "lokr_dim", m.lokr_dim);
+        yyjson_mut_obj_add_real(doc, cfg, "lokr_alpha", (double) m.lokr_alpha);
+        yyjson_mut_obj_add_int(doc, cfg, "lokr_factor", m.lokr_factor);
+        yyjson_mut_obj_add_bool(doc, cfg, "lokr_decompose_both", m.lokr_decompose_both);
+    }
     yyjson_mut_obj_add_real(doc, cfg, "dropout", 0.0);
     yyjson_mut_obj_add_bool(doc, cfg, "target_mlp", m.target_mlp);
     yyjson_mut_obj_add_int(doc, cfg, "layers", m.layers);
@@ -183,6 +197,16 @@ static bool dit_export_peft(const DitAdapter & ad, const DitExportMeta & meta, c
 
 // ─── milestones ─────────────────────────────────────────────────────────────
 
+// Every file exportDir() can have written, whatever the parameterization: PEFT
+// (adapter_model.safetensors + adapter_config.json) or LyCORIS LoKR
+// (lokr_weights.safetensors). Naming only the PEFT pair here would leave a LoKR
+// snapshot behind and _rmdir would then refuse the directory.
+static void dit_milestone_remove_weights(const std::string & dir) {
+    remove(lm_join(dir, "adapter_model.safetensors").c_str());
+    remove(lm_join(dir, "adapter_config.json").c_str());
+    remove(lm_join(dir, "lokr_weights.safetensors").c_str());
+}
+
 // Remove milestone dirs left by a PREVIOUS run into the same <out>: this run's
 // log would not list them, yet the UI's adapter picker would still offer them.
 static void dit_milestone_reset(const std::string & out_dir) {
@@ -195,8 +219,7 @@ static void dit_milestone_reset(const std::string & out_dir) {
             continue;  // only our own naming — never touch anything else
         }
         const std::string dir = lm_join(root, subs[i]);
-        remove(lm_join(dir, "adapter_model.safetensors").c_str());
-        remove(lm_join(dir, "adapter_config.json").c_str());
+        dit_milestone_remove_weights(dir);
         remove(lm_join(dir, "dit_train_log.json").c_str());
 #ifdef _WIN32
         _rmdir(dir.c_str());
@@ -225,8 +248,7 @@ static void dit_milestone_prune(const std::string & out_dir, std::vector<DitMile
             }
         }
         const std::string dir = lm_join(out_dir, (*list)[worst].path);
-        remove(lm_join(dir, "adapter_model.safetensors").c_str());
-        remove(lm_join(dir, "adapter_config.json").c_str());
+        dit_milestone_remove_weights(dir);
 #ifdef _WIN32
         _rmdir(dir.c_str());
 #else

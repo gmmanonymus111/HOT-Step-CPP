@@ -5,7 +5,7 @@
 // Model (S = crop / patch, K = trained decoder layers):
 //
 //   arena_MB(S,K) = K*(0.3274*S + 1.139e-4*S^2) + (-0.125*S + 1.863e-4*S^2)
-//   fixed_bytes(K) = mirror_bytes(K) + 16*lora_params(K) + static input buffers
+//   fixed_bytes(K) = mirror_bytes(K) + 16*adapter_params(K) + static input buffers
 //   trainer_MB(S,K) = fixed + arena
 //
 // The arena coefficients are the verifier's refit over all 12 measured points
@@ -22,6 +22,7 @@
 //
 // docs/plans/2026-07-28-dit-trainer-implementation.md §3.7
 
+#include "train/dit-adapter-lokr.h"
 #include "train/dit-adapter.h"
 #include "train/dit-mirror.h"
 #include "train/lm-common.h"
@@ -37,6 +38,11 @@ struct DitVramModel {
     int       patch    = 2;
     int       rank     = 16;
     bool      target_mlp = false;
+    // Adapter parameterization: the params term is the only footprint that
+    // differs, and the arena polynomial is reused as-is (K10).
+    bool is_lokr     = false;
+    int  lokr_dim    = 512;
+    int  lokr_factor = 6;
     // static input geometry
     int in_ch = 192, out_ch = 64, hidden = 2560, enc_H = 2048, enc_S = 0;
 };
@@ -63,14 +69,16 @@ static double dit_vram_static_bytes(const DitVramModel & vm, int crop) {
     return b;
 }
 
-static size_t dit_vram_lora_params(const DitVramModel & vm, int K) {
-    return dit_lora_expected_params(vm.m->cfg, vm.n_layers - K, vm.n_layers, vm.rank, vm.target_mlp);
+static size_t dit_vram_adapter_params(const DitVramModel & vm, int K) {
+    return vm.is_lokr ? dit_lokr_expected_params(vm.m->cfg, vm.n_layers - K, vm.n_layers, vm.lokr_dim, vm.lokr_factor,
+                                                 vm.target_mlp)
+                      : dit_lora_expected_params(vm.m->cfg, vm.n_layers - K, vm.n_layers, vm.rank, vm.target_mlp);
 }
 
-// mirror + optimizer state + LoRA params, bytes. K = trained depth (top-K).
+// mirror + optimizer state + adapter params, bytes. K = trained depth (top-K).
 static double dit_vram_fixed_bytes(const DitVramModel & vm, int K, int crop) {
     const size_t mirror = dit_mirror_bytes_for(vm.m, vm.n_layers - K);
-    const size_t np     = dit_vram_lora_params(vm, K);
+    const size_t np     = dit_vram_adapter_params(vm, K);
     return (double) mirror + 16.0 * (double) np + dit_vram_static_bytes(vm, crop);
 }
 

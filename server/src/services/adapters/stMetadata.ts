@@ -65,15 +65,20 @@ export function readSafetensorsMetadata(file: string): Record<string, string> {
 
 /**
  * Resolve an adapter's embedded trigger. Accepts either a bare `.safetensors`
- * file or a PEFT directory (in which case `adapter_model.safetensors` inside it
- * is read). Memoised on path + size + mtime, so re-scanning a folder of 200
- * adapters costs one stat each after the first pass.
+ * file or an adapter directory (in which case `adapter_model.safetensors` inside
+ * it is read, falling back to `lokr_weights.safetensors` — the LyCORIS leaf a
+ * DiT LoKR export writes instead, carrying the same trigger keys). Memoised on
+ * path + size + mtime, so re-scanning a folder of 200 adapters costs one stat
+ * each after the first pass.
  */
 export function readAdapterTrigger(pathOrDir: string): AdapterTrigger {
   try {
     let file = pathOrDir;
     const st = fs.statSync(pathOrDir);
-    if (st.isDirectory()) file = path.join(pathOrDir, 'adapter_model.safetensors');
+    if (st.isDirectory()) {
+      file = path.join(pathOrDir, 'adapter_model.safetensors');
+      if (!fs.existsSync(file)) file = path.join(pathOrDir, 'lokr_weights.safetensors');
+    }
 
     const fst = file === pathOrDir ? st : fs.statSync(file);
     if (!fst.isFile()) return EMPTY;

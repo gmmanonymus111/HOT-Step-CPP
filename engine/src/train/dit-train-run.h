@@ -32,6 +32,11 @@ struct DitTrainArgs {
 
     std::string adapter_type = "lora";
     int         rank = 128, alpha = 256;
+    // LoKR (--adapter-type lokr); Uber-LoKR-4 defaults, K2.
+    int   lokr_dim            = 512;
+    float lokr_alpha          = 512.0f;
+    int   lokr_factor         = 6;
+    bool  lokr_decompose_both = true;
     // ON by default: an attention-only LoRA leaves the MLP projections — where
     // most of the timbre lives — frozen. --no-target-mlp turns it back off.
     bool        target_mlp = true;
@@ -125,6 +130,7 @@ static std::string dit_milestone_label(double v, float step) {
 
 static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOutcome * out) {
     const int64_t t_stage0 = ggml_time_ms();
+    const bool    is_lokr  = (a.adapter_type == "lokr");
     jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"begin\",\"total\":%d}", a.epochs);
 
     // ── samples (host-resident for the whole run) ────────────────────────
@@ -246,16 +252,19 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
     // ── VRAM auto-fit (D10/D11) ──────────────────────────────────────────
     DitVramModel vm;
-    vm.m          = &M.m;
-    vm.n_layers   = L;
-    vm.patch      = P;
-    vm.rank       = a.rank;
-    vm.target_mlp = a.target_mlp;
-    vm.in_ch      = c.in_channels;
-    vm.out_ch     = Oc;
-    vm.hidden     = H;
-    vm.enc_H      = enc_H;
-    vm.enc_S      = enc_S;
+    vm.m           = &M.m;
+    vm.n_layers    = L;
+    vm.patch       = P;
+    vm.rank        = a.rank;
+    vm.target_mlp  = a.target_mlp;
+    vm.is_lokr     = is_lokr;
+    vm.lokr_dim    = a.lokr_dim;
+    vm.lokr_factor = a.lokr_factor;
+    vm.in_ch       = c.in_channels;
+    vm.out_ch      = Oc;
+    vm.hidden      = H;
+    vm.enc_H       = enc_H;
+    vm.enc_S       = enc_S;
 
     const DitVramFit fit =
         dit_vram_fit(vm, M.backend, a.vram_reserve_mb, a.vram_safety, a.crop, a.layers, a.crop_min, a.crop_max, max_T);
@@ -352,24 +361,33 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
     // ── adapter + optimizer ──────────────────────────────────────────────
     DitAdapterLora lora;
+    DitAdapterLoKr lokr;
+    DitAdapter *   adapter = is_lokr ? (DitAdapter *) &lokr : (DitAdapter *) &lora;
     {
         DitAdapterCfg cfg;
-        cfg.rank       = a.rank;
-        cfg.alpha      = (float) a.alpha;
-        cfg.target_mlp = a.target_mlp;
-        cfg.seed       = (uint64_t) a.seed;
+        cfg.rank                = a.rank;
+        cfg.alpha               = (float) a.alpha;
+        cfg.target_mlp          = a.target_mlp;
+        cfg.seed                = (uint64_t) a.seed;
+        cfg.lokr_dim            = a.lokr_dim;
+        cfg.lokr_alpha          = a.lokr_alpha;
+        cfg.lokr_factor         = a.lokr_factor;
+        cfg.lokr_decompose_both = a.lokr_decompose_both;
         std::string err;
-        if (!lora.init(&M.m, M.backend, lora_lo, L, cfg, &err)) {
+        if (!adapter->init(&M.m, M.backend, lora_lo, L, cfg, &err)) {
             lm_fatal("unsupported-adapter", err);
             ggml_backend_buffer_free(buf_static);
             ggml_free(ctx_static);
             dit_train_free(&M);
             return 1;
         }
-        const size_t expect = dit_lora_expected_params(c, lora_lo, L, a.rank, a.target_mlp);
-        if (lora.nParams() != expect) {
+        const size_t expect =
+            is_lokr ? dit_lokr_expected_params(c, lora_lo, L, a.lokr_dim, a.lokr_factor, a.target_mlp)
+                    : dit_lora_expected_params(c, lora_lo, L, a.rank, a.target_mlp);
+        if (adapter->nParams() != expect) {
             char b[192];
-            snprintf(b, sizeof(b), "LoRA parameter count %zu != expected %zu", lora.nParams(), expect);
+            snprintf(b, sizeof(b), "%s parameter count %zu != expected %zu", adapter->typeName(), adapter->nParams(),
+                     expect);
             lm_fatal("unsupported-adapter", b);
             ggml_backend_buffer_free(buf_static);
             ggml_free(ctx_static);
@@ -377,14 +395,14 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             return 1;
         }
     }
-    const DitAdapter * ad = &lora;
+    const DitAdapter * ad = adapter;
 
     LmOptim opt;
     {
         std::string err;
-        if (!lm_optim_init(&opt, lora.params(), M.backend, &err)) {
+        if (!lm_optim_init(&opt, adapter->params(), M.backend, &err)) {
             lm_fatal("vram", err);
-            lora.free();
+            adapter->free();
             ggml_backend_buffer_free(buf_static);
             ggml_free(ctx_static);
             dit_train_free(&M);
@@ -416,7 +434,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
        "\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"source\":\"%s\",\"cropSource\":\"%s\","
        "\"layersSource\":\"%s\"}",
        (long long) fit.free_mb, (long long) fit.total_mb, a.vram_reserve_mb, (long long) (M.mirror.bytes / 1048576),
-       crop_len, K, (long long) lora.nParams(), (long long) (fit.est_bytes / 1048576.0),
+       crop_len, K, (long long) adapter->nParams(), (long long) (fit.est_bytes / 1048576.0),
        (fit.crop_user && fit.layers_user) ? "user" : "auto", fit.crop_user ? "user" : "auto",
        fit.layers_user ? "user" : "auto");
     if (K < L) {
@@ -562,7 +580,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     // ── teardown helper (used by every failure path from here on) ────────
     auto teardown = [&]() {
         lm_optim_free(&opt);
-        lora.free();
+        adapter->free();
         ggml_backend_buffer_free(buf_static);
         ggml_free(ctx_static);
         dit_train_free(&M);
@@ -878,6 +896,8 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 // ─── main entry ─────────────────────────────────────────────────────────────
 
 static int dit_train_main(const DitTrainArgs & a) {
+    const bool   is_lokr      = (a.adapter_type == "lokr");
+    const char * weights_leaf = is_lokr ? "lokr_weights.safetensors" : "adapter_model.safetensors";
     if (a.self_test) {
         return dit_self_test(a.dit_path, a.tensors_dir, (uint64_t) a.seed, std::min(a.crop_max, 750),
                              a.vram_reserve_mb, a.vram_safety);
@@ -893,18 +913,28 @@ static int dit_train_main(const DitTrainArgs & a) {
         stage_csv += "\"" + a.stages[i] + "\"";
     }
 
+    // LoKR carries its own geometry fields; `rank`/`alpha` stay at 0 so a relay
+    // cannot mistake the LoRA defaults for the configuration that ran.
+    char adapter_fields[160];
+    if (is_lokr) {
+        snprintf(adapter_fields, sizeof(adapter_fields),
+                 "\"rank\":0,\"alpha\":0,\"lokrDim\":%d,\"lokrAlpha\":%.9g,\"lokrFactor\":%d,\"lokrDecomposeBoth\":%s",
+                 a.lokr_dim, (double) a.lokr_alpha, a.lokr_factor, a.lokr_decompose_both ? "true" : "false");
+    } else {
+        snprintf(adapter_fields, sizeof(adapter_fields), "\"rank\":%d,\"alpha\":%d", a.rank, a.alpha);
+    }
     jl("{\"type\":\"start\",\"stages\":[%s],\"tensors\":\"%s\",\"out\":\"%s\",\"dit\":\"%s\",\"adapterType\":\"%s\","
-       "\"rank\":%d,\"alpha\":%d,\"targetMlp\":%s,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"targetLoss\":%.9g,"
+       "%s,\"targetMlp\":%s,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"targetLoss\":%.9g,"
        "\"gradClip\":%.9g,\"seed\":%d,\"lossWeighting\":\"%s\",\"channelBalance\":%s,\"cfgRatio\":%.9g,"
        "\"genreRatio\":%d}",
        stage_csv.c_str(), lm_json_escape(a.tensors_dir).c_str(), lm_json_escape(a.out_dir).c_str(),
-       lm_json_escape(a.dit_name.empty() ? a.dit_path : a.dit_name).c_str(), a.adapter_type.c_str(), a.rank, a.alpha,
+       lm_json_escape(a.dit_name.empty() ? a.dit_path : a.dit_name).c_str(), a.adapter_type.c_str(), adapter_fields,
        a.target_mlp ? "true" : "false", (double) a.lr, a.epochs, a.grad_accum, (double) a.target_loss,
        (double) a.grad_clip, a.seed, a.loss_weighting.c_str(), a.channel_balance ? "true" : "false",
        (double) a.cfg_ratio, a.genre_ratio);
 
-    if (a.adapter_type != "lora") {
-        lm_fatal("unsupported-adapter", "LoKR training is not available yet — use --adapter-type lora (D22)");
+    if (a.adapter_type != "lora" && !is_lokr) {
+        lm_fatal("unsupported-adapter", "--adapter-type must be lora|lokr");
         return 1;
     }
 
@@ -915,6 +945,11 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.adapter_type    = a.adapter_type;
     log.rank            = a.rank;
     log.alpha           = a.alpha;
+    log.is_lokr             = is_lokr;
+    log.lokr_dim            = a.lokr_dim;
+    log.lokr_alpha          = a.lokr_alpha;
+    log.lokr_factor         = a.lokr_factor;
+    log.lokr_decompose_both = a.lokr_decompose_both;
     log.target_mlp      = a.target_mlp;
     log.dit_path        = a.dit_path;
     log.dit_name        = a.dit_name;
@@ -954,7 +989,12 @@ static int dit_train_main(const DitTrainArgs & a) {
         return 1;
     }
     if (a.overwrite) {
+        // BOTH layouts, not just this run's: a leftover lokr_weights.safetensors
+        // next to a fresh LoRA export (or vice versa) wins some loader probes and
+        // loses others, so the directory would serve the stale adapter.
         remove(lm_join(a.out_dir, "adapter_model.safetensors").c_str());
+        remove(lm_join(a.out_dir, "adapter_config.json").c_str());
+        remove(lm_join(a.out_dir, "lokr_weights.safetensors").c_str());
     }
 
     if (dit_has_stage(a, "train")) {
@@ -984,7 +1024,7 @@ static int dit_train_main(const DitTrainArgs & a) {
                 return 1;
             }
             long long bytes = 0;
-            pm_stat_file(lm_join(a.out_dir, "adapter_model.safetensors"), &bytes, NULL);
+            pm_stat_file(lm_join(a.out_dir, weights_leaf), &bytes, NULL);
             jl("{\"type\":\"export\",\"path\":\"%s\",\"tensors\":%d,\"bytes\":%lld,\"ms\":%lld}",
                lm_json_escape(a.out_dir).c_str(), out.export_tensors, bytes, (long long) (ggml_time_ms() - t_x0));
             jl("{\"type\":\"stage\",\"stage\":\"export\",\"state\":\"end\",\"ms\":%lld}",

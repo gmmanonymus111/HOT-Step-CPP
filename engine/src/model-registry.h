@@ -479,18 +479,22 @@ static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_di
         count++;
     }
 
-    // PEFT directories (contain adapter_model.safetensors)
+    // Adapter directories: PEFT (adapter_model.safetensors), else the LyCORIS
+    // LoKR layout ace-train --adapter-type lokr writes (lokr_weights.safetensors)
     std::vector<std::string> subdirs;
     registry_list_subdirs(adapters_dir, &subdirs);
     std::sort(subdirs.begin(), subdirs.end());
     for (const auto & dname : subdirs) {
-        std::string adapter =
-            std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
-        if (registry_is_file(adapter.c_str())) {
-            std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
-            reg->adapters.push_back({ dname, full });
-            fprintf(stderr, "[Registry] Adapter: %s (PEFT)\n", dname.c_str());
-            count++;
+        const char * leaves[2] = { "adapter_model.safetensors", "lokr_weights.safetensors" };
+        for (int li = 0; li < 2; li++) {
+            std::string adapter = std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + leaves[li];
+            if (registry_is_file(adapter.c_str())) {
+                std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
+                reg->adapters.push_back({ dname, full });
+                fprintf(stderr, "[Registry] Adapter: %s (%s)\n", dname.c_str(), li == 0 ? "PEFT" : "LoKR");
+                count++;
+                break;
+            }
         }
     }
 

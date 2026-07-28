@@ -22,7 +22,7 @@ import { AuditionCard, type MilestoneAuditionRequest } from './AuditionCard';
 import { JobProgress } from './JobProgress';
 import { TrainingChart } from './TrainingChart';
 import { TrainingRunStats } from './TrainingRunStats';
-import { TRAIN_DIT_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
+import { TRAIN_DIT_LOKR_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
 import { TRAIN_LM_DEFAULTS, TrainLmForm, type TrainLmFormState } from './TrainLmForm';
 import { useTrainingStream } from './useTrainingStream';
 
@@ -68,7 +68,8 @@ export const TrainPanel: React.FC = () => {
   const startTrainDit = useTrainingStore(s => s.startTrainDit);
 
   const [form, setForm] = useState<TrainLmFormState>(TRAIN_LM_DEFAULTS);
-  const [ditForm, setDitForm] = useState<TrainDitFormState>(TRAIN_DIT_DEFAULTS);
+  // K1: LoKR is the form's initial state — Rob's validated default preference.
+  const [ditForm, setDitForm] = useState<TrainDitFormState>(TRAIN_DIT_LOKR_DEFAULTS);
   const [starting, setStarting] = useState(false);
   const [ditStarting, setDitStarting] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -236,8 +237,17 @@ export const TrainPanel: React.FC = () => {
       ...(trainDitStatus?.variantKey ? { variantKey: trainDitStatus.variantKey } : {}),
       adapterName: ditForm.adapterName.trim(),
       adapterType: ditForm.adapterType,
-      rank: ditForm.rank,
-      alpha: ditForm.alpha,
+      // §2.1: lora trains via rank/alpha, lokr via the four lokr* fields — the
+      // server ignores whichever side doesn't match adapterType, but sending
+      // only the relevant one keeps the request body honest about what ran.
+      ...(ditForm.adapterType === 'lokr'
+        ? {
+            lokrDim: ditForm.lokrDim,
+            lokrAlpha: ditForm.lokrAlpha,
+            lokrFactor: ditForm.lokrFactor,
+            lokrDecomposeBoth: ditForm.lokrDecomposeBoth,
+          }
+        : { rank: ditForm.rank, alpha: ditForm.alpha }),
       targetMlp: ditForm.targetMlp,
       layers: ditForm.layers,
       crop: ditForm.crop,

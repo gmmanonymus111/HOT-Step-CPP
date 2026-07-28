@@ -17,6 +17,12 @@
 //   GET    /scan-preview                                — pre-create folder summary
 //   GET    /datasets                                    — list (newest first)
 //   POST   /datasets                                    — create
+//   POST   /pipeline                                    — start a batch import + stage chain
+//   GET    /pipeline                                    — active + recent pipelines
+//   GET    /pipeline/:id                                — one pipeline
+//   DELETE /pipeline/:id                                — cancel a pipeline
+//   GET    /defaults                                    — stored per-stage defaults
+//   PUT    /defaults                                    — set per-stage defaults
 //   GET    /jobs                                        — active + finished jobs
 //   GET    /jobs/:jobId                                 — poll a job
 //   DELETE /jobs/:jobId                                 — cancel/forget a job
@@ -48,7 +54,6 @@
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { engineReady } from '../engineState.js';
 import { aceClient } from '../services/aceClient.js';
@@ -58,11 +63,14 @@ import {
   buildSamples, loadSidecarMetadata, sampleFromParts,
   scanPreview as scanPreviewFolder, ScanLimitError,
 } from '../services/training/datasetScan.js';
-import {
-  isInside, labelsDir, slugify, trainingBaseDir, uniqueSlug,
-} from '../services/training/paths.js';
+import { isInside, trainingBaseDir } from '../services/training/paths.js';
 import { deleteLabel, deleteLabels, patchLabel, readLabel } from '../services/training/labelStore.js';
-import { readDatasetJsonMetadata } from '../services/training/datasetBuilder.js';
+import { createDatasetFromFolder, DatasetCreateError } from '../services/training/datasetCreate.js';
+import { detailFor, syncCounters } from '../services/training/datasetDetail.js';
+import {
+  cancelPipeline, getPipeline, hasActivePipeline, listPipelines, PIPELINE_STAGES, startPipeline,
+} from '../services/training/pipelineRunner.js';
+import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
 import { essentiaAvailable } from '../services/training/essentiaClient.js';
 import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services/training/understandClient.js';
@@ -73,7 +81,7 @@ import {
   tensorsDir, tensorsRoot, variantKeyFor,
   type ResolvedPreprocessOptions, type ResolvedTrainDitOptions, type ResolvedTrainLmOptions,
 } from '../services/training/aceTrain.js';
-import { countPreprocessedVariants, readPreprocessStatus } from '../services/training/preprocessStatus.js';
+import { readPreprocessStatus } from '../services/training/preprocessStatus.js';
 import {
   adapterLmRoot, lmRunDirFor, newestVariantKey, readTrainLmStatus,
   safeAdapterName, variantDitModel, variantExists,
@@ -89,10 +97,11 @@ import {
 import { AuditionError, decodeStoredCodes } from '../services/training/auditionService.js';
 import type {
   AuditionListResponse, AuditionOptions, AuditionSideSpec,
-  BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, LmSize,
-  PatchSampleInput, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
-  TrainingCapabilities, TrainingDatasetDetail, TrainingDatasetRow, TrainingSample,
-  TrainDitOptions, TrainDitStage, TrainLmOptions, TrainLmStage,
+  BulkSetInput, CaptionOptions, CreateDatasetInput, FieldSource, GeniusOptions, LabelOptions, LmSize,
+  PatchSampleInput, PipelineFolderSpec, PipelineStage,
+  PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
+  TrainingCapabilities, TrainingDatasetRow, TrainingDefaults, TrainingSample,
+  DitAdapterType, TrainDitOptions, TrainDitStage, TrainLmOptions, TrainLmStage,
 } from '../services/training/types.js';
 
 const router = Router();
@@ -108,65 +117,6 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-
-/**
- * The dataset status the fresh scan implies (§2.0). Both the response body and
- * the DB cache are derived from this, so a GET can never report the pre-sync
- * value (e.g. 'labeling' for one call after a job ended).
- */
-function computeStatus(ds: TrainingDatasetRow, samples: TrainingSample[]): TrainingDatasetRow['status'] {
-  if (ds.status === 'built') return 'built';
-  if (queue.activeJobForDataset(ds.id)) return 'labeling';
-  return samples.some(s => !!s.caption.trim()) ? 'labeled' : 'draft';
-}
-
-/** Build the full detail payload — always a fresh scan (D3). */
-async function detailFor(ds: TrainingDatasetRow): Promise<TrainingDatasetDetail> {
-  const warnings: string[] = [];
-  const samples = await buildSamples(ds, { warnings });
-
-  const included = samples.filter(s => !s.excluded);
-  if (included.length > 0 && included.length < 10) {
-    warnings.push(`Only ${included.length} samples — 10+ recommended`);
-  }
-  const missing = included.filter(s => s.fileMissing).length;
-  if (missing > 0) warnings.push(`${missing} file(s) are missing from disk`);
-
-  const active = queue.activeJobForDataset(ds.id);
-
-  let preprocessedVariants = 0;
-  try { preprocessedVariants = countPreprocessedVariants(ds.slug); } catch { /* stays 0 */ }
-
-  return {
-    ...ds,
-    // The DB counters are a cache; the fresh scan is what the client sees.
-    sampleCount: samples.length,
-    labeledCount: samples.filter(s => !!s.caption.trim()).length,
-    excludedCount: samples.filter(s => s.excluded).length,
-    status: computeStatus(ds, samples),
-    samples,
-    warnings,
-    activeJobId: active ? active.id : null,
-    preprocessedVariants,
-  };
-}
-
-/** Refresh the cached counters after a scan. */
-function syncCounters(ds: TrainingDatasetRow, samples: TrainingSample[]): void {
-  const labeled = samples.filter(s => !!s.caption.trim()).length;
-  const excluded = samples.filter(s => s.excluded).length;
-  const status = computeStatus(ds, samples);
-  try {
-    repo.updateCounters(ds.id, {
-      sampleCount: samples.length,
-      labeledCount: labeled,
-      excludedCount: excluded,
-      status,
-    });
-  } catch (err: any) {
-    console.warn(`[Training] Counter sync failed: ${err.message}`);
-  }
-}
 
 /** Re-read one sample from disk after a write — avoids a full rescan per edit. */
 function reloadSample(ds: TrainingDatasetRow, sample: TrainingSample): TrainingSample {
@@ -206,22 +156,6 @@ const SOURCE_TRACKED_FIELDS: ReadonlySet<string> = new Set([
   'caption', 'lyrics', 'genre', 'bpm', 'key', 'signature', 'language',
 ]);
 
-function metaString(meta: Record<string, unknown>, key: string): string {
-  const v = meta[key];
-  return typeof v === 'string' ? v : '';
-}
-
-function isWritableDir(dir: string): boolean {
-  const probe = path.join(dir, '.hotstep-write-test');
-  try {
-    fs.writeFileSync(probe, 'x');
-    fs.unlinkSync(probe);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // ── Capabilities (§2.1) ──────────────────────────────────────────────────
 
 router.get('/capabilities', async (_req: Request, res: Response) => {
@@ -241,7 +175,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       defaultLmBySize: { '0.6B': '', '1.7B': '', '4B': '' }, adaptersRoot: '',
     },
     trainDit: {
-      available: false, adapterTypes: ['lora'], adaptersRoot: '', minVramMb: 16384,
+      available: false, adapterTypes: ['lora', 'lokr'], adaptersRoot: '', minVramMb: 16384,
     },
   };
 
@@ -363,92 +297,16 @@ router.get('/datasets', (_req: Request, res: Response) => {
 
 router.post('/datasets', async (req: Request, res: Response) => {
   try {
-    const body = req.body || {};
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    const rawDir = typeof body.sourceDir === 'string' ? body.sourceDir.trim() : '';
-
-    if (!name || name.length > 100) {
-      res.status(400).json({ error: 'name is required' });
-      return;
-    }
-    if (!rawDir) {
-      res.status(400).json({ error: 'sourceDir is required' });
-      return;
-    }
-
-    const sourceDir = path.resolve(rawDir);
-    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
-      res.status(400).json({ error: 'sourceDir is not a directory' });
-      return;
-    }
-    if (!isWritableDir(sourceDir)) {
-      res.status(400).json({ error: 'sourceDir is not writable — sidecars cannot be saved there' });
-      return;
-    }
-    if (repo.getDatasetBySourceDir(sourceDir)) {
-      res.status(409).json({ error: 'A dataset already exists for this folder' });
-      return;
-    }
-
-    const recursive = body.recursive !== false;
-    const preview = scanPreviewFolder(sourceDir, recursive);
-    if (preview.audioFiles === 0) {
-      res.status(400).json({ error: 'No audio files found in sourceDir' });
-      return;
-    }
-
-    const slug = uniqueSlug(slugify(name), repo.listSlugs());
-
-    // §8.5 — a folder that already has a dataset.json owns these settings.
-    // Seeding the row from it is what makes "existing labels will be imported
-    // and kept" true: the builder rewrites the same values instead of blanking
-    // custom_tag / genre_ratio / default_artist / default_album on the first build.
-    const priorMeta = readDatasetJsonMetadata(sourceDir);
-    const priorTagPosition = metaString(priorMeta, 'tag_position');
-    const priorGenreRatio = Number(priorMeta.genre_ratio);
-
-    const now = new Date().toISOString();
-    const row: TrainingDatasetRow = {
-      id: randomUUID(),
-      slug,
-      name,
-      sourceDir,
-      recursive,
-      customTag: typeof body.customTag === 'string'
-        ? body.customTag.trim()
-        : (metaString(priorMeta, 'custom_tag') || slug),
-      tagPosition: ['prepend', 'append', 'replace'].includes(body.tagPosition)
-        ? body.tagPosition
-        : (['prepend', 'append', 'replace'].includes(priorTagPosition)
-          ? priorTagPosition as TrainingDatasetRow['tagPosition']
-          : 'prepend'),
-      genreRatio: Number.isFinite(Number(body.genreRatio))
-        ? Math.min(100, Math.max(0, Math.trunc(Number(body.genreRatio))))
-        : (Number.isFinite(priorGenreRatio) ? Math.min(100, Math.max(0, Math.trunc(priorGenreRatio))) : 30),
-      defaultArtist: typeof body.defaultArtist === 'string' ? body.defaultArtist : metaString(priorMeta, 'default_artist'),
-      defaultAlbum: typeof body.defaultAlbum === 'string' ? body.defaultAlbum : metaString(priorMeta, 'default_album'),
-      defaultGenre: typeof body.defaultGenre === 'string' ? body.defaultGenre : metaString(priorMeta, 'default_genre'),
-      defaultLanguage: typeof body.defaultLanguage === 'string' && body.defaultLanguage.trim()
-        ? body.defaultLanguage.trim().toLowerCase()
-        : (metaString(priorMeta, 'default_language') || 'english'),
-      sampleCount: preview.audioFiles,
-      labeledCount: preview.withCaption,
-      excludedCount: 0,
-      status: 'draft',
-      builtAt: '',
-      datasetJsonPath: '',
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    repo.insertDataset(row);
-    fs.mkdirSync(labelsDir(slug), { recursive: true });
-
-    const detail = await detailFor(row);
-    syncCounters(row, detail.samples);
-    console.log(`[Training] Created dataset "${name}" (${slug}) — ${detail.samples.length} files in ${sourceDir}`);
+    // The whole creation block lives in the service so the batch pipeline can
+    // create datasets without going through HTTP; DatasetCreateError carries the
+    // status this handler used to send inline.
+    const detail = await createDatasetFromFolder((req.body || {}) as CreateDatasetInput);
     res.status(201).json({ dataset: detail });
   } catch (err: any) {
+    if (err instanceof DatasetCreateError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
     if (err instanceof ScanLimitError) {
       res.status(400).json({ error: err.message });
       return;
@@ -569,6 +427,136 @@ router.get('/previews/:previewId/:slot', (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(`[Training] Preview stream failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Batch pipeline (batch-pipeline §2.2) — declared before /datasets/:id ──
+
+router.post('/pipeline', (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const rawFolders = Array.isArray(body.folders) ? body.folders : [];
+    if (rawFolders.length === 0) {
+      res.status(400).json({ error: 'folders is required' });
+      return;
+    }
+
+    const folders: PipelineFolderSpec[] = [];
+    for (const raw of rawFolders) {
+      const dir = typeof raw?.sourceDir === 'string' ? raw.sourceDir.trim() : '';
+      if (!dir) {
+        res.status(400).json({ error: 'folders is required' });
+        return;
+      }
+      // Checked up front for EVERY folder: a typo in the last row of a 20-album
+      // batch should not surface an hour into the run.
+      const sourceDir = path.resolve(dir);
+      if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+        res.status(400).json({ error: `Folder does not exist: ${dir}` });
+        return;
+      }
+      folders.push({
+        sourceDir,
+        name: typeof raw?.name === 'string' ? raw.name.trim() : undefined,
+        customTag: typeof raw?.customTag === 'string' ? raw.customTag.trim() : undefined,
+      });
+    }
+
+    let stages: PipelineStage[] = [...PIPELINE_STAGES];
+    if (Array.isArray(body.stages)) {
+      for (const stage of body.stages) {
+        if (!PIPELINE_STAGES.includes(stage)) {
+          res.status(400).json({ error: `Unknown stage: ${stage}` });
+          return;
+        }
+      }
+      // Canonical order, whatever order the client listed them in.
+      stages = PIPELINE_STAGES.filter(s => body.stages.includes(s));
+    }
+
+    if (hasActivePipeline()) {
+      res.status(409).json({ error: 'A pipeline is already running' });
+      return;
+    }
+
+    res.status(202).json({ pipeline: startPipeline(folders, stages) });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline start failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/pipeline', (_req: Request, res: Response) => {
+  try {
+    res.json({ pipelines: listPipelines() });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline list failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/pipeline/:id', (req: Request, res: Response) => {
+  try {
+    const pipeline = getPipeline(req.params.id as string);
+    if (!pipeline) {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    res.json(pipeline);
+  } catch (err: any) {
+    console.error(`[Training] Pipeline read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/pipeline/:id', (req: Request, res: Response) => {
+  try {
+    if (!cancelPipeline(req.params.id as string)) {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline cancel failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Stage defaults (batch-pipeline §2.2) ─────────────────────────────────
+//
+// No deep validation on PUT: a section is an opaque bag of the stage route's
+// own option fields, and that route re-validates every one of them when the
+// pipeline POSTs it — which is the honest gate.
+
+const DEFAULTS_SECTIONS: ReadonlyArray<keyof TrainingDefaults> =
+  ['label', 'preprocess', 'trainLm', 'trainDit'];
+
+router.get('/defaults', (_req: Request, res: Response) => {
+  try {
+    res.json(getTrainingDefaults());
+  } catch (err: any) {
+    console.error(`[Training] Defaults read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/defaults', (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const patch: Partial<TrainingDefaults> = {};
+    for (const section of DEFAULTS_SECTIONS) {
+      const value = body[section];
+      if (value === undefined) continue;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        res.status(400).json({ error: `${section} must be an object` });
+        return;
+      }
+      patch[section] = value as Record<string, unknown>;
+    }
+    res.json(setTrainingDefaults(patch));
+  } catch (err: any) {
+    console.error(`[Training] Defaults write failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1678,10 +1666,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // reason=unsupported-adapter`, exit 1): the engine's refusal arrives only
     // after the runner has already stopped the app's engine, so a typo would
     // cost a full stop/restart cycle.
-    if (body.adapterType !== undefined && body.adapterType !== 'lora') {
-      res.status(400).json({ error: 'LoKR training is not available yet — use LoRA' });
+    if (body.adapterType !== undefined && body.adapterType !== 'lora' && body.adapterType !== 'lokr') {
+      res.status(400).json({ error: 'adapterType must be "lora" or "lokr"' });
       return;
     }
+    const adapterType: DitAdapterType = body.adapterType === 'lokr' ? 'lokr' : 'lora';
+    const isLokr = adapterType === 'lokr';
 
     // ── 5. base model ────────────────────────────────────────────────────
     // NEVER from user input: the cached encoder states and context latents are
@@ -1728,19 +1718,27 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // ── 7. numeric clamps (§4.5 step 7) ──────────────────────────────────
     // train-dit defaults. These are what the UI path actually gets: TrainDitForm
     // sends every field, but any client that omits one lands here.
+    //
+    // K2 (lokr-dit-training plan §0): when adapterType==='lokr', four of these
+    // omitted-field fallbacks change to Rob's Uber-LoKR-4 preset values. The
+    // 'lora' path's fallbacks are untouched — byte-identical to before LoKR.
     const epochs = numOpt(body.epochs, 400);
-    const targetLoss = numOpt(body.targetLoss, 0.4);
+    const targetLoss = numOpt(body.targetLoss, isLokr ? 0.6 : 0.4);
     const rank = numOpt(body.rank, 128);
     const alpha = numOpt(body.alpha, 256);
+    const lokrDim = numOpt(body.lokrDim, 512);
+    const lokrAlpha = numOpt(body.lokrAlpha, 512);
+    const lokrFactor = numOpt(body.lokrFactor, 6);
+    const lokrDecomposeBoth = body.lokrDecomposeBoth !== false;
     const layers = numOpt(body.layers, 0);
     const crop = numOpt(body.crop, 0);
     const cropMin = numOpt(body.cropMin, 375);
     const cropMax = numOpt(body.cropMax, 1250);
-    const learningRate = numOpt(body.learningRate, 0.0005);
+    const learningRate = numOpt(body.learningRate, isLokr ? 0.01 : 0.0005);
     const gradAccum = numOpt(body.gradAccum, 4);
     const gradClip = numOpt(body.gradClip, 1.0);
     const warmupRatio = numOpt(body.warmupRatio, 0.05);
-    const weightDecay = numOpt(body.weightDecay, 0.01);
+    const weightDecay = numOpt(body.weightDecay, isLokr ? 0.001 : 0.01);
     const snrGamma = numOpt(body.snrGamma, 5);
     const tBias = numOpt(body.tBias, 0.5);
     const timestepMu = numOpt(body.timestepMu, -0.4);
@@ -1762,6 +1760,11 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       ?? outOfRange('targetLoss', targetLoss, 0, 20)
       ?? outOfRange('rank', rank, 1, 256)
       ?? outOfRange('alpha', alpha, 1, 1024)
+      ?? outOfRange('lokrDim', lokrDim, 4, 4096)
+      // §2.1: (0,8192] with 0 as the "-> dim" sentinel (K6) — 0 is valid input.
+      ?? outOfRange('lokrAlpha', lokrAlpha, 0, 8192)
+      ?? (lokrFactor !== -1 && (lokrFactor < 2 || lokrFactor > 64)
+        ? 'lokrFactor must be -1 or between 2 and 64' : null)
       ?? outOfRange('layers', layers, 0, 64)
       ?? outOfRange('cropMin', cropMin, 128, 8192)
       ?? outOfRange('cropMax', cropMax, 128, 8192)
@@ -1826,9 +1829,13 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       ditPath,
       adapterName,
       adapterDir,
-      adapterType: 'lora',
+      adapterType,
       rank: Math.trunc(rank),
       alpha: Math.trunc(alpha),
+      lokrDim: Math.trunc(lokrDim),
+      lokrAlpha,
+      lokrFactor: Math.trunc(lokrFactor),
+      lokrDecomposeBoth,
       // Default ON: an attention-only DiT LoRA leaves the MLP projections —
       // where most of the timbre lives — frozen. Same !== false shape as
       // channelBalance/stopEngine, so an omitting client gets the default.
@@ -1844,7 +1851,11 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       gradClip,
       warmupRatio,
       weightDecay,
-      lossWeighting: body.lossWeighting === 'none' ? 'none' : 'flow_snr',
+      // K2: omitted-field fallback is 'none' for lokr, 'flow_snr' for lora —
+      // an explicit value from the client always wins either way.
+      lossWeighting: body.lossWeighting === 'none' ? 'none'
+        : body.lossWeighting === 'flow_snr' ? 'flow_snr'
+          : (isLokr ? 'none' : 'flow_snr'),
       snrGamma,
       tBias,
       channelBalance: body.channelBalance !== false,
@@ -1865,8 +1876,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     };
 
     const job = queue.startTrainDitJob(ds.id, opts);
+    const adapterDesc = isLokr ? `lokr dim${opts.lokrDim}` : `lora r${opts.rank}`;
     console.log(
-      `[Training] train-dit job ${job.id} queued — lora r${opts.rank}, variant ${variantKey} → ${adapterDir}`);
+      `[Training] train-dit job ${job.id} queued — ${adapterDesc}, variant ${variantKey} → ${adapterDir}`);
     res.status(202).json({ jobId: job.id });
   } catch (err: any) {
     console.error(`[Training] train-dit start failed: ${err.message}`);

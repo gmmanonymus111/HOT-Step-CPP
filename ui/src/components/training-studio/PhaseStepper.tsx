@@ -1,7 +1,7 @@
 // PhaseStepper.tsx — Dataset · Preprocess · Train · Monitor
 //
-// Dataset, Preprocess and Train ship; Monitor renders as a disabled chip with
-// a "coming soon" tooltip so it slots in without a restructure.
+// All four phases ship. Monitor is the batch-pipeline queue view (see
+// MonitorPanel.tsx).
 
 import React from 'react';
 import { Database, Layers, Cpu, Activity, Lock } from 'lucide-react';
@@ -14,7 +14,7 @@ const PHASES: Array<{ id: Phase; icon: React.ReactNode; labelKey: string; enable
   { id: 'dataset',    icon: <Database size={14} />, labelKey: 'trainingStudio.phase.dataset',    enabled: true },
   { id: 'preprocess', icon: <Layers size={14} />,   labelKey: 'trainingStudio.phase.preprocess', enabled: true },
   { id: 'train',      icon: <Cpu size={14} />,      labelKey: 'trainingStudio.phase.train',      enabled: true },
-  { id: 'monitor',    icon: <Activity size={14} />, labelKey: 'trainingStudio.phase.monitor',    enabled: false },
+  { id: 'monitor',    icon: <Activity size={14} />, labelKey: 'trainingStudio.phase.monitor',    enabled: true },
 ];
 
 export const PhaseStepper: React.FC = () => {

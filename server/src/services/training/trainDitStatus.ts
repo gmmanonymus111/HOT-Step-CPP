@@ -120,6 +120,7 @@ function applyTrainLog(dir: string, status: TrainDitStatus): void {
   status.targetLoss = num(cfg.target_loss, -1);
   status.crop = num(cfg.crop, 0);
   status.layers = num(cfg.layers, 0);
+  status.adapterType = str(cfg.adapter_type);
 
   // `partial_depth` is the engine's own verdict (layers < n_layers_total, §2.4)
   // and wins. The derived comparison is only a fallback for a log that predates
@@ -200,6 +201,7 @@ export function readTrainDitStatus(
     adapterDir,
     adapterExists: false,
     adapterBytes: 0,
+    adapterType: '',
     trainedAt: '',
     finalLoss: -1,
     bestLoss: -1,
@@ -220,12 +222,23 @@ export function readTrainDitStatus(
     } catch { /* stays false */ }
   }
 
+  // K8: LoKR exports write `lokr_weights.safetensors` instead of the PEFT
+  // `adapter_model.safetensors` — check both, PEFT first (lora is still the
+  // engine's own CLI default).
   try {
     const model = path.join(adapterDir, 'adapter_model.safetensors');
     const st = fs.statSync(model);
     status.adapterExists = st.isFile();
     status.adapterBytes = st.size;
-  } catch { /* not trained yet */ }
+  } catch { /* not a lora adapter */ }
+  if (!status.adapterExists) {
+    try {
+      const model = path.join(adapterDir, 'lokr_weights.safetensors');
+      const st = fs.statSync(model);
+      status.adapterExists = st.isFile();
+      status.adapterBytes = st.size;
+    } catch { /* not trained yet */ }
+  }
 
   try { applyTrainLog(adapterDir, status); } catch { /* defaults stand */ }
 

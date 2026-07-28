@@ -268,7 +268,7 @@ export interface TrainLmCapabilities {
 }
 
 // ── DiT training ─────────────────────────────────────────────────────────
-export type DitAdapterType = 'lora';                 // 'lokr' reserved (D22)
+export type DitAdapterType = 'lora' | 'lokr';
 export type TrainDitStage  = 'train' | 'export';
 
 export interface TrainDitOptions {
@@ -276,22 +276,30 @@ export interface TrainDitOptions {
   variantKey?: string;
   /** Adapter directory name under <adapters>/. Omit = the dataset slug. */
   adapterName?: string;
+  /** Engine CLI default stays 'lora' for back-compat; the UI form defaults
+   *  to 'lokr' (K1). */
   adapterType?: DitAdapterType;    // default 'lora'
-  rank?: number;                   // default 128
-  alpha?: number;                  // default 256
+  rank?: number;                   // default 128 (adapterType==='lora' only)
+  alpha?: number;                  // default 256 (adapterType==='lora' only)
+  /** LyCORIS LoKR factors, per Rob's Uber-LoKR-4 preset (K2). Ignored unless
+   *  adapterType==='lokr'. */
+  lokrDim?: number;                // default 512, range [4,4096]
+  lokrAlpha?: number;              // default 512, range (0,8192]; 0 -> dim
+  lokrFactor?: number;             // default 6, -1 or [2,64]
+  lokrDecomposeBoth?: boolean;     // default true (parity knob; inert at dim 512)
   targetMlp?: boolean;             // default true
   layers?: number;                 // default 0 = auto (top-K depth)
   crop?: number;                   // default 0 = auto-fit
   cropMin?: number;                // default 375
   cropMax?: number;                // default 1250
-  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  targetLoss?: number;             // default 0.4 (lora) / 0.6 (lokr, K2); 0 disables auto-stop
   epochs?: number;                 // default 400 (hard cap)
-  learningRate?: number;           // default 0.0005
+  learningRate?: number;           // default 0.0005 (lora) / 0.01 (lokr, K2)
   gradAccum?: number;              // default 4
   gradClip?: number;               // default 1.0;  0 disables
   warmupRatio?: number;            // default 0.05
-  weightDecay?: number;            // default 0.01
-  lossWeighting?: 'none' | 'flow_snr';   // default 'flow_snr'
+  weightDecay?: number;            // default 0.01 (lora) / 0.001 (lokr, K2)
+  lossWeighting?: 'none' | 'flow_snr';   // default 'flow_snr' (lora) / 'none' (lokr, K2)
   snrGamma?: number;               // default 5.0
   tBias?: number;                  // default 0.5
   channelBalance?: boolean;        // default true
@@ -328,8 +336,11 @@ export interface TrainDitStatus {
   channelStats: boolean;           // channel_stats.json present
   adapterName: string;
   adapterDir: string;              // absolute; the newest trained run, else the artist dir
-  adapterExists: boolean;          // adapter_model.safetensors present
+  adapterExists: boolean;          // adapter_model.safetensors OR lokr_weights.safetensors present
   adapterBytes: number;
+  /** From dit_train_log.json's config.adapter_type; '' when the log is
+   *  missing/unreadable (adapter trained elsewhere, or not trained yet). */
+  adapterType: string;
   trainedAt: string;               // ISO, '' if unknown
   finalLoss: number;               // -1 if unknown
   bestLoss: number;                // -1 if unknown
@@ -345,7 +356,7 @@ export interface TrainDitStatus {
 
 export interface TrainDitCapabilities {
   available: boolean;              // ace-train binary found
-  adapterTypes: DitAdapterType[];  // v1: ['lora']
+  adapterTypes: DitAdapterType[];  // ['lora','lokr']
   adaptersRoot: string;            // <adapters>
   /** Minimum total VRAM this build will accept, MB. v1: 16384 (D9). */
   minVramMb: number;
@@ -557,6 +568,70 @@ export interface CaptionOptions {
   includeLyricsExcerpt?: boolean;
   temperature?: number;
 }
+
+// ── Batch pipeline (multi-folder import + auto-chained stages) ─────────────
+//
+// Verbatim copy of docs/plans/2026-07-28-training-batch-pipeline.md §2.1 /
+// server/src/services/training/types.ts — keep both sides in sync by hand.
+
+export type PipelineStage = 'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm';
+export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
+
+export interface PipelineFolderSpec {
+  sourceDir: string;
+  /** Dataset name; omit = folder basename. */
+  name?: string;
+  /** Trigger word; omit = slugified name. */
+  customTag?: string;
+}
+
+export interface StartPipelineInput {
+  folders: PipelineFolderSpec[];
+  /** Which stages to run, in canonical order. Omit = all five. */
+  stages?: PipelineStage[];
+}
+
+export interface PipelineStageResult {
+  stage: PipelineStage;
+  jobId: string;          // '' if the stage never started
+  status: PipelineItemStatus;
+  error: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+export interface PipelineItem {
+  sourceDir: string;
+  name: string;
+  datasetId: string;      // '' until created/resolved
+  reusedExisting: boolean;
+  status: PipelineItemStatus;
+  currentStage: PipelineStage | null;
+  stages: PipelineStageResult[];
+  error: string | null;
+}
+
+export interface PipelineSummary {
+  id: string;
+  status: PipelineStatus;
+  stages: PipelineStage[];
+  items: PipelineItem[];
+  createdAt: number;
+  finishedAt: number | null;
+}
+
+export interface TrainingDefaults {
+  label: Record<string, unknown>;
+  preprocess: Record<string, unknown>;
+  trainLm: Record<string, unknown>;
+  trainDit: Record<string, unknown>;
+}
+
+/** Canonical stage order, mirrors server pipelineRunner.ts's PIPELINE_STAGES —
+ *  not itself part of the frozen contract, but keeping one copy avoids the UI
+ *  re-deriving order from whatever sequence a checkbox row happens to render. */
+export const PIPELINE_STAGES: readonly PipelineStage[] = ['label', 'build', 'preprocess', 'train-dit', 'train-lm'];
 
 // ── fetch helpers ────────────────────────────────────────────────────────
 
@@ -856,4 +931,32 @@ export async function auditionSample(
  *  this string; this helper exists for callers that only hold id + slot. */
 export function previewAudioUrl(previewId: string, slot: AuditionSlot): string {
   return `${API_BASE}/previews/${encodeURIComponent(previewId)}/${encodeURIComponent(slot)}`;
+}
+
+// ─── Batch pipeline ────────────────────────────────────────────────────────
+
+export async function startPipeline(input: StartPipelineInput): Promise<PipelineSummary> {
+  const data = await request<{ pipeline: PipelineSummary }>('/pipeline', { method: 'POST', ...jsonBody(input) });
+  return data.pipeline;
+}
+
+export async function listPipelines(): Promise<PipelineSummary[]> {
+  const data = await request<{ pipelines: PipelineSummary[] }>('/pipeline');
+  return data.pipelines;
+}
+
+export async function getPipeline(id: string): Promise<PipelineSummary> {
+  return request<PipelineSummary>(`/pipeline/${encodeURIComponent(id)}`);
+}
+
+export async function cancelPipeline(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/pipeline/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function getTrainingDefaults(): Promise<TrainingDefaults> {
+  return request<TrainingDefaults>('/defaults');
+}
+
+export async function putTrainingDefaults(patch: Partial<TrainingDefaults>): Promise<TrainingDefaults> {
+  return request<TrainingDefaults>('/defaults', { method: 'PUT', ...jsonBody(patch) });
 }

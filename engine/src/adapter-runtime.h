@@ -768,6 +768,14 @@ static bool adapter_runtime_stage_file(DiTLoRA *                  lora,
             loaded = true;
         }
     }
+    if (!loaded) {
+        // LyCORIS LoKR dir from ace-train --adapter-type lokr: no
+        // adapter_model.safetensors, weights in lokr_weights.safetensors.
+        st_path = path_str + "/lokr_weights.safetensors";
+        if (st_open(&st, st_path.c_str())) {
+            loaded = true;
+        }
+    }
     // Try as flat file
     if (!loaded && st_open(&st, adapter_path)) {
         loaded  = true;

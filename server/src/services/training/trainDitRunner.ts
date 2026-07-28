@@ -96,8 +96,12 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, state: RelayState)
       job.failed = 0;
       job.currentSampleId = null;
       job.engineQueueDepth = 0;
+      // §2.1: a lokr `start` event carries lokrDim/lokrAlpha/lokrFactor instead
+      // of rank/alpha (the contract lets those be absent or zero for lokr).
+      const adapterType = text(ev.adapterType) || 'lora';
+      const adapterDesc = adapterType === 'lokr' ? `dim${int(ev.lokrDim)}` : `r${int(ev.rank)}`;
       log(job, 'info',
-        `Training DiT ${text(ev.adapterType) || 'lora'} r${int(ev.rank)} → ${text(ev.out)}`);
+        `Training DiT ${adapterType} ${adapterDesc} → ${text(ev.out)}`);
       break;
     }
     case 'stage': {
@@ -408,14 +412,20 @@ export async function runTrainDitJob(job: TrainingJob): Promise<void> {
       if (state.fatalMessage) throw new Error(state.fatalMessage);
 
       // ── 4. post-check ──────────────────────────────────────────────────
-      // adapter_config.json is as load-bearing as the weights: without it the
-      // engine silently degrades the alpha/rank scale to 1.0 with only a warning
-      // (D19), so "wrote the tensors but not the config" is a failure, not a
-      // partial success.
+      // LoRA: adapter_config.json is as load-bearing as the weights — without it
+      // the engine silently degrades the alpha/rank scale to 1.0 with only a
+      // warning (D19), so "wrote the tensors but not the config" is a failure,
+      // not a partial success.
+      // LoKR: the exporter writes lokr_weights.safetensors and deliberately NO
+      // adapter_config.json (that is PEFT-only; alpha rides per-module tensors +
+      // __metadata__.lokr_config — lokr-dit-training plan §2.4). Demanding the
+      // PEFT pair here failed every successful LoKR job.
       if (opts.stages.includes('export')) {
-        const model = path.join(opts.adapterDir, 'adapter_model.safetensors');
-        const cfg = path.join(opts.adapterDir, 'adapter_config.json');
-        if (!fs.existsSync(model) || !fs.existsSync(cfg)) {
+        const wrote = opts.adapterType === 'lokr'
+          ? fs.existsSync(path.join(opts.adapterDir, 'lokr_weights.safetensors'))
+          : fs.existsSync(path.join(opts.adapterDir, 'adapter_model.safetensors'))
+            && fs.existsSync(path.join(opts.adapterDir, 'adapter_config.json'));
+        if (!wrote) {
           throw new Error('ace-train finished but wrote no adapter');
         }
       }

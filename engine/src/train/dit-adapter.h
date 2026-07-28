@@ -86,6 +86,11 @@ struct DitAdapterCfg {
     bool     target_mlp = false;
     uint64_t seed       = 42;
     float    b_sigma    = 0.0f;  // >0 only for the finite-difference self-test
+    // LoKR (dit-adapter-lokr.h); ignored by the LoRA implementation.
+    int   lokr_dim            = 512;
+    float lokr_alpha          = 512.0f;
+    int   lokr_factor         = 6;
+    bool  lokr_decompose_both = true;
 };
 
 struct DitExportMeta {

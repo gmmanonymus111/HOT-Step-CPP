@@ -139,8 +139,13 @@ router.post('/scan', (req, res) => {
     // too, but an enfoldered LyCORIS adapter (bare archive file moved into
     // <name>/adapter_model.safetensors) has its alphas per-tensor and no
     // config — hiding it from the dropdown would be worse than listing it.
+    //
+    // A DiT LoKR export (K8, lokr-dit-training plan §2.4) writes
+    // `lokr_weights.safetensors` instead — same out-dir convention, different
+    // filename, checked second so an (unexpected) dir with both prefers PEFT.
     const pushPeftDir = (dir: string, displayName: string) => {
-      const model = path.join(dir, 'adapter_model.safetensors');
+      let model = path.join(dir, 'adapter_model.safetensors');
+      if (!fs.existsSync(model)) model = path.join(dir, 'lokr_weights.safetensors');
       if (!fs.existsSync(model)) return;
       try {
         const tg = readAdapterTrigger(dir);

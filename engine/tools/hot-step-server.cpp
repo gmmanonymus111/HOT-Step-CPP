@@ -1147,12 +1147,18 @@ static void synth_worker(std::shared_ptr<Job>    job,
                     fprintf(stderr, "[Server] Adapter absolute path: %s\n", ar.name.c_str());
                     path = ar.name;
                 } else {
-                    const std::string peft = ar.name + "/adapter_model.safetensors";
-                    FILE * inner = fopen(peft.c_str(), "rb");
-                    if (inner) {
-                        fclose(inner);
-                        fprintf(stderr, "[Server] Adapter PEFT dir: %s\n", ar.name.c_str());
-                        path = ar.name;
+                    // PEFT first, then the LyCORIS LoKR layout that ace-train
+                    // --adapter-type lokr writes (lokr_weights.safetensors, no
+                    // adapter_model.safetensors).
+                    const char * leaves[2] = { "/adapter_model.safetensors", "/lokr_weights.safetensors" };
+                    for (int li = 0; li < 2 && path.empty(); li++) {
+                        const std::string inner_path = ar.name + leaves[li];
+                        FILE *            inner      = fopen(inner_path.c_str(), "rb");
+                        if (inner) {
+                            fclose(inner);
+                            fprintf(stderr, "[Server] Adapter dir (%s): %s\n", leaves[li] + 1, ar.name.c_str());
+                            path = ar.name;
+                        }
                     }
                 }
             }

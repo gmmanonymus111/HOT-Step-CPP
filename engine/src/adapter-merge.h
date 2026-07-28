@@ -1468,22 +1468,33 @@ static bool adapter_merge(WeightCtx *          wctx,
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // PEFT directory: adapter_model.safetensors is mandatory
+        // PEFT directory: adapter_model.safetensors, else the LyCORIS LoKR
+        // layout ace-train --adapter-type lokr writes (lokr_weights.safetensors,
+        // no adapter_model.safetensors). Mirrors hot-step-server.cpp's probe.
         sf_path = std::string(adapter_path) + "/adapter_model.safetensors";
         cfg_dir = adapter_path;
-        if (stat(sf_path.c_str(), &sb) != 0) {
-            fprintf(stderr, "[Adapter] directory %s is not a PEFT layout, missing adapter_model.safetensors\n",
-                    adapter_path);
-            return false;
-        }
-        // warn if adapter_config.json is missing, alpha lives there for PEFT so
-        // the merge silently falls back to alpha=rank (scaling=1) otherwise
-        std::string cfg_path = cfg_dir + "/adapter_config.json";
-        if (stat(cfg_path.c_str(), &sb) != 0) {
-            fprintf(stderr,
-                    "[Adapter] WARNING: PEFT directory %s missing adapter_config.json, alpha falls back to rank "
-                    "(scaling=1.0). If training used lora_alpha != rank, the merge will be under or over scaled.\n",
-                    adapter_path);
+        if (stat(sf_path.c_str(), &sb) == 0) {
+            // warn if adapter_config.json is missing, alpha lives there for PEFT so
+            // the merge silently falls back to alpha=rank (scaling=1) otherwise
+            std::string cfg_path = cfg_dir + "/adapter_config.json";
+            if (stat(cfg_path.c_str(), &sb) != 0) {
+                fprintf(stderr,
+                        "[Adapter] WARNING: PEFT directory %s missing adapter_config.json, alpha falls back to rank "
+                        "(scaling=1.0). If training used lora_alpha != rank, the merge will be under or over scaled.\n",
+                        adapter_path);
+            }
+        } else {
+            // No PEFT leaf: the LyCORIS LoKR layout ace-train --adapter-type lokr
+            // writes (lokr_weights.safetensors, alpha per-module, deliberately no
+            // adapter_config.json). Same probe order as hot-step-server.cpp.
+            sf_path = std::string(adapter_path) + "/lokr_weights.safetensors";
+            if (stat(sf_path.c_str(), &sb) != 0) {
+                fprintf(stderr,
+                        "[Adapter] directory %s is neither a PEFT nor a LoKR layout, missing "
+                        "adapter_model.safetensors and lokr_weights.safetensors\n",
+                        adapter_path);
+                return false;
+            }
         }
     } else {
         // LyCORIS flat file, LoRA or LoKr

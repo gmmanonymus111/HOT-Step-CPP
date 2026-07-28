@@ -4,10 +4,11 @@
 // centred card explaining what the Dataset phase does.
 
 import React, { useState } from 'react';
-import { Database, FolderOpen, GraduationCap, Loader2, Plus, Trash2 } from 'lucide-react';
+import { Database, FolderOpen, FolderPlus, GraduationCap, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
+import { BatchImportWizard } from './BatchImportWizard';
 import { NewDatasetWizard } from './NewDatasetWizard';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
@@ -35,6 +36,7 @@ export const DatasetList: React.FC = () => {
   const deleteDataset = useTrainingStore(s => s.deleteDataset);
 
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [batchWizardOpen, setBatchWizardOpen] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const confirmTarget = datasets.find(d => d.id === confirmId) || null;
 
@@ -53,14 +55,23 @@ export const DatasetList: React.FC = () => {
           <GraduationCap size={40} className="text-amber-500/70" />
           <div className="text-lg font-bold text-zinc-900 dark:text-white">{t('trainingStudio.empty.title')}</div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400 max-w-md">{t('trainingStudio.empty.body')}</p>
-          <button
-            onClick={() => setWizardOpen(true)}
-            className="mt-2 flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 text-black hover:bg-amber-400 transition-colors"
-          >
-            <Plus size={15} /> {t('trainingStudio.empty.cta')}
-          </button>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              onClick={() => setWizardOpen(true)}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold bg-amber-500 text-black hover:bg-amber-400 transition-colors"
+            >
+              <Plus size={15} /> {t('trainingStudio.empty.cta')}
+            </button>
+            <button
+              onClick={() => setBatchWizardOpen(true)}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+            >
+              <FolderPlus size={15} /> {t('trainingStudio.batch.cta')}
+            </button>
+          </div>
         </div>
         <NewDatasetWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+        <BatchImportWizard open={batchWizardOpen} onClose={() => setBatchWizardOpen(false)} />
       </>
     );
   }
@@ -69,12 +80,20 @@ export const DatasetList: React.FC = () => {
     <>
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-bold text-zinc-900 dark:text-white">{t('trainingStudio.list.title')}</h2>
-        <button
-          onClick={() => setWizardOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-black hover:bg-amber-400 transition-colors"
-        >
-          <Plus size={14} /> {t('trainingStudio.list.new')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setBatchWizardOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+          >
+            <FolderPlus size={14} /> {t('trainingStudio.batch.cta')}
+          </button>
+          <button
+            onClick={() => setWizardOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-black hover:bg-amber-400 transition-colors"
+          >
+            <Plus size={14} /> {t('trainingStudio.list.new')}
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
@@ -124,6 +143,7 @@ export const DatasetList: React.FC = () => {
       </div>
 
       <NewDatasetWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+      <BatchImportWizard open={batchWizardOpen} onClose={() => setBatchWizardOpen(false)} />
 
       <ConfirmDialog
         isOpen={!!confirmTarget}

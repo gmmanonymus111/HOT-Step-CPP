@@ -28,6 +28,12 @@ export interface TrainDitFormState {
   adapterType: DitAdapterType;
   rank: number;
   alpha: number;
+  /** LyCORIS LoKR factors (K2). Only meaningful when adapterType==='lokr' —
+   *  always present so a type toggle never has to invent them. */
+  lokrDim: number;
+  lokrAlpha: number;
+  lokrFactor: number;
+  lokrDecomposeBoth: boolean;
   targetMlp: boolean;
   layers: number;            // 0 = auto (top-K depth)
   crop: number;              // 0 = auto-fit
@@ -70,6 +76,12 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   adapterType: 'lora',
   rank: 128,
   alpha: 256,
+  // Inert while adapterType==='lora'; kept at the K2 values so a toggle to
+  // 'lokr' via TRAIN_DIT_LOKR_DEFAULTS below is the only place they change.
+  lokrDim: 512,
+  lokrAlpha: 512,
+  lokrFactor: 6,
+  lokrDecomposeBoth: true,
   targetMlp: true,
   layers: 0,
   crop: 0,
@@ -100,6 +112,25 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   stopEngine: true,
 };
 
+/** K1/K2 (lokr-dit-training plan §0): LoKR is the UI's DEFAULT adapter type —
+ *  Rob's validated preference (Uber-LoKR-4). Same base as TRAIN_DIT_DEFAULTS,
+ *  patched with the preset's four adapter fields plus the loss-shape knobs the
+ *  preset agrees with (lr/loss-weighting/target-loss/weight-decay). Everything
+ *  else (epochs, gradAccum, targetMlp, cfgRatio, channelBalance, seed,
+ *  milestoneStep, crop…) stays at the shared default. */
+export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
+  ...TRAIN_DIT_DEFAULTS,
+  adapterType: 'lokr',
+  lokrDim: 512,
+  lokrAlpha: 512,
+  lokrFactor: 6,
+  lokrDecomposeBoth: true,
+  learningRate: 0.01,
+  lossWeighting: 'none',
+  targetLoss: 0.6,
+  weightDecay: 0.001,
+};
+
 /** §5.2 quality dial. Each preset patches the SAME key set so flipping back and
  *  forth is reversible — the plan names targetLoss only under Thorough, which on
  *  its own would leave 0.3 stuck after switching away from it. */
@@ -111,6 +142,14 @@ const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
   fast:     { epochs: 100, cropMax: 750,  milestoneStep: 0.2, targetLoss: 0.4 },
   balanced: { epochs: 400, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.4 },
   thorough: { epochs: 800, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.3 },
+};
+
+/** …but the loss thresholds above are LoRA's. LoKR's validated auto-stop is 0.6
+ *  (K2, frozen contract), so applying the LoRA numbers on a quality click would
+ *  silently undo the default the LoKR form ships with. Only targetLoss is
+ *  type-aware — every other preset field means the same thing for both. */
+const DIT_LOKR_TARGET_LOSS: Record<DitQuality, number> = {
+  fast: 0.6, balanced: 0.6, thorough: 0.5,
 };
 
 const ALL_STAGES: TrainDitStage[] = ['train', 'export'];
@@ -160,11 +199,28 @@ export const TrainDitForm: React.FC<Props> = ({
     onChange({ stages: next });
   };
 
-  const pickQuality = (q: DitQuality) => onChange({ quality: q, ...DIT_QUALITY_PRESETS[q] });
+  const pickQuality = (q: DitQuality) => onChange({
+    quality: q,
+    ...DIT_QUALITY_PRESETS[q],
+    ...(value.adapterType === 'lokr' ? { targetLoss: DIT_LOKR_TARGET_LOSS[q] } : {}),
+  });
+
+  // §4: switching adapter type swaps the WHOLE form state to that type's
+  // default set (simplest option the plan sanctions over per-field "was it
+  // touched" tracking) — except the adapter name, which is the one field
+  // losing on a toggle would actually cost the user something.
+  const pickType = (ty: DitAdapterType) => {
+    if (ty === value.adapterType) return;
+    const defaults = ty === 'lokr' ? TRAIN_DIT_LOKR_DEFAULTS : TRAIN_DIT_DEFAULTS;
+    onChange({ ...defaults, adapterName: value.adapterName });
+  };
 
   // cropMax below cropMin is a 400 from the server (§4.5 step 7); flag it here.
   const cropRangeOk = value.cropMax >= value.cropMin;
   const tWindowOk = value.tMin < value.tMax;
+  const isLokr = value.adapterType === 'lokr';
+  // Server range: -1 or [2,64] (§2.1). 0/1/negative-not-(-1) values are refused.
+  const lokrFactorOk = value.lokrFactor === -1 || (value.lokrFactor >= 2 && value.lokrFactor <= 64);
   // The server accepts crop 0 (auto) or 128..8192 — the 2..126 band the stepper
   // walks through is a guaranteed 400. Same for lr (strictly > 0) and seed.
   const cropOk = value.crop === 0 || (value.crop >= 128 && value.crop <= 8192);
@@ -173,6 +229,32 @@ export const TrainDitForm: React.FC<Props> = ({
 
   return (
     <div className="flex flex-col gap-4">
+      {/* ── Adapter type (K1: LoKR is the default) ──────────────────────── */}
+      <div className="flex flex-col gap-1.5">
+        <span className={LABEL}>{t('trainingStudio.train.dit.adapterType')}</span>
+        <div className="flex items-center gap-1.5">
+          {(['lokr', 'lora'] as DitAdapterType[]).map(ty => {
+            const active = value.adapterType === ty;
+            return (
+              <button
+                key={ty}
+                type="button"
+                disabled={lock}
+                onClick={() => pickType(ty)}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  active
+                    ? 'text-amber-500 bg-amber-500/10 border-amber-500/30'
+                    : 'text-zinc-500 border-zinc-300 dark:border-white/10 hover:text-zinc-700 dark:hover:text-zinc-300'
+                }`}
+              >
+                {ty === 'lokr' ? t('trainingStudio.train.dit.adapterTypeLokr') : t('trainingStudio.train.dit.adapterTypeLora')}
+              </button>
+            );
+          })}
+        </div>
+        <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.adapterTypeHelp')}</span>
+      </div>
+
       {/* ── Base model (read-only) ────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
         <span className={LABEL}>{t('trainingStudio.train.dit.baseModel')}</span>
@@ -244,7 +326,7 @@ export const TrainDitForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.4) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, isLokr ? 0.6 : 0.4) })}
             className={FIELD}
           />
         </label>
@@ -277,29 +359,78 @@ export const TrainDitForm: React.FC<Props> = ({
         </summary>
 
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <span className="text-[11px] text-zinc-500 sm:col-span-2">
-            {t('trainingStudio.train.dit.lokrSoon')}
-          </span>
+          {isLokr ? (
+            <>
+              <label className="flex flex-col gap-1.5">
+                <span className={LABEL}>{t('trainingStudio.train.dit.lokrDim')}</span>
+                <input
+                  type="number" min={4} max={4096} step={1}
+                  value={value.lokrDim} disabled={lock}
+                  onChange={(e) => onChange({ lokrDim: num(e.target.value, 512) })}
+                  className={FIELD}
+                />
+              </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.rank')}</span>
-            <input
-              type="number" min={1} max={256} step={1}
-              value={value.rank} disabled={lock}
-              onChange={(e) => onChange({ rank: num(e.target.value, 128) })}
-              className={FIELD}
-            />
-          </label>
+              <label className="flex flex-col gap-1.5">
+                <span className={LABEL}>{t('trainingStudio.train.dit.lokrAlpha')}</span>
+                <input
+                  type="number" min={0} max={8192} step={1}
+                  value={value.lokrAlpha} disabled={lock}
+                  onChange={(e) => onChange({ lokrAlpha: num(e.target.value, 512) })}
+                  className={FIELD}
+                />
+              </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.alpha')}</span>
-            <input
-              type="number" min={1} max={1024} step={1}
-              value={value.alpha} disabled={lock}
-              onChange={(e) => onChange({ alpha: num(e.target.value, 256) })}
-              className={FIELD}
-            />
-          </label>
+              <label className="flex flex-col gap-1.5">
+                <span className={LABEL}>{t('trainingStudio.train.dit.lokrFactor')}</span>
+                <input
+                  type="number" min={-1} max={64} step={1}
+                  value={value.lokrFactor} disabled={lock}
+                  onChange={(e) => onChange({ lokrFactor: num(e.target.value, 6) })}
+                  className={`${FIELD}${lokrFactorOk ? '' : ' border-red-500/60'}`}
+                />
+                <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.lokrFactorHelp')}</span>
+                {!lokrFactorOk && (
+                  <span className="text-[11px] text-red-500">
+                    {t('trainingStudio.train.dit.lokrFactorInvalid')}
+                  </span>
+                )}
+              </label>
+
+              <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={value.lokrDecomposeBoth}
+                  disabled={lock}
+                  onChange={(e) => onChange({ lokrDecomposeBoth: e.target.checked })}
+                  className="accent-amber-500"
+                />
+                {t('trainingStudio.train.dit.lokrDecomposeBoth')}
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="flex flex-col gap-1.5">
+                <span className={LABEL}>{t('trainingStudio.train.dit.rank')}</span>
+                <input
+                  type="number" min={1} max={256} step={1}
+                  value={value.rank} disabled={lock}
+                  onChange={(e) => onChange({ rank: num(e.target.value, 128) })}
+                  className={FIELD}
+                />
+              </label>
+
+              <label className="flex flex-col gap-1.5">
+                <span className={LABEL}>{t('trainingStudio.train.dit.alpha')}</span>
+                <input
+                  type="number" min={1} max={1024} step={1}
+                  value={value.alpha} disabled={lock}
+                  onChange={(e) => onChange({ alpha: num(e.target.value, 256) })}
+                  className={FIELD}
+                />
+              </label>
+            </>
+          )}
 
           <label className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.train.dit.layers')}</span>
@@ -358,7 +489,7 @@ export const TrainDitForm: React.FC<Props> = ({
             <input
               type="number" min={0.00001} max={1} step={0.00001}
               value={value.learningRate} disabled={lock}
-              onChange={(e) => onChange({ learningRate: num(e.target.value, 0.0005) })}
+              onChange={(e) => onChange({ learningRate: num(e.target.value, isLokr ? 0.01 : 0.0005) })}
               className={FIELD}
             />
           </label>
@@ -398,7 +529,7 @@ export const TrainDitForm: React.FC<Props> = ({
             <input
               type="number" min={0} max={1} step={0.005}
               value={value.weightDecay} disabled={lock}
-              onChange={(e) => onChange({ weightDecay: num(e.target.value, 0.01) })}
+              onChange={(e) => onChange({ weightDecay: num(e.target.value, isLokr ? 0.001 : 0.01) })}
               className={FIELD}
             />
           </label>
@@ -611,7 +742,7 @@ export const TrainDitForm: React.FC<Props> = ({
         onClick={onStart}
         disabled={
           lock || !adapterNameOk || !cropRangeOk || !tWindowOk || !cropOk || !lrOk || !seedOk ||
-          value.stages.length === 0
+          !lokrFactorOk || value.stages.length === 0
         }
         className="self-start flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
