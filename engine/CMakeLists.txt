@@ -220,13 +220,16 @@ if(HOT_STEP_SUPERSEP AND ORT_ROOT)
     endif()
 endif()
 
-# SuperSep library (ONNX Runtime inference + STFT)
+# SuperSep library (STFT + ONNX Runtime for stages 1-4, GGML for the
+# BS-Roformer-Leap Xe pair used by SUPERSEP_STABLESTEP)
 add_library(supersep STATIC src/supersep.cpp)
 target_include_directories(supersep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/pocketfft
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+# bs-roformer-ggml.h needs ggml headers/symbols.
+target_link_libraries(supersep PUBLIC ggml)
 if(MSVC)
     target_compile_options(supersep PRIVATE /W4 /wd4100 /wd4505 /wd4244 /wd4267)
 else()
@@ -515,6 +518,11 @@ link_ggml_backends(neural-codec)
 add_executable(sa3-ggml-test tools/sa3-ggml-test.cpp)
 target_link_libraries(sa3-ggml-test PRIVATE yyjson)
 link_ggml_backends(sa3-ggml-test)
+
+# bs-roformer-test: parity test for the GGML BS-RoFormer (SuperSep StableStep
+# separation) vs PyTorch goldens. See scripts/dump_bs_roformer_goldens.py.
+add_executable(bs-roformer-test tools/bs-roformer-test.cpp)
+link_ggml_backends(bs-roformer-test)
 
 # ace-midi: MuScriptor audio->MIDI transcription (GGML port, in development —
 # docs/plans/muscriptor-cpp-port.md). Standalone tool, no acestep-core needed.

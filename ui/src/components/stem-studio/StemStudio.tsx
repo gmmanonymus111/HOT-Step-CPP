@@ -47,7 +47,9 @@ export const StemStudio: React.FC = () => {
 
   // Track selection
   const [selectedTracks, setSelectedTracks] = useState<string[]>(['vocals', 'drums', 'bass', 'guitar']);
-  const [mode, setMode] = useState<'extract' | 'supersep'>('extract');
+  // SuperSep is the default: it is the general-purpose separator. DiT extract
+  // is the specialist path (needs a base/SFT model and disables adapters).
+  const [mode, setMode] = useState<'extract' | 'supersep'>('supersep');
   const [sepLevel, setSepLevel] = useState<SeparationLevel>(() => {
     const stored = localStorage.getItem('hs-stem-sepLevel');
     return (stored != null ? parseInt(stored) : 1) as SeparationLevel;

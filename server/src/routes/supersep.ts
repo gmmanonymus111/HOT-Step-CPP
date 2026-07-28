@@ -18,7 +18,10 @@ const ACE_URL = config.aceServer.url;
 
 // POST /api/supersep/separate
 // Body (JSON): { audioUrl: "/references/uuid.flac" }
-// Query: level=0..3 (BASIC/VOCAL_SPLIT/FULL/MAXIMUM)
+// Query: level=0..5 (BASIC/VOCAL_SPLIT/FULL/MAXIMUM/VOCALS_ONLY/STABLESTEP)
+//        4 = 2-stem via the 6-stem BS-RoFormer (instrumental = mix − vocals)
+//        5 = 2-stem via the dual BS-Roformer-Leap Xe models (both stems neural)
+//        See SuperSepLevel in engine/src/supersep.h.
 // Reads the file from disk, converts non-WAV/MP3 to WAV, forwards to ace-server.
 router.post('/separate', async (req, res) => {
   try {

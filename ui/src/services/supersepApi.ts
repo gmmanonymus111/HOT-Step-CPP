@@ -28,13 +28,28 @@ export interface StemListResult {
   stems: StemInfo[];
 }
 
-export type SeparationLevel = 0 | 1 | 2 | 3;
+// Mirrors SuperSepLevel in engine/src/supersep.h — keep the numbering in sync.
+export type SeparationLevel = 0 | 1 | 2 | 3 | 4 | 5;
 
 export const SEPARATION_LEVELS: { value: SeparationLevel; label: string; description: string }[] = [
   { value: 0, label: 'Basic', description: '6 stems: vocals, bass, drums, guitar, piano, other' },
   { value: 1, label: 'Vocal Split', description: '8 stems: + lead/backing vocals' },
   { value: 2, label: 'Full', description: '14 stems: + 6 drum components' },
-  { value: 3, label: 'Maximum', description: '17+ stems: + refined "other" breakdown' },
+  // Level 3 ("Maximum") is retired — its HTDemucs "Other" refinement pass was
+  // removed. The enum value still exists engine-side and now behaves as Full,
+  // so anyone with 3 persisted keeps working; it is just not offered any more.
+  {
+    value: 4,
+    label: '2-Stem (BS-RoFormer)',
+    description: '2 stems: vocals from the 6-stem model, instrumental as mix − vocals '
+      + '(exact complement, inherits the vocal model\'s errors inverted)',
+  },
+  {
+    value: 5,
+    label: '2-Stem (Leap Xe)',
+    description: '2 stems, each from its own dedicated model — no mix-minus residual. '
+      + 'Native GGML, no ONNX Runtime. Requires the Leap Xe pair from Model Manager.',
+  },
 ];
 
 const API_BASE = '/api/supersep';

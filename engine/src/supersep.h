@@ -34,13 +34,37 @@ typedef enum {
     SUPERSEP_BASIC       = 0,  // Stage 1 only: 6 stems
     SUPERSEP_VOCAL_SPLIT = 1,  // Stages 1+2: 8 stems (lead/backing vocals)
     SUPERSEP_FULL        = 2,  // Stages 1+2+3: 14 stems (+ drum breakdown)
-    SUPERSEP_MAXIMUM     = 3,  // Stages 1+2+3+4: up to 17 stems
+    SUPERSEP_MAXIMUM     = 3,  // DEPRECATED — was stage 4 ("Other" refinement
+                               // via HTDemucs), removed along with the model.
+                               // The value is retained so persisted UI settings
+                               // and old API callers keep working; it now
+                               // behaves identically to SUPERSEP_FULL.
     SUPERSEP_VOCALS_ONLY = 4,  // BS-RoFormer pass, 2-stem output: Vocals
                                // (lead + backing) + Instrumental (mix −
                                // vocals, exact complement). Used by
                                // StableStep. NOT the karaoke model — its
                                // "vocals" is lead-only and leaves backing
                                // vocals in the instrumental.
+    SUPERSEP_STABLESTEP  = 5,  // Dual BS-Roformer-Leap Xe pass, 2-stem output.
+                               // Runs the vocal-target checkpoint AND the
+                               // instrumental-target checkpoint over the same
+                               // input and keeps the *neural output* of each,
+                               // discarding both arithmetic complements.
+                               //
+                               // Each Leap Xe checkpoint has num_stems=1 and
+                               // predicts only its target; the "other" stem a
+                               // normal inference wrapper reports is just
+                               // mix − target, which inherits the inverse of
+                               // every model error. Taking both neural outputs
+                               // means neither stem is an error bucket.
+                               //
+                               // Trade-off: vocals + instrumental no longer
+                               // reconstruct the input exactly (anything both
+                               // models claim is doubled; anything neither
+                               // claims is lost). Acceptable for StableStep,
+                               // which re-renders the instrumental through SA3
+                               // and so destroys the complement relationship
+                               // downstream anyway.
 } SuperSepLevel;
 
 // A single separated stem

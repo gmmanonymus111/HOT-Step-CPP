@@ -4,6 +4,7 @@
 
 #include "supersep.h"
 #include "supersep-stft.h"
+#include "bs-roformer-ggml.h"
 
 #include <algorithm>
 #include <cmath>
@@ -31,20 +32,24 @@ struct SuperSep {
     std::string   model_dir;
     int           device_id;
     Ort::Env      env;
-    Ort::Session *s1_bs_roformer;      // Stage 1
-    Ort::Session *s2_mel_band;         // Stage 2
+    BsRoformer *  s1_bs_roformer;      // Stage 1 — GGML
+    BsRoformer *  s2_mel_band;         // Stage 2 - GGML
     Ort::Session *s3_mdx23c;           // Stage 3
-    Ort::Session *s4_htdemucs;         // Stage 4
+    // Leap Xe pair (SUPERSEP_STABLESTEP) — GGML, not ONNX Runtime.
+    BsRoformer * leap_voc;             // vocal-target
+    BsRoformer * leap_inst;            // instrumental-target
     Ort::SessionOptions session_opts;
 
     SuperSep() : env(ORT_LOGGING_LEVEL_WARNING, "supersep"),
                  s1_bs_roformer(nullptr), s2_mel_band(nullptr),
-                 s3_mdx23c(nullptr), s4_htdemucs(nullptr) {}
+                 s3_mdx23c(nullptr),
+                 leap_voc(nullptr), leap_inst(nullptr) {}
     ~SuperSep() {
-        delete s1_bs_roformer;
-        delete s2_mel_band;
+        if (s1_bs_roformer) { bsr_free(s1_bs_roformer); delete s1_bs_roformer; }
+        if (s2_mel_band) { bsr_free(s2_mel_band); delete s2_mel_band; }
         delete s3_mdx23c;
-        delete s4_htdemucs;
+        if (leap_voc)  { bsr_free(leap_voc);  delete leap_voc;  }
+        if (leap_inst) { bsr_free(leap_inst); delete leap_inst; }
     }
 };
 
@@ -53,16 +58,50 @@ struct SuperSep {
 static const int SUPERSEP_SR = 44100;
 static const float SILENCE_THRESHOLD_DB = -60.0f;
 
-// BS-RoFormer STFT params (from BS-Roformer-SW.yaml)
+// BS-RoFormer STFT params. These are shared by every BS-RoFormer variant we
+// carry — BS-Roformer-SW.yaml and pcunwa's BS-Roformer-Leap Xe configs agree
+// on n_fft/hop/win/dim_freqs_in exactly, so the C++ STFT front-end is common.
 static const int BS_N_FFT       = 2048;
 static const int BS_HOP_LENGTH  = 512;
 static const int BS_WIN_LENGTH  = 2048;
-static const int BS_CHUNK_SIZE  = 588800;  // ~13.4s at 44100Hz
+static const int BS_CHUNK_SIZE  = 588800;  // ~13.4s at 44100Hz (SW default)
 static const int BS_N_FREQS     = BS_N_FFT / 2 + 1;  // 1025
 static const int BS_NUM_STEMS   = 6;
 
+// Per-checkpoint config. Only the stem count, the trained chunk length and the
+// file name vary between variants; the band split and mask estimator are baked
+// into the ONNX graph, so the engine never sees them.
+struct BsRoformerModel {
+    const char *filename;
+    int         chunk_size;  // trained chunk length in frames @44.1kHz
+    int         n_stems;     // model output stem count (num_stems in the yaml)
+};
+
+// 6-stem general-purpose model — drives every Cover Studio level. GGML.
+static const BsRoformerModel BS_MODEL_SW = {
+    "bs_roformer_sw-F32.gguf", BS_CHUNK_SIZE, BS_NUM_STEMS
+};
+
+// pcunwa/BS-Roformer-Leap "Xe" pair. Both are num_stems=1, dim=256, depth=16
+// and differ only in target_instrument (vocals vs other). chunk_size 881559
+// (~20.0 s) is the trained value from leap_xe_config_*.yaml — lowering it
+// trades separation quality for attention VRAM if that becomes a problem.
+//
+// These run through GGML (bs-roformer-ggml.h), not ONNX Runtime, so they are
+// .gguf. n_stems here is informational; the real value comes from the GGUF.
+static const BsRoformerModel BS_MODEL_LEAP_XE_VOC  = {"bs_leap_xe_voc-F32.gguf",  881559, 1};
+static const BsRoformerModel BS_MODEL_LEAP_XE_INST = {"bs_leap_xe_inst-F32.gguf", 881559, 1};
+
 // Mel-Band RoFormer lookup tables (auto-generated from mel filterbank)
 #include "mel_band_tables.inc"
+
+// Stage 2 karaoke split. Mel-Band RoFormer shares the BS-RoFormer graph — its
+// bands overlap and are gathered before the network (mel_band_tables.inc), so
+// the only differences the engine sees are hop 441 and the gathered in_dim.
+static const BsRoformerModel MEL_MODEL_KARAOKE = {
+    "mel_band_karaoke-F32.gguf", MB_CHUNK_SAMPLES, 1
+};
+
 
 // Stem definitions for each stage
 struct StemDef {
@@ -104,15 +143,6 @@ static const StemDef STAGE3_STEMS[] = {
 };
 static const int N_STAGE3_STEMS = 6;
 
-static const StemDef STAGE4_STEMS[] = {
-    {"12_Other_Vocal_Bleed", "Vocal Bleed",         "other",       4},
-    {"13_Other_Guitar",      "Other Guitar",        "instruments", 4},
-    {"14_Other_Piano_Keys",  "Other Piano/Keys",    "instruments", 4},
-    {"15_Other_Bass",        "Other Bass",          "instruments", 4},
-    {"16_Other_Percussion",  "Other Percussion",    "drums",       4},
-    {"17_Residual",          "Residual (Synths/FX)","other",       4},
-};
-static const int N_STAGE4_STEMS = 6;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -296,139 +326,94 @@ static void add_stem(std::vector<SuperSepStem> &stems, const StemDef &def,
 
 // ── BS-RoFormer STFT-based processing ───────────────────────────────────
 //
-// The ONNX model expects post-STFT input and produces mask output.
-// Preprocessing:  waveform → STFT → rearrange → model input [1, T, F*C*2]
-// Postprocessing: model output (mask) [1, stems, F*C, T, 2] → apply mask → iSTFT
+// STFT and iSTFT are native (supersep-stft.h); the network only predicts the
+// complex mask, which is applied here.
+//   Preprocessing:  waveform -> STFT -> rearrange -> [in_dim, T]
+//   Postprocessing: mask [2, T, F*C] -> complex multiply -> iSTFT
 //
-// Reference: ZFTurbo/MSS_ONNX_TensorRT/models/preprocess.py
+// Tensor layout follows ZFTurbo/MSS_ONNX_TensorRT/models/preprocess.py.
 
-// Process one chunk through BS-RoFormer.
-// chunk: interleaved stereo [L0,R0,L1,R1,...], chunk_frames per channel.
-// Returns n_stems interleaved stereo buffers (malloc'd). Caller frees each.
-static bool bs_roformer_process_chunk(
-    Ort::Session *session,
-    const float *chunk,          // interleaved stereo
-    int chunk_frames,            // per-channel frame count
-    int n_stems,
-    std::vector<float *> &stem_outputs,  // [n_stems] malloc'd interleaved stereo
-    std::vector<int> &stem_frame_counts
+// Bitmask selecting every stem (default for callers that want all of them).
+static const uint32_t BS_ALL_STEMS = 0xFFFFFFFFu;
+
+// ── GGML BS-RoFormer (Leap Xe) ──────────────────────────────────────────
+//
+// Same STFT front-end, mask semantics and overlap-add as the ONNX path above;
+// only the mask predictor differs. Single-stem by construction.
+
+static bool bsr_ggml_process_chunk(
+    BsRoformer *          m,
+    const float *         chunk,        // interleaved stereo
+    int                   chunk_frames,
+    uint32_t              stem_mask,    // bit i set = stem i wanted
+    std::vector<float *> &stem_outputs,
+    std::vector<int> &    stem_frame_counts
 ) {
-    const int n_fft     = BS_N_FFT;
-    const int hop       = BS_HOP_LENGTH;
-    const int n_freqs   = BS_N_FREQS;  // 1025
-    const int n_ch      = 2;  // stereo
+    const int n_fft   = BS_N_FFT;
+    const int hop     = BS_HOP_LENGTH;
+    const int n_freqs = BS_N_FREQS;
+    const int n_ch    = 2;
 
-    // ── STFT ─────────────────────────────────────────────────────────
     StftParams sp;
-    sp.n_fft = n_fft;
+    sp.n_fft      = n_fft;
     sp.hop_length = hop;
     sp.n_channels = n_ch;
     ComplexSpec spec = stft_forward(chunk, chunk_frames, sp);
     const int T = spec.n_frames;
 
-    fprintf(stderr, "[SuperSep] BS-RoFormer STFT: %d freqs x %d time frames\n", n_freqs, T);
+    const int in_dim = n_freqs * n_ch * 2;  // 4100
+    const int fs     = n_freqs * n_ch;      // 2050
 
-    // ── Rearrange STFT output to model input format ──────────────────
-    // Python: stft_repr has shape [batch, stereo, freq, time, 2] (real/imag)
-    //   rearrange 'b s f t c -> b (f s) t c' → [1, freq*stereo, time, 2]
-    //   rearrange 'b f t c -> b t (f c)'     → [1, time, freq*stereo*2]
-    //
-    // Our ComplexSpec layout: [ch][freq][time][2]
-    // Target: [1, T, n_freqs*n_ch*2]  where dimension ordering is
-    //   for each time step: [f0_ch0_re, f0_ch0_im, f0_ch1_re, f0_ch1_im, f1_ch0_re, ...]
-    //
-    // Actually from the Python code:
-    //   'b s f t c -> b (f s) t c' merges freq and stereo with freq leading
-    //   Then 'b f t c -> b t (f c)' flattens the (f_s) and c dimensions
-    //   So the order is: [f0_s0_re, f0_s0_im, f0_s1_re, f0_s1_im, f1_s0_re, ...]
-
-    int input_dim = n_freqs * n_ch * 2;  // 1025 * 2 * 2 = 4100
-    std::vector<float> model_input((size_t)T * input_dim);
-
+    // Model input: per time step, (f * n_ch + ch) * 2 + {re,im}
+    std::vector<float> model_in((size_t) T * in_dim);
+    std::vector<float> stft_repr((size_t) fs * T * 2);
     for (int t = 0; t < T; t++) {
         for (int f = 0; f < n_freqs; f++) {
             for (int ch = 0; ch < n_ch; ch++) {
                 const float *c = spec.at(ch, f, t);
-                // Index into flattened: (f * n_ch + ch) * 2 + {0,1}
-                int base = (f * n_ch + ch) * 2;
-                model_input[(size_t)t * input_dim + base + 0] = c[0]; // real
-                model_input[(size_t)t * input_dim + base + 1] = c[1]; // imag
+                int fs_idx = f * n_ch + ch;
+                model_in[(size_t) t * in_dim + fs_idx * 2 + 0] = c[0];
+                model_in[(size_t) t * in_dim + fs_idx * 2 + 1] = c[1];
+                stft_repr[((size_t) fs_idx * T + t) * 2 + 0]   = c[0];
+                stft_repr[((size_t) fs_idx * T + t) * 2 + 1]   = c[1];
             }
         }
     }
 
-    // Also save the stft_repr in the rearranged format [n_freqs*n_ch, T, 2]
-    // for mask application later
-    int fs = n_freqs * n_ch;  // 2050
-    std::vector<float> stft_repr((size_t)fs * T * 2);
-    for (int f = 0; f < n_freqs; f++) {
-        for (int ch = 0; ch < n_ch; ch++) {
-            int fs_idx = f * n_ch + ch;
-            for (int t = 0; t < T; t++) {
-                const float *c = spec.at(ch, f, t);
-                stft_repr[((size_t)fs_idx * T + t) * 2 + 0] = c[0];
-                stft_repr[((size_t)fs_idx * T + t) * 2 + 1] = c[1];
-            }
+    const int n_stems = m->cfg.n_stems;
+    std::vector<float> mask((size_t) n_stems * in_dim * T);
+    bsr_forward(m, model_in.data(), T, mask.data());
+
+    // mask layout per stem: [fs][t][{re,im}] — identical to the ONNX graph's
+    // [1, S, fs, T, 2], so the apply loop is unchanged.
+    for (int s = 0; s < n_stems; s++) {
+        // Unwanted stems skip the mask multiply and the iSTFT. The network
+        // predicts every stem in one forward regardless, but the per-stem
+        // inverse transform is pure CPU work — 5/6 of it is thrown away by a
+        // 1-of-6 caller like VOCALS_ONLY.
+        if (!(stem_mask & (1u << s))) {
+            stem_outputs.push_back(nullptr);
+            stem_frame_counts.push_back(0);
+            continue;
         }
-    }
 
-    // ── Run ONNX inference ───────────────────────────────────────────
-    Ort::AllocatorWithDefaultOptions alloc;
-    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    std::vector<int64_t> input_shape = {1, (int64_t)T, (int64_t)input_dim};
-    auto input_tensor = Ort::Value::CreateTensor<float>(
-        mem, model_input.data(), model_input.size(), input_shape.data(), input_shape.size());
-
-    auto in_name = session->GetInputNameAllocated(0, alloc);
-    auto out_name = session->GetOutputNameAllocated(0, alloc);
-    const char *in_names[] = { in_name.get() };
-    const char *out_names[] = { out_name.get() };
-
-    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
-
-    auto &out_tensor = outputs[0];
-    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
-    auto out_shape = type_info.GetShape();
-    const float *mask_data = out_tensor.GetTensorData<float>();
-
-    fprintf(stderr, "[SuperSep] BS-RoFormer output shape: [");
-    for (size_t i = 0; i < out_shape.size(); i++)
-        fprintf(stderr, "%s%lld", i ? "," : "", (long long)out_shape[i]);
-    fprintf(stderr, "]\n");
-
-    // Expected output: [1, n_stems, fs(=2050), T, 2]
-    int out_stems = (out_shape.size() >= 2) ? (int)out_shape[1] : 0;
-    int actual_stems = std::min(out_stems, n_stems);
-
-    // ── Apply mask and iSTFT for each stem ───────────────────────────
-    // mask shape: [1, stems, fs, T, 2] where fs = n_freqs * n_ch = 2050
-    // stft_repr: [fs, T, 2]
-    // Complex multiply: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-    // Then iSTFT each stem
-
-    for (int s = 0; s < actual_stems; s++) {
-        // Build per-stem complex spectrogram: stft_repr * mask[s]
         ComplexSpec stem_spec;
         stem_spec.n_channels = n_ch;
-        stem_spec.n_freqs = n_freqs;
-        stem_spec.n_frames = T;
-        stem_spec.n_fft = n_fft;
+        stem_spec.n_freqs    = n_freqs;
+        stem_spec.n_frames   = T;
+        stem_spec.n_fft      = n_fft;
         stem_spec.hop_length = hop;
-        stem_spec.data = (float *)calloc((size_t)n_ch * n_freqs * T * 2, sizeof(float));
+        stem_spec.data = (float *) calloc((size_t) n_ch * n_freqs * T * 2, sizeof(float));
 
         for (int f = 0; f < n_freqs; f++) {
             for (int ch = 0; ch < n_ch; ch++) {
                 int fs_idx = f * n_ch + ch;
                 for (int t = 0; t < T; t++) {
-                    // stft_repr[fs_idx, t] complex
-                    float sr = stft_repr[((size_t)fs_idx * T + t) * 2 + 0];
-                    float si = stft_repr[((size_t)fs_idx * T + t) * 2 + 1];
-                    // mask[1, s, fs_idx, t, 2]
-                    size_t mask_off = ((size_t)s * fs * T + (size_t)fs_idx * T + t) * 2;
-                    float mr = mask_data[mask_off + 0];
-                    float mi = mask_data[mask_off + 1];
-                    // Complex multiply
+                    float sr = stft_repr[((size_t) fs_idx * T + t) * 2 + 0];
+                    float si = stft_repr[((size_t) fs_idx * T + t) * 2 + 1];
+                    size_t off = ((size_t) s * fs * T + (size_t) fs_idx * T + t) * 2;
+                    float mr = mask[off + 0];
+                    float mi = mask[off + 1];
                     float *dst = stem_spec.at(ch, f, t);
                     dst[0] = sr * mr - si * mi;
                     dst[1] = sr * mi + si * mr;
@@ -439,7 +424,6 @@ static bool bs_roformer_process_chunk(
         int out_len = 0;
         float *stem_audio = stft_inverse(stem_spec, chunk_frames, &out_len);
         stft_free(&stem_spec);
-
         stem_outputs.push_back(stem_audio);
         stem_frame_counts.push_back(out_len);
     }
@@ -448,107 +432,97 @@ static bool bs_roformer_process_chunk(
     return true;
 }
 
-// Full BS-RoFormer separation with chunking + overlap-add.
-// audio: interleaved stereo, n_frames per channel.
-// Returns per-stem interleaved stereo buffers.
-static bool bs_roformer_separate(
-    Ort::Session *session,
-    const float *audio,
-    int n_frames,
-    int n_stems,
-    std::vector<float *> &stem_outputs,   // [n_stems], each is interleaved stereo
-    std::vector<int> &stem_frame_counts,
+// Chunked overlap-add, mirroring bs_roformer_separate (1 s crossfade).
+static bool bs_roformer_separate_ggml(
+    BsRoformer *          m,
+    const float *         audio,
+    int                   n_frames,
+    int                   chunk_size,
+    uint32_t              stem_mask,
+    std::vector<float *> &stem_outputs,
+    std::vector<int> &    stem_frame_counts,
     std::function<void(int, const char *, float)> cb,
     std::function<bool()> cancelled
 ) {
-    const int chunk_size = BS_CHUNK_SIZE;
+    const int n_stems = m->cfg.n_stems;
 
     if (n_frames <= chunk_size) {
-        // Single chunk — pad to full chunk_size if needed
-        cb(1, "Running BS-RoFormer inference...", 0.10f);
-
+        cb(1, "Running BS-RoFormer (GGML) inference...", 0.10f);
         if (n_frames < chunk_size) {
-            // Pad with zeros to full chunk_size
-            std::vector<float> padded(chunk_size * 2, 0.0f);
-            memcpy(padded.data(), audio, (size_t)n_frames * 2 * sizeof(float));
-            bool ok = bs_roformer_process_chunk(session, padded.data(), chunk_size, n_stems,
-                                                  stem_outputs, stem_frame_counts);
-            // Trim outputs back to original length
+            std::vector<float> padded((size_t) chunk_size * 2, 0.0f);
+            memcpy(padded.data(), audio, (size_t) n_frames * 2 * sizeof(float));
+            bool ok = bsr_ggml_process_chunk(m, padded.data(), chunk_size, stem_mask,
+                                             stem_outputs, stem_frame_counts);
             if (ok) {
-                for (int s = 0; s < (int)stem_outputs.size(); s++) {
-                    stem_frame_counts[s] = n_frames;
+                for (size_t s = 0; s < stem_outputs.size(); s++) {
+                    if (stem_outputs[s]) stem_frame_counts[s] = n_frames;
                 }
             }
             return ok;
         }
-        return bs_roformer_process_chunk(session, audio, n_frames, n_stems,
-                                          stem_outputs, stem_frame_counts);
+        return bsr_ggml_process_chunk(m, audio, n_frames, stem_mask,
+                                      stem_outputs, stem_frame_counts);
     }
 
-    // Multiple chunks with overlap-add.
-    // Use a small crossfade overlap (~1 second) for seamless joins.
-    // The model's chunk_size is ~13.4s, so overlap of ~1s is ~7%.
-    const int crossfade = 44100;  // 1 second crossfade region
-    int step = chunk_size - crossfade;
+    const int crossfade = 44100;
+    int step     = chunk_size - crossfade;
     int n_chunks = (n_frames - crossfade + step - 1) / step;
     if (n_chunks < 1) n_chunks = 1;
 
-    fprintf(stderr, "[SuperSep] Chunking: %d frames into %d chunks "
-            "(chunk=%d, crossfade=%d, step=%d)\n",
-            n_frames, n_chunks, chunk_size, crossfade, step);
+    fprintf(stderr, "[SuperSep] GGML chunking: %d frames into %d chunks "
+            "(chunk=%d, crossfade=%d)\n", n_frames, n_chunks, chunk_size, crossfade);
 
-    // Allocate output accumulators (per stem)
-    std::vector<std::vector<float>> accum(n_stems, std::vector<float>(n_frames * 2, 0.0f));
-    std::vector<std::vector<float>> weight(n_stems, std::vector<float>(n_frames * 2, 0.0f));
+    // Only allocate accumulators for requested stems — each pair is ~32 MB per
+    // stem for a 3-minute song at 44.1 kHz.
+    std::vector<std::vector<float>> accum(n_stems);
+    std::vector<std::vector<float>> weight(n_stems);
+    for (int s = 0; s < n_stems; s++) {
+        if (!(stem_mask & (1u << s))) continue;
+        accum[s].assign((size_t) n_frames * 2, 0.0f);
+        weight[s].assign((size_t) n_frames * 2, 0.0f);
+    }
 
-    // Crossfade window: ramp up over first crossfade/2, constant 1, ramp down over last crossfade/2
-    std::vector<float> fade_window(chunk_size, 1.0f);
+    std::vector<float> fade_window((size_t) chunk_size, 1.0f);
     int half_fade = crossfade / 2;
     for (int i = 0; i < half_fade; i++) {
-        float t = (float)i / (float)half_fade;
-        fade_window[i] = t;  // fade in
-        fade_window[chunk_size - 1 - i] = t;  // fade out
+        float t = (float) i / (float) half_fade;
+        fade_window[(size_t) i] = t;
+        fade_window[(size_t) (chunk_size - 1 - i)] = t;
     }
 
     for (int c = 0; c < n_chunks; c++) {
         if (cancelled()) return false;
 
-        int start = c * step;
-        int end = std::min(start + chunk_size, n_frames);
+        int start      = c * step;
+        int end        = std::min(start + chunk_size, n_frames);
         int this_chunk = end - start;
 
-        float pct = 0.10f + 0.15f * (float)c / (float)n_chunks;
         char msg[64];
         snprintf(msg, sizeof(msg), "Processing chunk %d/%d...", c + 1, n_chunks);
-        cb(1, msg, pct);
+        cb(1, msg, 0.10f + 0.15f * (float) c / (float) n_chunks);
 
-        // Extract chunk — ALWAYS pad to full chunk_size for fixed ONNX input shape
-        std::vector<float> chunk_buf(chunk_size * 2, 0.0f);
-        memcpy(chunk_buf.data(), audio + start * 2, (size_t)this_chunk * 2 * sizeof(float));
+        std::vector<float> chunk_buf((size_t) chunk_size * 2, 0.0f);
+        memcpy(chunk_buf.data(), audio + (size_t) start * 2,
+               (size_t) this_chunk * 2 * sizeof(float));
 
         std::vector<float *> chunk_stems;
-        std::vector<int> chunk_counts;
-
-        if (!bs_roformer_process_chunk(session, chunk_buf.data(), chunk_size,
-                                        n_stems, chunk_stems, chunk_counts)) {
+        std::vector<int>     chunk_counts;
+        if (!bsr_ggml_process_chunk(m, chunk_buf.data(), chunk_size, stem_mask,
+                                    chunk_stems, chunk_counts)) {
             for (auto p : chunk_stems) free(p);
             return false;
         }
 
-        // Overlap-add with crossfade window
-        // For first chunk: no fade-in. For last chunk: no fade-out.
-        for (int s = 0; s < (int)chunk_stems.size() && s < n_stems; s++) {
+        for (int s = 0; s < (int) chunk_stems.size() && s < n_stems; s++) {
+            if (!chunk_stems[s]) continue;  // stem not requested
             for (int i = 0; i < this_chunk; i++) {
-                float w = fade_window[i];
-                // First chunk: don't fade in
+                float w = fade_window[(size_t) i];
                 if (c == 0 && i < half_fade) w = 1.0f;
-                // Last chunk: don't fade out
                 if (c == n_chunks - 1 && i >= this_chunk - half_fade) w = 1.0f;
-
                 int dst = (start + i) * 2;
                 if (dst + 1 < n_frames * 2) {
-                    accum[s][dst + 0] += chunk_stems[s][i * 2 + 0] * w;
-                    accum[s][dst + 1] += chunk_stems[s][i * 2 + 1] * w;
+                    accum[s][dst + 0]  += chunk_stems[s][i * 2 + 0] * w;
+                    accum[s][dst + 1]  += chunk_stems[s][i * 2 + 1] * w;
                     weight[s][dst + 0] += w;
                     weight[s][dst + 1] += w;
                 }
@@ -557,17 +531,82 @@ static bool bs_roformer_separate(
         }
     }
 
-    // Normalize and output
     for (int s = 0; s < n_stems; s++) {
-        float *out = (float *)malloc((size_t)n_frames * 2 * sizeof(float));
+        if (!(stem_mask & (1u << s))) {
+            stem_outputs.push_back(nullptr);
+            stem_frame_counts.push_back(0);
+            continue;
+        }
+        float *out = (float *) malloc((size_t) n_frames * 2 * sizeof(float));
         for (int i = 0; i < n_frames * 2; i++) {
             out[i] = (weight[s][i] > 1e-8f) ? accum[s][i] / weight[s][i] : 0.0f;
         }
         stem_outputs.push_back(out);
         stem_frame_counts.push_back(n_frames);
     }
-
     return true;
+}
+
+// Load a BS-RoFormer GGUF into *slot on first use. Returns false on failure
+// (missing/corrupt file); the slot is left null so a later attempt can retry.
+// True if the model file is present. Lets optional models (the Leap pair) be
+// probed without bsr_load printing FATAL for what is a normal fallback.
+static bool bsr_model_present(SuperSep * ctx, const BsRoformerModel & cfg) {
+    std::string path = ctx->model_dir + "/" + cfg.filename;
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static bool bsr_load_slot(SuperSep * ctx, BsRoformer ** slot, const BsRoformerModel & cfg) {
+    if (*slot) return true;
+    std::string path = ctx->model_dir + "/" + cfg.filename;
+    BsRoformer *m = new BsRoformer();
+    if (!bsr_load(m, path.c_str())) {
+        delete m;
+        return false;
+    }
+    *slot = m;
+    return true;
+}
+
+// Run one single-stem BS-RoFormer variant (a Leap Xe checkpoint) over the full
+// input and return its neural output. Loads the GGUF into *slot on first use.
+// Returns a malloc'd interleaved stereo buffer, or nullptr on failure /
+// cancellation. Caller owns the buffer.
+//
+// This path is GGML, not ONNX Runtime — see bs-roformer-ggml.h for why. The
+// short version: the time transformer's materialised attention at the trained
+// 20 s chunk is 8.5 GB, and ggml_flash_attn_ext never builds it.
+static float * leap_run_single(
+    SuperSep *                ctx,
+    BsRoformer **             slot,
+    const BsRoformerModel &   cfg,
+    const float *             audio,
+    int                       n_frames,
+    int *                     out_frames,
+    std::function<void(int, const char *, float)> cb,
+    std::function<bool()>     cancelled
+) {
+    if (!bsr_load_slot(ctx, slot, cfg)) return nullptr;
+
+    std::vector<float *> outs;
+    std::vector<int>     counts;
+    if (!bs_roformer_separate_ggml(*slot, audio, n_frames, cfg.chunk_size,
+                                   BS_ALL_STEMS, outs, counts, cb, cancelled)) {
+        for (auto p : outs) free(p);
+        return nullptr;
+    }
+
+    // num_stems=1: index 0 is the target. Free anything else defensively in
+    // case a future checkpoint ever carries more than one stem.
+    float *stem = nullptr;
+    for (size_t i = 0; i < outs.size(); i++) {
+        if (i == 0) { stem = outs[i]; *out_frames = counts[i]; }
+        else        { free(outs[i]); }
+    }
+    return stem;
 }
 
 // ── Mel-Band RoFormer STFT-based processing ─────────────────────────────
@@ -580,7 +619,7 @@ static bool bs_roformer_separate(
 // Reference: ZFTurbo/MSS_ONNX_TensorRT/models/preprocess.py Mel_band_roformer_processor
 
 static bool mel_band_process_chunk(
-    Ort::Session *session,
+    BsRoformer *model,            // GGML Mel-Band RoFormer
     const float *chunk,           // interleaved stereo vocals
     int chunk_frames,             // per-channel frame count (must be MB_CHUNK_SAMPLES)
     float *&out_lead,             // output: lead vocals (malloc'd interleaved stereo)
@@ -621,48 +660,34 @@ static bool mel_band_process_chunk(
         }
     }
 
-    // ── Gather mel-band frequency indices → model input [3958, T, 2] ─
+    // ── Gather mel-band frequency indices → model input [in_dim, T] ──
+    // Mel bands OVERLAP, so this is a gather (with repeats), not a slice. The
+    // GGML graph wants time-major with (f,c) innermost — 'b t (f c)' — whereas
+    // the old ONNX graph took 'b f t c'. Everything downstream of the network
+    // is unchanged: the mask still comes back as [stem][f][t][re,im].
     const int n_gathered = MB_N_FREQ_INDICES_STEREO;
-    std::vector<float> model_input((size_t)n_gathered * T * 2);
+    const int in_dim     = n_gathered * 2;
+    std::vector<float> model_input((size_t)T * in_dim);
 
     for (int i = 0; i < MB_N_FREQ_INDICES_MONO; i++) {
         int mono_f = MB_FREQ_INDICES_MONO[i];
         for (int ch = 0; ch < n_ch; ch++) {
-            int stereo_gather_idx = i * n_ch + ch;  // output index
-            int stereo_src_idx = mono_f * n_ch + ch; // source in stft_repr
+            int stereo_gather_idx = i * n_ch + ch;   // destination band slot
+            int stereo_src_idx    = mono_f * n_ch + ch;  // source in stft_repr
             for (int t = 0; t < T; t++) {
-                model_input[((size_t)stereo_gather_idx * T + t) * 2 + 0] =
+                model_input[(size_t)t * in_dim + stereo_gather_idx * 2 + 0] =
                     stft_repr[((size_t)stereo_src_idx * T + t) * 2 + 0];
-                model_input[((size_t)stereo_gather_idx * T + t) * 2 + 1] =
+                model_input[(size_t)t * in_dim + stereo_gather_idx * 2 + 1] =
                     stft_repr[((size_t)stereo_src_idx * T + t) * 2 + 1];
             }
         }
     }
 
-    // ── Run ONNX inference ───────────────────────────────────────────
-    Ort::AllocatorWithDefaultOptions alloc;
-    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    std::vector<int64_t> input_shape = {1, (int64_t)n_gathered, (int64_t)T, 2};
-    auto input_tensor = Ort::Value::CreateTensor<float>(
-        mem, model_input.data(), model_input.size(), input_shape.data(), input_shape.size());
-
-    auto in_name = session->GetInputNameAllocated(0, alloc);
-    auto out_name = session->GetOutputNameAllocated(0, alloc);
-    const char *in_names[] = { in_name.get() };
-    const char *out_names[] = { out_name.get() };
-
-    auto outputs = session->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
-
-    auto &out_tensor = outputs[0];
-    auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
-    auto out_shape = type_info.GetShape();
-    const float *mask_data = out_tensor.GetTensorData<float>();
-
-    fprintf(stderr, "[SuperSep] Mel-Band output shape: [");
-    for (size_t i = 0; i < out_shape.size(); i++)
-        fprintf(stderr, "%s%lld", i ? "," : "", (long long)out_shape[i]);
-    fprintf(stderr, "]\n");
+    // ── Run GGML inference ───────────────────────────────────────────
+    const int n_stems_out = model->cfg.n_stems;
+    std::vector<float> mask_buf((size_t)n_stems_out * in_dim * T);
+    bsr_forward(model, model_input.data(), T, mask_buf.data());
+    const float *mask_data = mask_buf.data();
 
     // DEBUG: Check model input and output levels
     { float pk = 0; for (size_t i = 0; i < model_input.size(); i++) { float a = fabsf(model_input[i]); if (a>pk) pk=a; }
@@ -1025,6 +1050,86 @@ SuperSepResult * supersep_run(
 
     std::vector<SuperSepStem> stems;
 
+    // ── STABLESTEP: dual Leap Xe pass, both stems are neural ─────────────
+    // Runs the vocal-target checkpoint and the instrumental-target checkpoint
+    // over the same input and keeps each one's own prediction, discarding both
+    // arithmetic complements. Neither output is an error bucket: the vocal that
+    // gets re-applied after the SA3 refine is the vocal model's optimised
+    // output, and the instrumental that feeds SA3 is the instrumental model's.
+    //
+    // The two sessions are loaded and released strictly in sequence so peak
+    // VRAM stays at one model, matching the stage-1 → stage-2 handoff below.
+    if (level == SUPERSEP_STABLESTEP) {
+        // bs_roformer_separate reports progress in the 0.10..0.25 band; remap
+        // each pass into its own slice so the UI shows one monotonic sweep.
+        auto sub_cb = [&](float lo, float hi) {
+            return [=](int st, const char *m, float p) {
+                float t = (p - 0.10f) / 0.15f;
+                t = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+                cb(st, m, lo + (hi - lo) * t);
+            };
+        };
+
+        float *vocals = nullptr, *inst = nullptr;
+        int voc_frames = 0, inst_frames = 0;
+
+        try {
+            // ── Pass 1: vocal-target ─────────────────────────────────────
+            cb(1, "Loading Leap Xe vocal model...", 0.03f);
+            if (cancelled()) return nullptr;
+            vocals = leap_run_single(ctx, &ctx->leap_voc, BS_MODEL_LEAP_XE_VOC,
+                                     audio, n_frames, &voc_frames,
+                                     sub_cb(0.05f, 0.48f), cancelled);
+            if (!vocals) throw std::runtime_error("Leap Xe vocal pass produced no stem");
+
+            // Release before the second model loads — peak VRAM = one model.
+            if (ctx->leap_voc) {
+                bsr_free(ctx->leap_voc);
+                delete ctx->leap_voc;
+                ctx->leap_voc = nullptr;
+                fprintf(stderr, "[SuperSep] Released Leap Xe vocal model (VRAM freed for instrumental pass)\n");
+            }
+
+            // ── Pass 2: instrumental-target ──────────────────────────────
+            cb(1, "Loading Leap Xe instrumental model...", 0.50f);
+            if (cancelled()) { free(vocals); return nullptr; }
+            inst = leap_run_single(ctx, &ctx->leap_inst, BS_MODEL_LEAP_XE_INST,
+                                   audio, n_frames, &inst_frames,
+                                   sub_cb(0.52f, 0.92f), cancelled);
+            if (!inst) throw std::runtime_error("Leap Xe instrumental pass produced no stem");
+
+            if (ctx->leap_inst) {
+                bsr_free(ctx->leap_inst);
+                delete ctx->leap_inst;
+                ctx->leap_inst = nullptr;
+                fprintf(stderr, "[SuperSep] Released Leap Xe instrumental model\n");
+            }
+
+            // Same stem identities as VOCALS_ONLY so the server/StableStep side
+            // needs no changes — only how the two buffers were produced differs.
+            // add_stem takes ownership (and frees outright if the stem is
+            // silent) — drop our handles so the catch path can't double-free.
+            add_stem(stems, VOCALS_ONLY_STEMS[0], vocals, voc_frames);
+            vocals = nullptr;
+            add_stem(stems, VOCALS_ONLY_STEMS[1], inst, inst_frames);
+            inst = nullptr;
+            cb(1, "Dual-model vocal split complete", 0.95f);
+        } catch (const std::exception &e) {
+            fprintf(stderr, "[SuperSep] StableStep dual-Leap split failed: %s\n", e.what());
+            free(vocals);
+            free(inst);
+            for (auto &s : stems) free(s.samples);
+            return nullptr;
+        }
+
+        SuperSepResult *result = (SuperSepResult *)malloc(sizeof(SuperSepResult));
+        result->n_stems = (int)stems.size();
+        result->stems = (SuperSepStem *)malloc(sizeof(SuperSepStem) * stems.size());
+        memcpy(result->stems, stems.data(), sizeof(SuperSepStem) * stems.size());
+        fprintf(stderr, "[SuperSep] Done — %d stems extracted (dual Leap Xe)\n", result->n_stems);
+        return result;
+    }
+
     // ── VOCALS_ONLY: BS-RoFormer pass, 2-stem output ─────────────────────
     // The 6-stem model computes all stems in one forward anyway; we keep only
     // the Vocals stem (lead AND backing vocals — unlike the karaoke model,
@@ -1037,15 +1142,17 @@ SuperSepResult * supersep_run(
         cb(1, "Loading BS-RoFormer model...", 0.05f);
         if (cancelled()) return nullptr;
         try {
-            if (!ctx->s1_bs_roformer) {
-                ctx->s1_bs_roformer = load_onnx_model(ctx, "bs_roformer_sw.onnx");
+            if (!bsr_load_slot(ctx, &ctx->s1_bs_roformer, BS_MODEL_SW)) {
+                throw std::runtime_error(std::string("cannot load ") + BS_MODEL_SW.filename);
             }
 
             std::vector<float *> s1_stems;
             std::vector<int> s1_counts;
-            bool ok = bs_roformer_separate(
-                ctx->s1_bs_roformer, audio, n_frames, BS_NUM_STEMS,
-                s1_stems, s1_counts, cb, cancelled);
+            // Only stem 3 (Vocals) is kept — the mask skips the mask-multiply,
+            // iSTFT and overlap-add accumulators for the other five.
+            bool ok = bs_roformer_separate_ggml(
+                ctx->s1_bs_roformer, audio, n_frames, BS_MODEL_SW.chunk_size,
+                1u << 3, s1_stems, s1_counts, cb, cancelled);
             if (!ok) {
                 for (auto p : s1_stems) free(p);
                 return nullptr;
@@ -1087,27 +1194,96 @@ SuperSepResult * supersep_run(
     int stages[] = {1, 0, 0, 0};
     if (level >= SUPERSEP_VOCAL_SPLIT && level <= SUPERSEP_MAXIMUM) stages[1] = 1;
     if (level >= SUPERSEP_FULL        && level <= SUPERSEP_MAXIMUM) stages[2] = 1;
-    if (level == SUPERSEP_MAXIMUM)                                  stages[3] = 1;
 
     // Stems from stage 1 that feed into later stages
     float *s1_vocals = nullptr, *s1_drums = nullptr, *s1_other = nullptr;
     int s1_vocal_frames = 0, s1_drum_frames = 0, s1_other_frames = 0;
 
+    // ── STAGE 0: Leap Xe vocal/instrumental front door ───────────────
+    // BS-Roformer-Leap Xe is the strongest vocal/instrumental separator we
+    // carry, so when its pair is installed it does that split FIRST and the
+    // rest of the pipeline works on its outputs:
+    //
+    //   Leap vocals       -> the Vocals stem, and the Stage 2 lead/backing input
+    //   Leap instrumental -> the Stage 1 input, so the 6-stem model never has
+    //                        to fight vocal energy for the instrument stems
+    //
+    // Both stems are each model's own prediction; neither is a mix-minus
+    // residual. Costs two extra full passes over the audio — the quality of
+    // every downstream stem depends on this split, so it is worth paying.
+    //
+    // Falls back to running Stage 1 on the raw mix when the pair is absent.
+    const float * stage1_input = audio;
+    std::vector<float> leap_inst_buf;
+    float * leap_vocals = nullptr;
+    int     leap_vocal_frames = 0;
+    bool    use_leap = false;
+
+    if (bsr_model_present(ctx, BS_MODEL_LEAP_XE_VOC) &&
+        bsr_model_present(ctx, BS_MODEL_LEAP_XE_INST) &&
+        bsr_load_slot(ctx, &ctx->leap_voc, BS_MODEL_LEAP_XE_VOC)) {
+        cb(1, "Separating vocals (Leap Xe)...", 0.02f);
+        if (cancelled()) return nullptr;
+        int vf = 0;
+        float *v = leap_run_single(ctx, &ctx->leap_voc, BS_MODEL_LEAP_XE_VOC,
+                                   audio, n_frames, &vf,
+                                   [&](int st, const char *m, float) { cb(st, m, 0.03f); },
+                                   cancelled);
+        if (ctx->leap_voc) {
+            bsr_free(ctx->leap_voc); delete ctx->leap_voc; ctx->leap_voc = nullptr;
+        }
+        if (v) {
+            cb(1, "Separating instruments (Leap Xe)...", 0.05f);
+            int inf = 0;
+            float *inst = nullptr;
+            if (bsr_load_slot(ctx, &ctx->leap_inst, BS_MODEL_LEAP_XE_INST)) {
+                inst = leap_run_single(ctx, &ctx->leap_inst, BS_MODEL_LEAP_XE_INST,
+                                       audio, n_frames, &inf,
+                                       [&](int st, const char *m, float) { cb(st, m, 0.07f); },
+                                       cancelled);
+            }
+            if (ctx->leap_inst) {
+                bsr_free(ctx->leap_inst); delete ctx->leap_inst; ctx->leap_inst = nullptr;
+            }
+            if (inst) {
+                leap_vocals       = v;
+                leap_vocal_frames = vf;
+                leap_inst_buf.assign(inst, inst + (size_t)inf * 2);
+                free(inst);
+                stage1_input = leap_inst_buf.data();
+                use_leap     = true;
+                fprintf(stderr, "[SuperSep] Leap Xe front door: vocals %d frames, "
+                                "instrumental %d frames -> Stage 1\n", vf, inf);
+            } else {
+                free(v);
+                fprintf(stderr, "[SuperSep] Leap instrumental pass failed — "
+                                "falling back to Stage 1 on the raw mix\n");
+            }
+        }
+    }
+    if (!use_leap) {
+        fprintf(stderr, "[SuperSep] Leap Xe pair unavailable — Stage 1 runs on the mix\n");
+    }
+
     // ── STAGE 1: Primary 6-stem split ────────────────────────────────
-    cb(1, "Loading BS-RoFormer model...", 0.05f);
-    if (cancelled()) return nullptr;
+    cb(1, "Loading BS-RoFormer model...", 0.08f);
+    if (cancelled()) { free(leap_vocals); return nullptr; }
 
     try {
-        if (!ctx->s1_bs_roformer) {
-            ctx->s1_bs_roformer = load_onnx_model(ctx, "bs_roformer_sw.onnx");
+        if (!bsr_load_slot(ctx, &ctx->s1_bs_roformer, BS_MODEL_SW)) {
+            throw std::runtime_error(std::string("cannot load ") + BS_MODEL_SW.filename);
         }
 
         std::vector<float *> s1_stems;
         std::vector<int> s1_counts;
 
-        bool ok = bs_roformer_separate(
-            ctx->s1_bs_roformer, audio, n_frames, BS_NUM_STEMS,
-            s1_stems, s1_counts, cb, cancelled);
+        // Vocals (index 3) come from Leap when the front door ran, so the
+        // 6-stem model's own vocals output is not needed.
+        const uint32_t s1_mask = use_leap ? (BS_ALL_STEMS & ~(1u << 3)) : BS_ALL_STEMS;
+
+        bool ok = bs_roformer_separate_ggml(
+            ctx->s1_bs_roformer, stage1_input, n_frames, BS_MODEL_SW.chunk_size,
+            s1_mask, s1_stems, s1_counts, cb, cancelled);
 
         if (!ok) {
             for (auto p : s1_stems) free(p);
@@ -1132,13 +1308,15 @@ SuperSepResult * supersep_run(
         // Stems needed by later stages get duplicated: one copy goes to output,
         // the original pointer is kept for the downstream stage.
         for (int i = 0; i < N_STAGE1_STEMS && i < (int)s1_stems.size(); i++) {
-            // Keep vocals/drums/other for later stages (hold the original pointer)
+            // Vocals come from the Leap front door when it ran; the 6-stem
+            // model's index 3 was masked off and is null.
+            if (i == 3 && use_leap) continue;
+            if (!s1_stems[i]) continue;
+
+            // Keep drums/vocals for later stages (hold the original pointer)
             if (i == 1 && stages[2]) { // Drums (index 1) → Stage 3
                 s1_drums = s1_stems[i];
                 s1_drum_frames = s1_counts[i];
-            } else if (i == 2 && stages[3]) { // Other (index 2) → Stage 4
-                s1_other = s1_stems[i];
-                s1_other_frames = s1_counts[i];
             } else if (i == 3 && stages[1]) { // Vocals (index 3) → Stage 2
                 s1_vocals = s1_stems[i];
                 s1_vocal_frames = s1_counts[i];
@@ -1146,7 +1324,7 @@ SuperSepResult * supersep_run(
 
             // Always add to output (duplicate buffer if held for later stage)
             float *buf = s1_stems[i];
-            bool is_held = (i == 1 && stages[2]) || (i == 2 && stages[3]) || (i == 3 && stages[1]);
+            bool is_held = (i == 1 && stages[2]) || (i == 3 && stages[1]);
             if (is_held) {
                 size_t nbytes = (size_t)s1_counts[i] * 2 * sizeof(float);
                 buf = (float *)malloc(nbytes);
@@ -1155,10 +1333,31 @@ SuperSepResult * supersep_run(
             add_stem(stems, STAGE1_STEMS[i], buf, s1_counts[i], /*hidden=*/is_held);
         }
 
+        // Leap vocals take the Vocals slot and feed Stage 2.
+        if (use_leap && leap_vocals) {
+            if (stages[1]) {
+                s1_vocals       = leap_vocals;   // ownership moves to the stage-2 path
+                s1_vocal_frames = leap_vocal_frames;
+                size_t nbytes = (size_t)leap_vocal_frames * 2 * sizeof(float);
+                float *copy = (float *)malloc(nbytes);
+                memcpy(copy, leap_vocals, nbytes);
+                add_stem(stems, STAGE1_STEMS[3], copy, leap_vocal_frames, /*hidden=*/true);
+            } else {
+                add_stem(stems, STAGE1_STEMS[3], leap_vocals, leap_vocal_frames);
+            }
+            leap_vocals = nullptr;  // owned by stems / s1_vocals from here
+        }
+
+        // The instrumental buffer has served its purpose as the Stage 1 input.
+        leap_inst_buf.clear();
+        leap_inst_buf.shrink_to_fit();
+
         cb(1, "Stage 1 complete", 0.25f);
     } catch (const std::exception &e) {
         fprintf(stderr, "[SuperSep] Stage 1 failed: %s\n", e.what());
         cb(1, "Stage 1 failed", 0.25f);
+        free(leap_vocals);
+        for (auto &s : stems) free(s.samples);
         // Can't continue without stage 1
         return nullptr;
     }
@@ -1167,6 +1366,7 @@ SuperSepResult * supersep_run(
     if (stages[1] && s1_vocals) {
         // Release Stage 1 model to free VRAM before loading Stage 2
         if (ctx->s1_bs_roformer) {
+            bsr_free(ctx->s1_bs_roformer);
             delete ctx->s1_bs_roformer;
             ctx->s1_bs_roformer = nullptr;
             fprintf(stderr, "[SuperSep] Released BS-RoFormer (VRAM freed for Stage 2)\n");
@@ -1177,7 +1377,9 @@ SuperSepResult * supersep_run(
 
         try {
             if (!ctx->s2_mel_band) {
-                ctx->s2_mel_band = load_onnx_model(ctx, "mel_band_roformer_karaoke.onnx");
+                if (!bsr_load_slot(ctx, &ctx->s2_mel_band, MEL_MODEL_KARAOKE)) {
+                    throw std::runtime_error("cannot load mel-band model");
+                }
             }
 
             cb(2, "Splitting lead/backing vocals...", 0.35f);
@@ -1286,8 +1488,8 @@ SuperSepResult * supersep_run(
     // ── STAGE 3: Drum sub-separation ─────────────────────────────────
     if (stages[2] && s1_drums) {
         // Release previous stage models to free VRAM
-        if (ctx->s2_mel_band) { delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
-        if (ctx->s1_bs_roformer) { delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
+        if (ctx->s2_mel_band) { bsr_free(ctx->s2_mel_band); delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
+        if (ctx->s1_bs_roformer) { bsr_free(ctx->s1_bs_roformer); delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
         fprintf(stderr, "[SuperSep] Released previous models (VRAM freed for Stage 3)\n");
 
         cb(3, "Loading MDX23C DrumSep model...", 0.50f);
@@ -1389,112 +1591,6 @@ SuperSepResult * supersep_run(
         s1_drums = nullptr;
     }
 
-    // ── STAGE 4: "Other" refinement (HTDemucs waveform model) ────────
-    fprintf(stderr, "[SuperSep] Stage 4 check: stages[3]=%d, s1_other=%p, s1_other_frames=%d\n",
-            stages[3], (void*)s1_other, s1_other_frames);
-    if (stages[3] && s1_other) {
-        // Release previous stage models to free VRAM
-        if (ctx->s3_mdx23c) { delete ctx->s3_mdx23c; ctx->s3_mdx23c = nullptr; }
-        if (ctx->s2_mel_band) { delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
-        if (ctx->s1_bs_roformer) { delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
-        fprintf(stderr, "[SuperSep] Released previous models (VRAM freed for Stage 4)\n");
-
-        cb(4, "Loading HTDemucs model...", 0.75f);
-        if (cancelled()) { free(s1_other); return nullptr; }
-
-        try {
-            if (!ctx->s4_htdemucs) {
-                ctx->s4_htdemucs = load_onnx_model(ctx, "htdemucs_6s.onnx");
-            }
-
-            cb(4, "Refining 'other' stem...", 0.80f);
-
-            // HTDemucs: n_fft=4096, hop=1024, dim_f=2048, dim_t=474
-            // chunk_frames = (474-1) * 1024 = 484352 (~11s)
-            const int ht_nfft = 4096, ht_hop = 1024, ht_dimf = 2048;
-            const int ht_chunk = 473 * ht_hop;  // 484352
-            const int ht_xfade = 44100;
-            const int ht_step = ht_chunk - ht_xfade;
-            const int nf = s1_other_frames;
-
-            int n_chunks = (nf <= ht_chunk) ? 1 : (nf - ht_xfade + ht_step - 1) / ht_step;
-            if (n_chunks < 1) n_chunks = 1;
-
-            fprintf(stderr, "[SuperSep] HTDemucs: %d frames -> %d chunks\n", nf, n_chunks);
-
-            const int max_other_stems = N_STAGE4_STEMS;
-            std::vector<std::vector<double>> other_accum(max_other_stems, std::vector<double>(nf * 2, 0.0));
-            std::vector<double> other_weight(nf * 2, 0.0);
-            int found_stems = 0;
-
-            std::vector<float> fade_win(ht_chunk, 1.0f);
-            int half_fade = ht_xfade / 2;
-            for (int i2 = 0; i2 < half_fade; i2++) {
-                float t = (float)i2 / (float)half_fade;
-                fade_win[i2] = t;
-                fade_win[ht_chunk - 1 - i2] = t;
-            }
-
-            for (int c = 0; c < n_chunks; c++) {
-                if (cancelled()) { free(s1_other); return nullptr; }
-
-                int start = c * ht_step;
-                int end = std::min(start + ht_chunk, nf);
-                int this_chunk = end - start;
-
-                float pct = 0.80f + 0.10f * (float)c / (float)n_chunks;
-                char msg[64]; snprintf(msg, sizeof(msg), "Other chunk %d/%d...", c + 1, n_chunks);
-                cb(4, msg, pct);
-
-                std::vector<float> chunk_buf(ht_chunk * 2, 0.0f);
-                memcpy(chunk_buf.data(), s1_other + start * 2, (size_t)this_chunk * 2 * sizeof(float));
-
-                std::vector<float *> chunk_stems;
-                std::vector<int> chunk_counts;
-                if (!mdx_process_chunk(ctx->s4_htdemucs, chunk_buf.data(), ht_chunk,
-                                       ht_nfft, ht_hop, ht_dimf, max_other_stems,
-                                       chunk_stems, chunk_counts)) {
-                    for (auto p : chunk_stems) free(p);
-                    continue;
-                }
-
-                found_stems = std::max(found_stems, (int)chunk_stems.size());
-
-                for (int s = 0; s < (int)chunk_stems.size(); s++) {
-                    for (int i2 = 0; i2 < this_chunk; i2++) {
-                        float w = fade_win[i2];
-                        if (c == 0 && i2 < half_fade) w = 1.0f;
-                        if (c == n_chunks - 1 && i2 >= this_chunk - half_fade) w = 1.0f;
-                        int dst = (start + i2) * 2;
-                        if (dst + 1 < nf * 2) {
-                            other_accum[s][dst + 0] += chunk_stems[s][i2 * 2 + 0] * w;
-                            other_accum[s][dst + 1] += chunk_stems[s][i2 * 2 + 1] * w;
-                            if (s == 0) { other_weight[dst + 0] += w; other_weight[dst + 1] += w; }
-                        }
-                    }
-                    free(chunk_stems[s]);
-                }
-            }
-
-            for (int s = 0; s < found_stems && s < max_other_stems; s++) {
-                float *out = (float *)malloc((size_t)nf * 2 * sizeof(float));
-                for (int i2 = 0; i2 < nf * 2; i2++)
-                    out[i2] = (other_weight[i2] > 1e-8) ? (float)(other_accum[s][i2] / other_weight[i2]) : 0.0f;
-                add_stem(stems, STAGE4_STEMS[s], out, nf);
-            }
-
-            cb(4, "Other refinement complete", 0.90f);
-        } catch (const std::exception &e) {
-            fprintf(stderr, "[SuperSep] Stage 4 failed: %s\n", e.what());
-            StemDef fallback = {"06_Other", "Other", "other", 1};
-            add_stem(stems, fallback, s1_other, s1_other_frames);
-            s1_other = nullptr;
-            cb(4, "Other refinement failed, keeping original", 0.90f);
-        }
-        free(s1_other);
-        s1_other = nullptr;
-    }
-
     // ── Collect results ──────────────────────────────────────────────
     cb(0, "Finalizing...", 0.95f);
 
@@ -1523,10 +1619,11 @@ void supersep_free(SuperSep * ctx) {
 
 void supersep_release_models(SuperSep * ctx) {
     if (!ctx) return;
-    if (ctx->s1_bs_roformer) { delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
-    if (ctx->s2_mel_band)    { delete ctx->s2_mel_band;    ctx->s2_mel_band    = nullptr; }
+    if (ctx->s1_bs_roformer) { bsr_free(ctx->s1_bs_roformer); delete ctx->s1_bs_roformer; ctx->s1_bs_roformer = nullptr; }
+    if (ctx->s2_mel_band)    { bsr_free(ctx->s2_mel_band); delete ctx->s2_mel_band; ctx->s2_mel_band = nullptr; }
     if (ctx->s3_mdx23c)      { delete ctx->s3_mdx23c;      ctx->s3_mdx23c      = nullptr; }
-    if (ctx->s4_htdemucs)    { delete ctx->s4_htdemucs;    ctx->s4_htdemucs    = nullptr; }
+    if (ctx->leap_voc)  { bsr_free(ctx->leap_voc);  delete ctx->leap_voc;  ctx->leap_voc  = nullptr; }
+    if (ctx->leap_inst) { bsr_free(ctx->leap_inst); delete ctx->leap_inst; ctx->leap_inst = nullptr; }
     fprintf(stderr, "[SuperSep] Released all ONNX sessions (VRAM freed)\n");
 }
 

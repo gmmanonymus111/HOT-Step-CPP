@@ -117,8 +117,10 @@ export const TrackSelector: React.FC<TrackSelectorProps> = ({
             ))}
           </select>
           <p style={styles.sepLevelHint}>
-            SuperSep uses ONNX neural networks to separate the audio into stems.
-            Higher levels produce more stems but take longer.
+            SuperSep uses neural networks to separate the audio into stems.
+            Levels 0-3 produce progressively more stems and take longer. The two
+            2-stem modes are a straight vocal/instrumental split — Leap Xe runs
+            two dedicated models so neither stem is a mix-minus residual.
           </p>
         </div>
       )}

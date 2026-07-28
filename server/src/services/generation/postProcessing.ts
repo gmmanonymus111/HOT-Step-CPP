@@ -42,6 +42,22 @@ function sa3GgufInstalled(): boolean {
       && SA3_GGUF_FILES.every(f => fs.existsSync(path.join(modelsDir, f)));
 }
 
+// BS-Roformer-Leap "Xe" pair (huggingface.co/pcunwa/BS-Roformer-Leap). Both are
+// single-stem models differing only in target_instrument, and both run through
+// the engine's native GGML BS-RoFormer (bs-roformer-ggml.h), not ONNX Runtime.
+// Keep in sync with BS_MODEL_LEAP_XE_* in engine/src/supersep.cpp.
+const LEAP_XE_FILES = ['bs_leap_xe_voc-F32.gguf', 'bs_leap_xe_inst-F32.gguf'];
+
+/** True if both Leap Xe checkpoints are present, enabling SUPERSEP_STABLESTEP. */
+function leapXeInstalled(): boolean {
+  const modelsDir = config.aceServer.models;
+  return LEAP_XE_FILES.every(f => fs.existsSync(path.join(modelsDir, 'supersep', f)));
+}
+
+// SuperSepLevel values from engine/src/supersep.h.
+const SEP_LEVEL_VOCALS_ONLY = 4;  // single 6-stem pass, instrumental = mix − vocals
+const SEP_LEVEL_STABLESTEP  = 5;  // dual Leap Xe pass, both stems neural
+
 interface PostProcessParams {
   postProcessingEnabled?: boolean;
   ppVaeReencode?: boolean;
@@ -132,12 +148,17 @@ interface VocalSeparation {
   instBuf: Buffer;
 }
 
-/** Run a BS-RoFormer VOCALS_ONLY split (2-stem: Vocals + Instrumental) via the
- *  engine's SuperSep API and fetch both stems. Returns null when the split
- *  produced no usable vocal/instrumental pair (silent stems are dropped
- *  engine-side). Throws on separation failure/timeout. */
-async function separateVocals(srcBuf: Buffer): Promise<VocalSeparation | null> {
-  const sepId = await aceClient.submitSuperSepSeparate(srcBuf, 4 /* VOCALS_ONLY */);
+/** Run a 2-stem (Vocals + Instrumental) split via the engine's SuperSep API and
+ *  fetch both stems. Returns null when the split produced no usable
+ *  vocal/instrumental pair (silent stems are dropped engine-side). Throws on
+ *  separation failure/timeout.
+ *
+ *  `level` picks the separation strategy — see the SuperSepLevel constants. */
+async function separateVocals(
+  srcBuf: Buffer,
+  level: number = SEP_LEVEL_VOCALS_ONLY,
+): Promise<VocalSeparation | null> {
+  const sepId = await aceClient.submitSuperSepSeparate(srcBuf, level);
 
   // Poll separation to completion (GPU-serialized with other engine work)
   const sepDeadline = Date.now() + 30 * 60_000;
@@ -232,7 +253,7 @@ export async function runPostProcessingChain(
     }
 
     // ── Shared vocal separation (StableStep stem workflow + Whisper isolation) ──
-    // BS-RoFormer VOCALS_ONLY split, run at most ONCE per track. Consumers:
+    // 2-stem vocal/instrumental split, run at most ONCE per track. Consumers:
     //   - StableStep (vocal gens): SA3-refines the instrumental stem, cleans
     //     the vocal stem, recombines.
     //   - Whisper isolation (onVocalStem): the vocal stem is written to a temp
@@ -247,9 +268,23 @@ export async function runPostProcessingChain(
 
     if (stableStepWantsStems || whisperWantsStems) {
       const sepStart = performance.now();
+      // StableStep gets the dual Leap Xe pass when both checkpoints are
+      // installed: the vocal that is re-applied after the refine comes from the
+      // vocal-target model and the instrumental fed to SA3 comes from the
+      // instrumental-target model, so neither stem is a mix-minus residual.
+      // Whisper-only splits stay on the single 6-stem pass — one model load
+      // instead of two, and transcription does not need that precision.
+      const useLeap = stableStepWantsStems && leapXeInstalled();
+      const sepLevel = useLeap ? SEP_LEVEL_STABLESTEP : SEP_LEVEL_VOCALS_ONLY;
+      if (stableStepWantsStems && !useLeap) {
+        log('INFO', '[SuperSep] Leap Xe models not installed — using the 6-stem '
+          + 'BS-RoFormer pass (instrumental derived as mix − vocals)');
+      }
       setStage(`Separating vocals${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
       try {
-        vocalSep = await separateVocals(fs.readFileSync(processedPath));
+        log('INFO', `[SuperSep] Vocal split via level ${sepLevel}`
+          + `${useLeap ? ' (dual BS-Roformer-Leap Xe)' : ' (BS-RoFormer 6-stem)'}`);
+        vocalSep = await separateVocals(fs.readFileSync(processedPath), sepLevel);
         if (!vocalSep) {
           log('INFO', '[SuperSep] No vocal/instrumental split (no vocal energy detected)');
         }

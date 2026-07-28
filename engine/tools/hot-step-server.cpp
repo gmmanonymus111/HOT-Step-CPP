@@ -3892,7 +3892,7 @@ int main(int argc, char ** argv) {
         if (req.has_param("level")) {
             level = atoi(req.get_param_value("level").c_str());
             if (level < 0) level = 0;
-            if (level > SUPERSEP_VOCALS_ONLY) level = SUPERSEP_VOCALS_ONLY;
+            if (level > SUPERSEP_STABLESTEP) level = SUPERSEP_STABLESTEP;
         }
 
         // Decode audio to interleaved stereo 44100 Hz
