@@ -55,6 +55,9 @@ struct DitTrainLog {
     double      timestep_mu = -0.4, timestep_sigma = 1.0, t_min = 0.0, t_max = 1.0, cfg_ratio = 0.15;
     int         genre_ratio = 0;
     double      target_loss = 0.4;
+    // Trigger word embedded in the adapter's __metadata__ (empty = none).
+    // docs/plans/2026-07-28-adapter-trigger-embedding.md §2.2
+    std::string trigger, trigger_position;
 
     std::vector<DitEpochRec>     epochs_log;
     std::vector<DitMilestoneRec> milestones;
@@ -114,6 +117,8 @@ static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) 
     yyjson_mut_obj_add_real(doc, cfg, "cfg_ratio", m.cfg_ratio);
     yyjson_mut_obj_add_int(doc, cfg, "genre_ratio", m.genre_ratio);
     yyjson_mut_obj_add_real(doc, cfg, "target_loss", m.target_loss);
+    yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
+    yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epochs_log.size(); i++) {

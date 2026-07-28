@@ -205,6 +205,13 @@ static void print_usage(void) {
             "    --loss-on-cot                           default ON\n"
             "    --no-loss-on-cot\n"
             "\n"
+            "  Adapter identity:\n"
+            "    --trigger <word>            \"\"          trigger word embedded in the adapter's\n"
+            "                                            metadata. Default: custom_tag from the\n"
+            "                                            variant's preprocess_meta.json.\n"
+            "    --trigger-position <prepend|append>     where the trigger sat in the training\n"
+            "                                            captions. Default: that file's tag_position.\n"
+            "\n"
             "  Run management:\n"
             "    --milestone-step <f>        0.1         0 = disabled\n"
             "    --milestone-keep <n>        6\n"
@@ -264,6 +271,13 @@ static void print_usage(void) {
             "    --crop-max <n>              1250\n"
             "    --vram-reserve-mb <n>       2048        desktop/OS headroom left unallocated\n"
             "    --vram-safety <f>           0.05        extra margin on the footprint model\n"
+            "\n"
+            "  Adapter identity:\n"
+            "    --trigger <word>            \"\"          trigger word embedded in the adapter's\n"
+            "                                            metadata. Default: custom_tag from the\n"
+            "                                            variant's preprocess_meta.json.\n"
+            "    --trigger-position <prepend|append>     where the trigger sat in the training\n"
+            "                                            captions. Default: that file's tag_position.\n"
             "\n"
             "  Run management:\n"
             "    --milestone-step <f>        0.1         0 = disabled\n"
@@ -813,6 +827,8 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
+        else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
+        else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) a.limit = atoi(argv[++i]);
@@ -856,6 +872,16 @@ static int cmd_train_lm(int argc, char ** argv) {
     }
     if (a.order != "shuffle" && a.order != "fixed") {
         fprintf(stderr, "ace-train train-lm: --order must be shuffle|fixed\n");
+        return 2;
+    }
+    // "replace" never applies the tag during preprocessing (preprocess-run.h:203),
+    // so an adapter trained from it carried no trigger and must not claim one.
+    if (!a.trigger_position.empty() && a.trigger_position != "prepend" && a.trigger_position != "append") {
+        fprintf(stderr, "ace-train train-lm: --trigger-position must be prepend|append\n");
+        return 2;
+    }
+    if (a.trigger.size() > 128) {
+        fprintf(stderr, "ace-train train-lm: --trigger must be 128 characters or fewer\n");
         return 2;
     }
     if (a.low_vram != "auto" && a.low_vram != "on" && a.low_vram != "off") {
@@ -1047,6 +1073,8 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--crop-max") && i + 1 < argc) a.crop_max = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) a.vram_safety = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
+        else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-milestones")) a.milestone_step = 0.0f;
@@ -1092,6 +1120,16 @@ static int cmd_train_dit(int argc, char ** argv) {
     }
     if (a.order != "shuffle" && a.order != "fixed") {
         fprintf(stderr, "ace-train train-dit: --order must be shuffle|fixed\n");
+        return 2;
+    }
+    // "replace" never applies the tag during preprocessing (preprocess-run.h:203),
+    // so an adapter trained from it carried no trigger and must not claim one.
+    if (!a.trigger_position.empty() && a.trigger_position != "prepend" && a.trigger_position != "append") {
+        fprintf(stderr, "ace-train train-dit: --trigger-position must be prepend|append\n");
+        return 2;
+    }
+    if (a.trigger.size() > 128) {
+        fprintf(stderr, "ace-train train-dit: --trigger must be 128 characters or fewer\n");
         return 2;
     }
     if (a.loss_weighting != "none" && a.loss_weighting != "flow_snr") {

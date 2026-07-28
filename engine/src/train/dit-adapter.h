@@ -91,6 +91,9 @@ struct DitAdapterCfg {
 struct DitExportMeta {
     std::string base_model_path;  // adapter_config.json base_model_name_or_path
     std::string producer;         // "ace-train <version>"
+    // Trigger word embedded in __metadata__ (empty = none).
+    // docs/plans/2026-07-28-adapter-trigger-embedding.md §2.1
+    std::string trigger, trigger_position;
 };
 
 struct DitExportResult {
@@ -307,6 +310,15 @@ struct DitAdapterLora final : DitAdapter {
         md.push_back({ "format", "pt" });
         md.push_back({ "producer", meta.producer });
         md.push_back({ "hot_step_dit_trainer", "v1" });
+        // Trigger word (all three keys together or none — §2.1). Unknown metadata
+        // keys are ignored by every other safetensors consumer, so the adapter
+        // stays loadable by ComfyUI / Side-Step / PEFT exactly as before.
+        if (!meta.trigger.empty()) {
+            md.push_back({ "hot_step_trigger", meta.trigger });
+            md.push_back({ "hot_step_trigger_position",
+                           meta.trigger_position.empty() ? std::string("prepend") : meta.trigger_position });
+            md.push_back({ "modelspec.trigger_phrase", meta.trigger });
+        }
 
         const std::string sf = lm_join(d, "adapter_model.safetensors");
         if (!st_write_file(sf.c_str(), tensors, md, STW_F32)) {

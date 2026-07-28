@@ -364,6 +364,39 @@ static std::string lm_apply_tag(const std::string & text, const std::string & ta
     return text;  // "replace": tag is not applied here (verbatim Side-Step behaviour)
 }
 
+// Normalise a (trigger, position) pair for embedding. Only "prepend" and
+// "append" are ever written: `tag_position: "replace"` deliberately does NOT
+// apply the tag during preprocessing (preprocess-run.h:203, verbatim Side-Step),
+// so those captions carried no tag at all and claiming a trigger would be false.
+// `reason` receives a human-readable note when a non-empty tag is dropped.
+static bool lm_trigger_normalize(std::string * tag, std::string * position, std::string * reason) {
+    if (!tag || tag->empty()) {
+        if (position) {
+            position->clear();
+        }
+        return false;
+    }
+    std::string pos = position ? *position : std::string();
+    if (pos.empty()) {
+        pos = "prepend";
+    }
+    if (pos != "prepend" && pos != "append") {
+        if (reason) {
+            *reason = "trigger \"" + *tag + "\" not embedded: tag_position \"" + pos +
+                      "\" never applies the tag during training, so the captions carried no trigger";
+        }
+        tag->clear();
+        if (position) {
+            position->clear();
+        }
+        return false;
+    }
+    if (position) {
+        *position = pos;
+    }
+    return true;
+}
+
 // ─── VRAM probes ────────────────────────────────────────────────────────────
 
 static inline void lm_vram_query(ggml_backend_t backend, size_t * free_b, size_t * total_b) {
@@ -447,6 +480,45 @@ static inline std::string lm_join(const std::string & dir, const std::string & l
     }
     const char last = dir[dir.size() - 1];
     return (last == '/' || last == '\\') ? dir + leaf : dir + "/" + leaf;
+}
+
+// Parent directory of `path`, or "" when it has no separator. Counterpart to
+// preprocess-io.h's pm_basename(); trailing separators are not trimmed because
+// every caller passes a file path.
+static inline std::string lm_dirname(const std::string & path) {
+    const size_t p = path.find_last_of("/\\");
+    return p == std::string::npos ? std::string() : path.substr(0, p);
+}
+
+// Read the variant's dataset-level trigger word out of <dir>/preprocess_meta.json
+// (written by preprocess-io.h:515-516). Both trainers use it as the default for
+// the trigger they embed in the exported adapter, so an already-preprocessed
+// variant and a hand-run CLI training both get the tag for free.
+//
+// Returns false (and leaves both outputs untouched) when the file is missing or
+// unparseable — an absent trigger is not an error, it just means no keys get
+// written and the adapter stays byte-identical to a pre-trigger build.
+//
+// docs/plans/2026-07-28-adapter-trigger-embedding.md T5
+static bool lm_read_variant_tag(const std::string & tensors_dir, std::string * tag, std::string * position) {
+    const std::string p   = lm_join(tensors_dir, "preprocess_meta.json");
+    yyjson_doc *      doc = yyjson_read_file(p.c_str(), 0, NULL, NULL);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root)) {
+        yyjson_doc_free(doc);
+        return false;
+    }
+    if (tag) {
+        *tag = pm_js_str(root, "custom_tag");
+    }
+    if (position) {
+        *position = pm_js_str(root, "tag_position");
+    }
+    yyjson_doc_free(doc);
+    return true;
 }
 
 // "%.1f" with a '.' decimal separator regardless of locale (milestone dir names).

@@ -430,13 +430,25 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       (e: { stepStart?: number; stepEnd?: number }) => e.stepStart !== undefined || e.stepEnd !== undefined,
     );
 
-    // Trigger words: one per loaded adapter (every adapter in the stack
-    // contributes its filename trigger, not just the first).
-    const triggerWords: string[] = settings.triggerUseFilename
+    // Trigger words. The server resolves each adapter's EMBEDDED trigger from
+    // its safetensors metadata — that is what the adapter was actually trained
+    // with, so it wins and needs nothing from us. What we send is the filename
+    // fallback for adapters that carry no embedded trigger, tagged with the
+    // adapter path so the server can match it per-adapter rather than applying
+    // it to the whole stack.
+    // docs/plans/2026-07-28-adapter-trigger-embedding.md T6
+    const triggerPlacement = (settings.triggerPlacement || 'prepend') as 'prepend' | 'append' | 'replace';
+    const triggerSpecs = settings.triggerUseFilename
       ? stack
-          .map(e => e.path.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '')
-          .filter(Boolean)
+          .map(e => ({
+            word: e.path.split(/[\\\/]/).pop()?.replace(/\.safetensors$/i, '') || '',
+            placement: triggerPlacement,
+            source: 'filename' as const,
+            path: e.path,
+          }))
+          .filter(s => s.word)
       : [];
+    const triggerWords: string[] = triggerSpecs.map(s => s.word);
     const triggerWord = triggerWords.join(', ');
 
     return {
@@ -474,13 +486,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       // the engine skips it on the per-section masking path.
       rebaseSource: (primary && s.rebaseSource) ? s.rebaseSource : undefined,
       rebaseBeta: (primary && s.rebaseSource) ? s.rebaseBeta : undefined,
+      triggerSpecs: triggerSpecs.length ? triggerSpecs : undefined,
       triggerWord: triggerWord || undefined,
       triggerWords: triggerWords.length ? triggerWords : undefined,
       // '|| prepend' fallback matches the queue path (audioGenQueueStore):
       // an ace-settings object saved before triggerPlacement existed has the
       // key undefined, and translateParams skips injection entirely without a
       // placement — which silently dropped trigger words on Create/custom-gen.
-      triggerPlacement: triggerWords.length ? (settings.triggerPlacement || 'prepend') : undefined,
+      triggerPlacement: triggerWords.length ? triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,
       cfgCutoffRatio: s.cfgCutoffRatio < 1.0 ? s.cfgCutoffRatio : undefined,
       lmCfgCutoffRatio: s.lmCfgCutoffRatio < 1.0 ? s.lmCfgCutoffRatio : undefined,

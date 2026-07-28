@@ -54,6 +54,12 @@ struct LmTrainArgs {
     std::string weights = "f32-window";  // f32-window|bf16  (Lever A)
     std::string batch   = "1";           // 1..8|auto        (Lever B)
 
+    // Trigger word embedded in the exported adapter. Empty = fall back to the
+    // variant's preprocess_meta.json custom_tag/tag_position; still empty after
+    // that = no trigger keys written and the adapter is byte-identical to a
+    // pre-trigger build. docs/plans/2026-07-28-adapter-trigger-embedding.md T5
+    std::string trigger, trigger_position;
+
     float milestone_step = 1.0f;
     int   milestone_keep = 6;
 
@@ -61,6 +67,20 @@ struct LmTrainArgs {
     int  limit     = 0;
     bool self_test = false;
 };
+
+// Resolve the trigger to embed: explicit CLI flags win, else the variant's
+// preprocess_meta.json, else nothing. `replace` positions are dropped with a
+// warn (the tag was never applied to those captions — T4).
+static void lm_resolve_trigger(const std::string & tensors_dir, std::string * trigger, std::string * position) {
+    if (trigger->empty() && !tensors_dir.empty()) {
+        lm_read_variant_tag(tensors_dir, trigger, position);
+    }
+    std::string why;
+    if (!lm_trigger_normalize(trigger, position, &why) && !why.empty()) {
+        jl("{\"type\":\"log\",\"level\":\"warn\",\"message\":\"%s\"}", lm_json_escape(why).c_str());
+        fprintf(stderr, "[train-lm] %s\n", why.c_str());
+    }
+}
 
 static inline bool lm_has_stage(const LmTrainArgs & a, const char * s) {
     for (size_t i = 0; i < a.stages.size(); i++) {
@@ -947,6 +967,20 @@ static int lm_train_main(const LmTrainArgs & a) {
     meta.grad_accum     = a.grad_accum;
     meta.seed           = a.seed;
     meta.loss_on_cot    = a.loss_on_cot;
+
+    // Trigger word (T5): CLI flags win, else the variant's preprocess_meta.json.
+    // `--codes` always sits in the variant dir, so its parent is the fallback
+    // when `--tensors` was not passed (the train-only stage does not need it).
+    {
+        meta.trigger          = a.trigger;
+        meta.trigger_position = a.trigger_position;
+        std::string vdir      = a.tensors_dir.empty() ? lm_dirname(a.codes_path) : a.tensors_dir;
+        lm_resolve_trigger(vdir, &meta.trigger, &meta.trigger_position);
+        if (!meta.trigger.empty()) {
+            fprintf(stderr, "[train-lm] trigger \"%s\" (%s) will be embedded in the adapter\n",
+                    meta.trigger.c_str(), meta.trigger_position.c_str());
+        }
+    }
 
     // ── train ────────────────────────────────────────────────────────────
     if (lm_has_stage(a, "train")) {

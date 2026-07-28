@@ -8,6 +8,7 @@ import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
+import { readAdapterTrigger } from '../services/adapters/stMetadata.js';
 
 const router = Router();
 
@@ -128,7 +129,8 @@ router.post('/scan', (req, res) => {
       .map(e => {
         const fullPath = path.join(dirPath, e.name);
         const stat = fs.statSync(fullPath);
-        return { name: e.name, path: fullPath, size: stat.size };
+        const tg = readAdapterTrigger(fullPath);
+        return { name: e.name, path: fullPath, size: stat.size, trigger: tg.trigger, triggerPosition: tg.position };
       });
 
     // PEFT directories, mirroring GET /adapters/lm. Both files are required:
@@ -139,7 +141,11 @@ router.post('/scan', (req, res) => {
       const dir = path.join(dirPath, e.name);
       const model = path.join(dir, 'adapter_model.safetensors');
       if (!fs.existsSync(model) || !fs.existsSync(path.join(dir, 'adapter_config.json'))) continue;
-      try { files.push({ name: e.name, path: dir, size: fs.statSync(model).size }); } catch { /* skip */ }
+      try {
+        const tg = readAdapterTrigger(dir);
+        files.push({ name: e.name, path: dir, size: fs.statSync(model).size, trigger: tg.trigger,
+                     triggerPosition: tg.position });
+      } catch { /* skip */ }
     }
     files.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -164,7 +170,10 @@ router.post('/scan', (req, res) => {
 router.get('/lm', (req, res) => {
   const folderParam = (req.query.folder as string) || '';
   const root = folderParam ? path.resolve(folderParam) : path.join(config.aceServer.adapters, 'lm');
-  const adapters: Array<{ name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number }> = [];
+  const adapters: Array<{
+    name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
+    trigger: string; triggerPosition: 'prepend' | 'append' | '';
+  }> = [];
   try {
     if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -175,11 +184,15 @@ router.get('/lm', (req, res) => {
             const model = path.join(fullPath, 'adapter_model.safetensors');
             if (fs.existsSync(model)) {
               const stat = fs.statSync(model);
-              adapters.push({ name: entry.name, path: fullPath, kind: 'peft', size: stat.size, mtime: stat.mtimeMs });
+              const tg = readAdapterTrigger(fullPath);
+              adapters.push({ name: entry.name, path: fullPath, kind: 'peft', size: stat.size, mtime: stat.mtimeMs,
+                              trigger: tg.trigger, triggerPosition: tg.position });
             }
           } else if (entry.isFile() && entry.name.endsWith('.safetensors')) {
             const stat = fs.statSync(fullPath);
-            adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size, mtime: stat.mtimeMs });
+            const tg = readAdapterTrigger(fullPath);
+            adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size,
+                            mtime: stat.mtimeMs, trigger: tg.trigger, triggerPosition: tg.position });
           }
         } catch { /* skip unreadable entries */ }
       }

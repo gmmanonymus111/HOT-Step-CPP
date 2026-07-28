@@ -54,6 +54,10 @@ struct LmExportMeta {
     int         max_len = 0;
     std::string max_len_source = "auto";
 
+    // Trigger word embedded in the exported adapter's __metadata__ (empty = none).
+    // docs/plans/2026-07-28-adapter-trigger-embedding.md §2.1
+    std::string trigger, trigger_position;
+
     std::vector<LmEpochRec>     epoch_log;
     std::vector<LmMilestoneRec> milestones;
     bool                        target_stop = false;
@@ -159,6 +163,8 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_int(doc, cfg, "chunk", m.chunk);
     yyjson_mut_obj_add_strcpy(doc, cfg, "weights", m.weights.c_str());
     yyjson_mut_obj_add_int(doc, cfg, "batch", m.batch);
+    yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
+    yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epoch_log.size(); i++) {
@@ -278,6 +284,15 @@ static bool lm_export_peft(const LmLora & L, const Qwen3LMConfig & cfg, const Lm
     md.push_back({ "format", "pt" });
     md.push_back({ "producer", std::string("ace-train ") + ACE_VERSION });
     md.push_back({ "hot_step_lm_trainer", "v1" });
+    // Trigger word (all three keys together or none — §2.1). Unknown metadata
+    // keys are ignored by every other safetensors consumer, so the adapter stays
+    // loadable by PEFT / ComfyUI / Side-Step exactly as before.
+    if (!meta.trigger.empty()) {
+        md.push_back({ "hot_step_trigger", meta.trigger });
+        md.push_back({ "hot_step_trigger_position", meta.trigger_position.empty() ? std::string("prepend")
+                                                                                  : meta.trigger_position });
+        md.push_back({ "modelspec.trigger_phrase", meta.trigger });
+    }
 
     const std::string sf = lm_join(out_dir, "adapter_model.safetensors");
     if (!st_write_file(sf.c_str(), tensors, md, STW_F32)) {

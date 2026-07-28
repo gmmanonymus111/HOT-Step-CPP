@@ -67,6 +67,30 @@ function deriveTriggerWord(adapterPath: string): string {
   return filename.replace(/\.safetensors$/i, '');
 }
 
+/**
+ * What the server will actually inject for this adapter.
+ *
+ * An adapter trained by HOT-Step carries its trigger — and the position it was
+ * trained at — in its own safetensors metadata, and that always wins over a
+ * guess made from the filename. The filename fallback only fires for adapters
+ * that carry nothing (which is every adapter trained before this feature, until
+ * the stamper runs over them).
+ * docs/plans/2026-07-28-adapter-trigger-embedding.md T6
+ */
+function resolveTrigger(
+  adapterPath: string,
+  files: AdapterFile[],
+  useFilename: boolean,
+  globalPlacement: 'prepend' | 'append' | 'replace',
+): { word: string; placement: string; source: 'embedded' | 'filename' | 'none' } {
+  const hit = files.find(f => f.path === adapterPath);
+  if (hit?.trigger) {
+    return { word: hit.trigger, placement: hit.triggerPosition || 'prepend', source: 'embedded' };
+  }
+  const word = useFilename ? deriveTriggerWord(adapterPath) : '';
+  return word ? { word, placement: globalPlacement, source: 'filename' } : { word: '', placement: '', source: 'none' };
+}
+
 /** Format byte count */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -96,7 +120,7 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
   // Advanced: select a folder
   const fileBrowserMode = advancedAdapters ? 'folder' as const : 'file' as const;
 
-  const triggerWord = deriveTriggerWord(adapter);
+  const resolvedTrigger = resolveTrigger(adapter, adapterFiles, triggerUseFilename, triggerPlacement);
   const adapterFilename = adapter ? adapter.split(/[\\/]/).pop() || '' : '';
 
   const handleGroupScaleChange = (key: keyof AdapterGroupScales, value: number) => {
@@ -216,12 +240,17 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                 </div>
               )}
 
-              {/* Trigger word tag */}
-              {adapter && triggerUseFilename && triggerWord && (
+              {/* Trigger word tag — embedded triggers show regardless of the
+                  "use filename" setting, because they are what the adapter was
+                  trained with rather than a guess. */}
+              {adapter && resolvedTrigger.word && (
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-500/10 border border-pink-500/20">
                   <Tag size={10} className="text-pink-400 flex-shrink-0" />
-                  <span className="text-[10px] text-pink-400 font-medium">{triggerWord}</span>
-                  <span className="text-[10px] text-zinc-500">({triggerPlacement})</span>
+                  <span className="text-[10px] text-pink-400 font-medium">{resolvedTrigger.word}</span>
+                  <span className="text-[10px] text-zinc-500">
+                    ({resolvedTrigger.placement}
+                    {resolvedTrigger.source === 'embedded' ? ' · from adapter' : ' · from filename'})
+                  </span>
                 </div>
               )}
 
@@ -376,11 +405,14 @@ export const AdaptersAccordion: React.FC<AdaptersAccordionProps> = ({
                   </div>
 
                   {/* Trigger word tag */}
-                  {triggerUseFilename && triggerWord && (
+                  {resolvedTrigger.word && (
                     <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-500/10 border border-pink-500/20">
                       <Tag size={10} className="text-pink-400 flex-shrink-0" />
-                      <span className="text-[10px] text-pink-400 font-medium">{triggerWord}</span>
-                      <span className="text-[10px] text-zinc-500">({triggerPlacement})</span>
+                      <span className="text-[10px] text-pink-400 font-medium">{resolvedTrigger.word}</span>
+                      <span className="text-[10px] text-zinc-500">
+                        ({resolvedTrigger.placement}
+                        {resolvedTrigger.source === 'embedded' ? ' · from adapter' : ' · from filename'})
+                      </span>
                     </div>
                   )}
 

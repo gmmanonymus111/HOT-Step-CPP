@@ -6,6 +6,8 @@
 import type { AceRequest } from '../../services/aceClient.js';
 import { mapPath } from '../../services/pathMapper.js';
 import { parseAdapterSections, stripAdapterDirectives } from './adapterSections.js';
+import { applyTriggers, resolveAdapterTriggers, resolveTriggerSpecs } from './triggerWords.js';
+import { readAdapterTrigger } from '../adapters/stMetadata.js';
 
 /** Samples per compiled timestep gain curve (t ∈ [0,1], uniform). */
 const GAIN_CURVE_SAMPLES = 33;
@@ -220,19 +222,24 @@ export function translateParams(params: any): AceRequest {
     req.rebase_beta = params.rebaseBeta;
   }
 
-  // Trigger word(s): every loaded adapter contributes its trigger. triggerWords
-  // is the full list; fall back to the single triggerWord for older callers.
-  const triggerWords: string[] = (Array.isArray(params.triggerWords) && params.triggerWords.length)
-    ? params.triggerWords
-    : (params.triggerWord ? [params.triggerWord] : []);
-  if (triggerWords.length && params.triggerPlacement && params.loraPath) {
-    const tw = triggerWords.join(', ');
-    const caption = req.caption || '';
-    switch (params.triggerPlacement) {
-      case 'prepend': req.caption = caption ? `${tw}, ${caption}` : tw; break;
-      case 'append':  req.caption = caption ? `${caption}, ${tw}` : tw; break;
-      case 'replace': req.caption = tw; break;
-    }
+  // Trigger word(s): every loaded adapter contributes its own trigger and the
+  // position it was TRAINED at, so a stack of adapters can mix prepend and
+  // append (triggerWords.ts composes them). Gated on an adapter actually being
+  // loaded — but that now includes a planner-LM adapter, which was itself
+  // trained on tagged captions and so needs its trigger in the caption that
+  // goes to /lm.
+  // Adapter paths as the CLIENT sent them (server-local, straight from our own
+  // /api/adapters scan) — read the embedded metadata BEFORE mapPath rewrites
+  // them for the engine's filesystem view.
+  const adapterPaths = [
+    ...(Array.isArray(params.loraStack) ? params.loraStack.map((e: { path: string }) => e.path) : []),
+    ...(params.loraPath ? [params.loraPath] : []),
+    ...(params.lmAdapter ? [params.lmAdapter] : []),
+  ].filter((p, i, a) => p && a.indexOf(p) === i);
+
+  const triggerSpecs = resolveAdapterTriggers(adapterPaths, resolveTriggerSpecs(params), readAdapterTrigger);
+  if (triggerSpecs.length && adapterPaths.length) {
+    req.caption = applyTriggers(req.caption || '', triggerSpecs).caption;
   }
 
   // Solver sub-parameters

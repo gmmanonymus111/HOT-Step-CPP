@@ -25,6 +25,8 @@ import { wavDurationSec } from '../services/audioCrop.js';
 import { writeHslat, latentFrameCount, latentDuration, type HslatMetadata } from '../services/latentFormat.js';
 import { subscribeLines, pushLog } from './logs.js';
 import { translateParams } from '../services/generation/translateParams.js';
+import { applyTriggers, resolveAdapterTriggers, resolveTriggerSpecs } from '../services/generation/triggerWords.js';
+import { readAdapterTrigger } from '../services/adapters/stMetadata.js';
 import { computeLmCacheKey, getLmCache, setLmCache, getLmCacheSize, type LmCacheEntry } from '../services/generation/lmCache.js';
 import { loadSourceAudio, loadSourceLatent, applyTempoAndPitch, loadTimbreReference } from '../services/generation/sourceAudio.js';
 import { runPostProcessingChain } from '../services/generation/postProcessing.js';
@@ -385,39 +387,30 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       // original, so the trigger word injected by translateParams gets lost.
       // This applies to both cache hits (CoT caption from cache) and fresh
       // LM results (CoT caption from engine).
-      const triggerWords: string[] = (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length)
-        ? job.params.triggerWords
-        : (job.params.triggerWord ? [job.params.triggerWord] : []);
-      if (triggerWords.length && job.params.triggerPlacement && job.params.loraPath) {
+      // Resolve exactly the way translateParams did, so the two passes cannot
+      // disagree about which word goes where.
+      const adapterPaths: string[] = [
+        ...(Array.isArray(job.params.loraStack) ? job.params.loraStack.map((e: { path: string }) => e.path) : []),
+        ...(job.params.loraPath ? [job.params.loraPath] : []),
+        ...(job.params.lmAdapter ? [job.params.lmAdapter] : []),
+      ].filter((p, i, a) => p && a.indexOf(p) === i);
+      const triggerSpecs = resolveAdapterTriggers(adapterPaths, resolveTriggerSpecs(job.params), readAdapterTrigger);
+      if (triggerSpecs.length && adapterPaths.length) {
         for (const result of lmResults) {
-          const caption = result.caption || '';
-          if (job.params.triggerPlacement === 'replace') {
-            const tw = triggerWords.join(', ');
-            const before = caption.substring(0, 80);
-            result.caption = tw;
-            logGeneration(job.id, 'INFO', `[Trigger] Re-injected (replace) "${tw}" — before: "${before}…" → after: "${(result.caption || '').substring(0, 80)}…"`);
-            continue;
-          }
-          // prepend/append: only inject the triggers not already present, so
-          // multi-adapter stacks don't duplicate ones the CoT caption kept.
-          const missing = triggerWords.filter(w => !caption.includes(w));
-          if (missing.length) {
-            const tw = missing.join(', ');
-            const before = caption.substring(0, 80);
-            if (job.params.triggerPlacement === 'append') {
-              result.caption = caption ? `${caption}, ${tw}` : tw;
-            } else {
-              result.caption = caption ? `${tw}, ${caption}` : tw;
-            }
-            logGeneration(job.id, 'INFO', `[Trigger] Re-injected "${tw}" (${job.params.triggerPlacement}) — before: "${before}…" → after: "${(result.caption || '').substring(0, 80)}…"`);
+          const before = (result.caption || '').substring(0, 80);
+          // skipPresent: the planner often keeps the trigger it was trained on,
+          // and re-adding it would duplicate the token.
+          const r = applyTriggers(result.caption || '', triggerSpecs, { skipPresent: true });
+          result.caption = r.caption;
+          if (r.applied.length) {
+            logGeneration(job.id, 'INFO', `[Trigger] Re-injected "${r.applied.join(', ')}" — before: "${before}…" → after: "${r.caption.substring(0, 80)}…"`);
           } else {
-            logGeneration(job.id, 'INFO', `[Trigger] Already present: "${triggerWords.join(', ')}" found in caption, skipping re-injection`);
+            logGeneration(job.id, 'INFO', `[Trigger] Already present: "${r.skipped.join(', ')}" found in caption, skipping re-injection`);
           }
         }
-      } else if (job.params.triggerWord || (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length)) {
-        // Trigger word configured but condition incomplete — log why
-        const tw = (Array.isArray(job.params.triggerWords) && job.params.triggerWords.length) ? job.params.triggerWords.join(', ') : job.params.triggerWord;
-        logGeneration(job.id, 'WARNING', `[Trigger] triggerWord="${tw}" but placement=${job.params.triggerPlacement}, loraPath=${job.params.loraPath ? 'set' : 'MISSING'} — skipping re-injection`);
+      } else if (triggerSpecs.length) {
+        // Triggers configured but no adapter loaded — log why nothing happened.
+        logGeneration(job.id, 'WARNING', `[Trigger] "${triggerSpecs.map(s => s.word).join(', ')}" configured but no adapter is loaded — skipping re-injection`);
       }
     }
 

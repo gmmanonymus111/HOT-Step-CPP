@@ -54,6 +54,12 @@ struct DitTrainArgs {
     int   vram_reserve_mb = 2048;
     float vram_safety     = 0.05f;
 
+    // Trigger word embedded in the exported adapter. Empty = fall back to the
+    // variant's preprocess_meta.json custom_tag/tag_position; still empty after
+    // that = no trigger keys written and the adapter is byte-identical to a
+    // pre-trigger build. docs/plans/2026-07-28-adapter-trigger-embedding.md T5
+    std::string trigger, trigger_position;
+
     float milestone_step = 0.1f;
     int   milestone_keep = 6;
 
@@ -61,6 +67,20 @@ struct DitTrainArgs {
     int  limit     = 0;
     bool self_test = false;
 };
+
+// Resolve the trigger to embed: explicit CLI flags win, else the variant's
+// preprocess_meta.json, else nothing. `replace` positions are dropped with a
+// warn (the tag was never applied to those captions — T4).
+static void dit_resolve_trigger(const std::string & tensors_dir, std::string * trigger, std::string * position) {
+    if (trigger->empty() && !tensors_dir.empty()) {
+        lm_read_variant_tag(tensors_dir, trigger, position);
+    }
+    std::string why;
+    if (!lm_trigger_normalize(trigger, position, &why) && !why.empty()) {
+        jl("{\"type\":\"log\",\"level\":\"warn\",\"message\":\"%s\"}", lm_json_escape(why).c_str());
+        fprintf(stderr, "[train-dit] %s\n", why.c_str());
+    }
+}
 
 static inline bool dit_has_stage(const DitTrainArgs & a, const char * s) {
     for (size_t i = 0; i < a.stages.size(); i++) {
@@ -623,6 +643,8 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         DitExportMeta xmeta;
         xmeta.base_model_path = a.dit_path;
         xmeta.producer        = std::string("ace-train ") + ACE_VERSION;
+        xmeta.trigger          = log->trigger;
+        xmeta.trigger_position = log->trigger_position;
 
         std::vector<double> ep_hist;
         double              ladder      = 0.0;
@@ -897,6 +919,14 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.dit_path        = a.dit_path;
     log.dit_name        = a.dit_name;
     log.tensors         = a.tensors_dir;
+    // Trigger word (T5): CLI flags win, else the variant's preprocess_meta.json.
+    log.trigger          = a.trigger;
+    log.trigger_position = a.trigger_position;
+    dit_resolve_trigger(a.tensors_dir, &log.trigger, &log.trigger_position);
+    if (!log.trigger.empty()) {
+        fprintf(stderr, "[train-dit] trigger \"%s\" (%s) will be embedded in the adapter\n", log.trigger.c_str(),
+                log.trigger_position.c_str());
+    }
     log.crop_min        = a.crop_min;
     log.crop_max        = a.crop_max;
     log.lr              = a.lr;

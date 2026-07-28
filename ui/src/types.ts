@@ -173,6 +173,14 @@ export interface GenerationParams {
   triggerWord?: string;
   triggerWords?: string[];
   triggerPlacement?: 'prepend' | 'append' | 'replace';
+  // Per-adapter triggers with the position each one was TRAINED at, so a stack
+  // can mix prepend and append. Preferred over the flat fields above, which are
+  // kept for saved presets. docs/plans/2026-07-28-adapter-trigger-embedding.md
+  triggerSpecs?: Array<{
+    word: string;
+    placement: 'prepend' | 'append' | 'replace';
+    source?: 'embedded' | 'filename' | 'override' | 'none';
+  }>;
 
   // Task type
   taskType: string;
@@ -365,6 +373,10 @@ export interface AdapterFile {
   name: string;
   path: string;
   size: number;
+  /** Trigger word embedded in the adapter's safetensors metadata ('' = none). */
+  trigger?: string;
+  /** The position that trigger sat at in the training captions. */
+  triggerPosition?: 'prepend' | 'append' | '';
 }
 
 /** Model registry file entry */

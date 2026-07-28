@@ -59,6 +59,13 @@ Job model: one global promise-chain queue (`labelingQueue.ts`), SSE streams with
 - Defaults: epochs 400, r128/α256, genre ratio 30%, target-MLP **on** (needs `--no-target-mlp`-aware binary — see Pending). DiT target-loss 0.4 requires Side-Step-length runs; epoch cap is the practical stop (measured floor ~0.9 at 200 steps).
 - Adapter output: PEFT dir, loads through **both** `adapter-merge.h` and runtime paths (round-trip reproduces trainer loss; that check is a permanent gate).
 
+**Trigger words (embedded in the adapter)**
+- The tag was always trained in — `preprocess-run.h:192-204` bakes `custom_tag` into the caption before text encoding, and `lm-extract.h` re-applies it — but export used to drop it, leaving inference to guess the trigger from the filename (wrong for our adapters: the dir is `<name>-<size>`, not the tag).
+- Both trainers now write `hot_step_trigger`, `hot_step_trigger_position` and `modelspec.trigger_phrase` into the adapter's safetensors `__metadata__`. Tensors and `adapter_config.json` are untouched, so ComfyUI/PEFT/Side-Step load it exactly as before. **Not** `adapter_config.json` — PEFT does `LoraConfig(**json)` and unknown keys are a version-dependent TypeError.
+- Source of the value: `--trigger`/`--trigger-position` flags, else the variant's `preprocess_meta.json` (`custom_tag`/`tag_position`). The **variant meta, not the dataset row**, is authoritative — a dataset's tag can be edited after preprocessing, in which case the tensors (and the adapter) carry the old one. `tag_position: replace` embeds nothing: that path never puts the tag in the caption at all.
+- Generation-side resolution lives in `services/generation/triggerWords.ts` and runs **server-side** for every caller: per adapter, manual override → embedded → filename fallback → none. A stack can mix prepend and append. The gate widened from "a DiT adapter is loaded" to "any adapter", so planner-LM adapters now contribute their trigger too.
+- Legacy corpus: `server/scripts/stamp-adapter-triggers.mjs`, dry-run by default. Verified on a copy — 132 MB payload SHA-256 identical, header stays 8-byte aligned, `.bak` kept.
+
 **Audition (pure-LM preview)**
 - `POST /codes-decode`: codes → `detok_ggml_decode` → tail-call the existing VAE decode worker (layouts are byte-identical; zero changes to `/vae`). Deterministic; full song ≈ 3.1 s warm.
 - A/B = two `/lm` calls, same explicit `lm_seed`, base side **must** byte-match an adapterless run (V5 hard gate). Base LM auto-derived from the adapter's `-<size>` suffix (`pickLmFor`) — never let the engine's `resolve_name` fallback pick (sticky 0.6B met a 4B adapter: "36 layers but model has 28").
@@ -85,7 +92,8 @@ Job model: one global promise-chain queue (`labelingQueue.ts`), SSE streams with
 
 ## Pending / open decisions (Rob's list)
 
-1. **One `dev-rebuild` owed**: audition fixer's engine patches (CSV-truncation 400, sticky-DiT fallback, ONNX-VAE pin) + `--no-target-mlp` are source-only until the next rebuild.
+1. ~~One `dev-rebuild` owed~~ — **done**: the 2026-07-28 17:05 rebuild (during the SuperSep work) postdates every one of those source edits; `ace-train train-dit --help` shows `--no-target-mlp` and `ace-server.exe` carries the audition fixes.
+1b. **Trigger stamper awaits Rob's approval**: `node server/scripts/stamp-adapter-triggers.mjs --datasets D:\Ace-Step-Latest\Datasets-LoRA-LoKR` prints the proposed table for 179 adapters (28 from real dataset.json ground truth, 151 from the filename). Nothing is written without `--apply`. Also outstanding: the per-adapter **manual trigger override** UI — the server already accepts `triggerSpecs` entries with `source:'override'` and a `path`, but no control emits them yet.
 2. **bf16 listen test**: train twin LM adapters (f32-window vs `--weights bf16`), A/B via audition; ship-call by ear.
 3. **LoKR for DiT** (`dit-adapter.h` has the parameterization seam ready) — Rob's preferred adapter type.
 4. **ConvRot bases**: refused by the trainer pending a convrot spike (`…-convrot-*` GGUFs exist).
