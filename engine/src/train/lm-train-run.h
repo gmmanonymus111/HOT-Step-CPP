@@ -34,10 +34,10 @@ struct LmTrainArgs {
 
     int   rank = 16, alpha = 32;
     float lr = 1e-4f;
-    int   epochs = 16, grad_accum = 4;
+    int   epochs = 16, grad_accum = 2;   // GA2 = Side-Step parity (GA4 halves optimizer steps/epoch)
     float warmup_ratio = 0.05f, grad_clip = 1.0f, weight_decay = 0.01f;
     int   seed         = 42;
-    float target_loss  = 0.4f;
+    float target_loss  = 4.0f;   // parity: Side-Step's own electriccallboy run used 4.0 and stopped at epoch 29
     std::string order  = "shuffle";
 
     int  max_len         = 0;

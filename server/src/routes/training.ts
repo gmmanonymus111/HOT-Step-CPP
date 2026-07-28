@@ -1365,11 +1365,11 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
     const epochs = numOpt(body.epochs, 16);
-    const targetLoss = numOpt(body.targetLoss, 0.4);
+    const targetLoss = numOpt(body.targetLoss, 4.0);
     const rank = numOpt(body.rank, 16);
     const alpha = numOpt(body.alpha, 32);
     const learningRate = numOpt(body.learningRate, 0.0001);
-    const gradAccum = numOpt(body.gradAccum, 4);
+    const gradAccum = numOpt(body.gradAccum, 2);
     const gradClip = numOpt(body.gradClip, 1.0);
     const warmupRatio = numOpt(body.warmupRatio, 0.05);
     const weightDecay = numOpt(body.weightDecay, 0.01);

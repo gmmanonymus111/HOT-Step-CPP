@@ -43,12 +43,12 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmSize: '0.6B',
   lmModel: '',
   adapterName: '',
-  targetLoss: 0.4,
+  targetLoss: 4.0,
   epochs: 16,
   rank: 16,
   alpha: 32,
   learningRate: 0.0001,
-  gradAccum: 4,
+  gradAccum: 2,
   gradClip: 1.0,
   warmupRatio: 0.05,
   weightDecay: 0.01,
@@ -214,7 +214,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.4) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 4.0) })}
             className={FIELD}
           />
         </label>
@@ -295,7 +295,7 @@ export const TrainLmForm: React.FC<Props> = ({
             <input
               type="number" min={1} max={64} step={1}
               value={value.gradAccum} disabled={lock}
-              onChange={(e) => onChange({ gradAccum: num(e.target.value, 4) })}
+              onChange={(e) => onChange({ gradAccum: num(e.target.value, 2) })}
               className={FIELD}
             />
           </label>
