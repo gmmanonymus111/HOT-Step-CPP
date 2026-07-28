@@ -134,12 +134,14 @@ router.post('/scan', (req, res) => {
         return { name: e.name, path: fullPath, size: stat.size, trigger: tg.trigger, triggerPosition: tg.position };
       });
 
-    // PEFT directories, mirroring GET /adapters/lm. Both files are required:
-    // a dir with weights but no adapter_config.json loads with its alpha/rank
-    // scale silently degraded to 1.0, so it must not be offered as ready.
+    // Adapter directories, mirroring GET /adapters/lm. Only the weights file
+    // is required: PEFT dirs from our trainers always carry adapter_config.json
+    // too, but an enfoldered LyCORIS adapter (bare archive file moved into
+    // <name>/adapter_model.safetensors) has its alphas per-tensor and no
+    // config — hiding it from the dropdown would be worse than listing it.
     const pushPeftDir = (dir: string, displayName: string) => {
       const model = path.join(dir, 'adapter_model.safetensors');
-      if (!fs.existsSync(model) || !fs.existsSync(path.join(dir, 'adapter_config.json'))) return;
+      if (!fs.existsSync(model)) return;
       try {
         const tg = readAdapterTrigger(dir);
         files.push({ name: displayName, path: dir, size: fs.statSync(model).size, trigger: tg.trigger,
