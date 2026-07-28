@@ -46,6 +46,115 @@
 #include <string>
 #include <vector>
 
+// ─── §6.1 Phase-0 instrumentation: the Lever B build gate ───────────────────
+//
+// Micro-batching's ENTIRE win is amortising per-graph HOST cost (graph build +
+// sched_reset + split planning) and kernel-launch overhead over B samples,
+// minus padding waste — the GEMMs themselves get no more efficient (S7). So the
+// design made the lever conditional on measuring that host fraction FIRST:
+// build Lever B only if (build + planning + launch) / total >= 10 % at 0.6B.
+//
+// This is stderr-only and off unless HOTSTEP_LM_PHASE_TIMER is set in the
+// environment: no new flag, no contract change, and when disabled the only cost
+// is a predictable branch. The numbers a run produces are untouched, which
+// §6.0's byte-identity gate depends on.
+// The decision rule names THREE amortisable terms — build, planning and launch.
+// An earlier cut of this timer bucketed ggml_backend_sched_graph_compute()
+// wholesale into `compute` and then reported `AMORTISABLE(build+reset)`, i.e. it
+// answered a narrower question than the one the gate asks. Both missing terms
+// live inside that one call, and both are reachable through PUBLIC api:
+//
+//   ggml_backend_sched_graph_compute(sched, gf)                      is exactly
+//     = ggml_backend_sched_graph_compute_async(sched, gf)            [submit]
+//     + ggml_backend_sched_synchronize(sched)                        [GPU tail]
+//   …and compute_async's first act is ggml_backend_sched_alloc_graph()
+//     = split_graph + gallocr_alloc_graph                            [plan]
+//   (ggml-backend.cpp:1882-1901), which is legal to hoist because the async
+//   entry point simply skips it when `is_alloc` is already set.
+//
+// So the split below is a bookkeeping change, not a behaviour change, and it is
+// only taken when the timer is on.
+//
+// `submit` is an UPPER bound on kernel-launch overhead: CUDA launches are
+// asynchronous, so it is pure host submission cost UNLESS the queue backs up, in
+// which case it also absorbs GPU wait. Upper-bound-high is the honest direction
+// for a gate deciding whether to build a lever — if even the upper bound leaves
+// the total under the bar, the closure is safe.
+struct LmPhaseTimer {
+    bool      on         = false;
+    long long reset_us   = 0;  // ggml_backend_sched_reset
+    long long plan_us    = 0;  // split_graph + gallocr (ggml_backend_sched_alloc_graph)
+    long long submit_us  = 0;  // compute_async after alloc: kernel launch, UPPER bound
+    long long sync_us    = 0;  // ggml_backend_sched_synchronize: the GPU itself
+    long long total_us   = 0;
+    int       graphs     = 0;
+    int       steps      = 0;
+
+    void begin_step() { on = true; }
+
+    void report(const char * tag) const {
+        if (!steps) {
+            return;
+        }
+        const double t   = (double) total_us / (double) steps / 1000.0;
+        const double r   = (double) reset_us / (double) steps / 1000.0;
+        const double pl  = (double) plan_us / (double) steps / 1000.0;
+        const double sb  = (double) submit_us / (double) steps / 1000.0;
+        const double gpu = (double) sync_us / (double) steps / 1000.0;
+        // Everything that is not sched_reset and not sched_graph_compute: graph
+        // construction, ggml_free, input uploads, buffer clears. An UPPER bound
+        // on what batching could amortise (the mask/token uploads in here are
+        // per-micro-step, not per-graph, and would only partly amortise).
+        const double b   = t - r - pl - sb - gpu;
+        // THE NUMBER THE GATE IS ABOUT: every per-graph host term batching would
+        // spread over B samples. Bar is >= 10 % at 0.6B.
+        const double am  = b + r + pl + sb;
+        fprintf(stderr,
+                "[phase0] %s  steps=%d graphs/step=%.1f | build(host)=%.2f ms (%.2f%%) "
+                "sched_reset=%.2f ms (%.2f%%) plan=%.2f ms (%.2f%%) submit=%.2f ms (%.2f%%) "
+                "gpu_sync=%.2f ms (%.2f%%) | total=%.2f ms/micro-step | "
+                "AMORTISABLE(build+reset+plan+submit)=%.2f%% vs the 10%% bar -> %s\n",
+                tag, steps, (double) graphs / (double) steps, b, 100.0 * b / t, r, 100.0 * r / t, pl, 100.0 * pl / t,
+                sb, 100.0 * sb / t, gpu, 100.0 * gpu / t, t, 100.0 * am / t,
+                100.0 * am / t >= 10.0 ? "BUILD LEVER B" : "CLOSE LEVER B");
+    }
+};
+
+static LmPhaseTimer g_lm_phase;
+
+static inline bool lm_phase_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * e = getenv("HOTSTEP_LM_PHASE_TIMER");
+        cached         = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+// One sched run, phase-split when the timer is on and byte-for-byte the shipped
+// single call when it is off.
+static inline bool lm_phase_compute(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+    if (!lm_phase_enabled()) {
+        return ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+    }
+    const int64_t t0 = ggml_time_us();
+    if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+        g_lm_phase.plan_us += ggml_time_us() - t0;
+        g_lm_phase.graphs++;
+        return false;
+    }
+    const int64_t t1 = ggml_time_us();
+    const ggml_status st = ggml_backend_sched_graph_compute_async(sched, gf);
+    const int64_t t2 = ggml_time_us();
+    ggml_backend_sched_synchronize(sched);
+    const int64_t t3 = ggml_time_us();
+    g_lm_phase.plan_us += t1 - t0;
+    g_lm_phase.submit_us += t2 - t1;
+    g_lm_phase.sync_us += t3 - t2;
+    g_lm_phase.graphs++;
+    return st == GGML_STATUS_SUCCESS;
+}
+
 // ─── configuration + persistent state ───────────────────────────────────────
 
 struct LmCkptCfg {
@@ -54,6 +163,10 @@ struct LmCkptCfg {
     int s_max           = 0;    // longest accepted sequence
     int layer_lo        = 0;
     int layer_hi        = 0;    // exclusive; <= 0 means cfg.n_layers
+
+    // Lever A (--weights bf16). Default OFF => lm_ckpt_layer_opts() returns a
+    // default LmLayerOpts and every graph below is emitted verbatim (§6.0).
+    bool weights_bf16   = false;
 };
 
 // Each group gets its OWN backend buffer because ggml_backend_buffer_clear()
@@ -366,6 +479,9 @@ static inline LmLayerOpts lm_ckpt_layer_opts(const LmCkptState & st) {
     o.cast_weights    = true;
     o.attn_head_block = st.cfg.attn_head_block;
     o.attn_zero       = st.t_zero_attn;
+    o.weights_bf16    = st.cfg.weights_bf16;
+    // o.wt stays nullptr: P2/P3 are forward-only, so a transposed weight there
+    // would be a node nothing consumes. Only the P7 backward segment sets it.
     return o;
 }
 
@@ -409,8 +525,13 @@ static bool lm_ckpt_head_chunked(LmCkptRun & r, const LmSample & s, bool count_l
         ggml_build_forward_expand(gf, lc);
         ggml_build_forward_expand(gf, ggml_cpy(ctx, dh, gv));
 
+        const bool tm = lm_phase_enabled();
+        const int64_t p0 = tm ? ggml_time_us() : 0;
         ggml_backend_sched_reset(r.sched);
-        const bool ok = ggml_backend_sched_graph_compute(r.sched, gf) == GGML_STATUS_SUCCESS;
+        if (tm) {
+            g_lm_phase.reset_us += ggml_time_us() - p0;
+        }
+        const bool ok = lm_phase_compute(r.sched, gf);
         if (ok && count_loss) {
             float lv = 0.0f;
             ggml_backend_tensor_get(lc, &lv, 0, sizeof(float));
@@ -474,13 +595,22 @@ static bool lm_ckpt_head_naive(LmCkptRun & r, const LmSample & s, bool count_los
 }
 
 // Build (but do not run) one P7 segment to size the scheduler.
-static int lm_ckpt_probe_segment_nodes(LmCkptRun & r, int S) {
+// `counts` (T16) makes the Lever A surgery REPORT instead of abort, so the
+// self-test can print the tripwire numbers rather than take the process down.
+static int lm_ckpt_probe_segment_nodes(LmCkptRun & r, int S, LmBf16Counts * counts = nullptr) {
     LmCkptState &         st = *r.st;
     const Qwen3LMConfig & c  = r.lm->cfg;
     const int             H  = c.hidden_size;
     const int             l  = st.cfg.layer_hi - 1;
 
-    const LmLayerOpts opts = lm_ckpt_layer_opts(st);
+    // MIRRORS P7 EXACTLY, including the Lever A surgery, so the scheduler is
+    // sized against the real graph. Any drift here shows up as a mid-run
+    // reallocation (and T13's leak gate catches it).
+    LmLayerOpts      opts = lm_ckpt_layer_opts(st);
+    LmWtCollect      wc;
+    if (opts.weights_bf16) {
+        opts.wt = &wc;
+    }
     ggml_init_params  ip   = { st.arena.size(), st.arena.data(), true };
     ggml_context *    ctx  = ggml_init(ip);
     ggml_cgraph *     gf   = ggml_new_graph_custom(ctx, 8192, /*grads=*/true);
@@ -490,6 +620,7 @@ static int lm_ckpt_probe_segment_nodes(LmCkptRun & r, int S) {
     ggml_tensor * X     = ggml_view_2d(ctx, st.C[(size_t) l], H, S, st.C[(size_t) l]->nb[1], 0);
     ggml_tensor * Y     = lm_train_layer(ctx, c, &r.lm->layers[l], X, pos_v, mask, S, opts);
     Y                   = lm_rms(ctx, Y, r.lm->final_norm, c.rms_norm_eps);
+    lm_bf16_expand_wt(gf, wc);  // §3.2: BEFORE the loss root, or Wt lands after its consumer
     ggml_tensor * dY    = ggml_view_2d(ctx, st.Gh[0], H, S, st.Gh[0]->nb[1], 0);
     ggml_tensor * Lsur  = ggml_sum(ctx, ggml_mul(ctx, Y, dY));
     ggml_set_loss(Lsur);
@@ -497,6 +628,13 @@ static int lm_ckpt_probe_segment_nodes(LmCkptRun & r, int S) {
     ggml_build_forward_expand(gf, Lsur);
     lm_ckpt_fill_gacc(r.opt, gf, st.C[(size_t) l], st.Gh[1], r.t_one, &st.gacc);
     ggml_build_backward_expand(ctx, gf, st.gacc.data());
+    if (opts.weights_bf16) {
+        if (counts) {
+            *counts = lm_bf16_rewrite_segment(gf, wc);
+        } else {
+            lm_bf16_finish_segment(gf, wc);
+        }
+    }
     const int n = ggml_graph_n_nodes(gf);
     ggml_free(ctx);
     return n;
@@ -522,9 +660,21 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
 
     const LmLayerOpts opts = lm_ckpt_layer_opts(st);
 
+    // §6.1: `build` is derived as total - reset - plan - submit - sync, so it absorbs every
+    // remaining host cost (graph construction, ggml_free, input uploads, buffer
+    // clears). That makes it an UPPER bound on what batching could amortise —
+    // which is the honest way round for a gate whose job is to decide whether
+    // the lever is worth building.
+    const bool    phase_tm = lm_phase_enabled();
+    const int64_t step_t0  = phase_tm ? ggml_time_us() : 0;
+
     auto run_graph = [&](ggml_cgraph * gf) -> bool {
+        const int64_t p0 = phase_tm ? ggml_time_us() : 0;
         ggml_backend_sched_reset(r.sched);
-        return ggml_backend_sched_graph_compute(r.sched, gf) == GGML_STATUS_SUCCESS;
+        if (phase_tm) {
+            g_lm_phase.reset_us += ggml_time_us() - p0;
+        }
+        return lm_phase_compute(r.sched, gf);
     };
 
     // ── P1: embedding -> C[Lo] ───────────────────────────────────────────
@@ -610,13 +760,27 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
         ggml_context *   ctx = ggml_init(ip);
         ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 8192, /*grads=*/true);
 
+        // Lever A: a FRESH collect per segment. The transposes are in-graph and
+        // gallocr frees them with the segment (S4), so nothing survives the loop.
+        LmLayerOpts sopts = opts;
+        LmWtCollect wc;
+        if (sopts.weights_bf16) {
+            sopts.wt = &wc;
+        }
+
         ggml_tensor * pv = ggml_view_1d(ctx, r.t_pos, S, 0);
         ggml_tensor * mv = ggml_view_2d(ctx, r.t_msk, S, S, (size_t) S * sizeof(float), 0);
         ggml_tensor * X  = ggml_view_2d(ctx, st.C[(size_t) l], H, S, st.C[(size_t) l]->nb[1], 0);
-        ggml_tensor * Y  = lm_train_layer(ctx, c, &lm.layers[l], X, pv, mv, S, opts);
+        ggml_tensor * Y  = lm_train_layer(ctx, c, &lm.layers[l], X, pv, mv, S, sopts);
         if (l == Hi - 1) {
             Y = lm_rms(ctx, Y, lm.final_norm, c.rms_norm_eps);
         }
+        // §3.2 step 2, and the one thing that is easy to get wrong:
+        // ggml_build_forward_expand APPENDS, so every cont(transpose(W)) must
+        // enter the graph BEFORE the loss root — otherwise the rewritten
+        // backward node would consume a Wt that is computed after it, silently.
+        lm_bf16_expand_wt(gf, wc);
+
         ggml_tensor * dY   = ggml_view_2d(ctx, st.Gh[cur], H, S, st.Gh[cur]->nb[1], 0);
         ggml_tensor * Lsur = ggml_sum(ctx, ggml_mul(ctx, Y, dY));  // L' = SUM(Y (.) dY)
         ggml_set_loss(Lsur);
@@ -625,6 +789,12 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
 
         lm_ckpt_fill_gacc(r.opt, gf, st.C[(size_t) l], st.Gh[nxt], r.t_one, &st.gacc);
         ggml_build_backward_expand(ctx, gf, st.gacc.data());
+
+        // S18: exactly 7 rewritten, 0 skipped, 0 base-weight out_prod left, or
+        // GGML_ABORT. A silent no-op flag would be a TF32 run labelled "bf16".
+        if (sopts.weights_bf16) {
+            lm_bf16_finish_segment(gf, wc);
+        }
 
         const bool ok = run_graph(gf);
         ggml_free(ctx);
@@ -635,5 +805,14 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
     }
     // Gh[cur] now holds dL/d(embedding output) and is DISCARDED: embed_tokens is
     // frozen and carries no LoRA site.
+    if (phase_tm) {
+        g_lm_phase.total_us += ggml_time_us() - step_t0;
+        g_lm_phase.steps++;
+        if (g_lm_phase.steps % 20 == 0) {
+            char tag[64];
+            snprintf(tag, sizeof(tag), "S=%d", S);
+            g_lm_phase.report(tag);
+        }
+    }
     return true;
 }

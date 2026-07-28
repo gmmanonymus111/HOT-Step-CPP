@@ -182,6 +182,26 @@ static void print_usage(void) {
             "                                            -1 = engine picks (<=16 heads -> 0, else 8).\n"
             "                                            Must divide n_heads AND n*n_kv/n_heads >= 1\n"
             "    --lm-chunk <n>              128         trained positions per CE chunk (low-vram only)\n"
+            "    --weights <f32-window|bf16> f32-window  projection GEMM dtype.\n"
+            "                                            f32-window = the shipped per-segment F32 weight\n"
+            "                                                         cast (cublasSgemm/TF32).\n"
+            "                                            bf16       = BF16 projections + backward surgery\n"
+            "                                                         (cublasGemmEx BF16). Needs a BF16\n"
+            "                                                         base and low-VRAM mode, and CHANGES\n"
+            "                                                         THE TRAINED WEIGHTS (the activation\n"
+            "                                                         gradient is BF16-rounded at every\n"
+            "                                                         layer). Not resume-compatible with\n"
+            "                                                         an f32-window run.\n"
+            "                                            EXPERIMENTAL, NOT ACCEPTED: its own parity gates\n"
+            "                                            (--self-test T14/T15) measure OVER their bars —\n"
+            "                                            max rel ~1.2e-1 vs a 2e-2 bar, cosine ~0.9995 vs\n"
+            "                                            1-1e-4. Direction is close but not within spec;\n"
+            "                                            judge a bf16 adapter by ear before trusting it.\n"
+            "    --batch <n|auto>            1           micro-batch size. NOT SUPPORTED in this build:\n"
+            "                                            micro-batching was never written — the host\n"
+            "                                            overhead it would amortise measures 9.3%% at 4B,\n"
+            "                                            under the 10%% bar its build gate required.\n"
+            "                                            Use --grad-accum to change effective batch size.\n"
             "    --loss-on-cot                           default ON\n"
             "    --no-loss-on-cot\n"
             "\n"
@@ -791,6 +811,8 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--low-vram") && i + 1 < argc) a.low_vram = argv[++i];
         else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
+        else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) a.limit = atoi(argv[++i]);
@@ -842,6 +864,76 @@ static int cmd_train_lm(int argc, char ** argv) {
     }
     if (a.attn_head_block < -1 || a.attn_head_block > 128 || a.chunk < 16 || a.chunk > 1024) {
         fprintf(stderr, "ace-train train-lm: --attn-head-block must be -1..128 and --lm-chunk 16..1024\n");
+        return 2;
+    }
+
+    // ── speed levers (2026-07-28 plan §2.1) ─────────────────────────────
+    //
+    // Every one of these is raised BEFORE any model load, so the server never
+    // pays an engine stop/restart for a bad flag.
+    if (a.weights != "f32-window" && a.weights != "bf16") {
+        fprintf(stderr, "ace-train train-lm: --weights must be f32-window|bf16\n");
+        return 2;
+    }
+    int batch_n = 1;
+    if (a.batch != "auto") {
+        char *     end = nullptr;
+        const long bv  = strtol(a.batch.c_str(), &end, 10);
+        if (!end || *end != '\0' || bv < 1 || bv > 8) {
+            fprintf(stderr, "ace-train train-lm: --batch must be 1..8 or auto\n");
+            return 2;
+        }
+        batch_n = (int) bv;
+    }
+    // bf16 has no F32 mirror to fall back on, so it is only meaningful under
+    // checkpointing. An explicit `--low-vram off` is a direct contradiction,
+    // not something to silently override.
+    if (a.weights == "bf16" && a.low_vram == "off") {
+        fprintf(stderr, "ace-train train-lm: --weights bf16 requires low-VRAM mode "
+                        "(the naive path mirrors every weight to F32) — drop --low-vram off\n");
+        return 2;
+    }
+    // LEVER B IS NOT BUILT — see the §6.1 Phase-0 measurement, and read the
+    // numbers rather than the headline, because they are more equivocal than a
+    // one-word verdict suggests. Batching cannot make the GEMMs cheaper (S7);
+    // its whole win is spreading per-micro-step HOST cost over B samples, so the
+    // design made it conditional on that cost reaching 10 %. Measured
+    // (HOTSTEP_LM_PHASE_TIMER=1, 20 micro-steps, S=2427):
+    //
+    //   4B  low-VRAM: build 2.35 % + reset 0.01 % + plan 0.20 % + submit 6.75 %
+    //                 = 9.31 % — under the bar even counting all of submit.
+    //   0.6B low-VRAM: 7.43 + 0.03 + 0.35 + 12.43 = 20.24 %, BUT `submit` is an
+    //                 upper bound (async launches absorb GPU wait when the queue
+    //                 backs up), so the true figure is bracketed [7.81 %,
+    //                 20.24 %] — the bar sits INSIDE the bracket. Inconclusive,
+    //                 not a miss.
+    //
+    // So: definitively closed at 4B (the case that costs real wall clock), and
+    // unresolved at 0.6B low-VRAM — which is the narrowest slice there is, since
+    // 0.6B runs naive by default and is FASTER that way (257 vs 368 ms). Not
+    // worth ~600 lines through the hottest code in the trainer on that basis.
+    // Accepting the flag and silently packing batches of 1 is exactly the
+    // failure mode S18 forbids, so this refuses loudly instead.
+    //
+    // THIS CHECK RUNS BEFORE THE --low-vram INTERACTION BELOW, deliberately.
+    // `--batch 2 --low-vram off` used to answer "--batch >1 requires low-VRAM
+    // mode", which sends the user off to fix something that still would not
+    // work. The unconditional refusal is the true reason, so it speaks first.
+    if (a.batch == "auto" || batch_n > 1) {
+        fprintf(stderr,
+                "ace-train train-lm: --batch %s is not supported in this build.\n"
+                "  Micro-batching was never written. It cannot make the maths cheaper — it only\n"
+                "  spreads per-micro-step host overhead over B samples, and that overhead measures\n"
+                "  9.3%% at 4B (under the 10%% bar the design required) and at most 20%% at 0.6B in\n"
+                "  low-VRAM mode, which is a mode 0.6B does not need. Use --grad-accum instead — it\n"
+                "  changes the effective batch size with none of the padding waste.\n",
+                a.batch.c_str());
+        return 2;
+    }
+    // Kept for the day Lever B is built: at that point this is the rule, and
+    // until then it is unreachable-by-construction rather than wrong.
+    if ((a.batch == "auto" || batch_n > 1) && a.low_vram == "off") {
+        fprintf(stderr, "ace-train train-lm: --batch >1 requires low-VRAM mode — drop --low-vram off\n");
         return 2;
     }
 

@@ -37,6 +37,10 @@ export interface TrainLmFormState {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** Projection GEMM dtype (speed lever A). 'f32-window' is the shipped path. */
+  weights: 'f32-window' | 'bf16';
+  /** Micro-batch size (speed lever B). 1 is the shipped path. */
+  batch: number | 'auto';
 }
 
 export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
@@ -61,10 +65,22 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
+  // Both levers default to the shipped behaviour, and the server emits no CLI
+  // flag at all for these values — a default run is byte-identical to today.
+  weights: 'f32-window',
+  batch: 1,
 };
 
 const ALL_STAGES: TrainLmStage[] = ['extract', 'train', 'export'];
 const LM_SIZES: LmSize[] = ['0.6B', '1.7B', '4B'];
+// Lever B (micro-batching) was closed by its own build gate and never written:
+// ace-train refuses `--batch >1` at exit 2 and the server 400s before the job is
+// queued. Offering 2/4/8/auto would be a dropdown whose every non-default value
+// is a guaranteed failure — and, because the runner stops ace-server before it
+// spawns ace-train, a failure that bounces the user's engine on the way. The
+// control stays visible and disabled so the decision is documented where the
+// question gets asked, rather than silently vanishing.
+const BATCH_CHOICES: Array<number | 'auto'> = [1];
 
 const FIELD =
   'rounded-lg px-3 py-2 text-sm bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed';
@@ -339,6 +355,37 @@ export const TrainLmForm: React.FC<Props> = ({
               className={FIELD}
             />
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxLenAuto')}</span>
+          </label>
+
+          {/* ── Speed levers (2026-07-28 plan §1.4) ───────────────────────
+              Both ship at their default value, and the server omits the CLI
+              flag entirely at that value, so leaving these alone reproduces
+              today's run exactly. */}
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.weights')}</span>
+            <select
+              value={value.weights}
+              disabled={lock}
+              onChange={(e) => onChange({ weights: e.target.value === 'bf16' ? 'bf16' : 'f32-window' })}
+              className={FIELD}
+            >
+              <option value="f32-window">f32-window</option>
+              <option value="bf16">bf16</option>
+            </select>
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.weightsHint')}</span>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.batch')}</span>
+            <select
+              value={String(value.batch)}
+              disabled
+              onChange={(e) => onChange({ batch: e.target.value === 'auto' ? 'auto' : Number(e.target.value) })}
+              className={FIELD}
+            >
+              {BATCH_CHOICES.map(b => <option key={String(b)} value={String(b)}>{b}</option>)}
+            </select>
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.batchHint')}</span>
           </label>
 
           <label className="flex flex-col gap-1.5">

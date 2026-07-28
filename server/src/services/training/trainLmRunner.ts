@@ -123,6 +123,11 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, state: RelayState)
         baseMb: optNum(ev, 'baseMb'),
         ckptMb: optNum(ev, 'ckptMb'),
         segPeakMb: optNum(ev, 'segPeakMb'),
+        // Speed-lever §2.2 fields. Same DEVIATION reasoning as the four above:
+        // this relay is an explicit whitelist, so an un-listed field is dropped.
+        weights: typeof ev.weights === 'string' ? ev.weights : undefined,
+        batch: optNum(ev, 'batch'),
+        batchSource: typeof ev.batchSource === 'string' ? ev.batchSource : undefined,
       });
       log(job, 'info',
         ev.mode === 'lowvram'
@@ -142,6 +147,11 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, state: RelayState)
         totalSteps: optNum(ev, 'totalSteps'),
         loraParams: optNum(ev, 'loraParams'),
         maxLen: optNum(ev, 'maxLen'),
+        // Speed-lever §2.2: batches/padTokens/padPct. In a default run these read
+        // batches == samples, 0, 0.0 — so the event's meaning is unchanged.
+        batches: optNum(ev, 'batches'),
+        padTokens: optNum(ev, 'padTokens'),
+        padPct: optNum(ev, 'padPct'),
       });
       log(job, 'info',
         `${int(ev.samples)} songs, ${int(ev.stepsPerEpoch)} steps/epoch, ${int(ev.loraParams)} LoRA parameters`);
@@ -178,6 +188,9 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, state: RelayState)
         clipScale: optNum(ev, 'clipScale'),
         ms: optNum(ev, 'ms'),
         vramMb: optNum(ev, 'vramMb'),
+        // Speed-lever §2.2: samples folded into this optimizer step (micro * B).
+        // Reads `micro` in a default run.
+        samples: optNum(ev, 'samples'),
       });
       break;
     }

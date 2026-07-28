@@ -1424,6 +1424,45 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
+    // Both defaults ARE the CLI defaults, so an omitted field emits no flag at
+    // all (buildTrainLmArgs) and the argv stays byte-identical to today. The
+    // engine owns the semantic rules (bf16 needs a BF16 base; batch>1 implies
+    // low-VRAM) — this is a value whitelist only, so a stale UI can never make
+    // the runner stop ace-server for an argument ace-train would reject.
+    const weights = body.weights === undefined ? 'f32-window' : body.weights;
+    if (weights !== 'f32-window' && weights !== 'bf16') {
+      res.status(400).json({ error: 'weights must be f32-window or bf16' });
+      return;
+    }
+    const rawBatch = body.batch === undefined ? 1 : body.batch;
+    let batch: number | 'auto';
+    if (rawBatch === 'auto') {
+      batch = 'auto';
+    } else {
+      const n = Number(rawBatch);
+      if (!Number.isFinite(n) || Math.trunc(n) !== n || n < 1 || n > 8) {
+        res.status(400).json({ error: 'batch must be 1-8 or auto' });
+        return;
+      }
+      batch = n;
+    }
+    // Lever B (micro-batching) was never written — its §6.1 build gate measures
+    // 9.3% amortisable host overhead at 4B against a 10% bar — so ace-train
+    // refuses anything but 1 with exit 2. That refusal has to happen HERE and
+    // not there: trainLmRunner stops ace-server before it spawns ace-train, so
+    // letting a batch>1 request through would shut the user's engine down, fail
+    // instantly, and restart it — an engine bounce as the reward for touching a
+    // dropdown. Reject before the job is queued.
+    if (batch !== 1) {
+      res.status(400).json({
+        error: 'batch must be 1 — micro-batching is not built in this engine. The host overhead it would '
+             + 'amortise measures 9.3% at 4B, under the 10% bar its build gate required. Use gradient '
+             + 'accumulation to change the effective batch size.',
+      });
+      return;
+    }
+
     // ── stages ───────────────────────────────────────────────────────────
     const requestedStages = Array.isArray(body.stages) ? body.stages : [];
     const stages = TRAIN_LM_STAGES.filter(s => requestedStages.includes(s));
@@ -1466,6 +1505,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       lowVram,
       attnHeadBlock: Math.trunc(attnHeadBlock),
       chunk: Math.trunc(chunk),
+      weights,
+      batch,
     };
 
     const job = queue.startTrainLmJob(ds.id, opts);

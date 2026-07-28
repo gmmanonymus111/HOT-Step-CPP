@@ -217,6 +217,12 @@ export interface ResolvedTrainLmOptions {
   attnHeadBlock: number;
   /** 0 = engine default (128 trained positions per CE chunk). */
   chunk: number;
+  /** 'f32-window' = the shipped per-segment F32 weight cast (CLI default).
+   *  'bf16' = BF16 projections + backward surgery; needs a BF16 base + low-VRAM
+   *  and changes the trained weights. */
+  weights: 'f32-window' | 'bf16';
+  /** Micro-batch size 1..8, or 'auto'. 1 is the CLI default; >1 implies low-VRAM. */
+  batch: number | 'auto';
 }
 
 /** Full argv for `ace-train train-lm` (§2.1 order). */
@@ -262,6 +268,12 @@ export function buildTrainLmArgs(input: {
   if (o.lowVram && o.lowVram !== 'auto') args.push('--low-vram', o.lowVram);
   if (o.attnHeadBlock > 0) args.push('--attn-head-block', String(o.attnHeadBlock));
   if (o.chunk > 0) args.push('--lm-chunk', String(o.chunk));
+  // Speed levers (2026-07-28 plan §1.3). Same rule: both CLI defaults are the
+  // shipped behaviour, so a normal run emits NEITHER flag and the argv stays
+  // byte-identical to the pre-lever build — which is also what keeps an older
+  // ace-train.exe (no --weights/--batch) working.
+  if (o.weights && o.weights !== 'f32-window') args.push('--weights', o.weights);
+  if (o.batch !== undefined && o.batch !== 1) args.push('--batch', String(o.batch));
   // `--loss-on-cot` is the CLI default; only the negation needs emitting.
   if (!o.lossOnCot) args.push('--no-loss-on-cot');
   if (o.overwrite) args.push('--overwrite');

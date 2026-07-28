@@ -206,6 +206,11 @@ export const TrainPanel: React.FC = () => {
       stages: form.stages,
       overwrite: form.overwrite,
       stopEngine: form.stopEngine,
+      // Speed levers. Sent only when the user moved them off the shipped
+      // default, so a normal start posts the same body it always did — and an
+      // engine without the flags never sees them.
+      ...(form.weights !== 'f32-window' ? { weights: form.weights } : {}),
+      ...(form.batch !== 1 ? { batch: form.batch } : {}),
     };
     setStarting(true);
     try { await startTrainLm(opts); } finally { setStarting(false); }

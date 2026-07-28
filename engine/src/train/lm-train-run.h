@@ -49,6 +49,11 @@ struct LmTrainArgs {
     int         attn_head_block = -1;      // -1 = engine picks (lm_ckpt_default_head_block)
     int         chunk           = 128;
 
+    // Speed levers (2026-07-28 plan §2.1). Both DEFAULT TO THE SHIPPED
+    // BEHAVIOUR — §6.0 requires a flags-off run to be byte-identical.
+    std::string weights = "f32-window";  // f32-window|bf16  (Lever A)
+    std::string batch   = "1";           // 1..8|auto        (Lever B)
+
     float milestone_step = 1.0f;
     int   milestone_keep = 6;
 
@@ -120,6 +125,26 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     const bool        auto_mode  = (a.low_vram != "on" && a.low_vram != "off");
     LmVramMode        mode       = lm_vram_pick_mode(a.low_vram, size_label, /*naive_max_len=*/0);
 
+    // ── Lever A gating (§3.4), before the mirror decision ────────────────
+    //
+    // bf16 is meaningless on the naive path: it mirrors every weight to F32 and
+    // releases the BF16 buffer, so there is nothing left to run a BF16 GEMM on.
+    // --low-vram off + --weights bf16 was already rejected at exit 2 in
+    // cmd_train_lm, so forcing the mode here can never contradict the user.
+    const bool weights_bf16 = (a.weights == "bf16");
+    if (weights_bf16) {
+        mode = LM_VRAM_LOWVRAM;
+        if (!lm_bf16_base_is_bf16(lm)) {
+            // NEVER a silent fallback (S18): a bf16-labelled run that quietly
+            // used the F32 cast would be a TF32 run wearing a BF16 label.
+            lm_fatal("model-load", std::string("--weights bf16 needs a BF16 base; ") + a.lm_name +
+                                       " loads its projections as " + lm_bf16_base_proj_type_name(lm) +
+                                       " — rerun with --weights f32-window");
+            qw3lm_free(&lm);
+            return 1;
+        }
+    }
+
     size_t base_bytes = lm_base_weight_bytes(lm);
 
     // ── F32 mirror; a quantized base is refused here ─────────────────────
@@ -185,6 +210,8 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     lc.base_bytes      = base_bytes;
     lc.emb_t_bytes     = (size_t) V * (size_t) H * ggml_type_size(lm.embed_tokens->type);
     lc.layer_w_bytes   = lm_layer_weight_bytes(c);
+    lc.layer_wt_bytes  = lm_layer_proj_bytes(c, GGML_TYPE_BF16);  // §3.5
+    lc.weights_bf16    = weights_bf16;
 
     LmVramFit fit;
     if (mode == LM_VRAM_NAIVE) {
@@ -336,21 +363,29 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     // size and three zeros, so the event stays byte-compatible with [P] §2.9.
     jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"reserveMb\":%d,\"mirrorMb\":%lld,\"maxLen\":%d,"
        "\"estMb\":%lld,\"source\":\"%s\",\"mode\":\"%s\",\"baseMb\":%lld,\"ckptMb\":%lld,\"segPeakMb\":%lld,"
-       "\"attnHeadBlock\":%d,\"chunk\":%d}",
+       "\"attnHeadBlock\":%d,\"chunk\":%d,\"weights\":\"%s\",\"batch\":%d,\"batchSource\":\"%s\"}",
        (long long) fit.free_mb, (long long) fit.total_mb, a.vram_reserve_mb,
        (long long) (low ? 0 : mirror.bytes / 1048576), max_len, (long long) (est_bytes / 1048576.0),
        a.max_len > 0 ? "user" : "auto", low ? "lowvram" : "naive",
        (long long) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0),
        (long long) (ckpt_bytes / 1048576.0), (long long) (seg_bytes / 1048576.0), low ? lc.attn_head_block : 0,
-       low ? lc.chunk : 0);
+       low ? lc.chunk : 0,
+       // §2.2: three additive fields. In a default run they read
+       // "f32-window", 1, "user", so the event stays byte-compatible in meaning
+       // and [P] §2.9's SSE mapping needs no change.
+       a.weights.c_str(), 1, "user");
 
     // `skippedBad` is additive (§2.2: consumers ignore unknown fields) and keeps
     // `skippedLong` meaning what its name says.
     jl("{\"type\":\"data\",\"samples\":%d,\"skippedLong\":%d,\"skippedBad\":%d,\"minLen\":%d,\"maxLen\":%d,"
        "\"maxLenCap\":%d,\"trainedTokens\":%lld,\"stepsPerEpoch\":%d,\"totalSteps\":%d,\"warmupSteps\":%d,"
-       "\"loraParams\":%lld}",
+       "\"loraParams\":%lld,\"batches\":%d,\"padTokens\":%lld,\"padPct\":%.1f}",
        n, skipped_long, skipped_bad, min_len, max_seq, max_len, trained_tokens, steps_per_ep, total_steps,
-       warmup_steps, (long long) vm.lora_params);
+       warmup_steps, (long long) vm.lora_params,
+       // §2.2: at --batch 1 there is one batch per sample and no padding at all,
+       // so these read `samples`, 0 and 0.0 — the honest cost side of Lever B's
+       // ledger, reported even when the lever is off.
+       n, (long long) 0, 0.0);
     if (skipped_bad > 0) {
         char sb[128];
         snprintf(sb, sizeof(sb), "%d song(s) rejected for malformed prompt/codes — not a length problem", skipped_bad);
@@ -450,6 +485,7 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         cc.s_max           = max_seq;
         cc.layer_lo        = 0;
         cc.layer_hi        = c.n_layers;
+        cc.weights_bf16    = weights_bf16;  // Lever A
         std::string err;
         if (!lm_ckpt_alloc(&ckpt, &lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt, &err)) {
             lm_fatal("vram", err.empty() ? std::string("low-vram allocation failed") : err);
@@ -651,6 +687,8 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     meta->low_vram        = low;
     meta->attn_head_block = low ? lc.attn_head_block : 0;
     meta->chunk           = low ? lc.chunk : 0;
+    meta->weights         = a.weights;   // §2.3 — recorded so a resume can refuse (S6)
+    meta->batch           = 1;
     meta->vram_mode       = low ? "lowvram" : "naive";
     meta->vram_base_mb    = (size_t) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0);
     meta->vram_ckpt_mb    = (size_t) (ckpt_bytes / 1048576.0);
@@ -703,10 +741,14 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
                 global_step++;
                 const size_t vram_mb = tracker.sample();
                 jl("{\"type\":\"step\",\"epoch\":%d,\"step\":%d,\"totalSteps\":%d,\"micro\":%d,\"loss\":%.6f,"
-                   "\"lr\":%.9g,\"gradNorm\":%.6f,\"clipScale\":%.6f,\"ms\":%lld,\"vramMb\":%lld}",
+                   "\"lr\":%.9g,\"gradNorm\":%.6f,\"clipScale\":%.6f,\"ms\":%lld,\"vramMb\":%lld,"
+                   "\"samples\":%d}",
                    epoch + 1, global_step, total_steps, win_micro, win_loss / std::max(1, win_micro),
                    (double) last_stats.lr, (double) last_stats.grad_norm, (double) last_stats.clip,
-                   (long long) (ggml_time_ms() - t_win0), (long long) vram_mb);
+                   (long long) (ggml_time_ms() - t_win0), (long long) vram_mb,
+                   // §4.8: samples == micro * B_cur summed over the window. At
+                   // B == 1 that is exactly `micro`.
+                   win_micro);
                 win_loss  = 0.0;
                 win_micro = 0;
                 t_win0    = ggml_time_ms();

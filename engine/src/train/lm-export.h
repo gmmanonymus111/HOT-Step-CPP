@@ -72,6 +72,13 @@ struct LmExportMeta {
     int         chunk           = 0;
     std::string vram_mode       = "naive";
     size_t      vram_base_mb = 0, vram_ckpt_mb = 0, vram_seg_peak_mb = 0;
+
+    // Speed levers (2026-07-28 plan §2.3). Additive; every reader defaults each
+    // field individually. RESUME RULE: a resume path must REFUSE to continue a
+    // run whose recorded `weights` differs from the requested one — under
+    // --weights bf16 the gradients are not the same quantity (S6).
+    std::string weights = "f32-window";
+    int         batch   = 1;
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -150,6 +157,8 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_bool(doc, cfg, "low_vram", m.low_vram);
     yyjson_mut_obj_add_int(doc, cfg, "attn_head_block", m.attn_head_block);
     yyjson_mut_obj_add_int(doc, cfg, "chunk", m.chunk);
+    yyjson_mut_obj_add_strcpy(doc, cfg, "weights", m.weights.c_str());
+    yyjson_mut_obj_add_int(doc, cfg, "batch", m.batch);
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epoch_log.size(); i++) {
@@ -191,6 +200,8 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_int(doc, vr, "base_mb", (int64_t) m.vram_base_mb);
     yyjson_mut_obj_add_int(doc, vr, "ckpt_mb", (int64_t) m.vram_ckpt_mb);
     yyjson_mut_obj_add_int(doc, vr, "seg_peak_mb", (int64_t) m.vram_seg_peak_mb);
+    yyjson_mut_obj_add_strcpy(doc, vr, "weights", m.weights.c_str());
+    yyjson_mut_obj_add_int(doc, vr, "batch", m.batch);
 
     yyjson_mut_obj_add_int(doc, root, "total_ms", (int64_t) m.total_ms);
 

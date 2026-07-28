@@ -212,6 +212,15 @@ export interface TrainLmOptions {
   lowVram?: 'auto' | 'on' | 'off';   // default 'auto'
   attnHeadBlock?: number;            // default 0 = engine picks
   chunk?: number;                    // default 0 = engine default (128)
+  // ── LM speed levers (2026-07-28 plan §2.4). Verbatim contract text. ──────
+  /** Projection GEMM dtype. 'f32-window' (default) is the shipped per-segment F32
+   *  weight cast. 'bf16' runs the projections in BF16 and rewrites the backward
+   *  activation-gradient nodes; ~1.65-1.78x on the projection mix, but it changes
+   *  the trained weights (BF16 gradient rounding) and requires a BF16 base + low-VRAM. */
+  weights?: 'f32-window' | 'bf16';   // default 'f32-window'
+  /** Micro-batch size 1..8, or 'auto' (largest of {1,2,4} that fits without
+   *  dropping a song). >1 forces low-VRAM mode. */
+  batch?: number | 'auto';           // default 1
 }
 
 export interface TrainLmEpoch {
@@ -420,6 +429,16 @@ export interface TrainingMetricEvent {
   baseMb?: number;    // resident base weights
   ckptMb?: number;    // per-layer checkpoint buffers
   segPeakMb?: number; // transient peak of one segment graph
+  // train-lm speed levers (2026-07-28 plan §2.2/§2.4). All optional, additive.
+  // §2.4's verbatim three:
+  weights?: string; batch?: number; padPct?: number;
+  // …plus the rest of §2.2's JSONL fields, which the server relay forwards by
+  // name and therefore need a home on this interface.
+  batchSource?: string;  // vram: 'user' | 'auto'
+  batches?: number;      // data: micro-batches per epoch
+  padTokens?: number;    // data: padding tokens added by batching
+  // NB `samples` (declared above under `data`) is reused by `step` as the
+  // per-optimizer-step sample count (micro * B_cur); no new field needed.
 }
 
 export type TrainingStreamEvent =

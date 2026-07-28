@@ -154,6 +154,13 @@ struct LmVramLowCfg {
     size_t base_bytes      = 0;  // ggml_backend_buffer_get_size(lm.wctx.buffer)
     size_t emb_t_bytes     = 0;  // V * H * ggml_type_size(embed dtype)
     size_t layer_w_bytes   = 0;  // lm_layer_weight_bytes(cfg) — the F32 window
+
+    // ── Lever A (2026-07-28 speed-levers plan §3.5) ──────────────────────
+    // Default OFF, so lm_vram_lowvram_transient() below selects layer_w_bytes
+    // exactly as it ships and the §6.0 estMb integer is unchanged.
+    size_t layer_wt_bytes  = 0;      // lm_layer_proj_bytes(cfg, BF16) — the BF16
+                                     // transposed window that replaces the F32 one
+    bool   weights_bf16    = false;
 };
 
 static double lm_vram_lowvram_resident(const LmVramModel & m, const LmVramLowCfg & lc, int S) {
@@ -175,8 +182,25 @@ static double lm_vram_lowvram_transient(const LmVramModel & m, const LmVramLowCf
     const double s2  = hb * dS * dS * 4.0;
     const double non = (LmVramModel::c2f * (double) m.ffn + LmVramModel::c2h * (double) m.hidden) * dS * 4.0;
     const double qkv = 2.0 * (double) m.n_heads * (double) lc.head_dim * dS * 4.0;  // acc + cont churn
-    const double seg_bwd = (double) lc.layer_w_bytes + 3.0 * s2 + 2.0 * non + qkv;
-    const double seg_fwd = (double) lc.layer_w_bytes + 2.0 * s2 + non + qkv;
+    // §3.5: Lever A replaces the per-segment F32 weight window with a BF16
+    // TRANSPOSED window over the 7 projections only — 192.5 MiB instead of
+    // 385.0 MiB at 4B, i.e. the lever is VRAM-POSITIVE.
+    //
+    // MEASURED, not just modelled — and the two do not agree, so read the
+    // measurement. LmVramTracker::peak_mb over the §6.5 runs: 4B 12,466 ->
+    // 12,363 MiB, i.e. -103 MiB against the -192.5 MiB this line predicts
+    // (0.6B: 3,267 -> 3,242 = -25 vs -30). Checking the estimate against itself
+    // would of course reproduce -192.5 exactly; it is circular and means nothing.
+    // Second-order effect that matters if this ever feeds the auto-fit: the
+    // model already under-predicts the real 4B peak by 340 MiB on the f32
+    // window (est 12,126 vs peak 12,466), and enabling the lever widens that to
+    // 429 MiB (est 11,934 vs peak 12,363) — ~26 % less conservative. Still
+    // inside the 1,024 MiB reserve, but the headroom is smaller than the
+    // arithmetic suggests.
+    const double w_window = (lc.weights_bf16 && lc.layer_wt_bytes > 0) ? (double) lc.layer_wt_bytes
+                                                                      : (double) lc.layer_w_bytes;
+    const double seg_bwd = w_window + 3.0 * s2 + 2.0 * non + qkv;
+    const double seg_fwd = w_window + 2.0 * s2 + non + qkv;
     const double head    = 3.0 * (double) m.vocab * (double) lc.chunk * 4.0;
     return std::max(seg_bwd, std::max(seg_fwd, head));
 }

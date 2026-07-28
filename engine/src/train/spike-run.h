@@ -1,7 +1,9 @@
 #pragma once
 // spike-run.h — `ace-train spike` subcommand dispatch (Phase-0 evidence).
 
+#include "spike-bf16layer.h"
 #include "spike-dit2.h"
+#include "spike-gemmbench.h"
 #include "spike-s1.h"
 #include "spike-s2.h"
 #include "spike-s3.h"
@@ -23,7 +25,11 @@ static void spike_usage(void) {
             "        [--crop 750] [--crop-start 0] [--rank 16] [--alpha 32] [--steps 48]\n"
             "        [--layer-lo 0] [--lr 1e-4] [--grad-clip 1.0] [--seed 42]\n"
             "        [--mu -0.4] [--sigma 1.0] [--cfg-ratio 0.15] [--fixed-t <t>]\n"
-            "        [--sweep] [--mirror-ca-kv]\n");
+            "        [--sweep] [--mirror-ca-kv]\n"
+            "  gemmbench  BF16-GEMM lever: time the real 4B trainer GEMM shapes\n"
+            "        F32/TF32 vs BF16 vs transpose-route   [--seq N] [--reps N]\n"
+            "  bf16layer  P2 prototype on ONE REAL layer: F32-window vs backward surgery\n"
+            "        --lm <gguf|dir> [--seq N] [--rank N] [--layer N] [--reps N]\n");
 }
 
 static int cmd_spike(int argc, char ** argv) {
@@ -36,6 +42,7 @@ static int cmd_spike(int argc, char ** argv) {
 
     std::string lm_path, dit_path, sample_dir, jsonl;
     int  seq = 256, rank = 16, steps = 20, row = 0, chunk = 512;
+    int  reps = 0;  // gemmbench: 0 = auto-scale by shape
     bool no_cast = false, chunked = false;
     D2Args d2;
     d2.rank = 16;
@@ -67,12 +74,21 @@ static int cmd_spike(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--rank") && i + 1 < argc)   rank = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--steps") && i + 1 < argc)  steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chunk") && i + 1 < argc)  chunk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reps") && i + 1 < argc)   reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chunked"))                chunked = true;
         else if (!strcmp(argv[i], "--no-cast"))                no_cast = true;
         else { fprintf(stderr, "ace-train spike: unknown option '%s'\n", argv[i]); return 2; }
     }
     (void) dit_path; (void) sample_dir;
 
+    if (!strcmp(rung, "bf16layer")) {
+        if (lm_path.empty()) { fprintf(stderr, "spike bf16layer: --lm required\n"); return 2; }
+        return spike_bf16layer(lm_path.c_str(), seq == 256 ? 1024 : seq, rank, row, reps > 0 ? reps : 20);
+    }
+    if (!strcmp(rung, "gemmbench")) {
+        // `--seq 0` (the default here) means "sweep 512/2048/2944".
+        return spike_gemmbench(seq == 256 ? 0 : (int64_t) seq, reps);
+    }
     if (!strcmp(rung, "s1")) {
         return spike_s1();
     }

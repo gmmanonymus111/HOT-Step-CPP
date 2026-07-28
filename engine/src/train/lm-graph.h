@@ -23,6 +23,7 @@
 
 #include "qwen3-lm.h"
 #include "qwen3-lora.h"
+#include "train/lm-bf16.h"  // LmWtCollect — Lever A (--weights bf16)
 #include "train/lm-common.h"
 
 #include <string>
@@ -316,6 +317,15 @@ struct LmLayerOpts {
     int           attn_head_block = 0;        // q heads per attention block; 0 = off
     ggml_tensor * attn_zero       = nullptr;  // persistent, permanently-zero
                                               // [Nh*D, S_max] F32 base for ggml_acc
+
+    // ── Lever A (2026-07-28 speed-levers plan §3.1) ──────────────────────
+    // Both default OFF, and with them off lm_linear() takes the shipped branch
+    // verbatim — §6.0 byte-identity depends on that.
+    bool          weights_bf16 = false;    // run the 7 projections in BF16
+    LmWtCollect * wt           = nullptr;  // per-graph W -> cont(transpose(W)) map;
+                                           // nullptr in the P2/P3 forward-collect
+                                           // graphs, which have no backward and
+                                           // would only carry dead nodes
 };
 
 // F32 bytes of ONE transformer layer's trainable-graph weights (7 projections +
@@ -333,6 +343,25 @@ static size_t lm_layer_weight_bytes(const Qwen3LMConfig & c) {
     return p * sizeof(float);
 }
 
+// Bytes of ONE transformer layer's SEVEN PROJECTIONS in `t` — the size of the
+// per-segment transposed window under Lever A (§3.5). The 4 norms are excluded
+// on purpose: lm_rms() is untouched by the lever, so they keep their F32 cast
+// (21 KiB at 4B, charged separately in the model's slack).
+//
+// 4B [D]: P_proj = 100,925,440 params -> 192.5 MiB at BF16 vs 385.0 MiB for the
+// F32 window it replaces.
+static size_t lm_layer_proj_bytes(const Qwen3LMConfig & c, ggml_type t) {
+    const size_t H = (size_t) c.hidden_size, F = (size_t) c.intermediate_size;
+    const size_t D = (size_t) c.head_dim, Nh = (size_t) c.n_heads, Nkv = (size_t) c.n_kv_heads;
+    size_t       p = 0;
+    p += H * (Nh * D);          // q_proj
+    p += H * (Nkv * D) * 2;     // k_proj, v_proj
+    p += (Nh * D) * H;          // o_proj
+    p += H * F * 2;             // gate_proj, up_proj
+    p += F * H;                 // down_proj
+    return p * ggml_type_size(t) / (size_t) ggml_blck_size(t);
+}
+
 // Bytes actually held by the loaded base weight buffer (BF16 in low-VRAM mode).
 static size_t lm_base_weight_bytes(const Qwen3LM & lm) {
     return lm.wctx.buffer ? ggml_backend_buffer_get_size(lm.wctx.buffer) : 0;
@@ -340,12 +369,31 @@ static size_t lm_base_weight_bytes(const Qwen3LM & lm) {
 
 // ─── graph builders ─────────────────────────────────────────────────────────
 
-static ggml_tensor * lm_linear(ggml_context * ctx, ggml_tensor * w, const QwLoraPair * pr, ggml_tensor * x) {
-    // qwen3_f32() is a NO-OP for an F32 weight, so the naive path's graph is
-    // byte-identical to the shipped one. On a BF16 base it emits the in-graph
-    // cast that ggml_out_prod (the mul_mat activation backward) requires — and
-    // ggml_gallocr frees it with the segment. Plan D2/D3.
-    ggml_tensor * y = ggml_mul_mat(ctx, qwen3_f32(ctx, w), x);
+static ggml_tensor * lm_linear(ggml_context * ctx, ggml_tensor * w, const QwLoraPair * pr, ggml_tensor * x,
+                               const LmLayerOpts & opts) {
+    ggml_tensor * y;
+    if (!opts.weights_bf16 || w->type == GGML_TYPE_F32) {
+        // SHIPPED PATH — byte-identical.
+        // qwen3_f32() is a NO-OP for an F32 weight, so the naive path's graph is
+        // byte-identical to the shipped one. On a BF16 base it emits the in-graph
+        // cast that ggml_out_prod (the mul_mat activation backward) requires — and
+        // ggml_gallocr frees it with the segment. Plan D2/D3.
+        y = ggml_mul_mat(ctx, qwen3_f32(ctx, w), x);
+    } else {
+        // Lever A. src0 stays BF16 -> ggml-cuda.cu's cublasGemmEx(CUDA_R_16BF,
+        // CUBLAS_COMPUTE_32F) instead of cublasSgemm/TF32.
+        y = ggml_mul_mat(ctx, w, x);
+        if (opts.wt && !opts.wt->map.count(w)) {
+            // [K,N] -> [N,K], SAME dtype. Consumed ONLY by the rewritten backward
+            // node (lm_bf16_rewrite_outprod). ~0.041 ms against a ~0.9 ms GEMM
+            // [M]; gallocr frees it with the segment, so there is no persistent
+            // transposed bank (S4 — one would be a second 7,991 MiB at 4B).
+            ggml_tensor * wt = ggml_cont(ctx, ggml_transpose(ctx, w));
+            ggml_format_name(wt, "%s.T", w->name);
+            opts.wt->map[w] = wt;
+            opts.wt->nodes.push_back(wt);
+        }
+    }
     if (pr && pr->A && pr->B) {
         ggml_tensor * t = ggml_mul_mat(ctx, pr->A, x);  // [r, S]
         t               = ggml_scale(ctx, t, pr->scale);
@@ -423,9 +471,9 @@ static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c,
 
     ggml_tensor * x = lm_rms(ctx, hidden, ly->input_layernorm, c.rms_norm_eps);
 
-    ggml_tensor * q = lm_linear(ctx, ly->q_proj, qwen3_lora_slot(ll, QW_LORA_Q), x);
-    ggml_tensor * k = lm_linear(ctx, ly->k_proj, qwen3_lora_slot(ll, QW_LORA_K), x);
-    ggml_tensor * v = lm_linear(ctx, ly->v_proj, qwen3_lora_slot(ll, QW_LORA_V), x);
+    ggml_tensor * q = lm_linear(ctx, ly->q_proj, qwen3_lora_slot(ll, QW_LORA_Q), x, opts);
+    ggml_tensor * k = lm_linear(ctx, ly->k_proj, qwen3_lora_slot(ll, QW_LORA_K), x, opts);
+    ggml_tensor * v = lm_linear(ctx, ly->v_proj, qwen3_lora_slot(ll, QW_LORA_V), x, opts);
 
     ggml_tensor * attn = nullptr;
     if (opts.attn_head_block > 0 && opts.attn_head_block < Nh) {
@@ -449,14 +497,14 @@ static ggml_tensor * lm_train_layer(ggml_context * ctx, const Qwen3LMConfig & c,
         attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
     }
 
-    ggml_tensor * ao = lm_linear(ctx, ly->o_proj, qwen3_lora_slot(ll, QW_LORA_O), attn);
+    ggml_tensor * ao = lm_linear(ctx, ly->o_proj, qwen3_lora_slot(ll, QW_LORA_O), attn, opts);
     hidden           = ggml_add(ctx, hidden, ao);
 
     ggml_tensor * xm = lm_rms(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
-    ggml_tensor * g  = lm_linear(ctx, ly->gate_proj, qwen3_lora_slot(ll, QW_LORA_GATE), xm);
-    ggml_tensor * u  = lm_linear(ctx, ly->up_proj, qwen3_lora_slot(ll, QW_LORA_UP), xm);
+    ggml_tensor * g  = lm_linear(ctx, ly->gate_proj, qwen3_lora_slot(ll, QW_LORA_GATE), xm, opts);
+    ggml_tensor * u  = lm_linear(ctx, ly->up_proj, qwen3_lora_slot(ll, QW_LORA_UP), xm, opts);
     ggml_tensor * ff = ggml_swiglu_split(ctx, g, u);  // fused ggml_swiglu has NO backward
-    ggml_tensor * dn = lm_linear(ctx, ly->down_proj, qwen3_lora_slot(ll, QW_LORA_DOWN), ff);
+    ggml_tensor * dn = lm_linear(ctx, ly->down_proj, qwen3_lora_slot(ll, QW_LORA_DOWN), ff, opts);
     return ggml_add(ctx, hidden, dn);
 }
 
