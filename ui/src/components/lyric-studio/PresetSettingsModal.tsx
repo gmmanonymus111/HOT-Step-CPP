@@ -60,10 +60,11 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
   const [saving, setSaving] = useState(false);
   const [groupsExpanded, setGroupsExpanded] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [browserTarget, setBrowserTarget] = useState<'adapter' | 'reference'>('adapter');
-  // Planner-LM adapters live in one known folder (adapters/lm) — a dropdown
-  // beats a path browser here.
-  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string }[]>([]);
+  const [browserTarget, setBrowserTarget] = useState<'adapter' | 'lmAdapter' | 'reference'>('adapter');
+  // Planner-LM adapters: the registry dropdown is the quick pick, and the
+  // path + Browse row below it (same UI as the DiT adapter) reaches anything
+  // the scan didn't — per-run subfolders, other drives, other size roots.
+  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; lmSize?: string; run?: string }[]>([]);
   useEffect(() => {
     if (!isOpen) return;
     // Same scan folder the global Adapters menu uses (persisted store value)
@@ -224,9 +225,25 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                         <option value={form.lm_adapter_path}>{form.lm_adapter_path.split(/[\\/]/).pop()} (outside scan folder)</option>
                       )}
                       {lmAdapters.map(a => (
-                        <option key={a.path} value={a.path}>{a.name}</option>
+                        <option key={a.path} value={a.path}>
+                          {[a.name, a.lmSize, a.run].filter(Boolean).join(' · ')}
+                        </option>
                       ))}
                     </select>
+                    {/* Same path + Browse row the DiT adapter has — reaches
+                        per-run subfolders and anything outside the scan. */}
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Path</label>
+                    <div className="flex gap-2">
+                      <input type="text" value={form.lm_adapter_path}
+                        onChange={e => setForm(p => ({ ...p, lm_adapter_path: e.target.value }))}
+                        placeholder="Path to adapter folder or adapter_model.safetensors"
+                        className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-500 transition-colors"
+                      />
+                      <button onClick={() => { setBrowserTarget('lmAdapter'); setBrowserOpen(true); }}
+                        className="px-2.5 py-2 rounded-lg text-xs font-semibold bg-violet-900/20 text-violet-400 hover:bg-violet-900/30 transition-colors flex items-center gap-1 flex-shrink-0">
+                        <FolderSearch size={12} /> Browse
+                      </button>
+                    </div>
                     <p className="text-[10px] text-zinc-600">
                       Shapes song structure/phrasing via the 5Hz planner — pairs with the DiT adapter above (same trigger word).
                       Strength comes from the global Adapters menu, like the DiT adapter scale.
@@ -293,13 +310,25 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
         open={browserOpen}
         onClose={() => setBrowserOpen(false)}
         onSelect={(path) => {
-          if (browserTarget === 'adapter') setForm(p => ({ ...p, adapter_path: path }));
-          else setForm(p => ({ ...p, reference_track_path: path }));
+          if (browserTarget === 'adapter') {
+            setForm(p => ({ ...p, adapter_path: path }));
+          } else if (browserTarget === 'lmAdapter') {
+            // The planner loader wants the PEFT directory; picking the weights
+            // file inside it is the natural browse gesture, so normalise.
+            const dir = /adapter_model\.safetensors$/i.test(path)
+              ? path.replace(/[\\/]adapter_model\.safetensors$/i, '')
+              : path;
+            setForm(p => ({ ...p, lm_adapter_path: dir }));
+          } else {
+            setForm(p => ({ ...p, reference_track_path: path }));
+          }
           setBrowserOpen(false);
         }}
         mode="file"
         filter={browserTarget === 'reference' ? 'audio' : 'adapters'}
-        title={browserTarget === 'reference' ? 'Select Reference Audio' : 'Select Adapter File'}
+        title={browserTarget === 'reference' ? 'Select Reference Audio'
+          : browserTarget === 'lmAdapter' ? 'Select Planner Adapter'
+          : 'Select Adapter File'}
       />
     </>
   );

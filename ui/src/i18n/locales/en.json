@@ -1056,7 +1056,7 @@
     "lyric.llmModels": "LLM Models",
     "lyric.editSystemPrompts": "Edit System Prompts",
     "lyric.albumPreset": "Album Preset",
-    "lyric.adapter": "Adapter (LoRA/LoKR)",
+    "lyric.adapter": "Diffusion Adapter (DiT)",
     "lyric.adapterPath": "Adapter Path",
     "lyric.groupScales": "Group Scales",
     "lyric.referenceTrack": "Reference Track",
