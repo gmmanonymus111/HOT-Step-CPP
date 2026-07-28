@@ -1796,7 +1796,7 @@
       "scale": null,
       "variant": "stablestep",
       "quant": "F32",
-      "sizeBytes": 267433440,
+      "sizeBytes": 267433600,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "StableStep vocal split: vocal-target BS-Roformer-Leap Xe. Runs on the native GGML engine (no ONNX Runtime). Paired with the instrumental model so both stems are direct model outputs rather than mix-minus residuals.",
       "tags": []
@@ -1810,7 +1810,7 @@
       "scale": null,
       "variant": "stablestep",
       "quant": "F32",
-      "sizeBytes": 267433440,
+      "sizeBytes": 267433600,
       "repo": "scragnog/HOT-Step-CPP-SuperSep",
       "description": "StableStep instrumental split: instrumental-target BS-Roformer-Leap Xe. Its output is what feeds the SA3 refine. Runs on the native GGML engine (no ONNX Runtime).",
       "tags": []
