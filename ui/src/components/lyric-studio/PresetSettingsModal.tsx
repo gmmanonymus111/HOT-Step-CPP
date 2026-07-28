@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, Save, Loader2, ChevronDown, ChevronRight, Zap, Music, FolderSearch, Brain } from 'lucide-react';
 import { lireekApi } from '../../services/lireekApi';
-import { adapterApi } from '../../services/api';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
 
 interface PresetForm {
@@ -33,6 +32,11 @@ interface PresetSettingsModalProps {
   showToast: (msg: string) => void;
 }
 
+/** The weights file is always adapter_model.safetensors, so a pasted or
+ *  browsed file path normalises to its folder — the only part that matters. */
+const stripWeightsFile = (p: string): string =>
+  p.replace(/[\\/]adapter_model\.safetensors$/i, '');
+
 // Simple inline slider
 const Slider: React.FC<{
   label: string; value: number; min: number; max: number; step: number;
@@ -61,17 +65,6 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
   const [groupsExpanded, setGroupsExpanded] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserTarget, setBrowserTarget] = useState<'adapter' | 'lmAdapter' | 'reference'>('adapter');
-  // Planner-LM adapters: the registry dropdown is the quick pick, and the
-  // path + Browse row below it (same UI as the DiT adapter) reaches anything
-  // the scan didn't — per-run subfolders, other drives, other size roots.
-  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; lmSize?: string; run?: string }[]>([]);
-  useEffect(() => {
-    if (!isOpen) return;
-    // Same scan folder the global Adapters menu uses (persisted store value)
-    let folder = '';
-    try { folder = JSON.parse(localStorage.getItem('hs-lmAdapterFolder') || '""') || ''; } catch { /* default */ }
-    adapterApi.lmList(folder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
-  }, [isOpen]);
 
   // Load existing preset
   useEffect(() => {
@@ -101,10 +94,11 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
     setSaving(true);
     try {
       await lireekApi.upsertPreset(lyricsSetId, {
-        adapter_path: form.adapter_path || undefined,
+        // Normalise typed/pasted file paths to their folder on the way out too.
+        adapter_path: stripWeightsFile(form.adapter_path) || undefined,
         adapter_group_scales: { self_attn: form.self_attn, cross_attn: form.cross_attn, mlp: form.mlp, cond_embed: form.cond_embed },
         reference_track_path: form.reference_track_path || undefined,
-        lm_adapter_path: form.lm_adapter_path || undefined,
+        lm_adapter_path: stripWeightsFile(form.lm_adapter_path) || undefined,
       });
       showToast('Preset saved');
       onClose();
@@ -131,7 +125,11 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const adapterFileName = form.adapter_path ? form.adapter_path.split(/[\\/]/).pop() || '' : '';
+  // Last two path segments — for a per-run folder that reads "artist/stamp",
+  // which is the part a human recognises.
+  const adapterFileName = form.adapter_path
+    ? form.adapter_path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')
+    : '';
   const matchFileName = form.reference_track_path ? form.reference_track_path.split(/[\\/]/).pop() || '' : '';
 
   return (
@@ -165,11 +163,11 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                     {t('lyric.adapter')}
                   </div>
                   <div className="space-y-2">
-                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Path</label>
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Folder</label>
                     <div className="flex gap-2">
                       <input type="text" value={form.adapter_path}
                         onChange={e => setForm(p => ({ ...p, adapter_path: e.target.value }))}
-                        placeholder="Path to .safetensors file or adapter folder"
+                        placeholder="Folder containing adapter_model.safetensors"
                         className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-pink-500 transition-colors"
                       />
                       <button onClick={() => { setBrowserTarget('adapter'); setBrowserOpen(true); }}
@@ -213,30 +211,11 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
                     Planner Adapter (LM)
                   </div>
                   <div className="space-y-2">
-                    <select
-                      value={form.lm_adapter_path}
-                      onChange={e => setForm(p => ({ ...p, lm_adapter_path: e.target.value }))}
-                      className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500 transition-colors cursor-pointer"
-                    >
-                      <option value="">None (base planner)</option>
-                      {/* Preset paths from outside the scanned folder stay selectable —
-                          the engine loads by path, so this is informational, not an error */}
-                      {form.lm_adapter_path && !lmAdapters.some(a => a.path === form.lm_adapter_path) && (
-                        <option value={form.lm_adapter_path}>{form.lm_adapter_path.split(/[\\/]/).pop()} (outside scan folder)</option>
-                      )}
-                      {lmAdapters.map(a => (
-                        <option key={a.path} value={a.path}>
-                          {[a.name, a.lmSize, a.run].filter(Boolean).join(' · ')}
-                        </option>
-                      ))}
-                    </select>
-                    {/* Same path + Browse row the DiT adapter has — reaches
-                        per-run subfolders and anything outside the scan. */}
-                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Path</label>
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Adapter Folder</label>
                     <div className="flex gap-2">
                       <input type="text" value={form.lm_adapter_path}
                         onChange={e => setForm(p => ({ ...p, lm_adapter_path: e.target.value }))}
-                        placeholder="Path to adapter folder or adapter_model.safetensors"
+                        placeholder="Folder containing adapter_model.safetensors — empty = base planner"
                         className="flex-1 bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-violet-500 transition-colors"
                       />
                       <button onClick={() => { setBrowserTarget('lmAdapter'); setBrowserOpen(true); }}
@@ -310,25 +289,18 @@ export const PresetSettingsModal: React.FC<PresetSettingsModalProps> = ({
         open={browserOpen}
         onClose={() => setBrowserOpen(false)}
         onSelect={(path) => {
-          if (browserTarget === 'adapter') {
-            setForm(p => ({ ...p, adapter_path: path }));
-          } else if (browserTarget === 'lmAdapter') {
-            // The planner loader wants the PEFT directory; picking the weights
-            // file inside it is the natural browse gesture, so normalise.
-            const dir = /adapter_model\.safetensors$/i.test(path)
-              ? path.replace(/[\\/]adapter_model\.safetensors$/i, '')
-              : path;
-            setForm(p => ({ ...p, lm_adapter_path: dir }));
-          } else {
-            setForm(p => ({ ...p, reference_track_path: path }));
-          }
+          // Both adapter targets take the FOLDER — the weights file inside is
+          // always adapter_model.safetensors, so the filename carries nothing.
+          if (browserTarget === 'adapter') setForm(p => ({ ...p, adapter_path: stripWeightsFile(path) }));
+          else if (browserTarget === 'lmAdapter') setForm(p => ({ ...p, lm_adapter_path: stripWeightsFile(path) }));
+          else setForm(p => ({ ...p, reference_track_path: path }));
           setBrowserOpen(false);
         }}
-        mode="file"
+        mode={browserTarget === 'reference' ? 'file' : 'folder'}
         filter={browserTarget === 'reference' ? 'audio' : 'adapters'}
         title={browserTarget === 'reference' ? 'Select Reference Audio'
-          : browserTarget === 'lmAdapter' ? 'Select Planner Adapter'
-          : 'Select Adapter File'}
+          : browserTarget === 'lmAdapter' ? 'Select Planner Adapter Folder'
+          : 'Select Adapter Folder'}
       />
     </>
   );
