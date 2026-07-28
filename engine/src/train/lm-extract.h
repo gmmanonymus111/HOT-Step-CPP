@@ -4,7 +4,7 @@
 // preprocess variant dir (per-song safetensors with `target_latents [T,64] F32`
 // @25 Hz + a full __metadata__ block)  ->  5 Hz FSQ codes  ->  lm_codes.jsonl.
 //
-// Zero audio decode, zero VAE work: `tok_ggml_encode` consumes exactly the
+// Zero audio decode, zero VAE work: `lm_tok_encode_ref` consumes exactly the
 // tensor preprocess already wrote (L13), and every prompt field the trainer
 // needs is already in that file's __metadata__ (L14).
 //
@@ -18,6 +18,7 @@
 #include "gguf-weights.h"
 #include "silence-latent.h"
 #include "train/lm-common.h"
+#include "train/lm-fsq.h"  // reference-conformant quantizer (NOT the inference one)
 #include "version.h"
 
 #include <cstdio>
@@ -406,7 +407,10 @@ static bool lm_extract_run(const LmExtractOpts & o, std::string * err) {
 
         LmCodeRow row;
         row.codes.assign((size_t) ((T + 4) / 5), 0);
-        const int n = tok_ggml_encode(&tok, lat.data(), T, row.codes.data(), silence.data());
+        // lm_tok_encode_ref, NOT tok_ggml_encode: same tokenizer forward, but the
+        // float -> level step follows vector_quantize_pytorch's actual
+        // ResidualFSQ(preserve_symmetry, bound_hard_clamp) path (train/lm-fsq.h).
+        const int n = lm_tok_encode_ref(&tok, lat.data(), T, row.codes.data(), silence.data());
         if (n <= 0 || n != (int) row.codes.size()) {
             failed++;
             jl("{\"type\":\"extract_fail\",\"index\":%d,\"id\":\"%s\",\"file\":\"%s\",\"error\":\"%s\"}", i,

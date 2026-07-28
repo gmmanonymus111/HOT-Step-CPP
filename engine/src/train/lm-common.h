@@ -258,7 +258,14 @@ static std::string sha1_16(const std::string & s) {
     return lm_sha1_hex(&c).substr(0, 16);
 }
 
-// _tok = sha1(dit_path + "\0" + size + "\0" + mtime_ms)[0:16]   (§2.3)
+// Bump whenever the extract stage's float -> code mapping changes: it is folded
+// into `_tok`, so every cached lm_codes.jsonl row is invalidated and re-encoded.
+//   v1 — fsq-tok.h::fsq_encode_index (old vqp symmetry-preserving bound)
+//   v2 — train/lm-fsq.h::fsq_encode_index_ref (vqp >= 1.27.21 ResidualFSQ:
+//        soft clamp + hard clamp), 100% match vs the PyTorch reference
+#define LM_FSQ_ENCODER_VERSION "fsq-v2"
+
+// _tok = sha1(dit_path + "\0" + size + "\0" + mtime_ms + "\0" + encoder)[0:16]  (§2.3)
 static std::string lm_tok_identity(const std::string & dit_path) {
     long long bytes = 0, mtime = 0;
     pm_stat_file(dit_path, &bytes, &mtime);
@@ -270,6 +277,8 @@ static std::string lm_tok_identity(const std::string & dit_path) {
     s.push_back('\0');
     snprintf(b, sizeof(b), "%lld", mtime);
     s += b;
+    s.push_back('\0');
+    s += LM_FSQ_ENCODER_VERSION;
     return sha1_16(s);
 }
 
