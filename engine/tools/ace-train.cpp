@@ -8,6 +8,7 @@
 // docs/plans/2026-07-27-preprocess-implementation.md §3.1
 
 #include "model-registry.h"
+#include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
 #include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
 #include "train/preprocess-run.h"  // pulls in st-write.h + preprocess-io.h
 #include "train/spike-run.h"       // Phase-0 training spike (evidence code)
@@ -101,6 +102,7 @@ static void print_usage(void) {
             "Subcommands:\n"
             "  preprocess    Build per-song tensor caches from a dataset.\n"
             "  train-lm      Train a planner-LM LoRA from a preprocessed tensor cache.\n"
+            "  train-dit     Train a DiT LoRA from a preprocessed tensor cache.\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -180,6 +182,66 @@ static void print_usage(void) {
             "    --milestone-keep <n>        6\n"
             "    --no-milestones\n"
             "    --overwrite                 off         re-extract every song / overwrite <out>\n"
+            "    --limit <n>                 0           debug: first n songs only\n"
+            "    --self-test                 off         run the correctness gates and exit\n"
+            "    --jsonl                     off         machine-readable JSONL on stdout\n"
+            "    -h, --help\n"
+            "\n"
+            "ace-train train-dit  (all paths absolute; long options only; \"--flag value\" form)\n"
+            "\n"
+            "  Stages (default: train,export):\n"
+            "    --stages <csv>              subset of train,export in that order\n"
+            "\n"
+            "  Input / output:\n"
+            "    --tensors <dir>             preprocess variant dir (required)\n"
+            "    --out <dir>                 adapter output dir (required)\n"
+            "    --models <dir>              root scanned by registry_scan() for name lookups\n"
+            "    --dit <name|path>           base DiT GGUF (default: dit_path from\n"
+            "                                <tensors>/preprocess_meta.json — must match the\n"
+            "                                variant the latents were made against)\n"
+            "\n"
+            "  Adapter:\n"
+            "    --adapter-type <lora>       lora            (lokr reserved, D22 — rejected in v1)\n"
+            "    --rank <n>                  16\n"
+            "    --alpha <n>                 32\n"
+            "    --target-mlp                off             also LoRA mlp gate/up/down\n"
+            "    --layers <n>                0               0 = auto; else train the top n layers\n"
+            "\n"
+            "  Objective (design 4.5):\n"
+            "    --loss-weighting <none|flow_snr>   flow_snr\n"
+            "    --snr-gamma <f>             5.0\n"
+            "    --t-bias <f>                0.5\n"
+            "    --channel-balance / --no-channel-balance    default ON\n"
+            "    --timestep-mu <f>           -0.4\n"
+            "    --timestep-sigma <f>        1.0\n"
+            "    --t-min <f>                 0.0             interval-expert window (rejection resample)\n"
+            "    --t-max <f>                 1.0\n"
+            "    --cfg-ratio <f>             0.15\n"
+            "    --genre-ratio <n>           0               percent, 0-100\n"
+            "\n"
+            "  Optimizer / schedule:\n"
+            "    --lr <f>                    5e-4\n"
+            "    --epochs <n>                100         hard cap; target-loss usually stops earlier\n"
+            "    --grad-accum <n>            4\n"
+            "    --warmup-ratio <f>          0.05\n"
+            "    --grad-clip <f>             1.0         0 = disabled\n"
+            "    --weight-decay <f>          0.01\n"
+            "    --seed <n>                  42\n"
+            "    --target-loss <f>           0.4         0 = disabled (run to the epoch cap)\n"
+            "    --order <shuffle|fixed>     shuffle\n"
+            "\n"
+            "  Crop / memory:\n"
+            "    --crop <n>                  0           latent frames; 0 = auto-fit\n"
+            "    --crop-min <n>              375\n"
+            "    --crop-max <n>              1250\n"
+            "    --vram-reserve-mb <n>       2048        desktop/OS headroom left unallocated\n"
+            "    --vram-safety <f>           0.05        extra margin on the footprint model\n"
+            "\n"
+            "  Run management:\n"
+            "    --milestone-step <f>        0.1         0 = disabled\n"
+            "    --milestone-keep <n>        6\n"
+            "    --no-milestones\n"
+            "    --overwrite                 off\n"
             "    --limit <n>                 0           debug: first n songs only\n"
             "    --self-test                 off         run the correctness gates and exit\n"
             "    --jsonl                     off         machine-readable JSONL on stdout\n"
@@ -831,6 +893,140 @@ static int cmd_train_lm(int argc, char ** argv) {
     return lm_train_main(a);
 }
 
+// ─── train-dit (plan §2.1) ──────────────────────────────────────────────────
+
+static int cmd_train_dit(int argc, char ** argv) {
+    DitTrainArgs a;
+    std::string  stages_csv, dit_arg;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--stages") && i + 1 < argc) stages_csv = argv[++i];
+        else if (!strcmp(argv[i], "--tensors") && i + 1 < argc) a.tensors_dir = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) a.out_dir = argv[++i];
+        else if (!strcmp(argv[i], "--models") && i + 1 < argc) a.models_dir = argv[++i];
+        else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
+        else if (!strcmp(argv[i], "--loss-weighting") && i + 1 < argc) a.loss_weighting = argv[++i];
+        else if (!strcmp(argv[i], "--snr-gamma") && i + 1 < argc) a.snr_gamma = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--t-bias") && i + 1 < argc) a.t_bias = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--channel-balance")) a.channel_balance = true;
+        else if (!strcmp(argv[i], "--no-channel-balance")) a.channel_balance = false;
+        else if (!strcmp(argv[i], "--timestep-mu") && i + 1 < argc) a.timestep_mu = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--timestep-sigma") && i + 1 < argc) a.timestep_sigma = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--t-min") && i + 1 < argc) a.t_min = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--t-max") && i + 1 < argc) a.t_max = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--cfg-ratio") && i + 1 < argc) a.cfg_ratio = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--genre-ratio") && i + 1 < argc) a.genre_ratio = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lr") && i + 1 < argc) a.lr = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--epochs") && i + 1 < argc) a.epochs = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-accum") && i + 1 < argc) a.grad_accum = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--warmup-ratio") && i + 1 < argc) a.warmup_ratio = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-clip") && i + 1 < argc) a.grad_clip = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--weight-decay") && i + 1 < argc) a.weight_decay = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--target-loss") && i + 1 < argc) a.target_loss = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--order") && i + 1 < argc) a.order = argv[++i];
+        else if (!strcmp(argv[i], "--crop") && i + 1 < argc) a.crop = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--crop-min") && i + 1 < argc) a.crop_min = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--crop-max") && i + 1 < argc) a.crop_max = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) a.vram_safety = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--milestone-keep") && i + 1 < argc) a.milestone_keep = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-milestones")) a.milestone_step = 0.0f;
+        else if (!strcmp(argv[i], "--limit") && i + 1 < argc) a.limit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--overwrite")) a.overwrite = true;
+        else if (!strcmp(argv[i], "--self-test")) a.self_test = true;
+        else if (!strcmp(argv[i], "--jsonl")) g_jsonl = true;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else {
+            fprintf(stderr, "ace-train train-dit: unknown option '%s'\n", argv[i]);
+            print_usage();
+            return 2;
+        }
+    }
+
+    // ── stages ──────────────────────────────────────────────────────────
+    if (!stages_csv.empty()) {
+        const bool want_tr = stages_csv.find("train") != std::string::npos;
+        const bool want_xp = stages_csv.find("export") != std::string::npos;
+        a.stages.clear();
+        if (want_tr) a.stages.push_back("train");
+        if (want_xp) a.stages.push_back("export");
+        if (a.stages.empty()) {
+            fprintf(stderr, "ace-train train-dit: --stages must name at least one of train,export\n");
+            return 2;
+        }
+    }
+
+    // ── numeric sanity (the server clamps these too; be defensive) ───────
+    if (a.rank < 1 || a.rank > 256 || a.alpha < 1 || a.alpha > 1024 || a.epochs < 1 || a.epochs > 2000 ||
+        a.grad_accum < 1 || a.grad_accum > 64 || a.lr <= 0.0f || a.lr > 1.0f || a.grad_clip < 0.0f ||
+        a.grad_clip > 100.0f || a.warmup_ratio < 0.0f || a.warmup_ratio > 0.5f || a.weight_decay < 0.0f ||
+        a.weight_decay > 1.0f || a.target_loss < 0.0f || a.target_loss > 20.0f || a.milestone_keep < 0 ||
+        a.milestone_keep > 64 || a.milestone_step < 0.0f || a.milestone_step > 5.0f || a.vram_reserve_mb < 0 ||
+        a.vram_reserve_mb > 16384 || a.vram_safety < 0.0f || a.vram_safety >= 1.0f || a.layers < 0 || a.layers > 64 ||
+        (a.crop != 0 && (a.crop < 128 || a.crop > 8192)) || a.crop_min < 128 || a.crop_min > 8192 ||
+        a.crop_max < a.crop_min || a.crop_max > 8192 || a.snr_gamma < 1.0f || a.snr_gamma > 100.0f ||
+        a.t_bias < 0.0f || a.t_bias > 4.0f || a.timestep_mu < -4.0f || a.timestep_mu > 4.0f ||
+        a.timestep_sigma <= 0.0f || a.timestep_sigma > 4.0f || a.t_min < 0.0f || a.t_max > 1.0f ||
+        a.t_min >= a.t_max || a.cfg_ratio < 0.0f || a.cfg_ratio > 1.0f || a.genre_ratio < 0 || a.genre_ratio > 100) {
+        fprintf(stderr, "ace-train train-dit: numeric option out of range\n");
+        return 2;
+    }
+    if (a.order != "shuffle" && a.order != "fixed") {
+        fprintf(stderr, "ace-train train-dit: --order must be shuffle|fixed\n");
+        return 2;
+    }
+    if (a.loss_weighting != "none" && a.loss_weighting != "flow_snr") {
+        fprintf(stderr, "ace-train train-dit: --loss-weighting must be none|flow_snr\n");
+        return 2;
+    }
+
+    // ── required arguments ──────────────────────────────────────────────
+    if (a.tensors_dir.empty()) {
+        fprintf(stderr, "ace-train train-dit: --tensors is required\n");
+        return 2;
+    }
+    if (!a.self_test && a.out_dir.empty()) {
+        fprintf(stderr, "ace-train train-dit: --out is required\n");
+        return 2;
+    }
+
+    // ── model resolution (same rule as preprocess/train-lm) ─────────────
+    // The DiT used for training MUST be the one the latents were preprocessed
+    // against — the encoder states and context latents are that model's outputs.
+    if (dit_arg.empty()) {
+        dit_arg = dit_meta_dit_path(a.tensors_dir.c_str());
+        if (dit_arg.empty()) {
+            fprintf(stderr, "ace-train train-dit: no --dit and no dit_path in %s/preprocess_meta.json\n",
+                    a.tensors_dir.c_str());
+            return 2;
+        }
+    }
+    {
+        ModelRegistry reg;
+        if (!a.models_dir.empty()) {
+            registry_scan(&reg, a.models_dir.c_str());
+        }
+        std::string name;
+        if (!resolve_model(dit_arg, reg.dit, false, a.dit_path, name)) {
+            fprintf(stderr, "ace-train train-dit: cannot resolve --dit '%s' in %s\n", dit_arg.c_str(),
+                    a.models_dir.c_str());
+            return 2;
+        }
+        a.dit_name = name;
+    }
+
+    // MANDATORY: ggml_time_ms() divides by an uninitialised frequency otherwise.
+    ggml_time_init();
+    return dit_train_main(a);
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char ** argv) {
@@ -847,6 +1043,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "train-lm")) {
         return cmd_train_lm(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "train-dit")) {
+        return cmd_train_dit(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);

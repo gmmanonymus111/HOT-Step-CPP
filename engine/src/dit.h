@@ -37,6 +37,11 @@
 // Config (populated from GGUF metadata or config.json by dit_ggml_load)
 // DiTGGMLConfig is defined in config-json.h
 
+// HOT-Step: force unfused q/k/v/o and gate/up loading without an adapter.
+// The training graph needs individually addressable, PEFT-shaped projections.
+// Mirrors the g_qwen3_load_no_fuse precedent (qwen3-lora.h:44).
+inline bool g_dit_load_no_fuse = false;
+
 // Layer weights
 struct DiTGGMLTembWeights {
     struct ggml_tensor * linear_1_w;   // [256, hidden]
@@ -549,7 +554,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         // HOT-Step: Runtime LoRA and merge_hq need individual projections (no fusion)
         // Runtime: deltas are applied per-projection in the compute graph
         // Merge HQ: projections are promoted to F32, incompatible with fused BF16 tensors
-        bool skip_fusion = (adapter_path &&
+        bool skip_fusion = g_dit_load_no_fuse || (adapter_path &&
             (g_hotstep_params.adapter_mode == "runtime" ||
              g_hotstep_params.adapter_mode == "runtime_lowrank" ||
              g_hotstep_params.adapter_mode == "merge"));

@@ -1112,3 +1112,22 @@ export function startTrainLmJob(datasetId: string, opts: unknown): TrainingJob {
   });
   return job;
 }
+
+/**
+ * DiT LoRA training (Training Studio phase 4) — spawns ace-train, which owns
+ * the whole card for the run (a ~15 GB F32 weight mirror plus the activation
+ * arena). Same lazy import as train-lm: trainDitRunner imports
+ * emitProgress/finishJob/isCancelled/killJobChild from this module, and a
+ * top-level import both ways is a cycle.
+ *
+ * `sampleIds` is empty — the run's inputs are the preprocess variant's tensor
+ * files, not dataset rows, so there is no per-sample row state to mark.
+ */
+export function startTrainDitJob(datasetId: string, opts: unknown): TrainingJob {
+  const job = createJob('train-dit', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runTrainDitJob } = await import('./trainDitRunner.js');
+    await runTrainDitJob(j);
+  });
+  return job;
+}

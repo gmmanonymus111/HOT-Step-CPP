@@ -38,6 +38,8 @@
 //   DELETE /datasets/:id/preprocess/:variantKey         — delete one cache variant
 //   POST   /datasets/:id/train-lm                       — start an LM LoRA training job
 //   GET    /datasets/:id/train-lm                       — LM adapter / codes status
+//   POST   /datasets/:id/train-dit                      — start a DiT LoRA training job
+//   GET    /datasets/:id/train-dit                      — DiT adapter / variant status
 
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
@@ -63,20 +65,23 @@ import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services
 import * as queue from '../services/training/labelingQueue.js';
 import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import {
-  aceTrainExe, getModelSnapshot, pickBf16, pickLmFor, refreshModelSnapshot,
+  aceTrainExe, getModelSnapshot, pickBf16, pickDitBaseFor, pickLmFor, refreshModelSnapshot,
   tensorsDir, tensorsRoot, variantKeyFor,
-  type ResolvedPreprocessOptions, type ResolvedTrainLmOptions,
+  type ResolvedPreprocessOptions, type ResolvedTrainDitOptions, type ResolvedTrainLmOptions,
 } from '../services/training/aceTrain.js';
 import { countPreprocessedVariants, readPreprocessStatus } from '../services/training/preprocessStatus.js';
 import {
   adapterDirFor, adapterLmRoot, newestVariantKey, readTrainLmStatus,
   safeAdapterName, variantDitModel, variantExists,
 } from '../services/training/trainLmStatus.js';
+import {
+  adapterDitDirFor, adapterDitRoot, readTrainDitStatus,
+} from '../services/training/trainDitStatus.js';
 import type {
   BulkSetInput, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, LmSize,
   PatchSampleInput, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetDetail, TrainingDatasetRow, TrainingSample,
-  TrainLmOptions, TrainLmStage,
+  TrainDitOptions, TrainDitStage, TrainLmOptions, TrainLmStage,
 } from '../services/training/types.js';
 
 const router = Router();
@@ -224,6 +229,9 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       available: false, lmModels: [], sizes: ['0.6B', '1.7B'],
       defaultLmBySize: { '0.6B': '', '1.7B': '' }, adaptersRoot: '',
     },
+    trainDit: {
+      available: false, adapterTypes: ['lora'], adaptersRoot: '', minVramMb: 16384,
+    },
   };
 
   try { caps.engine.up = await aceClient.isReachable(); } catch { /* stays false */ }
@@ -288,6 +296,14 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       '1.7B': pickLmFor('1.7B', snap.lm),
     };
   } catch { /* stays empty */ }
+
+  // ── DiT trainer (phase 4). No model list: the base is forced to the one the
+  // chosen preprocess variant was made against (§4.2 base-match guard), so
+  // there is nothing for the UI to pick. `minVramMb` is ADVISORY — the real
+  // gate is ace-train's own footprint solve, which can only run once the base
+  // is loaded and the engine is already down (§4.5).
+  try { caps.trainDit.available = !!aceTrainExe(); } catch { /* stays false */ }
+  try { caps.trainDit.adaptersRoot = adapterDitRoot(); } catch { /* stays '' */ }
 
   res.json(caps);
 });
@@ -1461,6 +1477,267 @@ router.get('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }));
   } catch (err: any) {
     console.error(`[Training] train-lm status failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DiT LoRA training (§2.7, phase 4) ────────────────────────────────────
+
+const TRAIN_DIT_STAGES: readonly TrainDitStage[] = ['train', 'export'];
+
+router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
+  try {
+    // ── 1. dataset / job / binary ────────────────────────────────────────
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    if (queue.activeJobForDataset(ds.id)) {
+      res.status(409).json({ error: 'A job is already running for this dataset' });
+      return;
+    }
+    if (!aceTrainExe()) {
+      res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
+      return;
+    }
+    // ── 2. built ─────────────────────────────────────────────────────────
+    if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
+      res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
+      return;
+    }
+
+    const body = (req.body || {}) as TrainDitOptions;
+
+    // ── 3. variant ───────────────────────────────────────────────────────
+    // isSafeVariantKey (inside variantExists) rejects any key that is not a
+    // single directory name: without it `../../otherslug/…` escapes the tensors
+    // root and ace-train would read an arbitrary directory. Same §7.8 rule the
+    // preprocess and train-lm routes apply.
+    const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
+    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+      res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
+      return;
+    }
+    const variantKey = requestedVariant || newestVariantKey(ds.slug);
+    if (!variantKey) {
+      res.status(400).json({ error: 'Dataset has no preprocessed tensors — run Preprocess first' });
+      return;
+    }
+    // Belt and braces: the key is already segment-validated above, but this is
+    // the path a spawned process reads, so assert containment too.
+    const tensorsPath = path.join(tensorsRoot(ds.slug), variantKey);
+    if (!isInside(tensorsRoot(ds.slug), tensorsPath)) {
+      res.status(400).json({ error: `Unknown preprocess variant: ${variantKey}` });
+      return;
+    }
+
+    // ── 4. adapter type ──────────────────────────────────────────────────
+    // Refused HERE rather than by the engine (which answers `fatal
+    // reason=unsupported-adapter`, exit 1): the engine's refusal arrives only
+    // after the runner has already stopped the app's engine, so a typo would
+    // cost a full stop/restart cycle.
+    if (body.adapterType !== undefined && body.adapterType !== 'lora') {
+      res.status(400).json({ error: 'LoKR training is not available yet — use LoRA' });
+      return;
+    }
+
+    // ── 5. base model ────────────────────────────────────────────────────
+    // NEVER from user input: the cached encoder states and context latents are
+    // this exact model's outputs, so training against another base is silently
+    // wrong (§4.2 base-match guard).
+    const ditModel = variantDitModel(ds.slug, variantKey);
+    const ditPath = pickDitBaseFor(variantKey, tensorsPath);
+    if (!ditPath) {
+      res.status(400).json({
+        error: 'This preprocess variant was made against a base that is no longer installed',
+      });
+      return;
+    }
+
+    // ── 6. adapter name / dir ────────────────────────────────────────────
+    const adapterName = (typeof body.adapterName === 'string' ? body.adapterName.trim() : '') || ds.slug;
+    // The regex alone accepts '.', '..', '.hidden' — all of which
+    // safeAdapterName() silently REWRITES, so the returned/logged adapterName
+    // would name a directory that does not exist and two distinct requests would
+    // write the same dir. Reject anything the sanitiser would have to change.
+    if (!ADAPTER_NAME_RE.test(adapterName) || safeAdapterName(adapterName) !== adapterName) {
+      res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
+      return;
+    }
+    const adaptersRoot = adapterDitRoot();
+    const adapterDir = adapterDitDirFor(adapterName);
+    // Containment, same rule the preprocess outputDir uses (§7.8): this path is
+    // mkdir'd and written into by a spawned process. The root itself is refused
+    // — a run writing adapter_model.safetensors into the adapters root would
+    // put a nameless adapter in every user's dropdown.
+    // ...and so is the LM adapter root: adapterDitDirFor('lm') resolves to exactly
+    // adapterLmRoot(), so a dataset slugged 'lm' would drop a DiT PEFT dir into
+    // <adapters>/lm, where GET /adapters/lm lists its bare .safetensors as a
+    // planner-LM adapter and POST /scan lists the directory itself as a top-level one.
+    if (
+      !isInside(adaptersRoot, adapterDir) ||
+      path.resolve(adaptersRoot) === path.resolve(adapterDir) ||
+      path.resolve(adapterLmRoot()) === path.resolve(adapterDir)
+    ) {
+      res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
+      return;
+    }
+
+    // ── 7. numeric clamps (§4.5 step 7) ──────────────────────────────────
+    const epochs = numOpt(body.epochs, 100);
+    const targetLoss = numOpt(body.targetLoss, 0.4);
+    const rank = numOpt(body.rank, 16);
+    const alpha = numOpt(body.alpha, 32);
+    const layers = numOpt(body.layers, 0);
+    const crop = numOpt(body.crop, 0);
+    const cropMin = numOpt(body.cropMin, 375);
+    const cropMax = numOpt(body.cropMax, 1250);
+    const learningRate = numOpt(body.learningRate, 0.0005);
+    const gradAccum = numOpt(body.gradAccum, 4);
+    const gradClip = numOpt(body.gradClip, 1.0);
+    const warmupRatio = numOpt(body.warmupRatio, 0.05);
+    const weightDecay = numOpt(body.weightDecay, 0.01);
+    const snrGamma = numOpt(body.snrGamma, 5);
+    const tBias = numOpt(body.tBias, 0.5);
+    const timestepMu = numOpt(body.timestepMu, -0.4);
+    const timestepSigma = numOpt(body.timestepSigma, 1.0);
+    const tMin = numOpt(body.tMin, 0);
+    const tMax = numOpt(body.tMax, 1);
+    const cfgRatio = numOpt(body.cfgRatio, 0.15);
+    const genreRatio = numOpt(body.genreRatio, 0);
+    const seed = numOpt(body.seed, 42);
+    const milestoneStep = numOpt(body.milestoneStep, 0.1);
+    const milestoneKeep = numOpt(body.milestoneKeep, 6);
+    const vramReserveMb = numOpt(body.vramReserveMb, 2048);
+
+    const rangeFailure =
+      outOfRange('epochs', epochs, 1, 2000)
+      ?? outOfRange('targetLoss', targetLoss, 0, 20)
+      ?? outOfRange('rank', rank, 1, 256)
+      ?? outOfRange('alpha', alpha, 1, 1024)
+      ?? outOfRange('layers', layers, 0, 64)
+      ?? outOfRange('cropMin', cropMin, 128, 8192)
+      ?? outOfRange('cropMax', cropMax, 128, 8192)
+      ?? outOfRange('gradAccum', gradAccum, 1, 64)
+      ?? outOfRange('gradClip', gradClip, 0, 100)
+      ?? outOfRange('warmupRatio', warmupRatio, 0, 0.5)
+      ?? outOfRange('weightDecay', weightDecay, 0, 1)
+      ?? outOfRange('snrGamma', snrGamma, 1, 100)
+      ?? outOfRange('tBias', tBias, 0, 4)
+      ?? outOfRange('timestepMu', timestepMu, -4, 4)
+      ?? outOfRange('tMin', tMin, 0, 1)
+      ?? outOfRange('tMax', tMax, 0, 1)
+      ?? outOfRange('cfgRatio', cfgRatio, 0, 1)
+      ?? outOfRange('genreRatio', genreRatio, 0, 100)
+      ?? outOfRange('seed', seed, 0, 2 ** 31 - 1)
+      ?? outOfRange('milestoneStep', milestoneStep, 0, 5)
+      ?? outOfRange('milestoneKeep', milestoneKeep, 0, 64)
+      ?? outOfRange('vramReserveMb', vramReserveMb, 0, 16384);
+    if (rangeFailure) {
+      res.status(400).json({ error: rangeFailure });
+      return;
+    }
+    // 0 means "auto-fit from free VRAM" (D10); any explicit value must be usable.
+    if (crop !== 0 && (crop < 128 || crop > 8192)) {
+      res.status(400).json({ error: 'crop must be 0 or between 128 and 8192 frames' });
+      return;
+    }
+    if (cropMax < cropMin) {
+      res.status(400).json({ error: 'cropMax must be greater than or equal to cropMin' });
+      return;
+    }
+    if (!Number.isFinite(learningRate) || learningRate <= 0 || learningRate > 1) {
+      res.status(400).json({ error: 'learningRate must be greater than 0 and at most 1' });
+      return;
+    }
+    // Exclusive lower bound: sigma 0 makes the logit-normal timestep sampler
+    // degenerate to a single t, which trains one point of the schedule (D12).
+    if (!Number.isFinite(timestepSigma) || timestepSigma <= 0 || timestepSigma > 4) {
+      res.status(400).json({ error: 'timestepSigma must be greater than 0 and at most 4' });
+      return;
+    }
+    // An empty interval makes dit_sample_t's rejection loop exhaust its 64 tries
+    // on every micro-step and clamp — silently training one timestep.
+    if (tMin >= tMax) {
+      res.status(400).json({ error: 'tMin must be less than tMax' });
+      return;
+    }
+
+    // ── 8. stages ────────────────────────────────────────────────────────
+    const requestedStages = Array.isArray(body.stages) ? body.stages : [];
+    const stages = TRAIN_DIT_STAGES.filter(s => requestedStages.includes(s));
+    const resolvedStages: TrainDitStage[] = stages.length > 0 ? [...stages] : [...TRAIN_DIT_STAGES];
+
+    // ── 9. queue ─────────────────────────────────────────────────────────
+    // No VRAM gating here (§4.5): only ace-train knows the mirror size, and only
+    // after the base is loaded with the engine already stopped.
+    // capabilities.trainDit.minVramMb is advisory for the UI banner alone.
+    const opts: ResolvedTrainDitOptions = {
+      variantKey,
+      tensorsDir: tensorsPath,
+      ditModel,
+      ditPath,
+      adapterName,
+      adapterDir,
+      adapterType: 'lora',
+      rank: Math.trunc(rank),
+      alpha: Math.trunc(alpha),
+      targetMlp: body.targetMlp === true,
+      layers: Math.trunc(layers),
+      crop: Math.trunc(crop),
+      cropMin: Math.trunc(cropMin),
+      cropMax: Math.trunc(cropMax),
+      targetLoss,
+      epochs: Math.trunc(epochs),
+      learningRate,
+      gradAccum: Math.trunc(gradAccum),
+      gradClip,
+      warmupRatio,
+      weightDecay,
+      lossWeighting: body.lossWeighting === 'none' ? 'none' : 'flow_snr',
+      snrGamma,
+      tBias,
+      channelBalance: body.channelBalance !== false,
+      timestepMu,
+      timestepSigma,
+      tMin,
+      tMax,
+      cfgRatio,
+      genreRatio: Math.trunc(genreRatio),
+      seed: Math.trunc(seed),
+      order: body.order === 'fixed' ? 'fixed' : 'shuffle',
+      milestoneStep,
+      milestoneKeep: Math.trunc(milestoneKeep),
+      vramReserveMb: Math.trunc(vramReserveMb),
+      stages: resolvedStages,
+      overwrite: body.overwrite === true,
+      stopEngine: body.stopEngine !== false,
+    };
+
+    const job = queue.startTrainDitJob(ds.id, opts);
+    console.log(
+      `[Training] train-dit job ${job.id} queued — lora r${opts.rank}, variant ${variantKey} → ${adapterDir}`);
+    res.status(202).json({ jobId: job.id });
+  } catch (err: any) {
+    console.error(`[Training] train-dit start failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/datasets/:id/train-dit', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    res.json(readTrainDitStatus(ds, {
+      variantKey: typeof req.query.variantKey === 'string' ? req.query.variantKey : undefined,
+      adapterName: typeof req.query.adapterName === 'string' ? req.query.adapterName : undefined,
+    }));
+  } catch (err: any) {
+    console.error(`[Training] train-dit status failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

@@ -16,7 +16,8 @@ export type MergePolicy =
   | 'overwrite_all';
 
 export type TrainingJobKind =
-  | 'label' | 'enhance-genius' | 'enhance-caption' | 'build' | 'preprocess' | 'train-lm';
+  | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
+  | 'preprocess' | 'train-lm' | 'train-dit';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -112,6 +113,8 @@ export interface TrainingJobSummary {
                               // kind==='preprocess' adds: 'engine-stop' | 'loading-models'
                               //                          | 'preprocess' | 'stats' | 'engine-restart'
                               // kind==='train-lm'   adds: 'engine-stop' | 'loading-models' | 'extract'
+                              //                          | 'train' | 'export' | 'engine-restart'
+                              // kind==='train-dit'  adds: 'engine-stop' | 'loading-models'
                               //                          | 'train' | 'export' | 'engine-restart'
   engineQueueDepth: number;   // # of ace-server jobs ahead of ours; 0 if unknown
   error: string | null;
@@ -247,6 +250,90 @@ export interface TrainLmCapabilities {
   adaptersRoot: string;            // <adapters>/lm
 }
 
+// ── DiT training ─────────────────────────────────────────────────────────
+export type DitAdapterType = 'lora';                 // 'lokr' reserved (D22)
+export type TrainDitStage  = 'train' | 'export';
+
+export interface TrainDitOptions {
+  /** Which preprocess variant to train from. Omit = the newest variant. */
+  variantKey?: string;
+  /** Adapter directory name under <adapters>/. Omit = the dataset slug. */
+  adapterName?: string;
+  adapterType?: DitAdapterType;    // default 'lora'
+  rank?: number;                   // default 16
+  alpha?: number;                  // default 32
+  targetMlp?: boolean;             // default false
+  layers?: number;                 // default 0 = auto (top-K depth)
+  crop?: number;                   // default 0 = auto-fit
+  cropMin?: number;                // default 375
+  cropMax?: number;                // default 1250
+  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  epochs?: number;                 // default 100 (hard cap)
+  learningRate?: number;           // default 0.0005
+  gradAccum?: number;              // default 4
+  gradClip?: number;               // default 1.0;  0 disables
+  warmupRatio?: number;            // default 0.05
+  weightDecay?: number;            // default 0.01
+  lossWeighting?: 'none' | 'flow_snr';   // default 'flow_snr'
+  snrGamma?: number;               // default 5.0
+  tBias?: number;                  // default 0.5
+  channelBalance?: boolean;        // default true
+  timestepMu?: number;             // default -0.4
+  timestepSigma?: number;          // default 1.0
+  tMin?: number;                   // default 0
+  tMax?: number;                   // default 1
+  cfgRatio?: number;               // default 0.15
+  genreRatio?: number;             // default 0 (percent)
+  seed?: number;                   // default 42
+  order?: 'shuffle' | 'fixed';     // default 'shuffle'
+  milestoneStep?: number;          // default 0.1;  0 disables
+  milestoneKeep?: number;          // default 6
+  vramReserveMb?: number;          // default 2048
+  stages?: TrainDitStage[];        // default ['train','export']
+  overwrite?: boolean;             // default false
+  stopEngine?: boolean;            // default TRUE
+}
+
+/** Structurally identical to TrainLmEpoch so LossSparkline is reused unedited. */
+export interface TrainDitEpoch {
+  epoch: number;
+  loss: number;
+  lr: number;
+  gradNorm: number;
+  ms: number;
+}
+
+export interface TrainDitStatus {
+  variantKey: string;              // '' when the dataset has no preprocessed variant
+  tensorsDir: string;              // absolute, '' if none
+  ditModel: string;                // the variant's base, from preprocess_meta.json
+  sampleCount: number;             // usable cached songs in the variant
+  channelStats: boolean;           // channel_stats.json present
+  adapterName: string;
+  adapterDir: string;              // absolute; where the next run would write
+  adapterExists: boolean;          // adapter_model.safetensors present
+  adapterBytes: number;
+  trainedAt: string;               // ISO, '' if unknown
+  finalLoss: number;               // -1 if unknown
+  bestLoss: number;                // -1 if unknown
+  epochsRun: number;               // 0 if unknown
+  targetLoss: number;              // -1 if unknown
+  stoppedOnTarget: boolean;
+  crop: number;                    // 0 if unknown
+  layers: number;                  // 0 if unknown
+  partialDepth: boolean;
+  epochs: TrainDitEpoch[];         // [] if unknown
+  milestones: Array<{ loss: number; epoch: number; path: string }>;
+}
+
+export interface TrainDitCapabilities {
+  available: boolean;              // ace-train binary found
+  adapterTypes: DitAdapterType[];  // v1: ['lora']
+  adaptersRoot: string;            // <adapters>
+  /** Minimum total VRAM this build will accept, MB. v1: 16384 (D9). */
+  minVramMb: number;
+}
+
 // ── Capabilities ─────────────────────────────────────────────────────────
 export interface TrainingCapabilities {
   engine: {
@@ -278,6 +365,7 @@ export interface TrainingCapabilities {
     engineSuspended: boolean;// true while a preprocess job owns the GPU
   };
   trainLm: TrainLmCapabilities;
+  trainDit: TrainDitCapabilities;
 }
 
 // ── SSE stream ───────────────────────────────────────────────────────────
@@ -313,6 +401,13 @@ export interface TrainingMetricEvent {
   loraParams?: number;
   // milestone
   path?: string;
+  // train-dit additions (§2.6). Optional fields on the EXISTING interface —
+  // deliberately not a new union member, so every consumer keeps working.
+  crop?: number;      // latent frames in the active crop window
+  layers?: number;    // trained decoder-layer count (top-K)
+  t?: number;         // last micro-step timestep (telemetry)
+  ma5?: number;       // 5-epoch moving average (the target-loss quantity)
+  rawLoss?: number;   // unweighted MSE, for telemetry
 }
 
 export type TrainingStreamEvent =
@@ -568,6 +663,26 @@ export async function getTrainLmStatus(
   const qs = params.toString();
   return request<TrainLmStatus>(
     `/datasets/${encodeURIComponent(id)}/train-lm${qs ? `?${qs}` : ''}`,
+  );
+}
+
+export async function startTrainDit(id: string, opts: TrainDitOptions): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>(
+    `/datasets/${encodeURIComponent(id)}/train-dit`,
+    { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+export async function getTrainDitStatus(
+  id: string,
+  q?: { variantKey?: string; adapterName?: string },
+): Promise<TrainDitStatus> {
+  const params = new URLSearchParams();
+  if (q?.variantKey) params.set('variantKey', q.variantKey);
+  if (q?.adapterName) params.set('adapterName', q.adapterName);
+  const qs = params.toString();
+  return request<TrainDitStatus>(
+    `/datasets/${encodeURIComponent(id)}/train-dit${qs ? `?${qs}` : ''}`,
   );
 }
 

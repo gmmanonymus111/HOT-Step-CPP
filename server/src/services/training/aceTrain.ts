@@ -14,8 +14,8 @@ import { config } from '../../config.js';
 import { aceClient } from '../aceClient.js';
 import { slugify, trainingBaseDir } from './paths.js';
 import type {
-  LmSize, PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
-  TrainLmStage,
+  DitAdapterType, LmSize, PreprocessCompat, PreprocessDtype, PreprocessNormalize,
+  PreprocessOptions, TrainDitStage, TrainLmStage,
 } from './types.js';
 
 /** Model-file extensions stripped when deriving a variant key. */
@@ -250,6 +250,130 @@ export function buildTrainLmArgs(input: {
   ];
   // `--loss-on-cot` is the CLI default; only the negation needs emitting.
   if (!o.lossOnCot) args.push('--no-loss-on-cot');
+  if (o.overwrite) args.push('--overwrite');
+  args.push('--jsonl');
+  return args;
+}
+
+// ── DiT LoRA training (phase 4) ──────────────────────────────────────────
+
+/** Every TrainDitOptions field the runner needs, with defaults and clamps
+ *  already applied by the route. `job.opts` carries exactly this shape for a
+ *  train-dit job. Spec §4.2. */
+export interface ResolvedTrainDitOptions {
+  variantKey: string; tensorsDir: string;
+  ditModel: string; ditPath: string;
+  adapterName: string; adapterDir: string;
+  adapterType: DitAdapterType; rank: number; alpha: number; targetMlp: boolean;
+  layers: number; crop: number; cropMin: number; cropMax: number;
+  targetLoss: number; epochs: number; learningRate: number;
+  gradAccum: number; gradClip: number; warmupRatio: number; weightDecay: number;
+  lossWeighting: 'none' | 'flow_snr'; snrGamma: number; tBias: number;
+  channelBalance: boolean; timestepMu: number; timestepSigma: number;
+  tMin: number; tMax: number; cfgRatio: number; genreRatio: number;
+  seed: number; order: 'shuffle' | 'fixed';
+  milestoneStep: number; milestoneKeep: number; vramReserveMb: number;
+  stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
+}
+
+/**
+ * The variant's own base DiT, as an ABSOLUTE path, '' when it is no longer on
+ * disk (§4.2 base-match guard).
+ *
+ * The encoder states and context latents in the cache are that exact model's
+ * outputs, so training against anything else is silently wrong — which is why
+ * this reads the variant's record and never user input. Three sources, in
+ * descending order of trust:
+ *   1. `dit_path`      — the absolute path the preprocess run actually loaded
+ *   2. `model_variant` — the file name, resolved against the models dir
+ *   3. `variantKey`    — the same name with its extension stripped (§ variantKeyFor)
+ * Returning '' is the caller's cue to answer 400 rather than stop the engine
+ * for a run that cannot load its base.
+ */
+export function pickDitBaseFor(variantKey: string, tensorsDirPath: string): string {
+  const exists = (p: string): boolean => {
+    try { return !!p && fs.existsSync(p); } catch { return false; }
+  };
+
+  let ditPath = '';
+  let modelVariant = '';
+  try {
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(tensorsDirPath, 'preprocess_meta.json'), 'utf-8'),
+    ) as { dit_path?: unknown; model_variant?: unknown };
+    if (typeof meta.dit_path === 'string') ditPath = meta.dit_path.trim();
+    if (typeof meta.model_variant === 'string') modelVariant = meta.model_variant.trim();
+  } catch {
+    return '';   // no meta = not a real variant
+  }
+
+  if (exists(ditPath)) return ditPath;
+
+  // The models dir may have moved since the preprocess run (portable release,
+  // ACESTEPCPP_MODELS repointed) while the same file is still installed.
+  const modelsDir = config.aceServer.models;
+  if (modelVariant) {
+    const byName = path.join(modelsDir, modelVariant);
+    if (exists(byName)) return byName;
+  }
+  if (variantKey) {
+    for (const ext of ['.gguf', '']) {
+      const byKey = path.join(modelsDir, `${variantKey}${ext}`);
+      if (exists(byKey)) return byKey;
+    }
+  }
+  return '';
+}
+
+/** Full argv for `ace-train train-dit` (§2.1 order). */
+export function buildTrainDitArgs(input: {
+  opts: ResolvedTrainDitOptions; modelsDir: string;
+}): string[] {
+  const o = input.opts;
+  const args = [
+    'train-dit',
+    '--stages', o.stages.join(','),
+    '--tensors', o.tensorsDir,
+    '--out', o.adapterDir,
+    '--models', input.modelsDir,
+    // Always present in practice — the route refuses the request when
+    // pickDitBaseFor() came back empty, so the engine never has to fall back to
+    // preprocess_meta.json's own default. Guarded anyway: passing an empty value
+    // would make resolve_model('') exit 2, AFTER the runner already stopped the
+    // engine.
+    ...(o.ditPath ? ['--dit', o.ditPath] : []),
+    '--adapter-type', o.adapterType,
+    '--rank', String(o.rank),
+    '--alpha', String(o.alpha),
+    '--layers', String(o.layers),
+    '--crop', String(o.crop),
+    '--crop-min', String(o.cropMin),
+    '--crop-max', String(o.cropMax),
+    '--loss-weighting', o.lossWeighting,
+    '--snr-gamma', String(o.snrGamma),
+    '--t-bias', String(o.tBias),
+    '--timestep-mu', String(o.timestepMu),
+    '--timestep-sigma', String(o.timestepSigma),
+    '--t-min', String(o.tMin),
+    '--t-max', String(o.tMax),
+    '--cfg-ratio', String(o.cfgRatio),
+    '--genre-ratio', String(o.genreRatio),
+    '--lr', String(o.learningRate),
+    '--epochs', String(o.epochs),
+    '--grad-accum', String(o.gradAccum),
+    '--warmup-ratio', String(o.warmupRatio),
+    '--grad-clip', String(o.gradClip),
+    '--weight-decay', String(o.weightDecay),
+    '--seed', String(o.seed),
+    '--target-loss', String(o.targetLoss),
+    '--order', o.order,
+    '--vram-reserve-mb', String(o.vramReserveMb),
+    '--milestone-step', String(o.milestoneStep),
+    '--milestone-keep', String(o.milestoneKeep),
+  ];
+  // Flag-shaped options: only the non-default side is emitted (§2.1).
+  if (o.targetMlp) args.push('--target-mlp');
+  if (!o.channelBalance) args.push('--no-channel-balance');
   if (o.overwrite) args.push('--overwrite');
   args.push('--jsonl');
   return args;

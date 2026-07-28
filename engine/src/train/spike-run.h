@@ -1,6 +1,7 @@
 #pragma once
 // spike-run.h — `ace-train spike` subcommand dispatch (Phase-0 evidence).
 
+#include "spike-dit2.h"
 #include "spike-s1.h"
 #include "spike-s2.h"
 #include "spike-s3.h"
@@ -16,7 +17,13 @@ static void spike_usage(void) {
             "  s1    toy LoRA convergence + finite-difference gradient check\n"
             "  s2    one real Qwen3 layer: fwd+bwd+AdamW step   --lm <gguf|dir>\n"
             "  s3    full LM LoRA micro-train                    --lm <gguf|dir> [--steps N] [--seq N]\n"
-            "  s4    one DiT decoder block                       --dit <gguf> [--sample <dir>]\n");
+            "  s4    one DiT decoder block                       --dit <gguf> [--sample <dir>]\n"
+            "  dit2  ROUND 2: full 32-layer UNFUSED DiT LoRA micro-train on a real crop\n"
+            "        --dit <gguf> --sample <safetensors> --stub <path>\n"
+            "        [--crop 750] [--crop-start 0] [--rank 16] [--alpha 32] [--steps 48]\n"
+            "        [--layer-lo 0] [--lr 1e-4] [--grad-clip 1.0] [--seed 42]\n"
+            "        [--mu -0.4] [--sigma 1.0] [--cfg-ratio 0.15] [--fixed-t <t>]\n"
+            "        [--sweep] [--mirror-ca-kv]\n");
 }
 
 static int cmd_spike(int argc, char ** argv) {
@@ -30,8 +37,28 @@ static int cmd_spike(int argc, char ** argv) {
     std::string lm_path, dit_path, sample_dir, jsonl;
     int  seq = 256, rank = 16, steps = 20, row = 0, chunk = 512;
     bool no_cast = false, chunked = false;
+    D2Args d2;
+    d2.rank = 16;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--lm") && i + 1 < argc)          lm_path = argv[++i];
+        if (!strcmp(argv[i], "--stub") && i + 1 < argc)        d2.stub_path = argv[++i];
+        else if (!strcmp(argv[i], "--export") && i + 1 < argc) d2.export_dir = argv[++i];
+        else if (!strcmp(argv[i], "--crop") && i + 1 < argc)   d2.crop = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--crop-start") && i + 1 < argc) d2.crop_start = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc)  d2.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--layer-lo") && i + 1 < argc) d2.layer_lo = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lr") && i + 1 < argc)     d2.lr = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--grad-clip") && i + 1 < argc) d2.grad_clip = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc)   d2.seed = (uint64_t) atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--mu") && i + 1 < argc)     d2.mu = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sigma") && i + 1 < argc)  d2.sigma = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--cfg-ratio") && i + 1 < argc) d2.cfg_ratio = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--fixed-t") && i + 1 < argc) d2.fixed_t = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--sweep"))                  d2.sweep = true;
+        else if (!strcmp(argv[i], "--control"))                { d2.sweep = true; d2.control = true; }
+        else if (!strcmp(argv[i], "--mirror-ca-kv"))           d2.mirror_ca_kv = true;
+        else if (!strcmp(argv[i], "--shuffle-target"))         d2.shuffle_target = true;  // VERIFIER ADDITION
+        else if (!strcmp(argv[i], "--merge-adapter"))          d2.merge_adapter = true;   // VERIFIER ADDITION
+        else if (!strcmp(argv[i], "--lm") && i + 1 < argc)     lm_path = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc)    dit_path = argv[++i];
         else if (!strcmp(argv[i], "--sample") && i + 1 < argc) sample_dir = argv[++i];
         else if (!strcmp(argv[i], "--codes") && i + 1 < argc)  jsonl = argv[++i];
@@ -60,6 +87,18 @@ static int cmd_spike(int argc, char ** argv) {
     if (!strcmp(rung, "s4")) {
         if (dit_path.empty() || sample_dir.empty()) { fprintf(stderr, "spike s4: --dit and --sample required\n"); return 2; }
         return spike_s4(dit_path.c_str(), sample_dir.c_str(), seq, chunk, rank);
+    }
+    if (!strcmp(rung, "dit2")) {
+        if (dit_path.empty() || sample_dir.empty()) {
+            fprintf(stderr, "spike dit2: --dit and --sample required\n");
+            return 2;
+        }
+        if (d2.stub_path.empty()) { fprintf(stderr, "spike dit2: --stub <path> required\n"); return 2; }
+        d2.dit_path    = dit_path;
+        d2.sample_path = sample_dir;
+        d2.rank        = rank;
+        d2.steps       = steps;
+        return spike_dit2(d2);
     }
     spike_usage();
     return 2;

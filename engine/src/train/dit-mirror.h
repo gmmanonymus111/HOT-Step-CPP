@@ -1,0 +1,423 @@
+#pragma once
+// dit-mirror.h — CPU-backend base load + streamed F32 weight mirror (plan §3.3).
+//
+// THE ORDERING IS THE WHOLE POINT (D3). The spike built the mirror from weights
+// that were already resident on the GPU, so base + mirror were both in VRAM at
+// once: +5.0 GB transient at K=32, +8.4 GB at K=8. A card that fits the steady
+// state OOMs on that transient. Here the base GGUF is loaded onto the CPU
+// backend (GGML_BACKEND=CPU around dit_ggml_load), the mirror is built straight
+// into VRAM from the host copy, and the host weight buffer is released. Peak
+// VRAM is the mirror alone — gate V9 measures it.
+//
+// Why a mirror at all (D2): ggml.c:6599-6612 computes the gradient w.r.t. the
+// ACTIVATION input of mul_mat as ggml_out_prod(src0, transpose(grad)), pushing
+// the frozen weight through out_prod, and ggml-cuda/out-prod.cu:11-13 asserts
+// F32 on all three tensors. So every weight in a gradient-carrying layer must be
+// F32, LoRA site or not.
+//
+// docs/plans/2026-07-28-dit-trainer-implementation.md §3.3
+
+#include "dit.h"
+#include "train/lm-common.h"
+
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+struct DitMirror {
+    ggml_context *        ctx       = nullptr;
+    ggml_backend_buffer_t buf       = nullptr;
+    size_t                bytes     = 0;
+    size_t                bytes_f32 = 0;
+    int                   n_f32     = 0;
+    int                   n_keep    = 0;
+};
+
+struct DitTrainModel {
+    DiTGGML              m;                  // structure + rewired tensor pointers
+    DitMirror            mirror;
+    ggml_backend_t       backend = nullptr;  // CUDA (or best), owned by the trainer
+    ggml_backend_t       cpu     = nullptr;  // the loader's CPU backend (shared cache)
+    ggml_backend_sched_t sched   = nullptr;
+    std::vector<float>   null_cond;          // host copy for CFG dropout
+    int                  lora_lo    = 0;
+    bool                 loaded     = false;
+    bool                 mirrored   = false;
+    long long            load_ms    = 0;
+};
+
+// ─── slot enumeration (shared by the sizing model and the builder) ──────────
+
+struct DitSlot {
+    ggml_tensor ** field;
+    bool           promote;
+};
+
+// Collect every weight the training graph touches, with the §3.3 promotion
+// policy applied for `lora_lo`. Pure bookkeeping — allocates nothing.
+static void dit_mirror_slots(DiTGGML * m, int lora_lo, std::vector<DitSlot> * slots) {
+    slots->clear();
+    auto add = [&](ggml_tensor ** f, bool promote) {
+        if (f && *f) {
+            slots->push_back({ f, promote });
+        }
+    };
+
+    // Globals: proj_in / cond_emb consume graph INPUTS (never an activation
+    // gradient), so they stay native; the output head descends from every
+    // trainable layer and must be F32.
+    add(&m->proj_in_w, false);
+    add(&m->proj_in_b, false);
+    add(&m->cond_emb_w, false);
+    add(&m->cond_emb_b, false);
+    add(&m->norm_out, true);
+    add(&m->out_scale_shift, true);
+    add(&m->proj_out_w, true);
+    add(&m->proj_out_b, true);
+    add(&m->scalar_one, false);
+
+    // temb: tiny, and §3.4 runs the temb subgraph on the training backend.
+    DiTGGMLTembWeights * tw[2] = { &m->time_embed, &m->time_embed_r };
+    for (int i = 0; i < 2; i++) {
+        add(&tw[i]->linear_1_w, true);
+        add(&tw[i]->linear_1_b, true);
+        add(&tw[i]->linear_2_w, true);
+        add(&tw[i]->linear_2_b, true);
+        add(&tw[i]->time_proj_w, true);
+        add(&tw[i]->time_proj_b, true);
+    }
+
+    for (int i = 0; i < m->cfg.n_layers; i++) {
+        DiTGGMLLayer & ly = m->layers[i];
+        const bool     tr = (i >= lora_lo);  // this layer carries gradients
+        add(&ly.self_attn_norm, tr);
+        add(&ly.sa_q_proj, tr);
+        add(&ly.sa_k_proj, tr);
+        add(&ly.sa_v_proj, tr);
+        add(&ly.sa_q_norm, tr);
+        add(&ly.sa_k_norm, tr);
+        add(&ly.sa_o_proj, tr);
+        add(&ly.cross_attn_norm, tr);
+        add(&ly.ca_q_proj, tr);
+        add(&ly.ca_k_proj, tr);  // D5: cross-attn K/V now host adapters
+        add(&ly.ca_v_proj, tr);
+        add(&ly.ca_q_norm, tr);
+        add(&ly.ca_k_norm, tr);
+        add(&ly.ca_o_proj, tr);
+        add(&ly.mlp_norm, tr);
+        add(&ly.gate_proj, tr);
+        add(&ly.up_proj, tr);
+        add(&ly.down_proj, tr);
+        add(&ly.scale_shift_table, tr);
+    }
+}
+
+// Exact mirror byte count for a given lora_lo, without allocating anything.
+// This is what the auto-fit's fixed term uses (see dit-vram.h).
+static size_t dit_mirror_bytes_for(DiTGGML * m, int lora_lo) {
+    std::vector<DitSlot> slots;
+    dit_mirror_slots(m, lora_lo, &slots);
+    size_t total = 0;
+    for (size_t i = 0; i < slots.size(); i++) {
+        ggml_tensor * s   = *slots[i].field;
+        const size_t  ne  = (size_t) ggml_nelements(s);
+        const bool    f32 = slots[i].promote || s->type == GGML_TYPE_F32;
+        total += f32 ? ne * 4 : ggml_nbytes(s);
+    }
+    return total;
+}
+
+// ─── the §3.2 post-load assertion ───────────────────────────────────────────
+
+static bool dit_assert_unfused(DiTGGML * m, std::string * err) {
+    for (int i = 0; i < m->cfg.n_layers; i++) {
+        DiTGGMLLayer & ly = m->layers[i];
+        if (ly.sa_qkv || ly.sa_qk || ly.ca_qkv || ly.ca_kv || ly.gate_up) {
+            char b[192];
+            snprintf(b, sizeof(b),
+                     "layer %d loaded FUSED (sa_qkv=%d sa_qk=%d ca_qkv=%d ca_kv=%d gate_up=%d) — "
+                     "g_dit_load_no_fuse did not take effect",
+                     i, ly.sa_qkv != nullptr, ly.sa_qk != nullptr, ly.ca_qkv != nullptr, ly.ca_kv != nullptr,
+                     ly.gate_up != nullptr);
+            *err = b;
+            return false;
+        }
+        if (!ly.sa_q_proj || !ly.sa_k_proj || !ly.sa_v_proj || !ly.sa_o_proj || !ly.ca_q_proj || !ly.ca_k_proj ||
+            !ly.ca_v_proj || !ly.ca_o_proj || !ly.gate_proj || !ly.up_proj || !ly.down_proj) {
+            char b[128];
+            snprintf(b, sizeof(b), "layer %d is missing an unfused projection", i);
+            *err = b;
+            return false;
+        }
+    }
+    return true;
+}
+
+// ─── env guard ──────────────────────────────────────────────────────────────
+
+struct DitEnvGuard {
+    std::string prev;
+    bool        had = false;
+
+    void force_cpu() {
+        const char * p = getenv("GGML_BACKEND");
+        had            = (p != nullptr);
+        if (had) {
+            prev = p;
+        }
+#ifdef _WIN32
+        _putenv_s("GGML_BACKEND", "CPU");
+#else
+        setenv("GGML_BACKEND", "CPU", 1);
+#endif
+    }
+
+    ~DitEnvGuard() {
+#ifdef _WIN32
+        _putenv_s("GGML_BACKEND", had ? prev.c_str() : "");
+#else
+        if (had) {
+            setenv("GGML_BACKEND", prev.c_str(), 1);
+        } else {
+            unsetenv("GGML_BACKEND");
+        }
+#endif
+    }
+};
+
+// ─── ConvRot refusal (D23) ──────────────────────────────────────────────────
+
+// True when the GGUF carries acestep.convrot_map. Checked BEFORE any allocation.
+static bool dit_gguf_has_convrot(const char * path) {
+    if (!dit_ends_with_gguf(path)) {
+        return false;  // safetensors dirs carry no convrot map
+    }
+    GGUFModel gf;
+    if (!gf_load(&gf, path)) {
+        return false;  // the real load reports the failure
+    }
+    const char * s   = gf_get_str(gf, "acestep.convrot_map");
+    const bool   has = (s != nullptr && s[0] != '\0');
+    gf_close(&gf);
+    return has;
+}
+
+// ─── the load ───────────────────────────────────────────────────────────────
+
+static void dit_train_free(DitTrainModel * M) {
+    if (M->sched) {
+        ggml_backend_sched_free(M->sched);
+        M->sched = nullptr;
+    }
+    if (M->mirror.buf) {
+        ggml_backend_buffer_free(M->mirror.buf);
+        M->mirror.buf = nullptr;
+    }
+    if (M->mirror.ctx) {
+        ggml_free(M->mirror.ctx);
+        M->mirror.ctx = nullptr;
+    }
+    if (M->backend) {
+        ggml_backend_free(M->backend);
+        M->backend = nullptr;
+    }
+    if (M->loaded) {
+        // The mirror already released wctx.buffer and rewired every pointer; the
+        // remaining work is the weight context + the shared backend refcount.
+        M->m.sched = nullptr;  // freed above / never ours
+        dit_ggml_free(&M->m);
+        M->loaded = false;
+    }
+}
+
+// Loads the base on the CPU backend, then streams the F32 mirror into VRAM.
+// `lora_lo` is the lowest trainable layer index.
+//
+// Failure modes, all before or during the mirror and all reported by the caller
+// as a `fatal`:
+//   convrot-unsupported  the GGUF carries acestep.convrot_map (D23)
+//   model-load           quantized base (D20), fused load, CPU force failed
+static bool dit_train_load(DitTrainModel * M, const char * gguf_path, int lora_lo, std::string * err) {
+    const int64_t t0 = ggml_time_ms();
+    M->lora_lo       = lora_lo;
+
+    // 1) config + ConvRot gate, before any allocation.
+    if (!dit_ggml_load_config(&M->m.cfg, gguf_path)) {
+        *err = std::string("cannot read the DiT config from ") + gguf_path;
+        return false;
+    }
+    if (dit_gguf_has_convrot(gguf_path)) {
+        *err = "convrot";  // sentinel: the caller maps this to reason=convrot-unsupported
+        return false;
+    }
+
+    // 2/3) force the CPU backend and take the unfused branch. Both globals are
+    // restored on EVERY exit path.
+    {
+        DitEnvGuard guard;
+        guard.force_cpu();
+        g_dit_load_no_fuse = true;
+        // adapter_path stays nullptr, so dit.h's "adapter contributed nothing"
+        // hard-fail is never reached — the whole reason the flag exists (D4).
+        const bool ok      = dit_ggml_load(&M->m, gguf_path, nullptr, 1.0f);
+        g_dit_load_no_fuse = false;
+        if (!ok) {
+            *err = std::string("cannot load the DiT base ") + gguf_path;
+            return false;
+        }
+    }
+    M->loaded = true;
+    M->cpu    = M->m.cpu_backend;
+
+    // 4) the CPU force must actually have taken.
+    if (strcmp(ggml_backend_name(M->m.backend), "CPU") != 0) {
+        *err = "could not load the DiT base on the CPU backend — streamed mirror unavailable";
+        return false;
+    }
+    // The loader's inference-sized scheduler is useless to us and points at CPU.
+    if (M->m.sched) {
+        ggml_backend_sched_free(M->m.sched);
+        M->m.sched = nullptr;
+    }
+
+    // 5) §3.2 post-load assertion.
+    if (!dit_assert_unfused(&M->m, err)) {
+        return false;
+    }
+
+    // null_condition_emb -> host (before the weight buffer goes away).
+    if (M->m.null_condition_emb) {
+        const size_t ne = (size_t) ggml_nelements(M->m.null_condition_emb);
+        M->null_cond.assign(ne, 0.0f);
+        if (M->m.null_condition_emb->type == GGML_TYPE_BF16) {
+            std::vector<uint16_t> b16(ne);
+            ggml_backend_tensor_get(M->m.null_condition_emb, b16.data(), 0, ne * sizeof(uint16_t));
+            for (size_t i = 0; i < ne; i++) {
+                const uint32_t w = (uint32_t) b16[i] << 16;
+                memcpy(&M->null_cond[i], &w, 4);
+            }
+        } else if (M->m.null_condition_emb->type == GGML_TYPE_F32) {
+            ggml_backend_tensor_get(M->m.null_condition_emb, M->null_cond.data(), 0, ne * sizeof(float));
+        } else {
+            M->null_cond.clear();
+        }
+    }
+
+    M->load_ms = (long long) (ggml_time_ms() - t0);
+    return true;
+}
+
+// The trainer's own compute backend. Separate from dit_train_load() so the
+// caller can run the VRAM auto-fit against the real device before allocating.
+static bool dit_train_backend_init(DitTrainModel * M, std::string * err) {
+    M->backend = ggml_backend_init_best();
+    if (!M->backend) {
+        *err = "no compute backend available for training";
+        return false;
+    }
+    if (strcmp(ggml_backend_name(M->backend), "CPU") == 0) {
+        *err = "DiT training needs a GPU backend (CUDA/Vulkan); only CPU is available";
+        ggml_backend_free(M->backend);
+        M->backend = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Build the mirror straight into VRAM at `lora_lo` and release the host copy.
+static bool dit_build_mirror(DitTrainModel * M, int lora_lo, std::string * err) {
+    M->lora_lo = lora_lo;
+    std::vector<DitSlot> slots;
+    dit_mirror_slots(&M->m, lora_lo, &slots);
+
+    {
+        ggml_init_params p = { (slots.size() + 16) * ggml_tensor_overhead(), nullptr, true };
+        M->mirror.ctx      = ggml_init(p);
+    }
+    if (!M->mirror.ctx) {
+        *err = "cannot create the mirror context";
+        return false;
+    }
+
+    // Refuse a quantized base BEFORE allocating a byte of VRAM (D20): a
+    // quantized layer cannot carry an activation gradient at all.
+    for (size_t i = 0; i < slots.size(); i++) {
+        ggml_tensor * s = *slots[i].field;
+        if (s->type != GGML_TYPE_F32 && s->type != GGML_TYPE_BF16 && s->type != GGML_TYPE_F16) {
+            char b[256];
+            snprintf(b, sizeof(b),
+                     "base weight '%s' is %s — DiT training needs a BF16/F16/F32 base "
+                     "(quantized bases cannot be trained: ggml_out_prod is F32-only)",
+                     s->name, ggml_type_name(s->type));
+            *err = b;
+            return false;
+        }
+    }
+
+    std::vector<ggml_tensor *> dsts(slots.size(), nullptr);
+    for (size_t i = 0; i < slots.size(); i++) {
+        ggml_tensor *   s  = *slots[i].field;
+        const ggml_type ty = slots[i].promote ? GGML_TYPE_F32 : s->type;
+        ggml_tensor *   d  = ggml_new_tensor_4d(M->mirror.ctx, ty, s->ne[0], s->ne[1], s->ne[2], s->ne[3]);
+        ggml_set_name(d, s->name);
+        dsts[i] = d;
+        M->mirror.bytes += ggml_nbytes(d);
+        if (ty == GGML_TYPE_F32 && s->type != GGML_TYPE_F32) {
+            M->mirror.bytes_f32 += ggml_nbytes(d);
+            M->mirror.n_f32++;
+        } else {
+            M->mirror.n_keep++;
+        }
+    }
+
+    M->mirror.buf = ggml_backend_alloc_ctx_tensors(M->mirror.ctx, M->backend);
+    if (!M->mirror.buf) {
+        char b[192];
+        snprintf(b, sizeof(b), "F32 weight mirror allocation failed (%.1f MB)", M->mirror.bytes / 1048576.0);
+        *err = b;
+        return false;
+    }
+    ggml_backend_buffer_set_usage(M->mirror.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+    // Stream: host tensor -> host convert -> device tensor -> rewire.
+    std::vector<uint8_t> raw;
+    std::vector<float>   f32;
+    for (size_t i = 0; i < slots.size(); i++) {
+        ggml_tensor * s  = *slots[i].field;
+        ggml_tensor * d  = dsts[i];
+        const size_t  ne = (size_t) ggml_nelements(s);
+        raw.resize(ggml_nbytes(s));
+        ggml_backend_tensor_get(s, raw.data(), 0, raw.size());
+
+        if (d->type == s->type) {
+            ggml_backend_tensor_set(d, raw.data(), 0, raw.size());
+        } else if (s->type == GGML_TYPE_BF16) {
+            f32.resize(ne);
+            const uint16_t * u = (const uint16_t *) raw.data();
+            for (size_t j = 0; j < ne; j++) {
+                const uint32_t b = (uint32_t) u[j] << 16;
+                float          v;
+                memcpy(&v, &b, 4);
+                f32[j] = v;
+            }
+            ggml_backend_tensor_set(d, f32.data(), 0, ne * sizeof(float));
+        } else {  // F16 (quantized already refused above)
+            f32.resize(ne);
+            ggml_fp16_to_fp32_row((const ggml_fp16_t *) raw.data(), f32.data(), (int64_t) ne);
+            ggml_backend_tensor_set(d, f32.data(), 0, ne * sizeof(float));
+        }
+        *slots[i].field = d;
+    }
+
+    // Release the host weight buffer — the mirror fully replaces it.
+    if (M->m.wctx.buffer) {
+        ggml_backend_buffer_free(M->m.wctx.buffer);
+        M->m.wctx.buffer = nullptr;
+    }
+    // NB `M->m.backend` deliberately stays the loader's CPU backend: dit_ggml_free
+    // routes it through backend_release(), which would free the trainer's own CUDA
+    // backend a second time if we retargeted it here. No graph builder reads it.
+    M->m.use_flash_attn = false;  // GGML_OP_FLASH_ATTN_EXT has no backward
+    M->mirrored         = true;
+    return true;
+}

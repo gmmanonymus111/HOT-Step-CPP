@@ -18,6 +18,9 @@ import type {
   LmSize,
   PreprocessOptions,
   PreprocessStatus,
+  TrainDitEpoch,
+  TrainDitOptions,
+  TrainDitStatus,
   TrainLmEpoch,
   TrainLmOptions,
   TrainLmStatus,
@@ -49,6 +52,14 @@ const refreshedJobs = new Set<string>();
 let lastTrainLmQuery: { variantKey?: string; adapterName?: string; lmSize?: LmSize } | undefined;
 // Monotonic request id — the older of two in-flight status reads must not win.
 let trainLmSeq = 0;
+// Same two devices for train-dit.
+let lastTrainDitQuery: { variantKey?: string; adapterName?: string } | undefined;
+let trainDitSeq = 0;
+// The `vram` metric carries crop/layers exactly ONCE, before the first step, and
+// `trainDitLast` does not exist yet at that point — creating it there would put a
+// fabricated 0.0000 loss on the metric strip. Park them here instead and fold them
+// into every later trainDitLast write.
+let ditVram = { crop: 0, layers: 0 };
 
 function timerKey(sampleId: string, field: string): string {
   return `${sampleId}:${field}`;
@@ -90,6 +101,15 @@ interface TrainingState {
    *  in the scrolling log tail (§5.6 mandates the string). */
   trainLmSkippedLong: number;
 
+  // train (DiT)
+  trainDitStatus: TrainDitStatus | null;
+  trainDitLoading: boolean;
+  trainDitEpochs: TrainDitEpoch[];        // live, from `metric` events
+  trainDitLast: {
+    loss: number; ma5: number; lr: number; gradNorm: number;
+    crop: number; layers: number; etaMs: number;
+  } | null;
+
   // grid
   selectedSampleIds: Set<string>;
   openSampleId: string | null;
@@ -129,6 +149,8 @@ interface TrainingState {
   deletePreprocessVariant(variantKey: string): Promise<void>;
   loadTrainLmStatus(q?: { variantKey?: string; adapterName?: string; lmSize?: LmSize }): Promise<void>;
   startTrainLm(opts: TrainLmOptions): Promise<void>;
+  loadTrainDitStatus(q?: { variantKey?: string; adapterName?: string }): Promise<void>;
+  startTrainDit(opts: TrainDitOptions): Promise<void>;
   cancelJob(): Promise<void>;
   applyStreamEvent(ev: TrainingStreamEvent): void;   // called by useTrainingStream
 }
@@ -170,6 +192,11 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainLmLast: null,
   trainLmSkippedLong: 0,
 
+  trainDitStatus: null,
+  trainDitLoading: false,
+  trainDitEpochs: [],
+  trainDitLast: null,
+
   selectedSampleIds: new Set<string>(),
   openSampleId: null,
   pendingEdits: {},
@@ -199,6 +226,10 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainLmEpochs: [],
     trainLmLast: null,
     trainLmSkippedLong: 0,
+    trainDitStatus: null,
+    trainDitLoading: false,
+    trainDitEpochs: [],
+    trainDitLast: null,
     selectedSampleIds: new Set<string>(),
     openSampleId: null,
     pendingEdits: {},
@@ -262,6 +293,10 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainLmEpochs: [],
               trainLmLast: null,
               trainLmSkippedLong: 0,
+              trainDitStatus: null,
+              trainDitLoading: false,
+              trainDitEpochs: [],
+              trainDitLast: null,
             }
           : {}),
       });
@@ -549,6 +584,42 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     }
   },
 
+  loadTrainDitStatus: async (q) => {
+    const id = get().selectedDatasetId;
+    if (!id) { set({ trainDitStatus: null }); return; }
+    // No argument = "refresh whatever the panel last asked for", not "read the
+    // <slug> directory" — same rule as loadTrainLmStatus.
+    const query = q ?? lastTrainDitQuery;
+    if (q) lastTrainDitQuery = q;
+    const seq = ++trainDitSeq;
+    set({ trainDitLoading: true });
+    try {
+      const trainDitStatus = await trainingApi.getTrainDitStatus(id, query);
+      if (seq !== trainDitSeq) return;
+      if (get().selectedDatasetId !== id) { set({ trainDitLoading: false }); return; }
+      set({ trainDitStatus, trainDitLoading: false });
+    } catch (err) {
+      // Advisory: a failed status read must never blank the panel's controls.
+      console.warn('[Training] train-dit status failed:', errMessage(err));
+      if (seq !== trainDitSeq) return;
+      if (get().selectedDatasetId === id) set({ trainDitStatus: null, trainDitLoading: false });
+      else set({ trainDitLoading: false });
+    }
+  },
+
+  startTrainDit: async (opts) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      const { jobId } = await trainingApi.startTrainDit(id, opts);
+      ditVram = { crop: 0, layers: 0 };
+      set({ jobLog: [], error: null, trainDitEpochs: [], trainDitLast: null });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
   cancelJob: async () => {
     const job = get().activeJob;
     if (!job) return;
@@ -621,6 +692,59 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
       }
 
       case 'metric': {
+        // train-dit writes its own slices. Same event shape, same omit-vs-zero
+        // discipline as the LM path below; only the destination differs.
+        if (get().activeJob?.kind === 'train-dit') {
+          if (ev.metric === 'vram') {
+            // One-shot, before the first step. Parked in `ditVram` rather than
+            // written into trainDitLast — see the note at the top of this file.
+            ditVram = {
+              crop: typeof ev.crop === 'number' ? ev.crop : ditVram.crop,
+              layers: typeof ev.layers === 'number' ? ev.layers : ditVram.layers,
+            };
+            break;
+          }
+          if (ev.metric !== 'epoch' && ev.metric !== 'step') break;
+          const prevDit = get().trainDitLast;
+          const crop = typeof ev.crop === 'number' ? ev.crop : (prevDit?.crop ?? ditVram.crop);
+          const layers = prevDit?.layers ?? ditVram.layers;
+          if (ev.metric === 'epoch' && typeof ev.epoch === 'number' && typeof ev.loss === 'number') {
+            // REPLACE by epoch number, never append — the SSE buffer is replayed
+            // on reconnect and the curve must be idempotent.
+            const epoch = ev.epoch;
+            const next = [...get().trainDitEpochs.filter(e => e.epoch !== epoch), {
+              epoch, loss: ev.loss, lr: ev.lr ?? 0,
+              gradNorm: ev.gradNorm ?? 0, ms: ev.ms ?? 0,
+            }].sort((a, b) => a.epoch - b.epoch);
+            set({
+              trainDitEpochs: next,
+              trainDitLast: {
+                loss: ev.loss,
+                ma5: ev.ma5 ?? prevDit?.ma5 ?? 0,
+                lr: ev.lr ?? prevDit?.lr ?? 0,
+                gradNorm: ev.gradNorm ?? prevDit?.gradNorm ?? 0,
+                crop, layers,
+                etaMs: ev.etaMs ?? prevDit?.etaMs ?? 0,
+              },
+            });
+          } else if (
+            typeof ev.loss === 'number' || typeof ev.lr === 'number'
+            || typeof ev.gradNorm === 'number' || typeof ev.crop === 'number'
+          ) {
+            set({
+              trainDitLast: {
+                loss: ev.loss ?? prevDit?.loss ?? 0,
+                ma5: ev.ma5 ?? prevDit?.ma5 ?? 0,
+                lr: ev.lr ?? prevDit?.lr ?? 0,
+                gradNorm: ev.gradNorm ?? prevDit?.gradNorm ?? 0,
+                crop, layers,
+                etaMs: ev.etaMs ?? prevDit?.etaMs ?? 0,
+              },
+            });
+          }
+          break;
+        }
+
         // §5.5 spells these as `ev.loss ?? 0`, but the runner deliberately OMITS
         // a metric field the engine did not send (trainLmRunner optNum: "a metric
         // field defaulted to 0 is indistinguishable from a real 0 in the loss
@@ -683,6 +807,10 @@ function refreshAfterJob(get: () => TrainingState, jobId: string): void {
   // A finished train-lm job wrote (or failed to write) the adapter dir — the
   // done-state card reads that from disk, so re-read it here.
   if (get().activeJob?.kind === 'train-lm') void get().loadTrainLmStatus();
+  // Same for the DiT adapter dir — the per-epoch export means even a cancelled
+  // run usually leaves one on disk, so this refresh matters on every terminal
+  // status, not just 'done'.
+  if (get().activeJob?.kind === 'train-dit') void get().loadTrainDitStatus();
 }
 
 /**

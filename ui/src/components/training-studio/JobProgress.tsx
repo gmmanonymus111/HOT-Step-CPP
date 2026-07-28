@@ -31,6 +31,12 @@ const PHASE_KEYS: Record<string, string> = {
   extract: 'trainingStudio.job.phaseExtract',
   train: 'trainingStudio.job.phaseTrain',
   export: 'trainingStudio.job.phaseExport',
+  // train-dit phases (§2.6). The engine reuses the SAME phase strings as
+  // train-lm ('train' / 'export'), so a bare phase lookup cannot distinguish
+  // them. These composite `<kind>:<phase>` entries are tried first and give the
+  // DiT run its own wording; every other phase falls through to the plain key.
+  'train-dit:train': 'trainingStudio.job.phaseTrainDit',
+  'train-dit:export': 'trainingStudio.job.phaseExportDit',
 };
 
 function formatEta(seconds: number): string {
@@ -90,7 +96,8 @@ export const JobProgress: React.FC = () => {
   const active = job.status === 'queued' || job.status === 'running';
   const failedJob = job.status === 'failed';
   const current = job.currentSampleId ? samplesById[job.currentSampleId] : undefined;
-  const phaseLabel = PHASE_KEYS[job.phase] ? t(PHASE_KEYS[job.phase]) : job.phase;
+  const phaseKey = PHASE_KEYS[`${job.kind}:${job.phase}`] ?? PHASE_KEYS[job.phase];
+  const phaseLabel = phaseKey ? t(phaseKey) : job.phase;
   const errorLines = jobLog.filter(l => l.level === 'error').slice(-10);
 
   // Retry has to re-run the job the card is actually showing. The enhance kinds

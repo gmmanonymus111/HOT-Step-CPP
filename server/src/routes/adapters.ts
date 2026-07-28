@@ -93,7 +93,16 @@ router.get('/browse', (req, res) => {
 /**
  * POST /api/adapters/scan
  *
- * Flat scan of a single directory for .safetensors adapter files.
+ * Flat scan of a single directory for adapters, in two forms:
+ *   * bare `.safetensors` files (the hand-installed convention), and
+ *   * PEFT sub-directories — `adapter_model.safetensors` + `adapter_config.json`
+ *     — which is what the DiT trainer writes.
+ *
+ * The PEFT half is what makes a freshly trained adapter appear in the Create
+ * view's dropdown WITHOUT an engine restart: `path` is the directory, and the
+ * engine's path-fallback resolver already accepts a PEFT dir (adapter-merge.h).
+ * Without it a just-finished training run would be invisible until relaunch.
+ *
  * Returns an empty array if the folder doesn't exist or is empty.
  *
  * Body: { folder: string }
@@ -121,6 +130,19 @@ router.post('/scan', (req, res) => {
         const stat = fs.statSync(fullPath);
         return { name: e.name, path: fullPath, size: stat.size };
       });
+
+    // PEFT directories, mirroring GET /adapters/lm. Both files are required:
+    // a dir with weights but no adapter_config.json loads with its alpha/rank
+    // scale silently degraded to 1.0, so it must not be offered as ready.
+    for (const e of rawEntries) {
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
+      const dir = path.join(dirPath, e.name);
+      const model = path.join(dir, 'adapter_model.safetensors');
+      if (!fs.existsSync(model) || !fs.existsSync(path.join(dir, 'adapter_config.json'))) continue;
+      try { files.push({ name: e.name, path: dir, size: fs.statSync(model).size }); } catch { /* skip */ }
+    }
+    files.sort((a, b) => a.name.localeCompare(b.name));
+
     res.json({ files });
   } catch {
     res.json({ files: [] });

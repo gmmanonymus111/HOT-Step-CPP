@@ -5,18 +5,21 @@
 // to itself: the server stops ace-server for the duration and restarts it
 // afterwards, so this panel is explicit about the engine being paused.
 //
-// LM only in this phase. The DiT card below is a deliberate dead sibling so the
-// Train phase does not read as "LoRA planner adapters, forever".
+// Two sibling cards: the planner LoRA (LM) and the sound LoRA (DiT). Both run in
+// the same standalone ace-train binary, both need the GPU to themselves, and only
+// one job at a time can own a dataset — so the two cards share every gate above
+// and differ only in which slice of the store they read.
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, Copy, Cpu, Database, FileCode2, Flag, Loader2, Lock, PauseCircle, Target, XCircle,
+  AlertTriangle, Check, Copy, Cpu, Database, FileCode2, Flag, Layers, Loader2, PauseCircle, Target, Waves, XCircle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { TrainLmOptions } from '../../services/trainingApi';
+import type { TrainDitOptions, TrainLmOptions } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
 import { LossSparkline } from './LossSparkline';
+import { TRAIN_DIT_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
 import { TRAIN_LM_DEFAULTS, TrainLmForm, type TrainLmFormState } from './TrainLmForm';
 import { useTrainingStream } from './useTrainingStream';
 
@@ -53,21 +56,37 @@ export const TrainPanel: React.FC = () => {
   const trainLmEpochs = useTrainingStore(s => s.trainLmEpochs);
   const trainLmLast = useTrainingStore(s => s.trainLmLast);
   const trainLmSkippedLong = useTrainingStore(s => s.trainLmSkippedLong);
+  const trainDitStatus = useTrainingStore(s => s.trainDitStatus);
+  const trainDitLoading = useTrainingStore(s => s.trainDitLoading);
+  const trainDitEpochs = useTrainingStore(s => s.trainDitEpochs);
+  const trainDitLast = useTrainingStore(s => s.trainDitLast);
   const openDataset = useTrainingStore(s => s.openDataset);
   const setPhase = useTrainingStore(s => s.setPhase);
   const loadCapabilities = useTrainingStore(s => s.loadCapabilities);
   const loadTrainLmStatus = useTrainingStore(s => s.loadTrainLmStatus);
   const startTrainLm = useTrainingStore(s => s.startTrainLm);
+  const loadTrainDitStatus = useTrainingStore(s => s.loadTrainDitStatus);
+  const startTrainDit = useTrainingStore(s => s.startTrainDit);
 
   const [form, setForm] = useState<TrainLmFormState>(TRAIN_LM_DEFAULTS);
+  const [ditForm, setDitForm] = useState<TrainDitFormState>(TRAIN_DIT_DEFAULTS);
   const [starting, setStarting] = useState(false);
+  const [ditStarting, setDitStarting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [ditCopied, setDitCopied] = useState(false);
   // True from the instant the status debounce is armed until that read settles.
   // `trainLmLoading` only turns true INSIDE loadTrainLmStatus, i.e. 400 ms after
   // mount, and until then both it and `trainLmStatus` are falsy — the spinner and
   // the needs-preprocess gate below are both skipped and the fully enabled form
   // renders for that window. Seeded true so the hole never exists.
   const [statusPending, setStatusPending] = useState(true);
+  // Same hole on the DiT side, and it is worse there: with trainDitStatus null the
+  // card's `variantKey === ''` gate is falsy, so the form rendered fully enabled
+  // with an EMPTY base-model chip, and handleStartDit then omits variantKey and
+  // lets the server silently pick newestVariantKey. Reachable via the 400 ms
+  // debounce, via openDataset() nulling the status on a dataset switch, and
+  // durably whenever GET /train-dit fails (loadTrainDitStatus swallows the error).
+  const [ditStatusPending, setDitStatusPending] = useState(true);
 
   const tl = capabilities?.trainLm;
   const jobKind = activeJob?.kind;
@@ -75,6 +94,7 @@ export const TrainPanel: React.FC = () => {
   const jobId = activeJob?.id;
   const jobActive = jobStatus === 'queued' || jobStatus === 'running';
   const trainJobActive = jobKind === 'train-lm' && jobActive;
+  const ditJobActive = jobKind === 'train-dit' && jobActive;
 
   // The dataset phase mounts the stream inside DatasetDetail, which is not
   // rendered here — without this the progress bar and loss curve never move.
@@ -85,6 +105,7 @@ export const TrainPanel: React.FC = () => {
   const slug = detail?.slug ?? '';
   useEffect(() => {
     if (slug) setForm(f => ({ ...f, adapterName: slug }));
+    if (slug) setDitForm(f => ({ ...f, adapterName: slug }));
   }, [slug]);
 
   // Adapter name and size both change where the run would write, so the status
@@ -126,7 +147,41 @@ export const TrainPanel: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, jobKind, jobStatus, loadTrainLmStatus, loadCapabilities]);
 
+  // ── The same two effects for the DiT adapter ──────────────────────────────
+  // Its status is also what supplies the read-only base-model chip, so it loads
+  // even when the DiT card is never expanded.
+  const ditAdapterName = ditForm.adapterName;
+  const ditQueryRef = useRef(ditAdapterName);
+  ditQueryRef.current = ditAdapterName;
+  const ditStatusQuery = () => {
+    const nm = ditQueryRef.current.trim();
+    return nm ? { adapterName: nm } : {};
+  };
+
+  useEffect(() => {
+    if (!selectedDatasetId) return;
+    setDitStatusPending(true);
+    const handle = window.setTimeout(() => {
+      void loadTrainDitStatus(ditAdapterName.trim() ? { adapterName: ditAdapterName.trim() } : {})
+        .finally(() => setDitStatusPending(false));
+    }, STATUS_RELOAD_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [selectedDatasetId, ditAdapterName, loadTrainDitStatus]);
+
+  useEffect(() => {
+    if (jobKind !== 'train-dit' || !jobStatus) return;
+    if (jobStatus === 'queued' || jobStatus === 'running') return;
+    // ditStatusQuery reads the adapter name through a ref, deliberately: it must
+    // not join this dep array. `activeJob` is never cleared when a job ends, so
+    // after any run jobKind/jobStatus stay terminal and every keystroke in the
+    // name box would re-fire an undebounced status GET plus a /capabilities call
+    // — and /capabilities does a live /props round-trip to ace-server.
+    void loadTrainDitStatus(ditStatusQuery());
+    void loadCapabilities();
+  }, [jobId, jobKind, jobStatus, loadTrainDitStatus, loadCapabilities]);
+
   const patchForm = (patch: Partial<TrainLmFormState>) => setForm(f => ({ ...f, ...patch }));
+  const patchDitForm = (patch: Partial<TrainDitFormState>) => setDitForm(f => ({ ...f, ...patch }));
 
   const handleStart = async () => {
     const opts: TrainLmOptions = {
@@ -159,11 +214,64 @@ export const TrainPanel: React.FC = () => {
     try { await startTrainLm(opts); } finally { setStarting(false); }
   };
 
+  const handleStartDit = async () => {
+    const opts: TrainDitOptions = {
+      // The base is NOT sent — the server resolves --dit from the variant's
+      // preprocess_meta.json, because the cached latents are that model's output.
+      ...(trainDitStatus?.variantKey ? { variantKey: trainDitStatus.variantKey } : {}),
+      adapterName: ditForm.adapterName.trim(),
+      adapterType: ditForm.adapterType,
+      rank: ditForm.rank,
+      alpha: ditForm.alpha,
+      targetMlp: ditForm.targetMlp,
+      layers: ditForm.layers,
+      crop: ditForm.crop,
+      cropMin: ditForm.cropMin,
+      cropMax: ditForm.cropMax,
+      targetLoss: ditForm.targetLoss,
+      epochs: ditForm.epochs,
+      learningRate: ditForm.learningRate,
+      gradAccum: ditForm.gradAccum,
+      gradClip: ditForm.gradClip,
+      warmupRatio: ditForm.warmupRatio,
+      weightDecay: ditForm.weightDecay,
+      lossWeighting: ditForm.lossWeighting,
+      snrGamma: ditForm.snrGamma,
+      tBias: ditForm.tBias,
+      channelBalance: ditForm.channelBalance,
+      timestepMu: ditForm.timestepMu,
+      timestepSigma: ditForm.timestepSigma,
+      tMin: ditForm.tMin,
+      tMax: ditForm.tMax,
+      cfgRatio: ditForm.cfgRatio,
+      genreRatio: ditForm.genreRatio,
+      seed: ditForm.seed,
+      order: ditForm.order,
+      milestoneStep: ditForm.milestoneStep,
+      milestoneKeep: ditForm.milestoneKeep,
+      vramReserveMb: ditForm.vramReserveMb,
+      stages: ditForm.stages,
+      overwrite: ditForm.overwrite,
+      stopEngine: ditForm.stopEngine,
+    };
+    setDitStarting(true);
+    try { await startTrainDit(opts); } finally { setDitStarting(false); }
+  };
+
   const copyAdapterDir = () => {
     const dir = trainLmStatus?.adapterDir;
     if (!dir) return;
     void navigator.clipboard?.writeText(dir).then(
       () => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); },
+      () => { /* clipboard blocked — the path is selectable on screen anyway */ },
+    );
+  };
+
+  const copyDitAdapterDir = () => {
+    const dir = trainDitStatus?.adapterDir;
+    if (!dir) return;
+    void navigator.clipboard?.writeText(dir).then(
+      () => { setDitCopied(true); window.setTimeout(() => setDitCopied(false), 1500); },
       () => { /* clipboard blocked — the path is selectable on screen anyway */ },
     );
   };
@@ -285,7 +393,8 @@ export const TrainPanel: React.FC = () => {
   }
 
   // ── Gate 5: another kind of job owns this dataset ───────────────────────
-  if (jobActive && jobKind !== 'train-lm') {
+  // train-dit is NOT "another kind" — it is the second card on this very panel.
+  if (jobActive && jobKind !== 'train-lm' && jobKind !== 'train-dit') {
     return (
       <div className="flex flex-col gap-4">
         {header}
@@ -299,8 +408,12 @@ export const TrainPanel: React.FC = () => {
   }
 
   const enginePaused = form.stopEngine || !!capabilities.preprocess?.engineSuspended;
+  const ditEnginePaused = ditForm.stopEngine || !!capabilities.preprocess?.engineSuspended;
   const status = trainLmStatus;
+  const ditStatus = trainDitStatus;
+  const ditStatusLoading = trainDitLoading || ditStatusPending;
   const etaLabel = formatEtaMs(trainLmLast?.etaMs ?? 0);
+  const ditEtaLabel = formatEtaMs(trainDitLast?.etaMs ?? 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -370,8 +483,10 @@ export const TrainPanel: React.FC = () => {
         />
       </div>
 
-      {/* ── Job area ─────────────────────────────────────────────────────── */}
-      {(jobKind === 'train-lm' || jobActive) && (
+      {/* ── Job area (LM) ────────────────────────────────────────────────── */}
+      {/* Gate 5 above already returned for every other kind, so `jobActive`
+          here means train-lm or train-dit — the DiT run has its own area. */}
+      {jobKind === 'train-lm' && (
         <div className="flex flex-col gap-3">
           <JobProgress />
 
@@ -490,14 +605,249 @@ export const TrainPanel: React.FC = () => {
         </div>
       )}
 
-      {/* ── DiT sub-card (deliberately inert) ────────────────────────────── */}
-      <div className={`${CARD} flex items-start gap-3 opacity-60`}>
-        <Lock size={15} className="text-zinc-400 dark:text-zinc-600 mt-0.5 flex-shrink-0" />
-        <div className="min-w-0">
-          <h3 className="text-sm font-bold text-zinc-700 dark:text-zinc-300">{t('trainingStudio.train.dit.title')}</h3>
-          <p className="text-xs text-zinc-500 mt-0.5">{t('trainingStudio.train.dit.comingSoon')}</p>
+      {/* ── DiT card ─────────────────────────────────────────────────────── */}
+      <div className={`${CARD} flex flex-col gap-4`}>
+        <div className="flex items-start gap-2">
+          <Waves size={15} className="text-amber-500 mt-0.5 flex-shrink-0" />
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-zinc-900 dark:text-white">{t('trainingStudio.train.dit.title')}</h3>
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t('trainingStudio.train.dit.subtitle')}</p>
+          </div>
         </div>
+
+        {/* Gates, first failing one wins (§5.2). Gates 2 and 4 above already
+            cover the common cases for the LM card; these keep the DiT card
+            honest on its own capability block and its own variant read. */}
+        {!capabilities.trainDit?.available ? (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-xs text-red-500 dark:text-red-400">
+            <XCircle size={13} className="mt-0.5 flex-shrink-0" />
+            {t('trainingStudio.train.dit.noBinary')}
+          </div>
+        ) : !ditStatus ? (
+          <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-500">
+            <Loader2 size={13} className="animate-spin flex-shrink-0" />
+            {ditStatusLoading ? '…' : t('trainingStudio.train.dit.statusUnavailable')}
+          </div>
+        ) : ditStatus.variantKey === '' ? (
+          <div className="flex flex-col items-start gap-3">
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+              <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+              {t('trainingStudio.train.dit.needsPreprocess')}
+            </div>
+            <button
+              onClick={() => setPhase('preprocess')}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/15 border border-amber-500/25 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors"
+            >
+              {t('trainingStudio.train.goToPreprocess')}
+            </button>
+          </div>
+        ) : jobActive && jobKind !== 'train-dit' ? (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+            <PauseCircle size={13} className="mt-0.5 flex-shrink-0" />
+            {t('trainingStudio.train.dit.otherJobRunning')}
+          </div>
+        ) : null}
+
+        {ditJobActive && ditEnginePaused && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+            <PauseCircle size={13} className="mt-0.5 flex-shrink-0" />
+            {t('trainingStudio.preprocess.enginePaused')}
+          </div>
+        )}
+
+        {/* Pre-flight provenance, the DiT twin of the LM card's codes strip:
+            sampleCount says how many cached songs will actually train, and
+            channelStats decides whether the default-ON Channel balance switch
+            does anything at all (a missing channel_stats.json disables it
+            silently, plan §3.1). Neither had a reader before. */}
+        {ditStatus && ditStatus.variantKey !== '' && (
+          <div className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+              <span className="tabular-nums font-semibold text-zinc-700 dark:text-zinc-300">
+                {ditStatus.sampleCount}
+              </span>
+              <span>{t('trainingStudio.train.dit.cachedSongs')}</span>
+              <span className="text-zinc-400 dark:text-zinc-600">·</span>
+              <span>{t('trainingStudio.train.dit.minVram')}</span>
+            </div>
+            {!ditStatus.channelStats && (
+              <div className="flex items-start gap-2 text-[11px] text-amber-600 dark:text-amber-400">
+                <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                {t('trainingStudio.train.dit.channelStatsMissing')}
+              </div>
+            )}
+          </div>
+        )}
+
+        <TrainDitForm
+          value={ditForm}
+          onChange={patchDitForm}
+          ditModel={ditStatus?.ditModel ?? ''}
+          disabled={
+            jobActive || ditStarting || !capabilities.trainDit?.available || !ditStatus ||
+            ditStatus.variantKey === ''
+          }
+          starting={ditStarting}
+          onStart={() => void handleStartDit()}
+        />
       </div>
+
+      {/* ── Job area (DiT) ───────────────────────────────────────────────── */}
+      {jobKind === 'train-dit' && (
+        <div className="flex flex-col gap-3">
+          <JobProgress />
+
+          {trainDitEpochs.length >= 2 && (
+            <div className={`${CARD} flex flex-col gap-2`}>
+              <LossSparkline epochs={trainDitEpochs} target={ditForm.targetLoss} />
+            </div>
+          )}
+
+          {trainDitLast && (
+            <div className={`${CARD} grid grid-cols-2 sm:grid-cols-4 gap-3`}>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.epochLoss')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{trainDitLast.loss.toFixed(4)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.ma5')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">
+                  {trainDitLast.ma5 > 0 ? trainDitLast.ma5.toFixed(4) : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.learningRateShort')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{trainDitLast.lr.toExponential(2)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.gradNorm')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{trainDitLast.gradNorm.toFixed(3)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.cropFrames')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">
+                  {trainDitLast.crop > 0 ? trainDitLast.crop : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.trainedLayers')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">
+                  {trainDitLast.layers > 0 ? trainDitLast.layers : '—'}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.eta')}</span>
+                <span className="text-sm font-bold tabular-nums text-zinc-900 dark:text-white">{ditEtaLabel || '—'}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── DiT done state ───────────────────────────────────────────────── */}
+      {ditStatus?.adapterExists && (
+        <div className={`${CARD} flex flex-col gap-3 border-emerald-500/30`}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Check size={15} className="text-emerald-500 flex-shrink-0" />
+            <h3 className="text-sm font-bold text-zinc-900 dark:text-white">{t('trainingStudio.train.dit.done')}</h3>
+            {ditStatus.stoppedOnTarget && (
+              <span className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-emerald-500 bg-emerald-500/10 border-emerald-500/20">
+                <Target size={10} /> {t('trainingStudio.train.dit.stoppedOnTarget')}
+              </span>
+            )}
+            {ditStatus.partialDepth && (
+              <span
+                className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20"
+                title={t('trainingStudio.train.dit.partialDepth')}
+              >
+                <Layers size={10} /> {t('trainingStudio.train.dit.partialDepth')}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <code className="flex-1 min-w-0 truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-400" title={ditStatus.adapterDir}>
+              {ditStatus.adapterDir}
+            </code>
+            <button
+              onClick={copyDitAdapterDir}
+              className="p-1.5 rounded-lg text-zinc-500 hover:text-amber-500 hover:bg-amber-500/10 transition-colors flex-shrink-0"
+              title={ditStatus.adapterDir}
+            >
+              {ditCopied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap text-[11px] text-zinc-600 dark:text-zinc-400">
+            {ditStatus.finalLoss >= 0 && (
+              <span className="tabular-nums">
+                {t('trainingStudio.train.dit.finalLoss')}: <strong>{ditStatus.finalLoss.toFixed(4)}</strong>
+              </span>
+            )}
+            {ditStatus.bestLoss >= 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.dit.bestLoss')}: <strong>{ditStatus.bestLoss.toFixed(4)}</strong>
+                </span>
+              </>
+            )}
+            {ditStatus.epochsRun > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.dit.epochsRun')}: <strong>{ditStatus.epochsRun}</strong>
+                </span>
+              </>
+            )}
+            {ditStatus.crop > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.dit.cropFrames')}: <strong>{ditStatus.crop}</strong>
+                </span>
+              </>
+            )}
+            {ditStatus.layers > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">
+                  {t('trainingStudio.train.dit.trainedLayers')}: <strong>{ditStatus.layers}</strong>
+                </span>
+              </>
+            )}
+            {ditStatus.adapterBytes > 0 && (
+              <>
+                <span className="text-zinc-400 dark:text-zinc-600">·</span>
+                <span className="tabular-nums">{formatBytes(ditStatus.adapterBytes)}</span>
+              </>
+            )}
+          </div>
+
+          {ditStatus.epochs.length >= 2 && (
+            <LossSparkline epochs={ditStatus.epochs} target={ditStatus.targetLoss} />
+          )}
+
+          {ditStatus.milestones.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-zinc-500">{t('trainingStudio.train.dit.milestones')}</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                {ditStatus.milestones.map(m => (
+                  <span
+                    key={m.path}
+                    title={m.path}
+                    className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-sky-500 bg-sky-500/10 border-sky-500/20 tabular-nums"
+                  >
+                    <Flag size={10} /> {m.loss.toFixed(1)} · #{m.epoch}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-emerald-600 dark:text-emerald-400">{t('trainingStudio.train.dit.visibleNow')}</p>
+        </div>
+      )}
     </div>
   );
 };
