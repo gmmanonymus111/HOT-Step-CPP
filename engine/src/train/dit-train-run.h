@@ -644,11 +644,23 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     const int win_songs    = B * a.grad_accum;
     const int steps_per_ep = (n + win_songs - 1) / win_songs;
     const int total_steps  = std::max(1, steps_per_ep * a.epochs);
-    int       warmup_steps = (a.warmup_ratio > 0.0f)
-                                 ? std::max(1, (int) ((double) total_steps * (double) a.warmup_ratio))
-                                 : 0;
-    if (warmup_steps > total_steps - 1) {
-        warmup_steps = std::max(0, total_steps - 1);  // lm_lr_lambda(0,...) == 0 by design
+    // Percentage-only warmup is a hyperparameter-porting hazard. The Uber-LoKR-4
+    // preset's lr (1e-2) is Side-Step's, and Side-Step warms up over a FIXED ~50
+    // of its ~400 optimizer steps. Our defaults give a much smaller effective
+    // batch and far fewer optimizer steps, so 5 % compressed to ~7 steps on a
+    // 150-epoch run: the LR hit full scale before the adapter had settled and
+    // three DiT LoKR runs blew up right at the end of the ramp (2026-07-29).
+    // Floor the ramp at 50 steps, and cap it at HALF the run so warmup can never
+    // dominate training. ratio == 0 still means "no warmup" (explicit opt-out),
+    // and a 1-step run gets 0 because lm_lr_lambda(0, ...) == 0 by design — a
+    // warmup covering every step would train nothing at all.
+    int warmup_steps = 0;
+    if (a.warmup_ratio > 0.0f) {
+        warmup_steps = std::max(50, (int) ((double) total_steps * (double) a.warmup_ratio));
+        warmup_steps = std::min(warmup_steps, total_steps / 2);
+        if (warmup_steps < 1) {
+            warmup_steps = 0;  // only reachable at total_steps == 1
+        }
     }
     opt.total_steps  = total_steps;
     opt.warmup_steps = warmup_steps;

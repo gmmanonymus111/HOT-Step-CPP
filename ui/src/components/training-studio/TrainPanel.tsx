@@ -756,6 +756,7 @@ export const TrainPanel: React.FC = () => {
           value={ditForm}
           onChange={patchDitForm}
           ditModel={ditStatus?.ditModel ?? ''}
+          sampleCount={ditStatus?.sampleCount ?? 0}
           disabled={
             jobActive || ditStarting || !capabilities.trainDit?.available || !ditStatus ||
             ditStatus.variantKey === ''

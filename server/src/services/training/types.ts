@@ -515,7 +515,7 @@ export interface TrainDitOptions {
   targetLoss?: number;             // default 0.4 (lora) / 0.6 (lokr, K2); 0 disables auto-stop
   epochs?: number;                 // default 400 (hard cap)
   learningRate?: number;           // default 0.0005 (lora) / 0.01 (lokr, K2)
-  gradAccum?: number;              // default 4
+  gradAccum?: number;              // default 4 (lora) / 20 (lokr — Side-Step's effective batch 20, which the lokr lr assumes)
   gradClip?: number;               // default 1.0;  0 disables
   warmupRatio?: number;            // default 0.05
   weightDecay?: number;            // default 0.01 (lora) / 0.001 (lokr, K2)

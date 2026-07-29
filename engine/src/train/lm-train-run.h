@@ -398,12 +398,22 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     // the exported adapter is an identity. The plan's `max(1, ...)` does exactly
     // that whenever total_steps == 1 (`--epochs 1` with n <= grad_accum, the
     // natural quick-test invocation) and also makes `--warmup-ratio 0`
-    // inoperable. Clamp to total_steps - 1, and honour ratio 0 as "no warmup".
-    int warmup_steps = (a.warmup_ratio > 0.0f)
-                           ? std::max(1, (int) ((double) total_steps * (double) a.warmup_ratio))
-                           : 0;
-    if (warmup_steps > total_steps - 1) {
-        warmup_steps = std::max(0, total_steps - 1);
+    // inoperable. Hence the half-run cap below, and ratio 0 == "no warmup".
+    //
+    // The 50-step FLOOR mirrors dit-train-run.h (kept in lockstep deliberately):
+    // percentage-only warmup is a hyperparameter-porting hazard, because the
+    // reference recipes these learning rates come from (Side-Step) warm up over
+    // a fixed ~50 of ~400 optimizer steps. With our smaller effective batch, 5 %
+    // compressed to ~7 steps on a short run and the LR reached full scale before
+    // the adapter had settled — reproducibly blowing up three DiT LoKR runs at
+    // the end of the ramp (2026-07-29).
+    int warmup_steps = 0;
+    if (a.warmup_ratio > 0.0f) {
+        warmup_steps = std::max(50, (int) ((double) total_steps * (double) a.warmup_ratio));
+        warmup_steps = std::min(warmup_steps, total_steps / 2);
+        if (warmup_steps < 1) {
+            warmup_steps = 0;  // only reachable at total_steps == 1
+        }
     }
 
     // ── vram + data events ───────────────────────────────────────────────

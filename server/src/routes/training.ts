@@ -1816,7 +1816,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const cropMin = numOpt(body.cropMin, 375);
     const cropMax = numOpt(body.cropMax, 1250);
     const learningRate = numOpt(body.learningRate, isLokr ? 0.01 : 0.0005);
-    const gradAccum = numOpt(body.gradAccum, 4);
+    // LoKR's 1e-2 comes from Side-Step, whose effective batch is 20 (batch 5 x
+    // GA 4). Porting the LR without the batch made the gradient noise per step
+    // ~5x larger than the LR was tuned for and three DiT LoKR runs blew up on
+    // the warmup ramp (2026-07-29). 20 restores the recipe's effective batch;
+    // the LoRA path (lr 5e-4) is unchanged, as is ace-train's own CLI default.
+    const gradAccum = numOpt(body.gradAccum, isLokr ? 20 : 4);
     const gradClip = numOpt(body.gradClip, 1.0);
     const warmupRatio = numOpt(body.warmupRatio, 0.05);
     const weightDecay = numOpt(body.weightDecay, isLokr ? 0.001 : 0.01);

@@ -12,6 +12,8 @@
 import React from 'react';
 import { Loader2, Lock, Waves } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { ParamLabel } from '../shared/ParamLabel';
+import { StyledSelect } from '../shared/StyledSelect';
 import type {
   DitAdapterType,
   TrainDitStage,
@@ -151,9 +153,10 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
 /** K1/K2 (lokr-dit-training plan §0): LoKR is the UI's DEFAULT adapter type —
  *  Rob's validated preference (Uber-LoKR-4). Same base as TRAIN_DIT_DEFAULTS,
  *  patched with the preset's four adapter fields plus the loss-shape knobs the
- *  preset agrees with (lr/loss-weighting/target-loss/weight-decay). Everything
- *  else (epochs, gradAccum, targetMlp, cfgRatio, channelBalance, seed,
- *  milestoneStep…) stays at the shared default.
+ *  preset agrees with (lr/loss-weighting/target-loss/weight-decay), plus
+ *  gradAccum, which the preset's lr is inseparable from. Everything else
+ *  (epochs, targetMlp, cfgRatio, channelBalance, seed, milestoneStep…) stays at
+ *  the shared default.
  *
  *  crop stays 0 (auto-fit) like the shared default. It shipped as a fixed 60 s
  *  window to match Side-Step's chunk_duration, but the auto-fit reduces CROP
@@ -172,6 +175,12 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   lokrFactor: 6,
   lokrDecomposeBoth: true,
   learningRate: 0.01,
+  // The 1e-2 above is Side-Step's, and Side-Step's effective batch is 20
+  // (batch 5 x GA 4). Carrying the LR over without the batch left the gradient
+  // ~5x noisier per step than the LR assumes, and three DiT LoKR runs blew up
+  // on the warmup ramp (2026-07-29). Matches the train-dit route's own
+  // isLokr fallback in server/src/routes/training.ts.
+  gradAccum: 20,
   lossWeighting: 'none',
   targetLoss: 0.6,
   weightDecay: 0.001,
@@ -215,12 +224,18 @@ const QUALITIES: DitQuality[] = ['fast', 'balanced', 'thorough'];
 const FIELD =
   'rounded-lg px-3 py-2 text-sm bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed';
 const LABEL = 'text-xs font-semibold text-zinc-600 dark:text-zinc-400';
+/** Checkbox-row label text — matches the row it sits in, so a hoverable
+ *  caption doesn't change weight next to a plain one. */
+const CHECK_LABEL = 'text-xs text-zinc-700 dark:text-zinc-300';
 
 interface Props {
   value: TrainDitFormState;
   onChange: (patch: Partial<TrainDitFormState>) => void;
   /** The variant's own DiT, from trainDitStatus.ditModel. Read-only. */
   ditModel: string;
+  /** Usable cached songs in the variant, from trainDitStatus.sampleCount. Only
+   *  feeds the schedule preview; 0/absent simply hides it. */
+  sampleCount?: number;
   /** Locks every control (a job is running, or a start is in flight). */
   disabled?: boolean;
   starting?: boolean;
@@ -228,11 +243,30 @@ interface Props {
 }
 
 export const TrainDitForm: React.FC<Props> = ({
-  value, onChange, ditModel, disabled, starting, onStart,
+  value, onChange, ditModel, sampleCount, disabled, starting, onStart,
 }) => {
   const { t } = useTranslation();
 
   const lock = !!disabled;
+
+  // Schedule preview — deliberately the SAME arithmetic the engine runs in
+  // dit-train-run.h: stepsPerEpoch = ceil(n / (batch * gradAccum)), then a
+  // warmup floored at 50 steps and capped at half the run. Surfaced because
+  // effective batch and warmup length are exactly the two quantities a ported
+  // learning rate silently depends on, and getting them wrong blew up three
+  // LoKR runs (2026-07-29). Hidden until the variant reports a sample count.
+  const schedule = React.useMemo(() => {
+    const n = Math.max(0, Math.trunc(sampleCount ?? 0));
+    if (n === 0) return null;
+    const winSongs = Math.max(1, Math.trunc(value.batch) * Math.trunc(value.gradAccum));
+    const steps = Math.max(1, Math.ceil(n / winSongs) * Math.max(1, Math.trunc(value.epochs)));
+    let warmup = 0;
+    if (value.warmupRatio > 0) {
+      warmup = Math.min(Math.max(50, Math.trunc(steps * value.warmupRatio)), Math.trunc(steps / 2));
+      if (warmup < 1) warmup = 0;   // only reachable at steps === 1
+    }
+    return { steps, effectiveBatch: Math.min(winSongs, n), warmup };
+  }, [sampleCount, value.batch, value.gradAccum, value.epochs, value.warmupRatio]);
 
   // Display unit for `crop`. Seeded from the incoming state, then re-seeded
   // whenever something outside the component (a preset load, an adapter-type
@@ -304,6 +338,19 @@ export const TrainDitForm: React.FC<Props> = ({
     }
   };
 
+  /** Field label + hover explanation. `key` is the i18n suffix under
+   *  trainingStudio.train.dit.*; the explanation is that key + "Info", so the
+   *  two cannot drift apart. `meta` is the default/range line — numbers only,
+   *  which is why it is not a translated string. */
+  const P = (key: string, meta?: string, className = LABEL) => (
+    <ParamLabel
+      label={t(`trainingStudio.train.dit.${key}`)}
+      info={t(`trainingStudio.train.dit.${key}Info`)}
+      meta={meta}
+      className={className}
+    />
+  );
+
   const cropShown = cropMode === 'seconds'
     ? Math.round((value.crop / LATENT_FPS) * 10) / 10
     : value.crop;
@@ -324,7 +371,7 @@ export const TrainDitForm: React.FC<Props> = ({
     <div className="flex flex-col gap-4">
       {/* ── Adapter type (K1: LoKR is the default) ──────────────────────── */}
       <div className="flex flex-col gap-1.5">
-        <span className={LABEL}>{t('trainingStudio.train.dit.adapterType')}</span>
+        {P('adapterType', 'Default LoKR')}
         <div className="flex items-center gap-1.5">
           {(['lokr', 'lora'] as DitAdapterType[]).map(ty => {
             const active = value.adapterType === ty;
@@ -350,7 +397,7 @@ export const TrainDitForm: React.FC<Props> = ({
 
       {/* ── Base model (read-only) ────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
-        <span className={LABEL}>{t('trainingStudio.train.dit.baseModel')}</span>
+        {P('baseModel', 'Read-only · set by the preprocess variant')}
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-zinc-300 dark:border-white/10 bg-zinc-200/50 dark:bg-white/5">
           <Lock size={12} className="text-zinc-500 flex-shrink-0" />
           <code className="min-w-0 truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300" title={ditModel}>
@@ -362,7 +409,7 @@ export const TrainDitForm: React.FC<Props> = ({
 
       {/* ── Quality dial ──────────────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
-        <span className={LABEL}>{t('trainingStudio.train.dit.quality')}</span>
+        {P('quality', 'Default Balanced')}
         <div className="flex items-center gap-1.5 flex-wrap">
           {QUALITIES.map(q => {
             const active = value.quality === q;
@@ -393,7 +440,7 @@ export const TrainDitForm: React.FC<Props> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {/* ── Adapter name ────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          <span className={LABEL}>{t('trainingStudio.train.dit.adapterName')}</span>
+          {P('adapterName')}
           <input
             type="text"
             value={value.adapterName}
@@ -411,7 +458,7 @@ export const TrainDitForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          <span className={LABEL}>{t('trainingStudio.train.dit.targetLoss')}</span>
+          {P('targetLoss', isLokr ? 'LoKR default 0.6 · 0 = no auto-stop' : 'LoRA default 0.4 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -430,7 +477,7 @@ export const TrainDitForm: React.FC<Props> = ({
       {/* ── Max epochs ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="flex flex-col gap-1.5">
-          <span className={LABEL}>{t('trainingStudio.train.dit.maxEpochs')}</span>
+          {P('maxEpochs', 'Default 400 · 1–2000')}
           <input
             type="number"
             min={1}
@@ -445,6 +492,16 @@ export const TrainDitForm: React.FC<Props> = ({
         </label>
       </div>
 
+      {schedule && (
+        <span className="text-[11px] text-zinc-500 -mt-2">
+          {t('trainingStudio.train.dit.scheduleSummary', {
+            steps: schedule.steps,
+            effectiveBatch: schedule.effectiveBatch,
+            warmup: schedule.warmup,
+          })}
+        </span>
+      )}
+
       {/* ── Advanced ──────────────────────────────────────────────────── */}
       <details className="rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2">
         <summary className="cursor-pointer text-xs font-semibold text-zinc-600 dark:text-zinc-400 select-none">
@@ -455,7 +512,7 @@ export const TrainDitForm: React.FC<Props> = ({
           {isLokr ? (
             <>
               <label className="flex flex-col gap-1.5">
-                <span className={LABEL}>{t('trainingStudio.train.dit.lokrDim')}</span>
+                {P('lokrDim', 'Default 512 · 4–4096')}
                 <input
                   type="number" min={4} max={4096} step={1}
                   value={value.lokrDim} disabled={lock}
@@ -465,7 +522,7 @@ export const TrainDitForm: React.FC<Props> = ({
               </label>
 
               <label className="flex flex-col gap-1.5">
-                <span className={LABEL}>{t('trainingStudio.train.dit.lokrAlpha')}</span>
+                {P('lokrAlpha', 'Default 512 (= dim, 1×) · 0–8192')}
                 <input
                   type="number" min={0} max={8192} step={1}
                   value={value.lokrAlpha} disabled={lock}
@@ -475,7 +532,7 @@ export const TrainDitForm: React.FC<Props> = ({
               </label>
 
               <label className="flex flex-col gap-1.5">
-                <span className={LABEL}>{t('trainingStudio.train.dit.lokrFactor')}</span>
+                {P('lokrFactor', 'Default 6 · -1 or 2–64')}
                 <input
                   type="number" min={-1} max={64} step={1}
                   value={value.lokrFactor} disabled={lock}
@@ -498,13 +555,13 @@ export const TrainDitForm: React.FC<Props> = ({
                   onChange={(e) => onChange({ lokrDecomposeBoth: e.target.checked })}
                   className="accent-amber-500"
                 />
-                {t('trainingStudio.train.dit.lokrDecomposeBoth')}
+                {P('lokrDecomposeBoth', 'Default on', CHECK_LABEL)}
               </label>
             </>
           ) : (
             <>
               <label className="flex flex-col gap-1.5">
-                <span className={LABEL}>{t('trainingStudio.train.dit.rank')}</span>
+                {P('rank', 'Default 128 · 1–256')}
                 <input
                   type="number" min={1} max={256} step={1}
                   value={value.rank} disabled={lock}
@@ -514,7 +571,7 @@ export const TrainDitForm: React.FC<Props> = ({
               </label>
 
               <label className="flex flex-col gap-1.5">
-                <span className={LABEL}>{t('trainingStudio.train.dit.alpha')}</span>
+                {P('alpha', 'Default 256 (2× at rank 128) · 1–1024')}
                 <input
                   type="number" min={1} max={1024} step={1}
                   value={value.alpha} disabled={lock}
@@ -526,7 +583,7 @@ export const TrainDitForm: React.FC<Props> = ({
           )}
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.layers')}</span>
+            {P('layers', 'Default 0 (auto) · 0–64')}
             <input
               type="number" min={0} max={64} step={1}
               value={value.layers} disabled={lock}
@@ -537,18 +594,25 @@ export const TrainDitForm: React.FC<Props> = ({
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.layersHelp')}</span>
           </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.crop')}</span>
+          <div className="flex flex-col gap-1.5">
+            {P('crop', 'Default Auto · 128–8192 frames when pinned')}
             <div className="flex items-center gap-1.5">
-              <select
-                value={cropMode} disabled={lock}
-                onChange={(e) => pickCropMode(e.target.value as CropMode)}
-                className={`${FIELD} shrink-0`}
-              >
-                <option value="auto">{t('trainingStudio.train.dit.cropModeAuto')}</option>
-                <option value="seconds">{t('trainingStudio.train.dit.cropModeSeconds')}</option>
-                <option value="frames">{t('trainingStudio.train.dit.cropModeFrames')}</option>
-              </select>
+              {/* Fixed width lives on a wrapper, not on the trigger: the
+                  trigger already carries w-full, and two conflicting width
+                  utilities resolve by stylesheet order, not class order. */}
+              <div className="w-28 shrink-0">
+                <StyledSelect
+                  accent="amber"
+                  value={cropMode}
+                  disabled={lock}
+                  onChange={(v) => pickCropMode(v)}
+                  options={[
+                    { value: 'auto' as const, label: t('trainingStudio.train.dit.cropModeAuto') },
+                    { value: 'seconds' as const, label: t('trainingStudio.train.dit.cropModeSeconds') },
+                    { value: 'frames' as const, label: t('trainingStudio.train.dit.cropModeFrames') },
+                  ]}
+                />
+              </div>
               {cropMode !== 'auto' && (
                 <input
                   type="number"
@@ -573,10 +637,10 @@ export const TrainDitForm: React.FC<Props> = ({
                 {t('trainingStudio.train.dit.cropHelp')}
               </span>
             )}
-          </label>
+          </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.cropMin')}</span>
+            {P('cropMin', 'Default 375 frames (≈15 s) · 128–8192')}
             <input
               type="number" min={128} max={8192} step={1}
               value={value.cropMin} disabled={lock}
@@ -586,7 +650,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.cropMax')}</span>
+            {P('cropMax', 'Default 1250 frames (≈50 s) · 128–8192')}
             <input
               type="number" min={128} max={8192} step={1}
               value={value.cropMax} disabled={lock}
@@ -600,7 +664,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </span>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.learningRate')}</span>
+            {P('learningRate', isLokr ? 'LoKR default 0.01' : 'LoRA default 5e-4')}
             <input
               type="number" min={0.00001} max={1} step={0.00001}
               value={value.learningRate} disabled={lock}
@@ -610,17 +674,17 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.gradAccum')}</span>
+            {P('gradAccum', isLokr ? 'LoKR default 20 micro-batches · 1–64' : 'LoRA default 4 micro-batches · 1–64')}
             <input
               type="number" min={1} max={64} step={1}
               value={value.gradAccum} disabled={lock}
-              onChange={(e) => onChange({ gradAccum: num(e.target.value, 4) })}
+              onChange={(e) => onChange({ gradAccum: num(e.target.value, isLokr ? 20 : 4) })}
               className={FIELD}
             />
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.gradClip')}</span>
+            {P('gradClip', 'Default 1.0 · 0 = off')}
             <input
               type="number" min={0} max={100} step={0.1}
               value={value.gradClip} disabled={lock}
@@ -630,7 +694,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.warmupRatio')}</span>
+            {P('warmupRatio', 'Default 0.05 · 0–0.5')}
             <input
               type="number" min={0} max={0.5} step={0.01}
               value={value.warmupRatio} disabled={lock}
@@ -640,7 +704,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.weightDecay')}</span>
+            {P('weightDecay', isLokr ? 'LoKR default 0.001 · 0–1' : 'LoRA default 0.01 · 0–1')}
             <input
               type="number" min={0} max={1} step={0.005}
               value={value.weightDecay} disabled={lock}
@@ -649,21 +713,22 @@ export const TrainDitForm: React.FC<Props> = ({
             />
           </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.lossWeighting')}</span>
-            <select
+          <div className="flex flex-col gap-1.5">
+            {P('lossWeighting', isLokr ? 'LoKR default none' : 'LoRA default flow_snr')}
+            <StyledSelect
+              accent="amber"
               value={value.lossWeighting}
               disabled={lock}
-              onChange={(e) => onChange({ lossWeighting: e.target.value === 'none' ? 'none' : 'flow_snr' })}
-              className={FIELD}
-            >
-              <option value="flow_snr">flow_snr</option>
-              <option value="none">none</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ lossWeighting: v })}
+              options={[
+                { value: 'flow_snr' as const, label: 'flow_snr' },
+                { value: 'none' as const, label: 'none' },
+              ]}
+            />
+          </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.snrGamma')}</span>
+            {P('snrGamma', 'Default 5.0 · 1–100 · flow_snr only')}
             <input
               type="number" min={1} max={100} step={0.5}
               value={value.snrGamma} disabled={lock}
@@ -673,7 +738,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.tBias')}</span>
+            {P('tBias', 'Default 0.5 · 0–4 · flow_snr only')}
             <input
               type="number" min={0} max={4} step={0.05}
               value={value.tBias} disabled={lock}
@@ -683,7 +748,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.timestepMu')}</span>
+            {P('timestepMu', 'Default -0.4 · -4 to 4')}
             <input
               type="number" min={-4} max={4} step={0.05}
               value={value.timestepMu} disabled={lock}
@@ -693,7 +758,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.timestepSigma')}</span>
+            {P('timestepSigma', 'Default 1.0 · 0.01–4')}
             <input
               type="number" min={0.01} max={4} step={0.05}
               value={value.timestepSigma} disabled={lock}
@@ -703,7 +768,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <div className="flex flex-col gap-1.5 sm:col-span-2">
-            <span className={LABEL}>{t('trainingStudio.train.dit.tWindow')}</span>
+            {P('tWindow', 'Default 0 → 1 (whole schedule)')}
             <div className="flex items-center gap-2">
               <input
                 type="number" min={0} max={1} step={0.01}
@@ -722,7 +787,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.cfgRatio')}</span>
+            {P('cfgRatio', 'Default 0.15 (15%) · 0–1')}
             <input
               type="number" min={0} max={1} step={0.05}
               value={value.cfgRatio} disabled={lock}
@@ -732,7 +797,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.genreRatio')}</span>
+            {P('genreRatio', 'Default 30% · 0–100')}
             <input
               type="number" min={0} max={100} step={1}
               value={value.genreRatio} disabled={lock}
@@ -742,7 +807,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.seed')}</span>
+            {P('seed', 'Default 42 · 0–2147483647')}
             <input
               type="number" min={0} max={2147483647} step={1}
               value={value.seed} disabled={lock}
@@ -751,21 +816,22 @@ export const TrainDitForm: React.FC<Props> = ({
             />
           </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.order')}</span>
-            <select
+          <div className="flex flex-col gap-1.5">
+            {P('order', 'Default shuffle')}
+            <StyledSelect
+              accent="amber"
               value={value.order}
               disabled={lock}
-              onChange={(e) => onChange({ order: e.target.value === 'fixed' ? 'fixed' : 'shuffle' })}
-              className={FIELD}
-            >
-              <option value="shuffle">shuffle</option>
-              <option value="fixed">fixed</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ order: v })}
+              options={[
+                { value: 'shuffle' as const, label: 'shuffle' },
+                { value: 'fixed' as const, label: 'fixed' },
+              ]}
+            />
+          </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.milestoneStep')}</span>
+            {P('milestoneStep', 'Default 0.1 · 0 = off')}
             <input
               type="number" min={0} max={5} step={0.05}
               value={value.milestoneStep} disabled={lock}
@@ -775,7 +841,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.milestoneKeep')}</span>
+            {P('milestoneKeep', 'Default 6 · 0–64')}
             <input
               type="number" min={0} max={64} step={1}
               value={value.milestoneKeep} disabled={lock}
@@ -789,7 +855,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </span>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.vramReserve')}</span>
+            {P('vramReserve', 'Default 2048 MB · 0–16384')}
             <input
               type="number" min={0} max={16384} step={128}
               value={value.vramReserveMb} disabled={lock}
@@ -798,39 +864,49 @@ export const TrainDitForm: React.FC<Props> = ({
             />
           </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.mirror')}</span>
-            <select
+          <div className="flex flex-col gap-1.5">
+            {P('mirror', 'Default BF16 · CUDA only')}
+            <StyledSelect
+              accent="amber"
               value={value.mirror}
               disabled={lock}
-              onChange={(e) => onChange({ mirror: e.target.value === 'bf16' ? 'bf16' : 'f32' })}
-              className={FIELD}
-            >
-              <option value="f32">{t('trainingStudio.train.dit.mirrorF32')}</option>
-              <option value="bf16">{t('trainingStudio.train.dit.mirrorBf16')}</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ mirror: v })}
+              options={[
+                { value: 'f32' as const, label: t('trainingStudio.train.dit.mirrorF32') },
+                { value: 'bf16' as const, label: t('trainingStudio.train.dit.mirrorBf16') },
+              ]}
+            />
+          </div>
 
           <span className="text-[11px] text-zinc-500 sm:col-span-2 -mt-1">
             {t('trainingStudio.train.dit.mirrorHelp')}
           </span>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.bwd')}</span>
-            <select
+          <div className="flex flex-col gap-1.5">
+            {/* Label key is shared with the LM form, so it is not one of P()'s
+                dit.* keys — but the explanation is DiT-specific (here mm is the
+                default and there is no collision to warn about). */}
+            <ParamLabel
+              label={t('trainingStudio.train.bwd')}
+              info={t('trainingStudio.train.dit.bwdInfo')}
+              meta="Default mm (DiT)"
+              className={LABEL}
+            />
+            <StyledSelect
+              accent="amber"
               value={value.bwd}
               disabled={lock}
-              onChange={(e) => onChange({ bwd: e.target.value === 'outprod' ? 'outprod' : 'mm' })}
-              className={FIELD}
-            >
-              <option value="mm">{t('trainingStudio.train.bwdMm')}</option>
-              <option value="outprod">{t('trainingStudio.train.bwdOutprod')}</option>
-            </select>
+              onChange={(v) => onChange({ bwd: v })}
+              options={[
+                { value: 'mm' as const, label: t('trainingStudio.train.bwdMm') },
+                { value: 'outprod' as const, label: t('trainingStudio.train.bwdOutprod') },
+              ]}
+            />
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.bwdHint')}</span>
-          </label>
+          </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.batch')}</span>
+            {P('batch', 'Default 1 (off) · 1–16')}
             <input
               type="number" min={1} max={16} step={1}
               value={value.batch} disabled={lock}
@@ -840,27 +916,28 @@ export const TrainDitForm: React.FC<Props> = ({
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.batchHelp')}</span>
           </label>
 
-          <label className="flex flex-col gap-1.5">
-            <span className={LABEL}>{t('trainingStudio.train.dit.ckptSegments')}</span>
-            <select
+          <div className="flex flex-col gap-1.5">
+            {P('ckptSegments', 'Default Auto · Off, or 2–32 segments')}
+            <StyledSelect
+              accent="amber"
               value={value.ckptSegments}
               disabled={lock}
-              onChange={(e) => onChange({ ckptSegments: Number(e.target.value) })}
-              className={FIELD}
-            >
-              <option value={1}>{t('trainingStudio.train.dit.ckptAuto')}</option>
-              <option value={0}>{t('trainingStudio.train.dit.ckptOff')}</option>
-              <option value={2}>2</option>
-              <option value={4}>4</option>
-              <option value={8}>8</option>
-              <option value={16}>16</option>
-            </select>
+              onChange={(v) => onChange({ ckptSegments: v })}
+              options={[
+                { value: 1, label: t('trainingStudio.train.dit.ckptAuto') },
+                { value: 0, label: t('trainingStudio.train.dit.ckptOff') },
+                { value: 2, label: '2' },
+                { value: 4, label: '4' },
+                { value: 8, label: '8' },
+                { value: 16, label: '16' },
+              ]}
+            />
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.ckptSegmentsHelp')}</span>
-          </label>
+          </div>
         </div>
 
         <div className="mt-3 flex flex-col gap-2">
-          <span className={LABEL}>{t('trainingStudio.train.dit.stages')}</span>
+          {P('stages')}
           <div className="flex items-center gap-4 flex-wrap">
             {ALL_STAGES.map(stage => (
               <label key={stage} className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
@@ -884,7 +961,7 @@ export const TrainDitForm: React.FC<Props> = ({
               onChange={(e) => onChange({ targetMlp: e.target.checked })}
               className="accent-amber-500"
             />
-            {t('trainingStudio.train.dit.targetMlp')}
+            {P('targetMlp', 'Default on', CHECK_LABEL)}
           </label>
           <span className="text-[11px] text-zinc-500 pl-6">{t('trainingStudio.train.dit.targetMlpHelp')}</span>
 
@@ -896,7 +973,7 @@ export const TrainDitForm: React.FC<Props> = ({
               onChange={(e) => onChange({ channelBalance: e.target.checked })}
               className="accent-amber-500"
             />
-            {t('trainingStudio.train.dit.channelBalance')}
+            {P('channelBalance', 'Default on · needs channel_stats.json', CHECK_LABEL)}
           </label>
 
           <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
@@ -907,7 +984,7 @@ export const TrainDitForm: React.FC<Props> = ({
               onChange={(e) => onChange({ stopEngine: e.target.checked })}
               className="accent-amber-500"
             />
-            {t('trainingStudio.train.dit.stopEngine')}
+            {P('stopEngine', 'Default on', CHECK_LABEL)}
           </label>
           <span className="text-[11px] text-zinc-500 pl-6">{t('trainingStudio.preprocess.stopEngineHelp')}</span>
         </div>
