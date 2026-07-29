@@ -74,6 +74,28 @@ function codesDuration(codesCount: number): number {
   return Math.round((codesCount / 5) * 10) / 10;
 }
 
+/**
+ * The dataset's trigger word, applied EXACTLY as the trainer applied it
+ * (lm_apply_tag, engine/src/train/lm-common.h:353): prepend → "tag, caption",
+ * append → "caption, tag", and 'replace' applies NO tag (verbatim Side-Step —
+ * those captions trained untagged, so claiming a trigger would be false).
+ *
+ * Free-text and LM-written audition prompts never carried the trigger, so the
+ * adapter ran without the token it was trained on and both sides emitted
+ * near-identical plans (Rob, 2026-07-29). Applied to BOTH sides identically —
+ * A/B discipline — and skipped when the caption already carries the tag (the
+ * lm_codes.jsonl row fallback is pre-tagged; users may also type it).
+ */
+function applyTriggerTag(caption: string, tag: string, position: string): string {
+  const t = String(tag ?? '').trim();
+  if (!t || !caption) return caption;
+  if (caption.toLowerCase().includes(t.toLowerCase())) return caption;
+  const pos = position || 'prepend';
+  if (pos === 'prepend') return `${t}, ${caption}`;
+  if (pos === 'append') return `${caption}, ${t}`;
+  return caption;   // 'replace'
+}
+
 // ── Codes-row lookup ──────────────────────────────────────────────────────
 
 export interface CodesRow {
@@ -218,6 +240,11 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
       : 'caption is required');
   }
 
+  // Free-text / LM-written / hand-edited prompts get the dataset's trigger word
+  // exactly as the trainer applied it; a pre-tagged row caption passes through
+  // unchanged (the contains-check inside). See applyTriggerTag.
+  const taggedCaption = applyTriggerTag(caption, ds.customTag, ds.tagPosition);
+
   // Never -1: the audition must be re-runnable from what we record (C14).
   const seed = Number.isFinite(Number(opts.seed)) && Number(opts.seed) >= 0
     ? Math.trunc(Number(opts.seed))
@@ -271,10 +298,12 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     slug: ds.slug,
     kind: opts.kind === 'milestone' ? 'milestone' : 'ab',
     sides,
-    caption,
+    caption: taggedCaption,
     lyrics,
     seed,
-    durationSec: Math.trunc(clamp(opts.durationSec, 30, 10, 120)),
+    // Cap raised 120 → 300 (Rob, 2026-07-29): a 3-minute audition is a
+    // legitimate ask; the LM cost scales linearly and the deadline has slack.
+    durationSec: Math.trunc(clamp(opts.durationSec, 30, 10, 300)),
     lmModel,
     ditModel,
     vaeModel: str(opts.vaeModel),

@@ -645,7 +645,7 @@ export interface AuditionOptions {
   caption: string;                // required, 1..4000 chars
   lyrics?: string;                // default ''
   seed?: number;                  // >= 0; omitted or < 0 → the server picks one and records it
-  durationSec?: number;           // default 30, clamp 10..120
+  durationSec?: number;           // default 30, clamp 10..300
   lmModel?: string;               // default: the newest variant's LM, else registry[0]
   ditModel?: string;              // default: variantDitModel(slug, variantKey)
   vaeModel?: string;              // default: engine's resolve_name default

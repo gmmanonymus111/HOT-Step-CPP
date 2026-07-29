@@ -528,7 +528,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
           <input
             type="number"
             min={10}
-            max={120}
+            max={300}
             value={durationSec}
             onChange={(e) => setDurationSec(Number(e.target.value) || 30)}
             className={`${FIELD} tabular-nums`}
