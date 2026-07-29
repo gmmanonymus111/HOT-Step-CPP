@@ -210,6 +210,31 @@ bool store_evict_label(ModelStore * s, const char * label) {
 // Song Builder convenience wrapper.
 void store_evict_lm(ModelStore * s) { store_evict_label(s, "LM"); }
 
+// Public: force-evict every unreferenced GPU module, any policy. The audition
+// flow latches EVICT_NEVER (?keep_loaded=1) and afterwards needs the "full
+// eviction pass" the /lm latch comment demands before STRICT can be restored.
+int store_evict_all(ModelStore * s, int * still_resident) {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    int freed  = 0;
+    int in_use = 0;
+    for (auto it = s->gpu.begin(); it != s->gpu.end();) {
+        GpuEntry & e = it->second;
+        if (e.refcount > 0) {
+            fprintf(stderr, "[Store] evict-all: %s in use (refcount=%d), keeping\n", e.label, e.refcount);
+            in_use++;
+            ++it;
+            continue;
+        }
+        fprintf(stderr, "[Store] Unload %s (%.1f MB freed)\n", e.label, (float) e.bytes / (1024.0f * 1024.0f));
+        s->handle_to_key.erase(e.ptr);
+        e.deleter(e.ptr);
+        it = s->gpu.erase(it);
+        freed++;
+    }
+    if (still_resident) *still_resident = in_use;
+    return freed;
+}
+
 void store_list_loaded(ModelStore * s, StoreLoadedCb cb, void * ud) {
     if (!cb) return;
     std::lock_guard<std::mutex> lock(s->mtx);

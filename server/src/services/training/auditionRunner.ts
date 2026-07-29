@@ -46,14 +46,28 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
   // Idempotent: the happy path calls it before finishJob so its log still
   // reaches the open SSE stream; the finally is the backstop for every other
   // exit.
-  let evictLm = false;
+  // `flipped` arms BOTH cleanups: the targeted mid-job LM evict (before the DiT
+  // renders) and the end-of-job policy restore. Restore is the real fix
+  // (2026-07-29): the latch used to survive the job, leaving the engine in
+  // EVICT_NEVER — every module the audition (and every later generation!)
+  // touched stayed resident for the rest of the session, which is why a
+  // rendered audition ate far more VRAM than a normal STRICT-policy generation
+  // and never gave it back.
+  let flipped = false;
   const evictLmIfFlipped = async (): Promise<void> => {
-    if (!evictLm) return;
-    evictLm = false;
+    if (!flipped) return;
     const evicted = await aceClient.unloadLabel('LM').catch(() => false);
     log(job, 'info', evicted
-      ? 'Evicted the LM from VRAM (the engine stays in keep-loaded mode until a restart)'
-      : 'Could not evict the LM — it stays resident until the engine restarts');
+      ? 'Evicted the LM from VRAM'
+      : 'Could not evict the LM — it stays resident until the policy restore');
+  };
+  const restorePolicyIfFlipped = async (): Promise<void> => {
+    if (!flipped) return;
+    flipped = false;
+    const restored = await aceClient.restoreEvictPolicy().catch(() => false);
+    log(job, restored ? 'info' : 'warn', restored
+      ? 'Freed every audition model and restored the normal eviction policy'
+      : 'Could not restore the eviction policy — models may stay resident until the engine restarts');
   };
 
   try {
@@ -86,7 +100,7 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
     const previewId = randomUUID();
 
     // Armed BEFORE the first post, because the first post is what flips the flag.
-    evictLm = resolved.coResident && !config.aceServer.keepLoaded;
+    flipped = resolved.coResident && !config.aceServer.keepLoaded;
 
     for (const side of resolved.sides) {
       if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
@@ -202,11 +216,11 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
         'Check ace_engine.log for "[Server] LM adapter: …".');
     }
 
-    // C15: un-flip what we flipped, best effort. FSQ-Detok and VAE-Dec stay
-    // resident on purpose — they are small and they are what makes the next
-    // audition instant. Called here (not only in the finally) so the log line
-    // still reaches the SSE stream while it is open.
-    await evictLmIfFlipped();
+    // C15: un-flip what we flipped, best effort — full eviction pass + STRICT
+    // restored. Called here (not only in the finally) so the log line still
+    // reaches the SSE stream while it is open. The next audition pays a cold
+    // load again; that is the correct price for giving the VRAM back.
+    await restorePolicyIfFlipped();
 
     const allFailed = results.length > 0 && results.every(r => !r.ok);
     pushLog(`[Training] audition job ${job.id} finished — preview ${previewId}` +
@@ -222,6 +236,6 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
     // Backstop for every non-happy exit: cancel at the top of a side loop
     // iteration, cancel after the last side, and the catch above. No-op when the
     // happy path already ran it.
-    await evictLmIfFlipped().catch(() => { /* never fail a job on cleanup */ });
+    await restorePolicyIfFlipped().catch(() => { /* never fail a job on cleanup */ });
   }
 }

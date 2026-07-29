@@ -843,6 +843,24 @@ export const aceClient = {
     return Buffer.from(arrayBuf);
   },
 
+  /** POST /models/restore-policy — full eviction pass + back to EVICT_STRICT
+   *  after a ?keep_loaded=1 latch (codes audition). Best-effort; false when
+   *  the engine refused (CLI --keep-loaded), something was still in use, or
+   *  the call failed. */
+  async restoreEvictPolicy(): Promise<boolean> {
+    try {
+      const res = await fetch(`${BASE}/models/restore-policy`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(TIMEOUT_QUICK),
+      });
+      if (!res.ok) return false;
+      const body = await res.json().catch(() => ({})) as { restored?: boolean };
+      return body.restored === true;
+    } catch {
+      return false;
+    }
+  },
+
   /** POST /models/unload — evict one ModelStore label ('LM', 'DiT', 'VAE-Dec',
    *  'FSQ-Detok', …). Best-effort: a false/failed reply is not an error. */
   async unloadLabel(label: string): Promise<boolean> {

@@ -225,6 +225,11 @@ static AceUnderstandParams g_und_params;
 static int  g_max_batch   = 1;
 static int  g_mp3_kbps    = 128;
 static bool g_keep_loaded = false;
+// True only when --keep-loaded was on the command line — that co-residency is
+// the user's explicit choice and /models/restore-policy must refuse to undo
+// it. A ?keep_loaded=1 request latch, by contrast, is transient job plumbing
+// (the codes audition) and IS restorable.
+static bool g_keep_loaded_cli = false;
 
 // speculative decoding: path to 0.6B draft model (auto-discovered or --draft-lm)
 static std::string g_draft_lm_path;
@@ -2817,7 +2822,8 @@ int main(int argc, char ** argv) {
         } else if (!strcmp(argv[i], "--vae-overlap") && i + 1 < argc) {
             g_synth_params.vae_overlap = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--keep-loaded")) {
-            g_keep_loaded = true;
+            g_keep_loaded     = true;
+            g_keep_loaded_cli = true;
 
             // output
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
@@ -3142,6 +3148,37 @@ int main(int argc, char ** argv) {
         snprintf(buf, sizeof(buf), "{\"unloaded\":%s,\"label\":\"%s\"}", freed ? "true" : "false", label);
         res.set_content(buf, "application/json");
         if (doc) yyjson_doc_free(doc);
+    });
+
+    // HOT-STEP: undo a ?keep_loaded=1 latch. The /lm handler's comment says
+    // going back to STRICT "would need a full eviction pass and is not safe
+    // mid-flight" — this endpoint IS that pass: evict every unreferenced GPU
+    // module, and only when nothing stays resident (nothing mid-flight) flip
+    // the policy back to EVICT_STRICT and clear the latch. The codes audition
+    // calls this on every job exit so a single audition no longer leaves the
+    // engine hoarding the whole pipeline for the rest of the session.
+    // Refused when --keep-loaded came from the command line — that residency
+    // is the user's explicit choice, not job plumbing.
+    svr.Post("/models/restore-policy", [](const httplib::Request &, httplib::Response & res) {
+        if (g_keep_loaded_cli) {
+            json_error(res, 409, "engine was started with --keep-loaded; policy is not restorable");
+            return;
+        }
+        int still = 0;
+        int freed = store_evict_all(g_store, &still);
+        bool restored = false;
+        if (g_keep_loaded && still == 0) {
+            store_set_policy(g_store, EVICT_STRICT);
+            g_keep_loaded = false;
+            restored      = true;
+            fprintf(stderr, "[Server] Eviction policy restored to STRICT (%d module(s) freed)\n", freed);
+        } else if (still > 0) {
+            fprintf(stderr, "[Server] restore-policy: %d module(s) still in use — policy left as-is\n", still);
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "{\"freed\":%d,\"resident\":%d,\"restored\":%s}", freed, still,
+                 restored ? "true" : "false");
+        res.set_content(buf, "application/json");
     });
 
     // job system endpoints

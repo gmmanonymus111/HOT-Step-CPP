@@ -171,6 +171,13 @@ void store_list_loaded(ModelStore * s, StoreLoadedCb cb, void * ud);
 // loaded the module simply reloads on next use.
 bool store_evict_label(ModelStore * s, const char * label);
 
+// Force-evict EVERY unreferenced GPU module, regardless of policy. Returns the
+// number of modules freed; *still_resident (may be NULL) reports how many
+// remain because they are in use (refcount > 0). The full-eviction pass that
+// makes restoring EVICT_STRICT after a keep-loaded episode safe: only when
+// *still_resident is 0 is nothing mid-flight.
+int store_evict_all(ModelStore * s, int * still_resident);
+
 // CPU-resident accessors. Loaded on first call, kept forever, never evicted.
 // All small (a few MB total). Return NULL on load failure.
 BPETokenizer *  store_bpe(ModelStore * s, const char * lm_path);
