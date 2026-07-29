@@ -1552,6 +1552,32 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
     }
+    // MUL_MAT activation-gradient formulation.
+    //
+    // THE LM DEFAULT IS 'outprod', NOT 'mm' — deliberately different from
+    // train-dit's. `weights` above already defaults to 'bf16', and lm-bf16.h's
+    // Lever A reaches the same mul_mat backward by rewriting ggml's out_prod
+    // nodes in place, asserting exactly 7 rewrites per segment. Under --bwd mm
+    // ggml emits mul_mat directly, that surgery finds nothing, and the S18
+    // tripwire GGML_ABORTs the run. Defaulting the LM to 'mm' would therefore
+    // brick the DEFAULT LM training job. It would also buy nothing on the
+    // f32-window path, where the transposed weight is the F32 window and the
+    // GEMM stays TF32 while paying an extra cont. --bwd mm is a train-dit win.
+    const bwd = body.bwd === undefined ? 'outprod' : body.bwd;
+    if (bwd !== 'outprod' && bwd !== 'mm') {
+      res.status(400).json({ error: 'bwd must be outprod or mm' });
+      return;
+    }
+    // Refused HERE so the user gets a 400 instead of the runner stopping
+    // ace-server for a run ace-train exits 2 on (same rule as the other levers).
+    if (weights === 'bf16' && bwd === 'mm') {
+      res.status(400).json({
+        error: 'weights bf16 and bwd mm are two routes to the same mul_mat backward and cannot be '
+             + 'combined — the bf16 lever rewrites ggml out_prod nodes in place and aborts when there '
+             + 'are none. Use weights bf16 on its own, or pair bwd mm with weights f32-window.',
+      });
+      return;
+    }
     const rawBatch = body.batch === undefined ? 1 : body.batch;
     let batch: number | 'auto';
     if (rawBatch === 'auto') {
@@ -1624,6 +1650,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       chunk: Math.trunc(chunk),
       weights,
       batch,
+      bwd,
     };
 
     const job = queue.startTrainLmJob(ds.id, opts);
@@ -1870,6 +1897,13 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'mirror must be f32 or bf16' });
       return;
     }
+    // Same rule for the MUL_MAT activation-gradient formulation: refused, not
+    // coerced. Default is 'mm' (engine/patches/mm-backward.patch), not
+    // ace-train's own 'outprod'.
+    if (body.bwd !== undefined && body.bwd !== 'outprod' && body.bwd !== 'mm') {
+      res.status(400).json({ error: 'bwd must be outprod or mm' });
+      return;
+    }
     if (!Number.isFinite(learningRate) || learningRate <= 0 || learningRate > 1) {
       res.status(400).json({ error: 'learningRate must be greater than 0 and at most 1' });
       return;
@@ -1948,6 +1982,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // the exact string 'f32' opts back out. The engine itself falls back to
       // f32 with a warning on a non-CUDA backend (dit-train-run.h).
       mirror: body.mirror === 'f32' ? 'f32' : 'bf16',
+      // MUL_MAT activation-gradient formulation. Default 'mm' (2026-07-29);
+      // only the exact string 'outprod' opts back out to upstream ggml's
+      // F32-only out_prod backward.
+      bwd: body.bwd === 'outprod' ? 'outprod' : 'mm',
       batch: Math.trunc(batch),
       ckptSegments: Math.trunc(ckptSegments),
       stages: resolvedStages,

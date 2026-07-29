@@ -225,6 +225,10 @@ export const TrainPanel: React.FC = () => {
       // engine without the flags never sees them.
       ...(form.weights !== 'f32-window' ? { weights: form.weights } : {}),
       ...(form.batch !== 1 ? { batch: form.batch } : {}),
+      // ALWAYS sent, unlike the two above: the server default ('mm') is not the
+      // CLI default ('outprod'), so omitting it would hide which formulation ran
+      // and make the drawer's 'outprod' option indistinguishable from "unset".
+      bwd: form.bwd,
     };
     setStarting(true);
     try { await startTrainLm(opts); } finally { setStarting(false); }
@@ -276,6 +280,7 @@ export const TrainPanel: React.FC = () => {
       milestoneKeep: ditForm.milestoneKeep,
       vramReserveMb: ditForm.vramReserveMb,
       mirror: ditForm.mirror,
+      bwd: ditForm.bwd,
       batch: ditForm.batch,
       ckptSegments: ditForm.ckptSegments,
       stages: ditForm.stages,

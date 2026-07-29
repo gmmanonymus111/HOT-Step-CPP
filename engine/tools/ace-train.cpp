@@ -15,6 +15,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -197,6 +198,16 @@ static void print_usage(void) {
             "                                            max rel ~1.2e-1 vs a 2e-2 bar, cosine ~0.9995 vs\n"
             "                                            1-1e-4. Direction is close but not within spec;\n"
             "                                            judge a bf16 adapter by ear before trusting it.\n"
+            "    --bwd <outprod|mm>          outprod     MUL_MAT activation-gradient formulation.\n"
+            "                                            outprod = upstream ggml out_prod (F32-only on\n"
+            "                                                      CUDA; forces an F32 weight, so the\n"
+            "                                                      forward runs TF32).\n"
+            "                                            mm      = mul_mat(cont(transpose(W)), grad) —\n"
+            "                                                      identical maths, dtype-agnostic, so a\n"
+            "                                                      BF16 weight uses BF16 tensor cores.\n"
+            "                                                      ~1.7-1.8x per layer per step on an\n"
+            "                                                      RTX 5090. Needs the vendored patch\n"
+            "                                                      engine/patches/mm-backward.patch.\n"
             "    --batch <n|auto>            1           micro-batch size. NOT SUPPORTED in this build:\n"
             "                                            micro-batching was never written — the host\n"
             "                                            overhead it would amortise measures 9.3%% at 4B,\n"
@@ -299,6 +310,16 @@ static void print_usage(void) {
             "                                            to F32, roughly halving the mirror. CUDA only\n"
             "                                            (engine/patches/bf16-out-prod.patch);\n"
             "                                            EXPERIMENTAL, adapter quality unvalidated.\n"
+            "    --bwd <outprod|mm>          outprod     MUL_MAT activation-gradient formulation.\n"
+            "                                            outprod = upstream ggml out_prod (F32-only on\n"
+            "                                                      CUDA; forces an F32 weight, so the\n"
+            "                                                      forward runs TF32).\n"
+            "                                            mm      = mul_mat(cont(transpose(W)), grad) —\n"
+            "                                                      identical maths, dtype-agnostic, so a\n"
+            "                                                      BF16 mirror uses BF16 tensor cores.\n"
+            "                                                      ~1.7-1.8x per layer per step on an\n"
+            "                                                      RTX 5090. Needs the vendored patch\n"
+            "                                                      engine/patches/mm-backward.patch.\n"
             "\n"
             "  Adapter identity:\n"
             "    --trigger <word>            \"\"          trigger word embedded in the adapter's\n"
@@ -820,6 +841,41 @@ static int cmd_preprocess(int argc, char ** argv) {
     return (processed == 0 && attempted > 0) ? 1 : 0;
 }
 
+// ─── --bwd: MUL_MAT activation-gradient formulation ─────────────────────────
+//
+// engine/patches/mm-backward.patch teaches ggml_compute_backward a second way to
+// emit the gradient wrt src1 of a MUL_MAT:
+//     mm      : mul_mat(cont(transpose(src0)), grad)
+//     outprod : out_prod(src0, transpose(grad))          <- upstream ggml
+// The two are shape- and maths-identical, but out_prod is F32-only on CUDA
+// (cublasSgemm), which forces the frozen weight to F32 and drags the FORWARD
+// mul_mat onto TF32 as well. The mul_mat arm is dtype-agnostic, so a BF16 weight
+// rides real BF16 tensor cores in both directions. Measured on an RTX 5090:
+// ~1.7-1.8x per layer per step (engine/src/train/spike-gemmbench.h).
+//
+// The patch reads GGML_BACKWARD_MM ONCE, at the first backward graph build, so
+// this MUST run before any model load or graph construction — hence it lives in
+// the argv handlers rather than inside the trainers, and covers --self-test too.
+//
+// `outprod` deliberately does NOT clear the variable. The self-test battery is
+// A/B'd by exporting GGML_BACKWARD_MM in the environment, and clearing it here
+// would make the default `--bwd outprod` silently defeat that.
+static bool bwd_valid(const std::string & v) {
+    return v == "outprod" || v == "mm";
+}
+
+static void bwd_apply(const std::string & v) {
+    if (v != "mm") {
+        return;
+    }
+#ifdef _WIN32
+    _putenv("GGML_BACKWARD_MM=1");
+#else
+    setenv("GGML_BACKWARD_MM", "1", 1);
+#endif
+    fprintf(stderr, "[ace-train] --bwd mm: GGML_BACKWARD_MM=1 (mul_mat activation backward)\n");
+}
+
 // ─── train-lm ───────────────────────────────────────────────────────────────
 //
 // docs/plans/2026-07-27-lm-trainer-implementation.md §2.1, §3.1
@@ -854,6 +910,7 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
+        else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
@@ -927,6 +984,35 @@ static int cmd_train_lm(int argc, char ** argv) {
     // pays an engine stop/restart for a bad flag.
     if (a.weights != "f32-window" && a.weights != "bf16") {
         fprintf(stderr, "ace-train train-lm: --weights must be f32-window|bf16\n");
+        return 2;
+    }
+    if (!bwd_valid(a.bwd)) {
+        fprintf(stderr, "ace-train train-lm: --bwd must be outprod|mm\n");
+        return 2;
+    }
+    // COLLISION, refused rather than coerced.
+    //
+    // `--weights bf16` (lm-bf16.h, Lever A) reaches the SAME mul_mat backward by
+    // a different route: it lets ggml build the out_prod form and then rewrites
+    // those nodes in place, asserting EXACTLY 7 rewrites / 0 skipped / 0 residual
+    // per segment (its S18 tripwire). `--bwd mm` makes ggml emit mul_mat directly,
+    // so the surgery finds nothing to rewrite and the tripwire GGML_ABORTs — which
+    // is the tripwire doing its job, but it would abort mid-run, after the model
+    // load, rather than here.
+    //
+    // There is no version of this pair worth building: on the f32-window path
+    // `--bwd mm` has nothing to gain either, because the weight it transposes is
+    // the F32 window, so the GEMM stays F32/TF32 and the extra `cont` is pure
+    // cost. The LM already solved this problem its own way; `--bwd mm` is a win
+    // for train-dit, whose bf16 mirror has no such surgery.
+    if (a.weights == "bf16" && a.bwd == "mm") {
+        fprintf(stderr,
+                "ace-train train-lm: --weights bf16 and --bwd mm are two routes to the SAME\n"
+                "  mul_mat backward and cannot be combined. --weights bf16 rewrites ggml's out_prod\n"
+                "  nodes in place and asserts it found exactly 7 per segment (lm-bf16.h S18); --bwd mm\n"
+                "  makes ggml emit mul_mat directly, so that surgery finds nothing and aborts the run.\n"
+                "  Use --weights bf16 (it already gives you the BF16 tensor-core backward) or pair\n"
+                "  --bwd mm with --weights f32-window.\n");
         return 2;
     }
     int batch_n = 1;
@@ -1053,6 +1139,10 @@ static int cmd_train_lm(int argc, char ** argv) {
         a.lm_size             = lm_size_label_from_config(c);
     }
 
+    // MUST precede every model load and graph build — the ggml patch latches
+    // GGML_BACKWARD_MM on the first backward it emits.
+    bwd_apply(a.bwd);
+
     // MANDATORY: ggml_time_ms() divides by an uninitialised frequency otherwise.
     ggml_time_init();
     return lm_train_main(a);
@@ -1110,6 +1200,7 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) { a.vram_safety = (float) atof(argv[++i]); safety_user = true; }
         else if (!strcmp(argv[i], "--mirror") && i + 1 < argc) a.mirror = argv[++i];
+        else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
@@ -1189,6 +1280,10 @@ static int cmd_train_dit(int argc, char ** argv) {
         fprintf(stderr, "ace-train train-dit: --mirror must be f32|bf16\n");
         return 2;
     }
+    if (!bwd_valid(a.bwd)) {
+        fprintf(stderr, "ace-train train-dit: --bwd must be outprod|mm\n");
+        return 2;
+    }
     // LoKR's est-vs-peak gap measured ~13 % (the kron-matvec intermediates the
     // fitted arena polynomial never saw — see dit-vram.h's K10 note), so 5 % is
     // not enough margin for it. An explicit --vram-safety always wins.
@@ -1230,6 +1325,10 @@ static int cmd_train_dit(int argc, char ** argv) {
         }
         a.dit_name = name;
     }
+
+    // MUST precede every model load and graph build — the ggml patch latches
+    // GGML_BACKWARD_MM on the first backward it emits.
+    bwd_apply(a.bwd);
 
     // MANDATORY: ggml_time_ms() divides by an uninitialised frequency otherwise.
     ggml_time_init();

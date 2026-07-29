@@ -41,6 +41,9 @@ export interface TrainLmFormState {
   weights: 'f32-window' | 'bf16';
   /** Micro-batch size (speed lever B). 1 is the shipped path. */
   batch: number | 'auto';
+  /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+   *  'mm' is the fast tensor-core backward and the server default. */
+  bwd: 'outprod' | 'mm';
 }
 
 export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
@@ -75,6 +78,13 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   // fatal against a non-BF16-quantized LM base (see aceTrain.ts/types.ts docs).
   weights: 'bf16',
   batch: 1,
+  // MUL_MAT activation-gradient formulation. 'outprod' here, unlike train-dit's
+  // 'mm': `weights: 'bf16'` above ALREADY gives this base the mul_mat backward,
+  // by rewriting ggml's out_prod nodes in place (lm-bf16.h). The two cannot be
+  // combined — the rewrite asserts it found 7 out_prod nodes per segment and
+  // aborts when --bwd mm leaves it none — and the server refuses the pair with
+  // a 400. Choosing 'mm' here means also choosing weights 'f32-window'.
+  bwd: 'outprod',
 };
 
 const ALL_STAGES: TrainLmStage[] = ['extract', 'train', 'export'];
@@ -381,6 +391,20 @@ export const TrainLmForm: React.FC<Props> = ({
               <option value="bf16">bf16</option>
             </select>
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.weightsHint')}</span>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.bwd')}</span>
+            <select
+              value={value.bwd}
+              disabled={lock}
+              onChange={(e) => onChange({ bwd: e.target.value === 'outprod' ? 'outprod' : 'mm' })}
+              className={FIELD}
+            >
+              <option value="mm">{t('trainingStudio.train.bwdMm')}</option>
+              <option value="outprod">{t('trainingStudio.train.bwdOutprod')}</option>
+            </select>
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.bwdHintLm')}</span>
           </label>
 
           <label className="flex flex-col gap-1.5">

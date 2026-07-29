@@ -213,8 +213,11 @@ jobs:
           # after "Restore source file timestamps": patched files get a
           # fresh mtime so their cached objects rebuild (content changed).
           # See engine/patches/README.md.
-          git apply --stat  engine/patches/bf16-out-prod.patch
-          git apply --verbose engine/patches/bf16-out-prod.patch
+          for p in engine/patches/*.patch; do
+            echo "== $p"
+            git apply --stat    "$p"
+            git apply --verbose "$p"
+          done
 
       - name: Build C++ engine
         shell: pwsh
@@ -396,8 +399,11 @@ jobs:
           # after "Restore source file timestamps": patched files get a
           # fresh mtime so their cached objects rebuild (content changed).
           # See engine/patches/README.md.
-          git apply --stat  engine/patches/bf16-out-prod.patch
-          git apply --verbose engine/patches/bf16-out-prod.patch
+          for p in engine/patches/*.patch; do
+            echo "== $p"
+            git apply --stat    "$p"
+            git apply --verbose "$p"
+          done
 
       - name: Build C++ engine
         run: |

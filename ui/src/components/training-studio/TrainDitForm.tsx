@@ -73,6 +73,9 @@ export interface TrainDitFormState {
   milestoneKeep: number;
   vramReserveMb: number;
   mirror: 'f32' | 'bf16';
+  /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+   *  'mm' is the fast tensor-core backward and the server default. */
+  bwd: 'outprod' | 'mm';
   /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2). */
   batch: number;
   /** Gradient-checkpointing segments: 0 = off, 1 = auto, 2-32 = fixed. */
@@ -129,6 +132,10 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   // spreads this object and doesn't override mirror, so LoKR inherits it too.
   // The engine itself falls back to 'f32' with a warning on a non-CUDA backend.
   mirror: 'bf16',
+  // MUL_MAT activation-gradient formulation. 'mm' mirrors the server default
+  // (2026-07-29): identical maths to out_prod but dtype-agnostic, so the BF16
+  // mirror above rides BF16 tensor cores instead of being promoted to F32.
+  bwd: 'mm',
   // Micro-batching + checkpointing defaults (design §2.2 / C3/C5) — the engine's
   // own train-dit defaults. batch 1 = OFF (2026-07-29, measured): batching is
   // ~2.5x SLOWER at full depth on a 32 GB card and ~2.4x faster on shallow /
@@ -807,6 +814,20 @@ export const TrainDitForm: React.FC<Props> = ({
           <span className="text-[11px] text-zinc-500 sm:col-span-2 -mt-1">
             {t('trainingStudio.train.dit.mirrorHelp')}
           </span>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.bwd')}</span>
+            <select
+              value={value.bwd}
+              disabled={lock}
+              onChange={(e) => onChange({ bwd: e.target.value === 'outprod' ? 'outprod' : 'mm' })}
+              className={FIELD}
+            >
+              <option value="mm">{t('trainingStudio.train.bwdMm')}</option>
+              <option value="outprod">{t('trainingStudio.train.bwdOutprod')}</option>
+            </select>
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.bwdHint')}</span>
+          </label>
 
           <label className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.train.dit.batch')}</span>

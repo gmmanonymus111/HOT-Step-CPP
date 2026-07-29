@@ -83,6 +83,12 @@ struct LmExportMeta {
     // --weights bf16 the gradients are not the same quantity (S6).
     std::string weights = "f32-window";
     int         batch   = 1;
+
+    // MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+    // Additive; readers default it to "outprod". Unlike `weights` this does NOT
+    // change the quantity being computed — both arms compute the same gradient,
+    // one via out_prod and one via mul_mat — so it is NOT a resume barrier.
+    std::string bwd = "outprod";
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -163,6 +169,7 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_int(doc, cfg, "chunk", m.chunk);
     yyjson_mut_obj_add_strcpy(doc, cfg, "weights", m.weights.c_str());
     yyjson_mut_obj_add_int(doc, cfg, "batch", m.batch);
+    yyjson_mut_obj_add_strcpy(doc, cfg, "bwd", m.bwd.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
 

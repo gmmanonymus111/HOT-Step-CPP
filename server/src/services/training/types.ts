@@ -424,6 +424,22 @@ export interface TrainLmOptions {
   /** Micro-batch size 1..8, or 'auto' (largest of {1,2,4} that fits without
    *  dropping a song). >1 forces low-VRAM mode. */
   batch?: number | 'auto';           // default 1
+  /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+   *  'outprod' is upstream ggml — out_prod(W, transpose(grad)) — which ggml-cuda
+   *  implements F32-only, forcing an F32 weight and dragging the forward mul_mat
+   *  onto TF32 too. 'mm' emits mul_mat(cont(transpose(W)), grad) instead:
+   *  provably the same shape and the same maths, but dtype-agnostic, so a BF16
+   *  weight rides real BF16 tensor cores in both directions. Measured ~1.7-1.8x
+   *  per layer per step on an RTX 5090. Unlike `weights`, this does NOT change
+   *  which quantity is computed.
+   *
+   *  THE LM SERVER DEFAULT IS 'outprod', unlike train-dit's 'mm': `weights:
+   *  'bf16'` already reaches the same mul_mat backward by rewriting ggml's
+   *  out_prod nodes in place (lm-bf16.h Lever A), and its S18 tripwire aborts
+   *  when --bwd mm leaves it nothing to rewrite. The pair is refused with a 400.
+   *  On the f32-window path 'mm' also buys nothing — the transposed weight is
+   *  the F32 window, so the GEMM stays TF32 and the extra cont is pure cost. */
+  bwd?: 'outprod' | 'mm';            // default 'outprod' (train-dit defaults to 'mm')
 }
 
 export interface TrainLmEpoch {
@@ -526,6 +542,15 @@ export interface TrainDitOptions {
    *  (dit-train-run.h), so an explicit 'f32' request is the only way to opt
    *  out deliberately. */
   mirror?: 'f32' | 'bf16';         // default 'bf16'
+  /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+   *  'outprod' is upstream ggml — out_prod(W, transpose(grad)) — which ggml-cuda
+   *  implements F32-only, forcing an F32 weight and dragging the forward mul_mat
+   *  onto TF32 too. 'mm' emits mul_mat(cont(transpose(W)), grad) instead:
+   *  provably the same shape and the same maths, but dtype-agnostic, so a BF16
+   *  mirror rides real BF16 tensor cores in both directions. Measured ~1.7-1.8x
+   *  per layer per step on an RTX 5090. ace-train's own default is 'outprod';
+   *  the SERVER default is 'mm' (training.ts train-dit handler). */
+  bwd?: 'outprod' | 'mm';          // default 'mm'
   /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2 /
    *  C5). Effective samples/optimizer-step is batch x gradAccum.
    *  Default 1 = OFF (2026-07-29, measured): batching is ~2.5x SLOWER at full

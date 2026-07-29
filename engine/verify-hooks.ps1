@@ -109,6 +109,24 @@ if (Test-Path $outProd) {
     Write-Host "  [WARN] $outProd not found - ggml submodule not checked out?" -ForegroundColor Yellow
 }
 
+# -- Hook 8: ggml.c's MUL_MAT backward must carry the mm-backward patch ------
+#            Also a SUBMODULE file, so a submodule update reverts it.
+$ggmlC = "$ggml\src\ggml.c"
+if (Test-Path $ggmlC) {
+    $content = Get-Content $ggmlC -Raw
+    if ($content -match 'HOT-Step patch: mm-backward') {
+        Write-Host "  [OK] ggml/src/ggml.c has the mm-backward patch" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] ggml/src/ggml.c is missing the mm-backward patch" -ForegroundColor Red
+        Write-Host "         Without it, ace-train --bwd mm silently runs the slow out_prod path" -ForegroundColor Yellow
+        Write-Host "         and train-dit --mirror bf16 loses its tensor-core backward." -ForegroundColor Yellow
+        Write-Host "         Fix (from the repo root): git apply engine\patches\mm-backward.patch" -ForegroundColor Yellow
+        $errors++
+    }
+} else {
+    Write-Host "  [WARN] $ggmlC not found - ggml submodule not checked out?" -ForegroundColor Yellow
+}
+
 # ── Summary ───────────────────────────────────────────────────────────
 Write-Host ""
 if ($errors -gt 0) {

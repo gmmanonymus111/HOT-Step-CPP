@@ -226,6 +226,16 @@ export interface ResolvedTrainLmOptions {
   weights: 'f32-window' | 'bf16';
   /** Micro-batch size 1..8, or 'auto'. 1 is the CLI default; >1 implies low-VRAM. */
   batch: number | 'auto';
+  /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
+   *  'outprod' = upstream ggml out_prod, F32-only on CUDA. 'mm' =
+   *  mul_mat(cont(transpose(W)), grad) — identical maths, dtype-agnostic, so a
+   *  BF16 weight uses BF16 tensor cores (~1.7-1.8x per layer on an RTX 5090).
+   *  ace-train's own default is 'outprod', and so is the LM SERVER default —
+   *  `weights: 'bf16'` already reaches the same backward by rewriting ggml's
+   *  out_prod nodes in place (lm-bf16.h) and aborts if --bwd mm leaves it none,
+   *  so the route refuses that pair. train-dit, which has no such surgery,
+   *  defaults to 'mm'. */
+  bwd: 'outprod' | 'mm';
 }
 
 /** Full argv for `ace-train train-lm` (§2.1 order). */
@@ -279,6 +289,9 @@ export function buildTrainLmArgs(input: {
   // if the caller explicitly requests 'f32-window'.
   if (o.weights && o.weights !== 'f32-window') args.push('--weights', o.weights);
   if (o.batch !== undefined && o.batch !== 1) args.push('--batch', String(o.batch));
+  // Always emitted, both sides: an ace-train that predates --bwd rejects it
+  // loudly rather than silently running the slow out_prod backward.
+  args.push('--bwd', o.bwd);
   // `--loss-on-cot` is the CLI default; only the negation needs emitting.
   if (!o.lossOnCot) args.push('--no-loss-on-cot');
   if (o.overwrite) args.push('--overwrite');
@@ -308,6 +321,9 @@ export interface ResolvedTrainDitOptions {
   seed: number; order: 'shuffle' | 'fixed';
   milestoneStep: number; milestoneKeep: number; vramReserveMb: number;
   mirror: 'f32' | 'bf16';
+  /** MUL_MAT activation-gradient formulation — see ResolvedTrainLmOptions.bwd.
+   *  ace-train defaults to 'outprod'; the SERVER default is 'mm'. */
+  bwd: 'outprod' | 'mm';
   batch: number; ckptSegments: number;
   stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
 }
@@ -419,6 +435,9 @@ export function buildTrainDitArgs(input: {
     // Always emitted, both sides: an ace-train that predates the flag rejects it
     // loudly rather than silently running the other precision.
     '--mirror', o.mirror,
+    // Ditto: always emitted, so an ace-train that predates --bwd rejects it
+    // loudly rather than silently running the slow out_prod backward.
+    '--bwd', o.bwd,
     // Batching/checkpointing (design §2.2): always emitted on both sides —
     // an ace-train that predates the flags rejects them loudly rather than
     // silently training at batch 1 / no checkpointing.

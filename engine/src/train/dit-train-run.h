@@ -90,6 +90,15 @@ struct DitTrainArgs {
     // mirror; needs the patched CUDA out_prod — engine/patches/bf16-out-prod.patch).
     std::string mirror = "f32";
 
+    // MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch):
+    //   "outprod" = ggml upstream, out_prod(src0, transpose(grad)) — F32-only on CUDA
+    //   "mm"      = mul_mat(cont(transpose(src0)), grad) — dtype-agnostic, BF16
+    //               tensor cores. ~1.7-1.8x per layer per step on an RTX 5090.
+    // ENGINE DEFAULT IS "outprod" so a bare ace-train invocation is unchanged; the
+    // server passes --bwd mm. Selected by setting GGML_BACKWARD_MM before any
+    // backward graph is built (ace-train.cpp).
+    std::string bwd = "outprod";
+
     // Trigger word embedded in the exported adapter. Empty = fall back to the
     // variant's preprocess_meta.json custom_tag/tag_position; still empty after
     // that = no trigger keys written and the adapter is byte-identical to a
@@ -1334,13 +1343,13 @@ static int dit_train_main(const DitTrainArgs & a) {
        "\"targetLoss\":%.9g,"
        "\"gradClip\":%.9g,\"seed\":%d,\"order\":\"%s\",\"lossWeighting\":\"%s\",\"channelBalance\":%s,"
        "\"cfgRatio\":%.9g,"
-       "\"genreRatio\":%d,\"mirror\":\"%s\"}",
+       "\"genreRatio\":%d,\"mirror\":\"%s\",\"bwd\":\"%s\"}",
        stage_csv.c_str(), lm_json_escape(a.tensors_dir).c_str(), lm_json_escape(a.out_dir).c_str(),
        lm_json_escape(a.dit_name.empty() ? a.dit_path : a.dit_name).c_str(), a.adapter_type.c_str(), adapter_fields,
        a.target_mlp ? "true" : "false", (double) a.lr, a.epochs, a.grad_accum, a.batch, a.ckpt,
        (double) a.target_loss,
        (double) a.grad_clip, a.seed, a.order.c_str(), a.loss_weighting.c_str(),
-       a.channel_balance ? "true" : "false", (double) a.cfg_ratio, a.genre_ratio, a.mirror.c_str());
+       a.channel_balance ? "true" : "false", (double) a.cfg_ratio, a.genre_ratio, a.mirror.c_str(), a.bwd.c_str());
 
     if (a.adapter_type != "lora" && !is_lokr) {
         lm_fatal("unsupported-adapter", "--adapter-type must be lora|lokr");
@@ -1374,6 +1383,7 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.crop_min        = a.crop_min;
     log.crop_max        = a.crop_max;
     log.mirror          = a.mirror;
+    log.bwd             = a.bwd;
     log.lr              = a.lr;
     log.epochs          = a.epochs;
     log.grad_accum      = a.grad_accum;

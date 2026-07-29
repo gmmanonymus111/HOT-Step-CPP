@@ -54,6 +54,15 @@ struct LmTrainArgs {
     std::string weights = "f32-window";  // f32-window|bf16  (Lever A)
     std::string batch   = "1";           // 1..8|auto        (Lever B)
 
+    // MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch):
+    //   "outprod" = ggml upstream, out_prod(src0, transpose(grad)) — F32-only on CUDA
+    //   "mm"      = mul_mat(cont(transpose(src0)), grad) — dtype-agnostic, BF16
+    //               tensor cores. ~1.7-1.8x per layer per step on an RTX 5090.
+    // ENGINE DEFAULT IS "outprod" so a bare ace-train invocation is unchanged; the
+    // server passes --bwd mm. Selected by setting GGML_BACKWARD_MM before any
+    // backward graph is built (ace-train.cpp).
+    std::string bwd = "outprod";
+
     // Trigger word embedded in the exported adapter. Empty = fall back to the
     // variant's preprocess_meta.json custom_tag/tag_position; still empty after
     // that = no trigger keys written and the adapter is byte-identical to a
@@ -956,11 +965,11 @@ static int lm_train_main(const LmTrainArgs & a) {
 
     jl("{\"type\":\"start\",\"stages\":[%s],\"tensors\":\"%s\",\"codes\":\"%s\",\"out\":\"%s\",\"lm\":\"%s\","
        "\"lmSize\":\"%s\",\"rank\":%d,\"alpha\":%d,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"targetLoss\":%.9g,"
-       "\"gradClip\":%.9g,\"seed\":%d,\"lossOnCot\":%s}",
+       "\"gradClip\":%.9g,\"seed\":%d,\"lossOnCot\":%s,\"bwd\":\"%s\"}",
        stage_csv.c_str(), lm_json_escape(a.tensors_dir).c_str(), lm_json_escape(a.codes_path).c_str(),
        lm_json_escape(a.out_dir).c_str(), lm_json_escape(a.lm_name).c_str(), a.lm_size.c_str(), a.rank, a.alpha,
        (double) a.lr, a.epochs, a.grad_accum, (double) a.target_loss, (double) a.grad_clip, a.seed,
-       a.loss_on_cot ? "true" : "false");
+       a.loss_on_cot ? "true" : "false", a.bwd.c_str());
 
     // ── extract ──────────────────────────────────────────────────────────
     if (lm_has_stage(a, "extract")) {
@@ -997,6 +1006,7 @@ static int lm_train_main(const LmTrainArgs & a) {
     meta.grad_accum     = a.grad_accum;
     meta.seed           = a.seed;
     meta.loss_on_cot    = a.loss_on_cot;
+    meta.bwd            = a.bwd;
 
     // Trigger word (T5): CLI flags win, else the variant's preprocess_meta.json.
     // `--codes` always sits in the variant dir, so its parent is the fallback
