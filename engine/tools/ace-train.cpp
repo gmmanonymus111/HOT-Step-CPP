@@ -278,6 +278,13 @@ static void print_usage(void) {
             "    --crop-max <n>              1250\n"
             "    --vram-reserve-mb <n>       2048        desktop/OS headroom left unallocated\n"
             "    --vram-safety <f>           0.05        extra margin on the footprint model\n"
+            "                                            (0.12 for --adapter-type lokr unless set)\n"
+            "    --mirror <f32|bf16>         f32         frozen-weight mirror precision. bf16 keeps\n"
+            "                                            the trainable layers' matmul weights in the\n"
+            "                                            base's native BF16 instead of promoting them\n"
+            "                                            to F32, roughly halving the mirror. CUDA only\n"
+            "                                            (engine/patches/bf16-out-prod.patch);\n"
+            "                                            EXPERIMENTAL, adapter quality unvalidated.\n"
             "\n"
             "  Adapter identity:\n"
             "    --trigger <word>            \"\"          trigger word embedded in the adapter's\n"
@@ -1042,6 +1049,7 @@ static int cmd_train_lm(int argc, char ** argv) {
 static int cmd_train_dit(int argc, char ** argv) {
     DitTrainArgs a;
     std::string  stages_csv, dit_arg;
+    bool         safety_user = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--stages") && i + 1 < argc) stages_csv = argv[++i];
@@ -1084,7 +1092,8 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--crop-min") && i + 1 < argc) a.crop_min = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--crop-max") && i + 1 < argc) a.crop_max = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--vram-reserve-mb") && i + 1 < argc) a.vram_reserve_mb = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) a.vram_safety = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) { a.vram_safety = (float) atof(argv[++i]); safety_user = true; }
+        else if (!strcmp(argv[i], "--mirror") && i + 1 < argc) a.mirror = argv[++i];
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
@@ -1158,6 +1167,16 @@ static int cmd_train_dit(int argc, char ** argv) {
         (a.lokr_factor != -1 && (a.lokr_factor < 2 || a.lokr_factor > 64))) {
         fprintf(stderr, "ace-train train-dit: --lokr-dim 4-4096, --lokr-alpha 0-8192, --lokr-factor -1 or 2-64\n");
         return 2;
+    }
+    if (a.mirror != "f32" && a.mirror != "bf16") {
+        fprintf(stderr, "ace-train train-dit: --mirror must be f32|bf16\n");
+        return 2;
+    }
+    // LoKR's est-vs-peak gap measured ~13 % (the kron-matvec intermediates the
+    // fitted arena polynomial never saw — see dit-vram.h's K10 note), so 5 % is
+    // not enough margin for it. An explicit --vram-safety always wins.
+    if (!safety_user && a.adapter_type == "lokr") {
+        a.vram_safety = 0.12f;
     }
 
     // ── required arguments ──────────────────────────────────────────────

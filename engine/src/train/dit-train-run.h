@@ -58,6 +58,9 @@ struct DitTrainArgs {
     int   crop = 0, crop_min = 375, crop_max = 1250;
     int   vram_reserve_mb = 2048;
     float vram_safety     = 0.05f;
+    // Frozen-weight mirror precision: "f32" (shipped) or "bf16" (halves the
+    // mirror; needs the patched CUDA out_prod — engine/patches/bf16-out-prod.patch).
+    std::string mirror = "f32";
 
     // Trigger word embedded in the exported adapter. Empty = fall back to the
     // variant's preprocess_meta.json custom_tag/tag_position; still empty after
@@ -129,8 +132,9 @@ static std::string dit_milestone_label(double v, float step) {
 // ─── the training stage ─────────────────────────────────────────────────────
 
 static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOutcome * out) {
-    const int64_t t_stage0 = ggml_time_ms();
-    const bool    is_lokr  = (a.adapter_type == "lokr");
+    const int64_t       t_stage0 = ggml_time_ms();
+    const bool          is_lokr  = (a.adapter_type == "lokr");
+    const DitMirrorMode mirror_mode = (a.mirror == "bf16") ? DIT_MIRROR_BF16 : DIT_MIRROR_F32;
     jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"begin\",\"total\":%d}", a.epochs);
 
     // ── samples (host-resident for the whole run) ────────────────────────
@@ -234,12 +238,33 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         }
     }
 
+    // ── --mirror bf16 is CUDA-only ───────────────────────────────────────
+    // Only ggml-cuda's out_prod carries the BF16 patch; the CPU and Vulkan
+    // implementations still assert F32 src0, so a BF16 mirror there would abort
+    // deep inside the first backward pass. Refuse up front instead.
+    if (mirror_mode == DIT_MIRROR_BF16 && strncmp(ggml_backend_name(M.backend), "CUDA", 4) != 0) {
+        char b[256];
+        snprintf(b, sizeof(b),
+                 "--mirror bf16 needs the CUDA backend (this run picked '%s'): only ggml-cuda's out_prod carries the "
+                 "BF16 patch — see engine/patches/bf16-out-prod.patch. Re-run with --mirror f32.",
+                 ggml_backend_name(M.backend));
+        lm_fatal("unsupported-backend", b);
+        dit_train_free(&M);
+        return 1;
+    }
+
+    // ── honest device VRAM (gpu-mem.h) ───────────────────────────────────
+    // cudaMemGetInfo counts another process's EVICTABLE memory as free under
+    // WDDM — measured 31 GB "free" against nvidia-smi's 22.4 GB on this card.
+    // Everything that sizes or polices the run reads NVML when it is available.
+    const DitGpuMem gmem = dit_gpu_mem_query(M.backend);
+
     // ── card support gate (D9) ───────────────────────────────────────────
-    const size_t total_mb = lm_vram_total_mb(M.backend);
+    const size_t total_mb = gmem.total_mb();
     if (!dit_vram_card_supported(total_mb)) {
         char extra[128];
         snprintf(extra, sizeof(extra), ",\"needMb\":%d,\"freeMb\":%lld", DIT_MIN_VRAM_MB,
-                 (long long) lm_vram_free_mb(M.backend));
+                 (long long) gmem.free_mb());
         char b[320];
         snprintf(b, sizeof(b),
                  "DiT LoRA training needs a 16 GB card or larger; this one reports %lld MB. Even the 2-layer floor "
@@ -260,14 +285,15 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     vm.is_lokr     = is_lokr;
     vm.lokr_dim    = a.lokr_dim;
     vm.lokr_factor = a.lokr_factor;
+    vm.mirror      = mirror_mode;
     vm.in_ch       = c.in_channels;
     vm.out_ch      = Oc;
     vm.hidden      = H;
     vm.enc_H       = enc_H;
     vm.enc_S       = enc_S;
 
-    const DitVramFit fit =
-        dit_vram_fit(vm, M.backend, a.vram_reserve_mb, a.vram_safety, a.crop, a.layers, a.crop_min, a.crop_max, max_T);
+    const DitVramFit fit = dit_vram_fit(vm, M.backend, a.vram_reserve_mb, a.vram_safety, a.crop, a.layers, a.crop_min,
+                                        a.crop_max, max_T, &gmem);
     if (!fit.ok) {
         char extra[160];
         snprintf(extra, sizeof(extra), ",\"needMb\":%lld,\"freeMb\":%lld",
@@ -289,18 +315,20 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     out->crop          = crop_len;
     out->layers        = K;
 
-    // ── the streamed F32 mirror, built ONCE at the chosen depth ──────────
+    // ── the streamed mirror, built ONCE at the chosen depth ──────────────
     {
         std::string err;
-        if (!dit_build_mirror(&M, lora_lo, &err)) {
+        if (!dit_build_mirror(&M, lora_lo, mirror_mode, &err)) {
             lm_fatal(err.find("quantized") != std::string::npos ? "model-load" : "vram", err);
             dit_train_free(&M);
             return 1;
         }
     }
-    fprintf(stderr, "[train-dit] mirror: %d promoted to F32 (%.1f MB) + %d kept native, %.1f MB total; device-wide %zu MB\n",
-            M.mirror.n_f32, M.mirror.bytes_f32 / 1048576.0, M.mirror.n_keep, M.mirror.bytes / 1048576.0,
-            lm_vram_used_mb(M.backend));
+    fprintf(stderr,
+            "[train-dit] mirror (%s): %d promoted to F32 (%.1f MB) + %d kept native, %.1f MB total; device-wide %zu "
+            "MB\n",
+            dit_mirror_mode_name(mirror_mode), M.mirror.n_f32, M.mirror.bytes_f32 / 1048576.0, M.mirror.n_keep,
+            M.mirror.bytes / 1048576.0, dit_gpu_mem_query(M.backend).used_mb());
 
     // ── scheduler ────────────────────────────────────────────────────────
     {
@@ -434,12 +462,13 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     // number here: it is the only figure that can see Windows quietly backing an
     // over-subscribed allocation with shared system memory. Sampled here, after
     // the mirror / adapter / optimizer are resident but before the probe.
-    jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"reserveMb\":%d,\"mirrorMb\":%lld,\"crop\":%d,"
-       "\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"deviceWideMb\":%lld,\"source\":\"%s\","
-       "\"cropSource\":\"%s\",\"layersSource\":\"%s\"}",
-       (long long) fit.free_mb, (long long) fit.total_mb, a.vram_reserve_mb, (long long) (M.mirror.bytes / 1048576),
-       crop_len, K, (long long) adapter->nParams(), (long long) (fit.est_bytes / 1048576.0),
-       (long long) lm_vram_used_mb(M.backend), (fit.crop_user && fit.layers_user) ? "user" : "auto",
+    jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"freeSource\":\"%s\",\"reserveMb\":%d,\"mirrorMb\":%lld,"
+       "\"mirror\":\"%s\",\"crop\":%d,\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"deviceWideMb\":%lld,"
+       "\"source\":\"%s\",\"cropSource\":\"%s\",\"layersSource\":\"%s\"}",
+       (long long) fit.free_mb, (long long) fit.total_mb, fit.free_source, a.vram_reserve_mb,
+       (long long) (M.mirror.bytes / 1048576), dit_mirror_mode_name(mirror_mode), crop_len, K,
+       (long long) adapter->nParams(), (long long) (fit.est_bytes / 1048576.0),
+       (long long) dit_gpu_mem_query(M.backend).used_mb(), (fit.crop_user && fit.layers_user) ? "user" : "auto",
        fit.crop_user ? "user" : "auto", fit.layers_user ? "user" : "auto");
     if (K < L) {
         // §2.8 gates the UI banner on layersSource === 'auto', so this line must
@@ -631,7 +660,11 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             fixed += ggml_backend_buffer_get_size(opt.buf_mom);
         }
         tracker.probe_baseline(M.backend, M.sched, fixed);
-        const size_t device_wide_mb = lm_vram_used_mb(M.backend);
+        // NVML, not cudaMemGetInfo: the whole point of the tripwire below is to
+        // catch a device that is fuller than CUDA admits.
+        const DitGpuMem gm_probe      = dit_gpu_mem_query(M.backend);
+        const size_t    device_wide_mb = gm_probe.used_mb();
+        const size_t    device_total_mb = gm_probe.total_mb();
         fprintf(stderr,
                 "[train-dit] graph %d nodes (fwd+bwd); high-water probe loss=%.6f in %lld ms; trainer-owned %zu MB "
                 "(est %lld MB), device-wide %zu MB\n",
@@ -645,12 +678,12 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         // spill is a performance cliff, not an error, and the reserve/safety
         // margins already own the refusal path. (Written as `+ 512 >` so a card
         // reporting under 512 MB total cannot underflow the size_t.)
-        if (device_wide_mb + 512 > total_mb) {
-            char b[288];
+        if (device_wide_mb + 512 > device_total_mb) {
+            char b[320];
             snprintf(b, sizeof(b),
-                     "VRAM overcommitted after probe (%lld of %lld MB device-wide) — Windows is likely spilling into "
-                     "shared GPU memory; reduce crop, layers, or lokr dim, or close other GPU apps",
-                     (long long) device_wide_mb, (long long) total_mb);
+                     "VRAM overcommitted after probe (%lld of %lld MB device-wide, %s) — Windows is likely spilling "
+                     "into shared GPU memory; reduce crop, layers, or lokr dim, or close other GPU apps",
+                     (long long) device_wide_mb, (long long) device_total_mb, gm_probe.source());
             lm_log("warn", b);
         }
     }
@@ -947,12 +980,12 @@ static int dit_train_main(const DitTrainArgs & a) {
     jl("{\"type\":\"start\",\"stages\":[%s],\"tensors\":\"%s\",\"out\":\"%s\",\"dit\":\"%s\",\"adapterType\":\"%s\","
        "%s,\"targetMlp\":%s,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"targetLoss\":%.9g,"
        "\"gradClip\":%.9g,\"seed\":%d,\"lossWeighting\":\"%s\",\"channelBalance\":%s,\"cfgRatio\":%.9g,"
-       "\"genreRatio\":%d}",
+       "\"genreRatio\":%d,\"mirror\":\"%s\"}",
        stage_csv.c_str(), lm_json_escape(a.tensors_dir).c_str(), lm_json_escape(a.out_dir).c_str(),
        lm_json_escape(a.dit_name.empty() ? a.dit_path : a.dit_name).c_str(), a.adapter_type.c_str(), adapter_fields,
        a.target_mlp ? "true" : "false", (double) a.lr, a.epochs, a.grad_accum, (double) a.target_loss,
        (double) a.grad_clip, a.seed, a.loss_weighting.c_str(), a.channel_balance ? "true" : "false",
-       (double) a.cfg_ratio, a.genre_ratio);
+       (double) a.cfg_ratio, a.genre_ratio, a.mirror.c_str());
 
     if (a.adapter_type != "lora" && !is_lokr) {
         lm_fatal("unsupported-adapter", "--adapter-type must be lora|lokr");
@@ -985,6 +1018,7 @@ static int dit_train_main(const DitTrainArgs & a) {
     }
     log.crop_min        = a.crop_min;
     log.crop_max        = a.crop_max;
+    log.mirror          = a.mirror;
     log.lr              = a.lr;
     log.epochs          = a.epochs;
     log.grad_accum      = a.grad_accum;

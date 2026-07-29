@@ -1849,6 +1849,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'cropMax must be greater than or equal to cropMin' });
       return;
     }
+    // Refused here rather than coerced: 'bf16' halves the frozen-weight mirror
+    // and is experimental, so a typo must not silently land on either side.
+    if (body.mirror !== undefined && body.mirror !== 'f32' && body.mirror !== 'bf16') {
+      res.status(400).json({ error: 'mirror must be f32 or bf16' });
+      return;
+    }
     if (!Number.isFinite(learningRate) || learningRate <= 0 || learningRate > 1) {
       res.status(400).json({ error: 'learningRate must be greater than 0 and at most 1' });
       return;
@@ -1923,6 +1929,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       milestoneStep,
       milestoneKeep: Math.trunc(milestoneKeep),
       vramReserveMb: Math.trunc(vramReserveMb),
+      // Frozen-weight mirror precision. Anything but the exact string 'bf16'
+      // falls back to 'f32' — the experimental path is opt-in only.
+      mirror: body.mirror === 'bf16' ? 'bf16' : 'f32',
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,

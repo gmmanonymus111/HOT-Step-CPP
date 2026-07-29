@@ -52,6 +52,7 @@ struct DitTrainLog {
     int         samples = 0;
     int         crop = 0, crop_min = 375, crop_max = 1250;
     std::string crop_source = "auto";
+    std::string mirror      = "f32";  // frozen-weight mirror precision (f32|bf16)
     double      lr = 5e-4;
     int         epochs = 100, grad_accum = 4;
     double      grad_clip = 1.0, weight_decay = 0.01, warmup_ratio = 0.05;
@@ -112,6 +113,7 @@ static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) 
     yyjson_mut_obj_add_strcpy(doc, cfg, "crop_source", m.crop_source.c_str());
     yyjson_mut_obj_add_int(doc, cfg, "crop_min", m.crop_min);
     yyjson_mut_obj_add_int(doc, cfg, "crop_max", m.crop_max);
+    yyjson_mut_obj_add_strcpy(doc, cfg, "mirror", m.mirror.c_str());
     yyjson_mut_obj_add_real(doc, cfg, "lr", m.lr);
     yyjson_mut_obj_add_int(doc, cfg, "epochs", m.epochs);
     yyjson_mut_obj_add_int(doc, cfg, "grad_accum", m.grad_accum);

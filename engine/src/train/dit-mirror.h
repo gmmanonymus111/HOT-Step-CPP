@@ -15,6 +15,13 @@
 // F32 on all three tensors. So every weight in a gradient-carrying layer must be
 // F32, LoRA site or not.
 //
+// ...unless out_prod itself takes BF16. engine/patches/bf16-out-prod.patch adds
+// exactly that to the CUDA kernel, which is what DIT_MIRROR_BF16 below trades on:
+// the per-layer MATMUL weights — the ~99 % of the mirror by bytes — then stay in
+// their native BF16 and the mirror roughly halves. Everything else (norms,
+// scale_shift_table, the output head, temb) is tiny and reaches its gradient
+// through non-out_prod ops, so it stays F32-promoted in both modes.
+//
 // docs/plans/2026-07-28-dit-trainer-implementation.md §3.3
 
 #include "dit.h"
@@ -46,6 +53,17 @@ struct DitTrainModel {
     long long            load_ms    = 0;
 };
 
+// ─── mirror precision policy ────────────────────────────────────────────────
+
+enum DitMirrorMode {
+    DIT_MIRROR_F32 = 0,  // shipped behaviour: every trainable-layer weight -> F32
+    DIT_MIRROR_BF16,     // trainable-layer matmul weights keep their native BF16
+};
+
+static inline const char * dit_mirror_mode_name(DitMirrorMode mode) {
+    return mode == DIT_MIRROR_BF16 ? "bf16" : "f32";
+}
+
 // ─── slot enumeration (shared by the sizing model and the builder) ──────────
 
 struct DitSlot {
@@ -55,12 +73,20 @@ struct DitSlot {
 
 // Collect every weight the training graph touches, with the §3.3 promotion
 // policy applied for `lora_lo`. Pure bookkeeping — allocates nothing.
-static void dit_mirror_slots(DiTGGML * m, int lora_lo, std::vector<DitSlot> * slots) {
+static void dit_mirror_slots(DiTGGML * m, int lora_lo, DitMirrorMode mode, std::vector<DitSlot> * slots) {
     slots->clear();
     auto add = [&](ggml_tensor ** f, bool promote) {
         if (f && *f) {
             slots->push_back({ f, promote });
         }
+    };
+    // A trainable layer's MATMUL weight: the only slot class DIT_MIRROR_BF16
+    // touches, and only when the base actually stores it as BF16 — the patched
+    // out_prod takes F32 or BF16 src0 and nothing else, so an F16 base still gets
+    // the F32 promotion (and a quantized one is refused outright, below).
+    auto add_mm = [&](ggml_tensor ** f, bool trainable) {
+        const bool native_bf16 = (f && *f && (*f)->type == GGML_TYPE_BF16);
+        add(f, trainable && !(mode == DIT_MIRROR_BF16 && native_bf16));
     };
 
     // Globals: proj_in / cond_emb consume graph INPUTS (never an activation
@@ -91,32 +117,34 @@ static void dit_mirror_slots(DiTGGML * m, int lora_lo, std::vector<DitSlot> * sl
         DiTGGMLLayer & ly = m->layers[i];
         const bool     tr = (i >= lora_lo);  // this layer carries gradients
         add(&ly.self_attn_norm, tr);
-        add(&ly.sa_q_proj, tr);
-        add(&ly.sa_k_proj, tr);
-        add(&ly.sa_v_proj, tr);
+        add_mm(&ly.sa_q_proj, tr);
+        add_mm(&ly.sa_k_proj, tr);
+        add_mm(&ly.sa_v_proj, tr);
         add(&ly.sa_q_norm, tr);
         add(&ly.sa_k_norm, tr);
-        add(&ly.sa_o_proj, tr);
+        add_mm(&ly.sa_o_proj, tr);
         add(&ly.cross_attn_norm, tr);
-        add(&ly.ca_q_proj, tr);
-        add(&ly.ca_k_proj, tr);  // D5: cross-attn K/V now host adapters
-        add(&ly.ca_v_proj, tr);
+        add_mm(&ly.ca_q_proj, tr);
+        add_mm(&ly.ca_k_proj, tr);  // D5: cross-attn K/V now host adapters
+        add_mm(&ly.ca_v_proj, tr);
         add(&ly.ca_q_norm, tr);
         add(&ly.ca_k_norm, tr);
-        add(&ly.ca_o_proj, tr);
+        add_mm(&ly.ca_o_proj, tr);
         add(&ly.mlp_norm, tr);
-        add(&ly.gate_proj, tr);
-        add(&ly.up_proj, tr);
-        add(&ly.down_proj, tr);
+        add_mm(&ly.gate_proj, tr);
+        add_mm(&ly.up_proj, tr);
+        add_mm(&ly.down_proj, tr);
         add(&ly.scale_shift_table, tr);
     }
 }
 
 // Exact mirror byte count for a given lora_lo, without allocating anything.
-// This is what the auto-fit's fixed term uses (see dit-vram.h).
-static size_t dit_mirror_bytes_for(DiTGGML * m, int lora_lo) {
+// This is what the auto-fit's fixed term uses (see dit-vram.h). It derives from
+// the slot promote flags, so the precision mode is followed automatically — the
+// auto-fit can never size a run against a mirror the builder would not build.
+static size_t dit_mirror_bytes_for(DiTGGML * m, int lora_lo, DitMirrorMode mode) {
     std::vector<DitSlot> slots;
-    dit_mirror_slots(m, lora_lo, &slots);
+    dit_mirror_slots(m, lora_lo, mode, &slots);
     size_t total = 0;
     for (size_t i = 0; i < slots.size(); i++) {
         ggml_tensor * s   = *slots[i].field;
@@ -325,10 +353,10 @@ static bool dit_train_backend_init(DitTrainModel * M, std::string * err) {
 }
 
 // Build the mirror straight into VRAM at `lora_lo` and release the host copy.
-static bool dit_build_mirror(DitTrainModel * M, int lora_lo, std::string * err) {
+static bool dit_build_mirror(DitTrainModel * M, int lora_lo, DitMirrorMode mode, std::string * err) {
     M->lora_lo = lora_lo;
     std::vector<DitSlot> slots;
-    dit_mirror_slots(&M->m, lora_lo, &slots);
+    dit_mirror_slots(&M->m, lora_lo, mode, &slots);
 
     {
         ggml_init_params p = { (slots.size() + 16) * ggml_tensor_overhead(), nullptr, true };
@@ -347,7 +375,7 @@ static bool dit_build_mirror(DitTrainModel * M, int lora_lo, std::string * err) 
             char b[256];
             snprintf(b, sizeof(b),
                      "base weight '%s' is %s — DiT training needs a BF16/F16/F32 base "
-                     "(quantized bases cannot be trained: ggml_out_prod is F32-only)",
+                     "(quantized bases cannot be trained: ggml_out_prod takes F32 or BF16 only)",
                      s->name, ggml_type_name(s->type));
             *err = b;
             return false;

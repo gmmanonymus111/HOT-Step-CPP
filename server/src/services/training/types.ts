@@ -512,6 +512,12 @@ export interface TrainDitOptions {
   milestoneStep?: number;          // default 0.1;  0 disables
   milestoneKeep?: number;          // default 6
   vramReserveMb?: number;          // default 2048
+  /** Frozen-weight mirror precision. Default 'f32'. 'bf16' keeps the trainable
+   *  layers' matmul weights in the base's native BF16 instead of promoting them
+   *  to F32, roughly halving the mirror's VRAM — CUDA-only (it needs the patched
+   *  out_prod in engine/patches/bf16-out-prod.patch) and EXPERIMENTAL: adapter
+   *  quality at BF16 is not yet validated. */
+  mirror?: 'f32' | 'bf16';         // default 'f32'
   stages?: TrainDitStage[];        // default ['train','export']
   overwrite?: boolean;             // default false
   stopEngine?: boolean;            // default TRUE

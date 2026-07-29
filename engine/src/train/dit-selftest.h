@@ -628,7 +628,9 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
             dit_train_free(&M);
             return 1;
         }
-        if (!dit_build_mirror(&M, 0, &err)) {
+        // The gates below compare against F32 references, so the self-test always
+        // runs the F32 mirror regardless of what a run would pick.
+        if (!dit_build_mirror(&M, 0, DIT_MIRROR_F32, &err)) {
             dit_st_report(rs, "MIRROR", false, err);
             dit_train_free(&M);
             return 1;

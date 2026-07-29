@@ -7,6 +7,7 @@
 
 $src   = "$PSScriptRoot\src"
 $tools = "$PSScriptRoot\tools"
+$ggml  = "$PSScriptRoot\ggml"
 $errors = 0
 
 Write-Host "`n=== HOT-Step Hook Verification ===" -ForegroundColor Cyan
@@ -89,6 +90,23 @@ if ($content -match 'hotstep_sampler_linked_') {
 } else {
     Write-Host "  [FAIL] hot-step-sampler.h missing linker sentinel (hotstep_sampler_linked_)" -ForegroundColor Red
     $errors++
+}
+
+# ── Hook 7: ggml-cuda's out_prod must carry the BF16 patch ────────────
+#            engine/ggml is a SUBMODULE, so a submodule update reverts it.
+$outProd = "$ggml\src\ggml-cuda\out-prod.cu"
+if (Test-Path $outProd) {
+    $content = Get-Content $outProd -Raw
+    if ($content -match 'HOT-Step patch: BF16 out_prod') {
+        Write-Host "  [OK] ggml-cuda/out-prod.cu has the BF16 patch" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] ggml-cuda/out-prod.cu is missing the BF16 out_prod patch" -ForegroundColor Red
+        Write-Host "         Without it, train-dit --mirror bf16 aborts on the first backward pass." -ForegroundColor Yellow
+        Write-Host "         Fix (from the repo root): git apply engine\patches\bf16-out-prod.patch" -ForegroundColor Yellow
+        $errors++
+    }
+} else {
+    Write-Host "  [WARN] $outProd not found - ggml submodule not checked out?" -ForegroundColor Yellow
 }
 
 # ── Summary ───────────────────────────────────────────────────────────

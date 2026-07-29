@@ -33,6 +33,7 @@
 #include "train/dit-adapter-lokr.h"
 #include "train/dit-adapter.h"
 #include "train/dit-mirror.h"
+#include "train/gpu-mem.h"
 #include "train/lm-common.h"
 #include "train/lm-vram.h"  // LmVramTracker (leak counter), reused unchanged
 
@@ -51,6 +52,9 @@ struct DitVramModel {
     bool is_lokr     = false;
     int  lokr_dim    = 512;
     int  lokr_factor = 6;
+    // Mirror precision: the fixed term is the mirror, so this is the single
+    // largest lever in the whole model (--mirror bf16 roughly halves it).
+    DitMirrorMode mirror = DIT_MIRROR_F32;
     // static input geometry
     int in_ch = 192, out_ch = 64, hidden = 2560, enc_H = 2048, enc_S = 0;
 };
@@ -85,7 +89,7 @@ static size_t dit_vram_adapter_params(const DitVramModel & vm, int K) {
 
 // mirror + optimizer state + adapter params, bytes. K = trained depth (top-K).
 static double dit_vram_fixed_bytes(const DitVramModel & vm, int K, int crop) {
-    const size_t mirror = dit_mirror_bytes_for(vm.m, vm.n_layers - K);
+    const size_t mirror = dit_mirror_bytes_for(vm.m, vm.n_layers - K, vm.mirror);
     const size_t np     = dit_vram_adapter_params(vm, K);
     return (double) mirror + 16.0 * (double) np + dit_vram_static_bytes(vm, crop);
 }
@@ -109,6 +113,7 @@ struct DitVramFit {
     int    crop = 0, layers = 0;
     double est_bytes    = 0.0;
     size_t free_mb      = 0, total_mb = 0;
+    const char * free_source = "cuda";  // which probe produced free_mb (gpu-mem.h)
     bool   ok           = false;
     bool   crop_user    = false;
     bool   layers_user  = false;
@@ -132,11 +137,23 @@ static int dit_vram_best_crop(const DitVramModel & vm, int K, double budget, int
 
 // `user_layers` / `user_crop` are 0 for auto. `max_T` is the longest song, which
 // caps the useful crop (songs shorter than the crop use their whole length).
+//
+// `mem` is the honest device figure (gpu-mem.h). Passing nullptr keeps the old
+// cudaMemGetInfo behaviour; the trainer always passes one, because under WDDM
+// that probe over-reports free VRAM by ~9 GB and the budget below is only as
+// good as the number it starts from.
 static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, int reserve_mb, float safety,
-                               int user_crop, int user_layers, int crop_min, int crop_max, int max_T) {
+                               int user_crop, int user_layers, int crop_min, int crop_max, int max_T,
+                               const DitGpuMem * mem = nullptr) {
     DitVramFit r;
     size_t     fb = 0, tb = 0;
-    lm_vram_query(backend, &fb, &tb);
+    if (mem) {
+        fb            = mem->free;
+        tb            = mem->total;
+        r.free_source = mem->source();
+    } else {
+        lm_vram_query(backend, &fb, &tb);
+    }
     r.free_mb     = fb / (1024 * 1024);
     r.total_mb    = tb / (1024 * 1024);
     r.crop_user   = user_crop > 0;

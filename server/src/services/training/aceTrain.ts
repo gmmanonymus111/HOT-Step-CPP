@@ -302,6 +302,7 @@ export interface ResolvedTrainDitOptions {
   tMin: number; tMax: number; cfgRatio: number; genreRatio: number;
   seed: number; order: 'shuffle' | 'fixed';
   milestoneStep: number; milestoneKeep: number; vramReserveMb: number;
+  mirror: 'f32' | 'bf16';
   stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
 }
 
@@ -409,6 +410,9 @@ export function buildTrainDitArgs(input: {
     '--target-loss', String(o.targetLoss),
     '--order', o.order,
     '--vram-reserve-mb', String(o.vramReserveMb),
+    // Always emitted, both sides: an ace-train that predates the flag rejects it
+    // loudly rather than silently running the other precision.
+    '--mirror', o.mirror,
     '--milestone-step', String(o.milestoneStep),
     '--milestone-keep', String(o.milestoneKeep),
   ];

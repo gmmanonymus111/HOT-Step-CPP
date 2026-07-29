@@ -72,6 +72,7 @@ export interface TrainDitFormState {
   milestoneStep: number;
   milestoneKeep: number;
   vramReserveMb: number;
+  mirror: 'f32' | 'bf16';
   stages: TrainDitStage[];
   overwrite: boolean;
   stopEngine: boolean;
@@ -120,6 +121,8 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   milestoneStep: 0.1,
   milestoneKeep: 6,
   vramReserveMb: 2048,
+  // Stays 'f32' for both adapter types until BF16 is ear-validated.
+  mirror: 'f32',
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,
@@ -132,9 +135,15 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
  *  else (epochs, gradAccum, targetMlp, cfgRatio, channelBalance, seed,
  *  milestoneStep…) stays at the shared default.
  *
- *  crop is the exception: LoKR ships a FIXED 60 s window (1500 frames) rather
- *  than auto-fit, to match Side-Step's chunk_duration. The auto-fit's footprint
- *  model is what picks a crop when this is 0, and it lands nowhere near 60 s. */
+ *  crop stays 0 (auto-fit) like the shared default. It shipped as a fixed 60 s
+ *  window to match Side-Step's chunk_duration, but the auto-fit reduces CROP
+ *  before it reduces DEPTH: pinning the window is what forces the depth ladder
+ *  down instead, so a 32 GB card would train a partial-depth adapter to keep the
+ *  60 s. Auto keeps all 32 layers and takes the longest window that genuinely
+ *  fits. DIT_LOKR_CROP_FRAMES below is still where the Seconds/Frames control
+ *  lands when the user leaves auto. */
+export const DIT_LOKR_CROP_FRAMES = 1500;   // 60 s at 25 latent fps
+
 export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   ...TRAIN_DIT_DEFAULTS,
   adapterType: 'lokr',
@@ -146,7 +155,7 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   lossWeighting: 'none',
   targetLoss: 0.6,
   weightDecay: 0.001,
-  crop: 1500,
+  crop: 0,
 };
 
 /** Which unit to show `crop` in. State, not a pure derivation: once the box holds
@@ -154,8 +163,8 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
  *  choice distinguishes them. This is the seed for that state. */
 const deriveCropMode = (state: TrainDitFormState): CropMode => {
   if (state.crop === 0) return 'auto';
-  // The LoKR default is authored in seconds, so show it in seconds.
-  if (state.adapterType === 'lokr' && state.crop === TRAIN_DIT_LOKR_DEFAULTS.crop) return 'seconds';
+  // The LoKR window is authored in seconds, so show it in seconds.
+  if (state.adapterType === 'lokr' && state.crop === DIT_LOKR_CROP_FRAMES) return 'seconds';
   return 'frames';
 };
 
@@ -263,13 +272,13 @@ export const TrainDitForm: React.FC<Props> = ({
     } else if (value.crop === 0) {
       // seconds <-> frames is lossless (same field, same number), so only the
       // hop out of auto has to invent one. Land on the documented 60 s window.
-      onChange({ crop: TRAIN_DIT_LOKR_DEFAULTS.crop });
+      onChange({ crop: DIT_LOKR_CROP_FRAMES });
     }
   };
 
   const setCropValue = (raw: string) => {
     if (cropMode === 'seconds') {
-      onChange({ crop: secondsToFrames(num(raw, TRAIN_DIT_LOKR_DEFAULTS.crop / LATENT_FPS)) });
+      onChange({ crop: secondsToFrames(num(raw, DIT_LOKR_CROP_FRAMES / LATENT_FPS)) });
     } else {
       onChange({ crop: num(raw, 0) });
     }
@@ -768,6 +777,23 @@ export const TrainDitForm: React.FC<Props> = ({
               className={FIELD}
             />
           </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.dit.mirror')}</span>
+            <select
+              value={value.mirror}
+              disabled={lock}
+              onChange={(e) => onChange({ mirror: e.target.value === 'bf16' ? 'bf16' : 'f32' })}
+              className={FIELD}
+            >
+              <option value="f32">{t('trainingStudio.train.dit.mirrorF32')}</option>
+              <option value="bf16">{t('trainingStudio.train.dit.mirrorBf16')}</option>
+            </select>
+          </label>
+
+          <span className="text-[11px] text-zinc-500 sm:col-span-2 -mt-1">
+            {t('trainingStudio.train.dit.mirrorHelp')}
+          </span>
         </div>
 
         <div className="mt-3 flex flex-col gap-2">
