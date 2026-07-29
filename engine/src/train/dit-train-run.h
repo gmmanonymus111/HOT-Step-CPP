@@ -430,13 +430,17 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     opt.warmup_steps = warmup_steps;
 
     // ── events (§2.2 order: model, vram, data, then steps) ───────────────
+    // `deviceWideMb` is (total - free) for the WHOLE card, unlike every other
+    // number here: it is the only figure that can see Windows quietly backing an
+    // over-subscribed allocation with shared system memory. Sampled here, after
+    // the mirror / adapter / optimizer are resident but before the probe.
     jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"reserveMb\":%d,\"mirrorMb\":%lld,\"crop\":%d,"
-       "\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"source\":\"%s\",\"cropSource\":\"%s\","
-       "\"layersSource\":\"%s\"}",
+       "\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"deviceWideMb\":%lld,\"source\":\"%s\","
+       "\"cropSource\":\"%s\",\"layersSource\":\"%s\"}",
        (long long) fit.free_mb, (long long) fit.total_mb, a.vram_reserve_mb, (long long) (M.mirror.bytes / 1048576),
        crop_len, K, (long long) adapter->nParams(), (long long) (fit.est_bytes / 1048576.0),
-       (fit.crop_user && fit.layers_user) ? "user" : "auto", fit.crop_user ? "user" : "auto",
-       fit.layers_user ? "user" : "auto");
+       (long long) lm_vram_used_mb(M.backend), (fit.crop_user && fit.layers_user) ? "user" : "auto",
+       fit.crop_user ? "user" : "auto", fit.layers_user ? "user" : "auto");
     if (K < L) {
         // §2.8 gates the UI banner on layersSource === 'auto', so this line must
         // say which it was; and the number that matters is the fitted BUDGET, not
@@ -627,11 +631,28 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             fixed += ggml_backend_buffer_get_size(opt.buf_mom);
         }
         tracker.probe_baseline(M.backend, M.sched, fixed);
+        const size_t device_wide_mb = lm_vram_used_mb(M.backend);
         fprintf(stderr,
                 "[train-dit] graph %d nodes (fwd+bwd); high-water probe loss=%.6f in %lld ms; trainer-owned %zu MB "
                 "(est %lld MB), device-wide %zu MB\n",
                 graph_nodes, lv, (long long) (ggml_time_ms() - tp0), tracker.base_mb,
-                (long long) (fit.est_bytes / 1048576.0), lm_vram_used_mb(M.backend));
+                (long long) (fit.est_bytes / 1048576.0), device_wide_mb);
+        // The probe succeeding does NOT mean it fitted: on Windows an
+        // over-subscribed CUDA allocation is silently backed by shared system
+        // memory instead of failing, and the run then trains at a crawl. Only the
+        // device-wide figure can see it — the trainer-owned one counts the same
+        // bytes whether they landed in VRAM or in host RAM. Warn, never fail: the
+        // spill is a performance cliff, not an error, and the reserve/safety
+        // margins already own the refusal path. (Written as `+ 512 >` so a card
+        // reporting under 512 MB total cannot underflow the size_t.)
+        if (device_wide_mb + 512 > total_mb) {
+            char b[288];
+            snprintf(b, sizeof(b),
+                     "VRAM overcommitted after probe (%lld of %lld MB device-wide) — Windows is likely spilling into "
+                     "shared GPU memory; reduce crop, layers, or lokr dim, or close other GPU apps",
+                     (long long) device_wide_mb, (long long) total_mb);
+            lm_log("warn", b);
+        }
     }
 
     jl("{\"type\":\"data\",\"samples\":%d,\"skipped\":0,\"minFrames\":%d,\"maxFrames\":%d,\"encSMax\":%d,"

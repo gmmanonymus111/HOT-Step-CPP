@@ -19,6 +19,19 @@ import type {
 
 export type DitQuality = 'fast' | 'balanced' | 'thorough';
 
+/** How the crop box is being *displayed*. Form-local only — the wire field stays
+ *  `crop`, in raw latent frames, exactly as the engine and the API expect. */
+type CropMode = 'auto' | 'seconds' | 'frames';
+
+/** Latent frame rate of the preprocess cache (preprocess_meta.json latent_fps). */
+const LATENT_FPS = 25;
+
+/** The DiT patch size is 2, so an odd crop is a frame the trainer cannot use. */
+const secondsToFrames = (seconds: number): number => {
+  const f = Math.round(seconds * LATENT_FPS);
+  return f - (f % 2);
+};
+
 /** Everything the panel needs to POST, with every default already resolved. */
 export interface TrainDitFormState {
   adapterName: string;
@@ -117,7 +130,11 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
  *  patched with the preset's four adapter fields plus the loss-shape knobs the
  *  preset agrees with (lr/loss-weighting/target-loss/weight-decay). Everything
  *  else (epochs, gradAccum, targetMlp, cfgRatio, channelBalance, seed,
- *  milestoneStep, crop…) stays at the shared default. */
+ *  milestoneStep…) stays at the shared default.
+ *
+ *  crop is the exception: LoKR ships a FIXED 60 s window (1500 frames) rather
+ *  than auto-fit, to match Side-Step's chunk_duration. The auto-fit's footprint
+ *  model is what picks a crop when this is 0, and it lands nowhere near 60 s. */
 export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   ...TRAIN_DIT_DEFAULTS,
   adapterType: 'lokr',
@@ -129,6 +146,17 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   lossWeighting: 'none',
   targetLoss: 0.6,
   weightDecay: 0.001,
+  crop: 1500,
+};
+
+/** Which unit to show `crop` in. State, not a pure derivation: once the box holds
+ *  a number, seconds and frames are the same value and only the user's last
+ *  choice distinguishes them. This is the seed for that state. */
+const deriveCropMode = (state: TrainDitFormState): CropMode => {
+  if (state.crop === 0) return 'auto';
+  // The LoKR default is authored in seconds, so show it in seconds.
+  if (state.adapterType === 'lokr' && state.crop === TRAIN_DIT_LOKR_DEFAULTS.crop) return 'seconds';
+  return 'frames';
 };
 
 /** §5.2 quality dial. Each preset patches the SAME key set so flipping back and
@@ -177,6 +205,18 @@ export const TrainDitForm: React.FC<Props> = ({
 
   const lock = !!disabled;
 
+  // Display unit for `crop`. Seeded from the incoming state, then re-seeded
+  // whenever something outside the component (a preset load, an adapter-type
+  // swap) moves `crop` across the auto boundary — which is the only move the
+  // current mode can no longer represent.
+  const [cropMode, setCropMode] = React.useState<CropMode>(() => deriveCropMode(value));
+  React.useEffect(() => {
+    if ((cropMode === 'auto') !== (value.crop === 0)) {
+      setCropMode(deriveCropMode(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value.crop, value.adapterType, cropMode]);
+
   // Mirrors the server's ADAPTER_NAME_RE (§4.5 step 6). The GET path sanitises
   // the same input instead of rejecting it, so without this the panel can render
   // a green "Adapter ready" card for a directory the POST will refuse.
@@ -212,8 +252,32 @@ export const TrainDitForm: React.FC<Props> = ({
   const pickType = (ty: DitAdapterType) => {
     if (ty === value.adapterType) return;
     const defaults = ty === 'lokr' ? TRAIN_DIT_LOKR_DEFAULTS : TRAIN_DIT_DEFAULTS;
+    setCropMode(deriveCropMode(defaults));
     onChange({ ...defaults, adapterName: value.adapterName });
   };
+
+  const pickCropMode = (mode: CropMode) => {
+    setCropMode(mode);
+    if (mode === 'auto') {
+      onChange({ crop: 0 });
+    } else if (value.crop === 0) {
+      // seconds <-> frames is lossless (same field, same number), so only the
+      // hop out of auto has to invent one. Land on the documented 60 s window.
+      onChange({ crop: TRAIN_DIT_LOKR_DEFAULTS.crop });
+    }
+  };
+
+  const setCropValue = (raw: string) => {
+    if (cropMode === 'seconds') {
+      onChange({ crop: secondsToFrames(num(raw, TRAIN_DIT_LOKR_DEFAULTS.crop / LATENT_FPS)) });
+    } else {
+      onChange({ crop: num(raw, 0) });
+    }
+  };
+
+  const cropShown = cropMode === 'seconds'
+    ? Math.round((value.crop / LATENT_FPS) * 10) / 10
+    : value.crop;
 
   // cropMax below cropMin is a 400 from the server (§4.5 step 7); flag it here.
   const cropRangeOk = value.cropMax >= value.cropMin;
@@ -446,13 +510,35 @@ export const TrainDitForm: React.FC<Props> = ({
 
           <label className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.train.dit.crop')}</span>
-            <input
-              type="number" min={0} max={8192} step={2}
-              value={value.crop} disabled={lock}
-              onChange={(e) => onChange({ crop: num(e.target.value, 0) })}
-              className={`${FIELD}${cropOk ? '' : ' border-red-500/60'}`}
-            />
-            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.cropAuto')}</span>
+            <div className="flex items-center gap-1.5">
+              <select
+                value={cropMode} disabled={lock}
+                onChange={(e) => pickCropMode(e.target.value as CropMode)}
+                className={`${FIELD} shrink-0`}
+              >
+                <option value="auto">{t('trainingStudio.train.dit.cropModeAuto')}</option>
+                <option value="seconds">{t('trainingStudio.train.dit.cropModeSeconds')}</option>
+                <option value="frames">{t('trainingStudio.train.dit.cropModeFrames')}</option>
+              </select>
+              {cropMode !== 'auto' && (
+                <input
+                  type="number"
+                  min={cropMode === 'seconds' ? 5 : 0}
+                  max={cropMode === 'seconds' ? 320 : 8192}
+                  step={cropMode === 'seconds' ? 1 : 2}
+                  value={cropShown} disabled={lock}
+                  onChange={(e) => setCropValue(e.target.value)}
+                  className={`${FIELD} w-full min-w-0${cropOk ? '' : ' border-red-500/60'}`}
+                />
+              )}
+            </div>
+            <span className="text-[11px] text-zinc-500">
+              {cropMode === 'auto'
+                ? t('trainingStudio.train.dit.cropAuto')
+                : cropMode === 'seconds'
+                  ? t('trainingStudio.train.dit.cropSecondsHelp')
+                  : t('trainingStudio.train.dit.cropFramesHelp')}
+            </span>
             {!cropOk && (
               <span className="text-[11px] text-red-500">
                 {t('trainingStudio.train.dit.cropHelp')}

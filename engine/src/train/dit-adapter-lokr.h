@@ -427,16 +427,29 @@ struct DitAdapterLoKr final : DitAdapter {
     }
 };
 
-// Expected parameter count for the cross-check in dit-train-run.h.
-static size_t dit_lokr_expected_params(const DiTGGMLConfig & c, int lo, int hi, int lokr_dim, int lokr_factor,
-                                       bool target_mlp) {
+// {in, out} for every adapted site, in DIT_NSITES order (the attention sites
+// first, so the leading DIT_NSITES_ATTN entries are the target_mlp=false set).
+// Shared by the parameter count and the arena estimate below so the two can
+// never disagree about the geometry they are counting.
+static void dit_lokr_site_dims(const DiTGGMLConfig & c, int64_t sites[DIT_NSITES][2]) {
     const int64_t H = c.hidden_size, Q = (int64_t) c.n_heads * c.head_dim, KV = (int64_t) c.n_kv_heads * c.head_dim,
                   F = c.intermediate_size;
-    const int64_t sites[DIT_NSITES][2] = {
+    const int64_t src[DIT_NSITES][2] = {
         { H, Q },  { H, KV }, { H, KV }, { Q, H },  // self q/k/v/o   {in, out}
         { H, Q },  { H, KV }, { H, KV }, { Q, H },  // cross q/k/v/o
         { H, F },  { H, F },  { F, H },             // gate / up / down
     };
+    for (int s = 0; s < DIT_NSITES; s++) {
+        sites[s][0] = src[s][0];
+        sites[s][1] = src[s][1];
+    }
+}
+
+// Expected parameter count for the cross-check in dit-train-run.h.
+static size_t dit_lokr_expected_params(const DiTGGMLConfig & c, int lo, int hi, int lokr_dim, int lokr_factor,
+                                       bool target_mlp) {
+    int64_t sites[DIT_NSITES][2];
+    dit_lokr_site_dims(c, sites);
     const int n_sites   = target_mlp ? DIT_NSITES : DIT_NSITES_ATTN;
     int64_t   per_layer = 0;
     for (int s = 0; s < n_sites; s++) {
@@ -448,4 +461,45 @@ static size_t dit_lokr_expected_params(const DiTGGMLConfig & c, int lo, int hi, 
                                                              : out_k * (int64_t) lokr_dim + (int64_t) lokr_dim * in_n;
     }
     return (size_t) (per_layer * (int64_t) (hi - lo));
+}
+
+// Retained kron-matvec intermediates in apply(), summed over every trained site,
+// bytes. S = crop / patch (the token count apply() sees).
+//
+// This is the arena cost dit-vram.h's fitted polynomial does NOT model: that fit
+// was taken on LoRA runs, whose adapter branch retains only the [rank, S]
+// bottleneck, while §2.3's LoKR contraction retains two ACTIVATION-shaped F32
+// tensors per site — T1 [out_k, in_m, S] and T2 [out_l, out_k, S] — each of
+// which is immediately followed by a ggml_cont of its permuted view. Hence the
+// factor 2, and F32 throughout.
+//
+// Deliberately conservative: after ggml_gallocr's block reuse the true
+// simultaneous retention is lower than this, but the backward pass adds gradient
+// buffers of the same shapes, so until it is measured against a real high-water
+// probe we err high.
+//
+// A factorized w2 splits T1's matmul in two and inserts one further
+// [lokr_dim, in_m, S] intermediate; it is counted as well. It is a small term —
+// factorization only fires when lokr_dim < max(out_k, in_n)/2 — but it is real,
+// so leaving it out would make this an under-estimate on exactly the MLP sites
+// that dominate the total.
+static double dit_lokr_apply_arena_bytes(const DiTGGMLConfig & c, int lo, int hi, int lokr_dim, int lokr_factor,
+                                         bool target_mlp, int S) {
+    if (hi <= lo || S <= 0) {
+        return 0.0;
+    }
+    int64_t sites[DIT_NSITES][2];
+    dit_lokr_site_dims(c, sites);
+    const int n_sites   = target_mlp ? DIT_NSITES : DIT_NSITES_ATTN;
+    double    per_layer = 0.0;  // elements per token
+    for (int s = 0; s < n_sites; s++) {
+        int64_t out_l, out_k, in_m, in_n;
+        dit_lokr_factorization(sites[s][1], lokr_factor, &out_l, &out_k);
+        dit_lokr_factorization(sites[s][0], lokr_factor, &in_m, &in_n);
+        per_layer += 2.0 * (double) (out_k * in_m + out_l * out_k);
+        if (!dit_lokr_w2_mono(lokr_dim, out_k, in_n)) {
+            per_layer += (double) ((int64_t) lokr_dim * in_m);
+        }
+    }
+    return per_layer * (double) S * 4.0 * (double) (hi - lo);
 }

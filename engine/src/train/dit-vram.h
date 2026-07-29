@@ -6,11 +6,19 @@
 //
 //   arena_MB(S,K) = K*(0.3274*S + 1.139e-4*S^2) + (-0.125*S + 1.863e-4*S^2)
 //   fixed_bytes(K) = mirror_bytes(K) + 16*adapter_params(K) + static input buffers
-//   trainer_MB(S,K) = fixed + arena
+//   trainer_MB(S,K) = fixed + arena [+ lokr apply arena, LoKR only]
 //
 // The arena coefficients are the verifier's refit over all 12 measured points
 // (the (K/32)*f(S) form has no K-independent term and under-predicts by 10-25%
 // exactly in the low-K / long-crop corner the small-card map depends on).
+//
+// K10 ("reuse the polynomial as-is for LoKR") turned out to hold for the LoRA
+// runs it was measured on and NOT for LoKR: every one of those 12 points is a
+// LoRA run, whose adapter branch retains a single [rank, S] bottleneck, whereas
+// the LoKR kron-matvec retains two activation-shaped tensors per site. The
+// difference is thousands of MB at a long crop, which is how a LoKR run at the
+// "fitted" crop ends up spilling into Windows' shared GPU memory. LoKR therefore
+// adds dit_lokr_apply_arena_bytes() on top; the LoRA path is untouched.
 //
 // DEVIATION (E2, documented in the handoff): §3.7's fixed term is the fitted
 // constant `7786 + (243.0 + state_MB_per_layer)*K`. We instead compute the mirror
@@ -83,7 +91,16 @@ static double dit_vram_fixed_bytes(const DitVramModel & vm, int K, int crop) {
 }
 
 static double dit_vram_total_bytes(const DitVramModel & vm, int crop, int K) {
-    return dit_vram_fixed_bytes(vm, K, crop) + dit_vram_arena_bytes(crop / vm.patch, K);
+    const int S = crop / vm.patch;
+    double    b = dit_vram_fixed_bytes(vm, K, crop) + dit_vram_arena_bytes(S, K);
+    if (vm.is_lokr) {
+        // The intermediates the fitted polynomial never saw. Added here rather
+        // than at any one call site so every consumer — the crop walk, the depth
+        // ladder, the `vram` JSONL est and dit_train_log.json — sees them too.
+        b += dit_lokr_apply_arena_bytes(vm.m->cfg, vm.n_layers - K, vm.n_layers, vm.lokr_dim, vm.lokr_factor,
+                                        vm.target_mlp, S);
+    }
+    return b;
 }
 
 // ─── auto-fit ───────────────────────────────────────────────────────────────
@@ -137,10 +154,13 @@ static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, 
 
     r.floor_bytes = dit_vram_total_bytes(vm, cmin, 2);
 
+    const int ladder[] = { vm.n_layers, 16, 8, 4, 2 };
+    const int n_rungs  = (int) (sizeof(ladder) / sizeof(ladder[0]));
+
     // Fixed axes: honour them, but still refuse an over-budget combination.
     if (r.crop_user || r.layers_user) {
-        const int K    = r.layers_user ? std::min(user_layers, vm.n_layers) : vm.n_layers;
-        int       crop = r.crop_user ? user_crop : 0;
+        int K    = r.layers_user ? std::min(user_layers, vm.n_layers) : vm.n_layers;
+        int crop = r.crop_user ? user_crop : 0;
         if (crop > 0) {
             crop -= crop % vm.patch;
             if (crop > max_T) {
@@ -148,6 +168,23 @@ static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, 
             }
         } else {
             crop = dit_vram_best_crop(vm, K, budget, cmin, cap);
+        }
+        // A user crop with AUTO depth still leaves one axis to fit, so walk the
+        // same depth ladder instead of refusing outright: a fixed window (the
+        // LoKR form's 60 s default) degrades to partial depth — which §2.8's
+        // banner then reports, since layersSource stays "auto" — rather than
+        // failing the run before it starts. A depth the USER pinned is never
+        // lowered behind their back; that combination is still refused.
+        if (crop > 0 && !r.layers_user && dit_vram_total_bytes(vm, crop, K) > budget) {
+            for (int i = 1; i < n_rungs; i++) {
+                if (ladder[i] >= K) {
+                    continue;
+                }
+                if (dit_vram_total_bytes(vm, crop, ladder[i]) <= budget) {
+                    K = ladder[i];
+                    break;
+                }
+            }
         }
         r.layers     = K;
         r.crop       = crop;
@@ -158,8 +195,7 @@ static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, 
     }
 
     // Both auto: depth ladder, re-raising the crop at every rung.
-    const int ladder[] = { vm.n_layers, 16, 8, 4, 2 };
-    for (size_t i = 0; i < sizeof(ladder) / sizeof(ladder[0]); i++) {
+    for (int i = 0; i < n_rungs; i++) {
         const int K = ladder[i];
         if (K > vm.n_layers || (i > 0 && K >= ladder[i - 1])) {
             continue;
