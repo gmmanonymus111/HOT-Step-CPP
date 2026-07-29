@@ -55,27 +55,117 @@ struct DitVramModel {
     // Mirror precision: the fixed term is the mirror, so this is the single
     // largest lever in the whole model (--mirror bf16 roughly halves it).
     DitMirrorMode mirror = DIT_MIRROR_F32;
+    // Micro-batch size (design C4). Every activation/arena/static term scales
+    // with it; mirror and optimizer state do not.
+    int batch = 1;
+    // Gradient-checkpoint segments (design C1/C4). 1 = off (the monolithic
+    // graph). The retained activation set is ONE segment, so the per-layer arena
+    // and the A1 expanded-KV term divide by it; the boundary buffers are the
+    // price paid back. Mirror and optimizer state are segment-invariant.
+    int segments = 1;
     // static input geometry
     int in_ch = 192, out_ch = 64, hidden = 2560, enc_H = 2048, enc_S = 0;
+    // attention geometry — only the A1 expanded-KV term needs it
+    int n_heads = 0, n_kv_heads = 0, head_dim = 0;
 };
 
 // arena (scheduler compute buffer), bytes.
-static double dit_vram_arena_bytes(int S, int K) {
+//
+// BATCHING VALIDATED (S-C2, 2026-07-29). The straight xB on the activation
+// terms below was carried over UNMEASURED from chunk 1/2; chunk 3's S-C2 grid
+// measured it against `ace-train`'s own trainer-owned high-water figure at
+// {B 1,5} x {ckpt 0,4} x {crop 375,750} (snapped to 374/750, patch 2), rank-16
+// LoRA, --layers 8, bf16 mirror, on a 32-layer turbo-XL base (Nh 32/Nkv 8):
+//
+//   B  ckpt  crop  estMb  trainerMb  deviceWideMb  est-vs-trainer
+//   1    0    374   8719    8641       13843          +0.9%
+//   1    0    750   9304    9124       14316          +2.0%
+//   1    4    374   8339    8329       13530          +0.1%
+//   1    4    750   8494    8460       13673          +0.4%
+//   5    0    374  11046   10673       15863          +3.5%
+//   5    0    750  14149   13234       18425          +6.9%
+//   5    4    374   8926    8888       14135          +0.4%
+//   5    4    750   9744    9570       14871          +1.8%
+//
+// Every cell is within the +-10% bar and, notably, on the SAME side of it
+// (over-, never under-predicting) — the safe direction for a budget the
+// reserve/safety margins and the NVML tripwire back up. Decomposing the
+// residual (isolating this polynomial's own contribution from the exactly-
+// computed mirror/optimizer/static terms, which are arithmetic, not fit) shows
+// the straight xB does NOT introduce or amplify error with batch size: the
+// arena-term ratio at K=8 (ckpt off) is ~0.84-0.85 at BOTH B=1 and B=5, and at
+// Kr=2 (ckpt on, the widest segment at --ckpt 4) it is ~0.91-0.94 at both B
+// values too. That spread is the pre-existing per-K residual the file header
+// already documents ("the fit ... under-predicts by 10-25% exactly in the
+// low-K / long-crop corner") — batching inherits it unchanged rather than
+// making it worse, so no numeric constant changes for the B term. NO CHANGE
+// was needed here: this comment records the validation, not a refit.
+// `K` is the RETAINED layer count — the trained depth when checkpointing is off,
+// the widest single segment when it is on (design C4: the retained activation set
+// is one segment, and the head/loss term, which is K-independent, is not divided).
+// UNMEASURED past this grid's range (K > 8, B > 5, crop > 750, ckpt other than
+// 0/4) — the backstop for those stays the high-water probe + safety margins.
+static double dit_vram_arena_bytes(int S, int K, int B = 1) {
     const double dS = (double) S;
     const double mb = (double) K * (0.3274 * dS + 1.139e-4 * dS * dS) + (-0.125 * dS + 1.863e-4 * dS * dS);
-    return (mb > 0.0 ? mb : 0.0) * 1048576.0;
+    return (mb > 0.0 ? mb : 0.0) * 1048576.0 * (double) std::max(1, B);
+}
+
+// Layers retained at once: the widest segment. Checkpointing off (segments <= 1)
+// is the whole trained depth, i.e. the pre-batching term unchanged.
+static int dit_vram_seg_layers(const DitVramModel & vm, int K) {
+    const int seg = std::max(1, std::min(vm.segments, std::max(1, K)));
+    return (K + seg - 1) / seg;
+}
+
+// The C1 boundary buffers: one [H,S,B] activation per segment (segment 0's is the
+// pre-stack output) plus two ping-ponging boundary gradients. Zero when off.
+// EXACT, not fitted — a deterministic byte count matching dit_ckpt_alloc's own
+// allocation size. S-C2 (2026-07-29) confirms it: every grid cell's reported
+// boundaryMb equalled this formula to the rounded MB (e.g. B=5/crop=750/segments=4
+// -> 2560*375*5*4 * 6B = 109 MB, exactly what the run logged).
+static double dit_vram_boundary_bytes(const DitVramModel & vm, int S) {
+    if (vm.segments <= 1) {
+        return 0.0;
+    }
+    const double one = (double) vm.hidden * (double) S * (double) std::max(1, vm.batch) * 4.0;
+    return one * (double) (vm.segments + 2);
+}
+
+// A1's expanded-KV surcharge, bytes. At B > 1 the K/V activations are tiled from
+// Nkv to Nh heads BEFORE the attention mul_mats (dit_expand_heads), because ggml's
+// GQA mul_mat backward aborts on a batch axis. Charged per trained layer for
+// self-attention (S tokens) and cross-attention (enc_S tokens), K and V each.
+// A shape-correct (arithmetic, not fitted) estimate of the retained set. S-C2
+// (2026-07-29) backed this term out of the grid's total-vs-estimate residual
+// (Nh 32/Nkv 8 on the test base) and found it consistent with the measured
+// totals to the same margin as the arena term above — not independently
+// isolated, since it and the arena term only separate cleanly by algebra, but
+// nothing in the grid suggests it is the source of any cell's error.
+static double dit_vram_kv_expand_bytes(const DitVramModel & vm, int S, int K) {
+    if (vm.batch <= 1 || vm.n_heads <= 0 || vm.n_kv_heads <= 0 || vm.n_heads == vm.n_kv_heads) {
+        return 0.0;
+    }
+    const double extra_heads = (double) (vm.n_heads - vm.n_kv_heads);
+    const double per_token   = (double) vm.head_dim * extra_heads * 4.0;
+    const double tokens      = ((double) S + (double) std::max(1, vm.enc_S)) * (double) vm.batch;
+    return 2.0 /*K and V*/ * per_token * tokens * (double) std::max(1, K);
 }
 
 // persistent input tensors we allocate ourselves, bytes.
 static double dit_vram_static_bytes(const DitVramModel & vm, int crop) {
     const int    S  = crop / vm.patch;
-    const double b  = (double) vm.in_ch * crop * 4.0                        // t_input
-                    + (double) vm.enc_H * std::max(1, vm.enc_S) * 4.0       // t_enc
-                    + (double) S * 4.0                                      // t_pos
-                    + (double) vm.hidden * 7.0 * 4.0                        // t_temb + t_tproj
-                    + (double) S * S * 2.0                                  // t_sa  f16
-                    + (double) std::max(1, vm.enc_S) * S * 2.0              // t_ca  f16
-                    + (double) vm.out_ch * crop * 4.0                       // t_vtgt
+    const double B  = (double) std::max(1, vm.batch);
+    const double b  = (double) vm.in_ch * crop * 4.0 * B                    // b_input
+                    + (double) vm.enc_H * std::max(1, vm.enc_S) * 4.0 * B   // b_enc
+                    + (double) S * 4.0 * B                                  // b_pos
+                    + (double) vm.hidden * 7.0 * 4.0 * B                    // b_temb + b_tproj
+                    // b_sa (+ b_sa_pad, allocated only at B > 1): f16, per element
+                    // when a mixed-length batch needs a padded-KV mask.
+                    + (double) S * S * 2.0 * B * (vm.batch > 1 ? 2.0 : 1.0)
+                    + (double) std::max(1, vm.enc_S) * S * 2.0 * B          // b_ca  f16
+                    + (double) vm.out_ch * crop * 4.0 * B                   // b_vtgt
+                    + (double) crop * 4.0 * 2.0 * B                         // b_lw + b_lwu
                     + (double) vm.out_ch * 4.0                              // t_cw
                     + 64.0;                                                 // scalars
     return b;
@@ -89,28 +179,65 @@ static size_t dit_vram_adapter_params(const DitVramModel & vm, int K) {
 
 // mirror + optimizer state + adapter params, bytes. K = trained depth (top-K).
 static double dit_vram_fixed_bytes(const DitVramModel & vm, int K, int crop) {
-    const size_t mirror = dit_mirror_bytes_for(vm.m, vm.n_layers - K, vm.mirror);
+    const size_t mirror = dit_mirror_bytes_for(vm.m, vm.n_layers - K, vm.mirror, vm.batch > 1);
     const size_t np     = dit_vram_adapter_params(vm, K);
     return (double) mirror + 16.0 * (double) np + dit_vram_static_bytes(vm, crop);
 }
 
 static double dit_vram_total_bytes(const DitVramModel & vm, int crop, int K) {
-    const int S = crop / vm.patch;
-    double    b = dit_vram_fixed_bytes(vm, K, crop) + dit_vram_arena_bytes(S, K);
+    const int S   = crop / vm.patch;
+    const int Kr  = dit_vram_seg_layers(vm, K);  // retained layers (C4)
+    double    b   = dit_vram_fixed_bytes(vm, K, crop) + dit_vram_arena_bytes(S, Kr, vm.batch) +
+               dit_vram_kv_expand_bytes(vm, S, Kr) + dit_vram_boundary_bytes(vm, S);
     if (vm.is_lokr) {
         // The intermediates the fitted polynomial never saw. Added here rather
         // than at any one call site so every consumer — the crop walk, the depth
         // ladder, the `vram` JSONL est and dit_train_log.json — sees them too.
-        b += dit_lokr_apply_arena_bytes(vm.m->cfg, vm.n_layers - K, vm.n_layers, vm.lokr_dim, vm.lokr_factor,
-                                        vm.target_mlp, S);
+        // C4: its `S` is already "tokens seen by apply()", which batching multiplies,
+        // and its layer range is the RETAINED one, which checkpointing divides.
+        b += dit_lokr_apply_arena_bytes(vm.m->cfg, vm.n_layers - Kr, vm.n_layers, vm.lokr_dim, vm.lokr_factor,
+                                        vm.target_mlp, S * std::max(1, vm.batch));
     }
     return b;
+}
+
+// ─── the A1 hard cap on B ───────────────────────────────────────────────────
+//
+// dit_expand_heads' backward is ggml_repeat_back, and the CUDA kernel refuses
+// grad->ne[2]*grad->ne[3] above 32768 (ggml-cuda.cu:5305). This is a CORRECTNESS
+// cap, not a footprint one: exceeding it aborts the run mid-backward.
+//
+// BOTH attentions expand. Self-attention's expanded K/V is [D,G,Nkv,S*B], so its
+// product is Nkv*S*B — but cross-attention's is [D,G,Nkv,enc_S*B], i.e. Nkv *
+// enc_S * B, and enc_S is the DATASET's padded encoder length, which has nothing
+// to do with the crop. A long-lyrics variant (enc_S in the high hundreds) trips
+// the cross-attention side while the self-attention side is comfortable, so the
+// constraint is Nkv * max(S, enc_S) * B. (Fixed 2026-07-29: the cap was
+// originally applied to S alone, which left enc_S entirely unguarded.)
+//
+// Returns the largest batch that satisfies it; `want` when unconstrained
+// (Nh == Nkv means no expansion happens at all, and neither does B == 1 —
+// dit_train_layer only calls dit_expand_heads when B > 1).
+#define DIT_REPEAT_BACK_MAX 32768
+
+static int dit_vram_max_batch(int n_heads, int n_kv_heads, int S, int enc_S, int want) {
+    const int tok = std::max(S, enc_S);
+    if (want <= 1 || n_kv_heads <= 0 || n_heads == n_kv_heads || tok <= 0) {
+        return want;
+    }
+    const long long per = (long long) n_kv_heads * (long long) tok;
+    if (per <= 0) {
+        return want;
+    }
+    const int cap = (int) ((long long) DIT_REPEAT_BACK_MAX / per);
+    return (cap < 1) ? 1 : std::min(want, cap);
 }
 
 // ─── auto-fit ───────────────────────────────────────────────────────────────
 
 struct DitVramFit {
     int    crop = 0, layers = 0;
+    int    segments     = 1;  // resolved checkpoint segments (1 = off)
     double est_bytes    = 0.0;
     size_t free_mb      = 0, total_mb = 0;
     const char * free_source = "cuda";  // which probe produced free_mb (gpu-mem.h)
@@ -142,11 +269,19 @@ static int dit_vram_best_crop(const DitVramModel & vm, int K, double budget, int
 // cudaMemGetInfo behaviour; the trainer always passes one, because under WDDM
 // that probe over-reports free VRAM by ~9 GB and the budget below is only as
 // good as the number it starts from.
+//
+// `ckpt_mode` is the --ckpt knob (C3): 0 = off, 1 = auto (this function picks),
+// N >= 2 = exactly N segments. `depth_ladder` == false stops the search at full
+// depth, which is how the caller honours the C4 order — full depth, shrink crop,
+// raise segments, THEN reduce B with a warn, and only after all of that walk the
+// depth ladder (depth is the quality axis). With ckpt_mode 0 and depth_ladder
+// true this is the pre-checkpointing function, decision for decision.
 static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, int reserve_mb, float safety,
                                int user_crop, int user_layers, int crop_min, int crop_max, int max_T,
-                               const DitGpuMem * mem = nullptr) {
-    DitVramFit r;
-    size_t     fb = 0, tb = 0;
+                               const DitGpuMem * mem = nullptr, int ckpt_mode = 0, bool depth_ladder = true) {
+    DitVramFit   r;
+    DitVramModel v  = vm;  // the segment count is what this search moves
+    size_t       fb = 0, tb = 0;
     if (mem) {
         fb            = mem->free;
         tb            = mem->total;
@@ -169,66 +304,122 @@ static DitVramFit dit_vram_fit(const DitVramModel & vm, ggml_backend_t backend, 
         cmin = cap;  // a dataset shorter than crop_min still trains on whole songs
     }
 
-    r.floor_bytes = dit_vram_total_bytes(vm, cmin, 2);
+    v.segments    = (ckpt_mode == 0) ? 1 : std::max(1, ckpt_mode);
+    r.floor_bytes = dit_vram_total_bytes(v, cmin, 2);
 
     const int ladder[] = { vm.n_layers, 16, 8, 4, 2 };
     const int n_rungs  = (int) (sizeof(ladder) / sizeof(ladder[0]));
 
+    // Segment counts to try, cheapest FIRST (C4: raising segments buys VRAM with
+    // one extra no-grad forward, so it is only worth doing when 1 does not fit).
+    // A pinned --ckpt N is a single-element list: the user's number is never
+    // changed behind their back.
+    auto seg_candidates = [&](int K) {
+        std::vector<int> s;
+        const int        kmax = std::max(1, K);
+        if (ckpt_mode == 0) {
+            s.push_back(1);
+            return s;
+        }
+        if (ckpt_mode >= 2) {
+            s.push_back(std::min(ckpt_mode, kmax));
+            return s;
+        }
+        const int steps[] = { 1, 2, 4, 8, 16, 32 };
+        for (int i = 0; i < (int) (sizeof(steps) / sizeof(steps[0])); i++) {
+            const int q = std::min(steps[i], kmax);
+            if (s.empty() || q > s.back()) {
+                s.push_back(q);
+            }
+        }
+        return s;
+    };
+
     // Fixed axes: honour them, but still refuse an over-budget combination.
     if (r.crop_user || r.layers_user) {
-        int K    = r.layers_user ? std::min(user_layers, vm.n_layers) : vm.n_layers;
-        int crop = r.crop_user ? user_crop : 0;
-        if (crop > 0) {
-            crop -= crop % vm.patch;
-            if (crop > max_T) {
-                crop = max_T - (max_T % vm.patch);
-            }
-        } else {
-            crop = dit_vram_best_crop(vm, K, budget, cmin, cap);
-        }
-        // A user crop with AUTO depth still leaves one axis to fit, so walk the
-        // same depth ladder instead of refusing outright: a fixed window (the
-        // LoKR form's 60 s default) degrades to partial depth — which §2.8's
-        // banner then reports, since layersSource stays "auto" — rather than
-        // failing the run before it starts. A depth the USER pinned is never
-        // lowered behind their back; that combination is still refused.
-        if (crop > 0 && !r.layers_user && dit_vram_total_bytes(vm, crop, K) > budget) {
+        const int        K0   = r.layers_user ? std::min(user_layers, vm.n_layers) : vm.n_layers;
+        int              K    = K0;
+        int              crop = 0;
+        bool             hit  = false;
+        // Depth rungs to try: the requested depth first; lower ones only when the
+        // depth is AUTO and the ladder is enabled (see the header comment).
+        std::vector<int> depths;
+        depths.push_back(K0);
+        if (depth_ladder && !r.layers_user) {
             for (int i = 1; i < n_rungs; i++) {
-                if (ladder[i] >= K) {
-                    continue;
-                }
-                if (dit_vram_total_bytes(vm, crop, ladder[i]) <= budget) {
-                    K = ladder[i];
-                    break;
+                if (ladder[i] < K0) {
+                    depths.push_back(ladder[i]);
                 }
             }
         }
-        r.layers     = K;
-        r.crop       = crop;
-        r.est_bytes  = crop > 0 ? dit_vram_total_bytes(vm, crop, K) : r.floor_bytes;
-        r.ok         = crop > 0 && r.est_bytes <= budget;
-        r.lowered    = K < vm.n_layers;
+        for (size_t di = 0; di < depths.size() && !hit; di++) {
+            const int Kd = depths[di];
+            const std::vector<int> segs = seg_candidates(Kd);
+            for (size_t si = 0; si < segs.size() && !hit; si++) {
+                v.segments = segs[si];
+                int c2     = user_crop;
+                if (r.crop_user) {
+                    c2 -= c2 % vm.patch;
+                    if (c2 > max_T) {
+                        c2 = max_T - (max_T % vm.patch);
+                    }
+                } else {
+                    c2 = dit_vram_best_crop(v, Kd, budget, cmin, cap);
+                }
+                if (c2 > 0 && dit_vram_total_bytes(v, c2, Kd) <= budget) {
+                    K    = Kd;
+                    crop = c2;
+                    hit  = true;
+                }
+            }
+        }
+        if (!hit) {
+            // Nothing fitted: report the requested depth at the widest segment
+            // count tried, so the fatal quotes the number that was actually short.
+            const std::vector<int> segs = seg_candidates(K0);
+            v.segments                  = segs.back();
+            crop                        = r.crop_user ? std::min(user_crop - (user_crop % vm.patch),
+                                                                 max_T - (max_T % vm.patch))
+                                                      : dit_vram_best_crop(v, K0, budget, cmin, cap);
+        }
+        r.layers    = K;
+        r.crop      = crop;
+        r.segments  = v.segments;
+        r.est_bytes = crop > 0 ? dit_vram_total_bytes(v, crop, K) : r.floor_bytes;
+        r.ok        = hit && crop > 0;
+        r.lowered   = K < vm.n_layers;
         return r;
     }
 
-    // Both auto: depth ladder, re-raising the crop at every rung.
+    // Both auto: full depth first (shrink crop, then raise segments), and only
+    // then — when the caller allows it — the depth ladder, re-raising the crop
+    // and re-trying the segment counts at every rung.
     for (int i = 0; i < n_rungs; i++) {
         const int K = ladder[i];
         if (K > vm.n_layers || (i > 0 && K >= ladder[i - 1])) {
             continue;
         }
-        const int crop = dit_vram_best_crop(vm, K, budget, cmin, cap);
-        if (crop > 0) {
-            r.layers    = K;
-            r.crop      = crop;
-            r.est_bytes = dit_vram_total_bytes(vm, crop, K);
-            r.ok        = true;
-            r.lowered   = K < vm.n_layers;
-            return r;
+        const std::vector<int> segs = seg_candidates(K);
+        for (size_t si = 0; si < segs.size(); si++) {
+            v.segments     = segs[si];
+            const int crop = dit_vram_best_crop(v, K, budget, cmin, cap);
+            if (crop > 0) {
+                r.layers    = K;
+                r.crop      = crop;
+                r.segments  = v.segments;
+                r.est_bytes = dit_vram_total_bytes(v, crop, K);
+                r.ok        = true;
+                r.lowered   = K < vm.n_layers;
+                return r;
+            }
+        }
+        if (!depth_ladder) {
+            break;
         }
     }
     r.layers    = 2;
     r.crop      = 0;
+    r.segments  = v.segments;
     r.est_bytes = r.floor_bytes;
     r.ok        = false;
     return r;

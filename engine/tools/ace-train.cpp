@@ -264,7 +264,21 @@ static void print_usage(void) {
             "  Optimizer / schedule:\n"
             "    --lr <f>                    5e-4\n"
             "    --epochs <n>                400         hard cap; target-loss usually stops earlier\n"
-            "    --grad-accum <n>            4\n"
+            "    --batch <n>                 1           1-16; crops per micro-batch, from that many\n"
+            "                                            DIFFERENT songs. Reduced with a warn when the\n"
+            "                                            variant has fewer songs, or when\n"
+            "                                            n_kv_heads*max(S,enc_S)*B would exceed ggml's\n"
+            "                                            CUDA repeat_back cap. Default 1 (off): measured\n"
+            "                                            ~2.5x SLOWER at full depth on a 32 GB card, but\n"
+            "                                            ~2.4x FASTER on shallow/partial-depth runs.\n"
+            "    --grad-accum <n>            4           counts MICRO-BATCHES, so an optimizer step sees\n"
+            "                                            batch x grad-accum songs (4 at the defaults).\n"
+            "    --ckpt <n>                  1           gradient checkpointing: 0 = off (one monolithic\n"
+            "                                            fwd+bwd graph), 1 = auto (the VRAM fit picks the\n"
+            "                                            segment count), 2-32 = exactly that many segments.\n"
+            "                                            Segments trade one extra no-grad forward (~+30-40%%\n"
+            "                                            of forward time) for an activation set divided by\n"
+            "                                            the segment count. Clamped to the trained depth.\n"
             "    --warmup-ratio <f>          0.05\n"
             "    --grad-clip <f>             1.0         0 = disabled\n"
             "    --weight-decay <f>          0.01\n"
@@ -1088,6 +1102,8 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--target-loss") && i + 1 < argc) a.target_loss = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--order") && i + 1 < argc) a.order = argv[++i];
+        else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ckpt") && i + 1 < argc) a.ckpt = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--crop") && i + 1 < argc) a.crop = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--crop-min") && i + 1 < argc) a.crop_min = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--crop-max") && i + 1 < argc) a.crop_max = atoi(argv[++i]);
@@ -1129,6 +1145,7 @@ static int cmd_train_dit(int argc, char ** argv) {
         a.grad_accum < 1 || a.grad_accum > 64 || a.lr <= 0.0f || a.lr > 1.0f || a.grad_clip < 0.0f ||
         a.grad_clip > 100.0f || a.warmup_ratio < 0.0f || a.warmup_ratio > 0.5f || a.weight_decay < 0.0f ||
         a.weight_decay > 1.0f || a.target_loss < 0.0f || a.target_loss > 20.0f || a.milestone_keep < 0 ||
+        a.batch < 1 || a.batch > 16 || a.ckpt < 0 || a.ckpt > 32 ||
         a.milestone_keep > 64 || a.milestone_step < 0.0f || a.milestone_step > 5.0f || a.vram_reserve_mb < 0 ||
         a.vram_reserve_mb > 16384 || a.vram_safety < 0.0f || a.vram_safety >= 1.0f || a.layers < 0 || a.layers > 64 ||
         (a.crop != 0 && (a.crop < 128 || a.crop > 8192)) || a.crop_min < 128 || a.crop_min > 8192 ||

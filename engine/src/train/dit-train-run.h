@@ -8,10 +8,22 @@
 //
 // Emission contract (§2.2): `start` is the first JSONL line, `done` is the last;
 // a `fatal` line replaces `done` and precedes a non-zero exit.
+//
+// JSONL FIELDS WHOSE MEANING CHANGED WITH MICRO-BATCHING (2026-07-29):
+//   step.micro   was "samples in this optimizer step". It is now MICRO-BATCHES in
+//                this optimizer step; the sample count is micro x batch, except in
+//                a short final window where the last micro-batch is narrower.
+//                (`vram.batch` carries B, so a consumer can still compute it.)
+//   start.batch  gone: `start` fires before the model is loaded and cannot know
+//   start.ckpt   what the VRAM fit / dataset size / A1 cap leave of the request.
+//                They are now `start.batchRequested` / `start.ckptRequested`, and
+//                the RESOLVED pair is `vram.batch` / `vram.ckptSegments`.
+//   data.batch   the resolved B (unchanged in name; it never carried the request).
 
 #include "train/dit-data.h"
 #include "train/dit-export.h"
 #include "train/dit-selftest.h"
+#include "train/dit-train-ckpt.h"
 #include "train/dit-train-graph.h"
 #include "train/dit-vram.h"
 #include "train/lm-optim.h"
@@ -50,6 +62,22 @@ struct DitTrainArgs {
 
     float       lr = 5e-4f;
     int         epochs = 400, grad_accum = 4;
+    // Micro-batching (design C5): crops per micro-batch, from B DIFFERENT songs.
+    // --grad-accum counts MICRO-BATCHES, so effective samples per optimizer step
+    // is batch x grad_accum.
+    //
+    // DEFAULT 1, i.e. OFF (2026-07-29, measured — was 5). The full-depth bench on
+    // a 32 GB RTX 5090 (LoKR dim512+MLP, 32 layers, bf16 mirror) came out ~2.5x
+    // SLOWER at batch 5 + auto-checkpointing than at batch 1: a full-depth graph
+    // is already compute-bound, so a wider batch buys nothing while paying
+    // checkpointing's extra no-grad forward AND a smaller auto-fit crop. Shallow /
+    // partial-depth runs are the opposite (~2.4x faster per crop at --layers 8),
+    // which is exactly who should raise this. See docs/TRAINING.md.
+    int         batch = 1;
+    // Gradient checkpointing (design C3): 0 = off (the monolithic graph, which
+    // stays the code path taken whenever this is 0), 1 = auto (the VRAM fit
+    // picks), N >= 2 = exactly N segments.
+    int         ckpt = 1;
     float       warmup_ratio = 0.05f, grad_clip = 1.0f, weight_decay = 0.01f;
     int         seed        = 42;
     float       target_loss = 0.4f;
@@ -108,6 +136,8 @@ struct DitTrainOutcome {
     int       samples           = 0;
     int       crop              = 0;
     int       layers            = 0;
+    int       batch             = 1;
+    int       ckpt              = 1;  // checkpoint segments that actually ran (1 = off)
     bool      exported          = false;
     int       export_tensors    = 0;
     long long ms                = 0;
@@ -300,9 +330,87 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     vm.hidden      = H;
     vm.enc_H       = enc_H;
     vm.enc_S       = enc_S;
+    vm.n_heads     = c.n_heads;
+    vm.n_kv_heads  = c.n_kv_heads;
+    vm.head_dim    = c.head_dim;
+    // A batch wider than the dataset cannot be assembled from B DIFFERENT songs
+    // (design B2), so clamp before the fit sizes anything against it.
+    vm.batch       = std::max(1, std::min(a.batch, n));
+    if (vm.batch < a.batch) {
+        char bb[192];
+        snprintf(bb, sizeof(bb), "--batch %d reduced to %d: a micro-batch takes B DIFFERENT songs and this variant has "
+                                 "%d",
+                 a.batch, vm.batch, n);
+        lm_log("warn", bb);
+    }
 
-    const DitVramFit fit = dit_vram_fit(vm, M.backend, a.vram_reserve_mb, a.vram_safety, a.crop, a.layers, a.crop_min,
-                                        a.crop_max, max_T, &gmem);
+    // The C4 auto-fit ORDER at a fixed B: full depth, shrinking the crop; then
+    // raising the segment count; then reducing B with a warn; and only when all
+    // of that has failed, the depth ladder — depth is the quality axis (Rob's
+    // rule), so it is the last thing given up. `depth_ladder=false` is what holds
+    // the earlier steps ahead of it.
+    auto run_fit = [&](bool allow_depth) {
+        return dit_vram_fit(vm, M.backend, a.vram_reserve_mb, a.vram_safety, a.crop, a.layers, a.crop_min, a.crop_max,
+                            max_T, &gmem, a.ckpt, allow_depth);
+    };
+    auto ordered_fit = [&]() {
+        DitVramFit f = run_fit(false);
+        while (!f.ok && vm.batch > 1) {
+            char bb[224];
+            snprintf(bb, sizeof(bb),
+                     "--batch %d reduced to %d: the widest checkpoint split at the shortest crop still does not fit "
+                     "the VRAM budget at full depth (C4 order: batch gives before depth)",
+                     vm.batch, vm.batch - 1);
+            lm_log("warn", bb);
+            vm.batch -= 1;
+            f = run_fit(false);
+        }
+        if (!f.ok) {
+            f = run_fit(true);
+        }
+        return f;
+    };
+    DitVramFit fit = ordered_fit();
+    // A1's CUDA repeat_back cap is a CORRECTNESS constraint on
+    // Nkv * max(S, enc_S) * B (exceeding it aborts mid-backward), so it is applied
+    // after the crop is known and the fit re-run at the reduced batch — a smaller
+    // B frees budget, which the crop walk should be allowed to spend, and a longer
+    // crop can re-trip the cap. BOTH attentions expand K/V: self-attention over S
+    // tokens, cross-attention over enc_S, and enc_S is dataset geometry the crop
+    // walk never touches. Terminates: vm.batch strictly decreases and
+    // dit_vram_max_batch never returns below 1, at which point it is a no-op.
+    for (int it = 0; it < 8 && fit.ok && fit.crop > 0; it++) {
+        const int S_fit = fit.crop / P;
+        const int cap   = dit_vram_max_batch(c.n_heads, c.n_kv_heads, S_fit, enc_S, vm.batch);
+        if (cap >= vm.batch) {
+            break;
+        }
+        char bb[288];
+        snprintf(bb, sizeof(bb),
+                 "--batch %d reduced to %d: ggml's CUDA repeat_back caps n_kv_heads*max(S,enc_S)*B at %d and this run "
+                 "is %d*max(%d,%d)*%d (A1 expanded-KV backward)",
+                 vm.batch, cap, DIT_REPEAT_BACK_MAX, c.n_kv_heads, S_fit, enc_S, vm.batch);
+        lm_log("warn", bb);
+        vm.batch = cap;
+        fit      = ordered_fit();
+    }
+    // The loop is bounded, so it must never be able to EXIT still violating the
+    // cap. A hard clamp with no re-fit closes that: shrinking B only ever lowers
+    // every term of the footprint model, so the fit stays valid (just
+    // conservative) at the smaller batch.
+    if (fit.ok && fit.crop > 0) {
+        const int S_fit = fit.crop / P;
+        const int cap   = dit_vram_max_batch(c.n_heads, c.n_kv_heads, S_fit, enc_S, vm.batch);
+        if (cap < vm.batch) {
+            char bb[288];
+            snprintf(bb, sizeof(bb),
+                     "--batch %d hard-clamped to %d after the repeat_back re-fit loop ran out of iterations; the fit "
+                     "is kept as-is (a smaller batch only frees VRAM)",
+                     vm.batch, cap);
+            lm_log("warn", bb);
+            vm.batch = cap;
+        }
+    }
     if (!fit.ok) {
         char extra[160];
         snprintf(extra, sizeof(extra), ",\"needMb\":%lld,\"freeMb\":%lld",
@@ -321,13 +429,47 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     const int crop_len = fit.crop;
     const int lora_lo  = L - K;
     const int S_max    = crop_len / P;
+    const int B        = std::max(1, vm.batch);
     out->crop          = crop_len;
     out->layers        = K;
+    out->batch         = B;
+    // Only the TRAINED range is segmented (dit-train-ckpt.h): the layers below it
+    // hold no adapter parameter, so no gradient flows through them and a segment
+    // that spanned only those would trip build_backward_expand's any_params
+    // assert. dit_ckpt_plan clamps the count to that range.
+    const DitCkptPlan ckplan = dit_ckpt_plan(lora_lo, L, (a.ckpt == 0) ? 1 : std::max(1, fit.segments));
+    const int         SEG    = ckplan.segments;
+    out->ckpt                = SEG;
+
+    // ── A1 pre-flight (hard) ─────────────────────────────────────────────
+    // The fit above is supposed to have made this impossible. It is checked again
+    // here, on the FINAL numbers, because the failure mode it guards is a GGML
+    // abort() inside the CUDA backward — the process dies with no JSONL, no
+    // `fatal`, and no way for the server to say why. A clean fatal beats that
+    // even if the branch is never taken. Only B > 1 expands K/V at all.
+    if (B > 1 && c.n_heads != c.n_kv_heads) {
+        const long long tok  = (long long) std::max(S_max, enc_S);
+        const long long prod = (long long) c.n_kv_heads * tok * (long long) B;
+        if (prod > DIT_REPEAT_BACK_MAX) {
+            char extra[128];
+            snprintf(extra, sizeof(extra), ",\"batch\":%d,\"S\":%d,\"encS\":%d", B, S_max, enc_S);
+            char b[320];
+            snprintf(b, sizeof(b),
+                     "batch %d cannot run: ggml's CUDA repeat_back caps n_kv_heads*max(S,enc_S)*B at %d and this "
+                     "configuration is %d*%lld*%d = %lld (S %d, enc_S %d) — lower --batch or --crop-max",
+                     B, DIT_REPEAT_BACK_MAX, c.n_kv_heads, tok, B, prod, S_max, enc_S);
+            lm_fatal("vram", b, extra);
+            dit_train_free(&M);
+            return 1;
+        }
+    }
 
     // ── the streamed mirror, built ONCE at the chosen depth ──────────────
+    // `B > 1` is A2c: proj_in/cond_emb are promoted to F32 only when a batch axis
+    // exists, so the §2.3.1 anchor at --batch 1 keeps the exact mirror it had.
     {
         std::string err;
-        if (!dit_build_mirror(&M, lora_lo, mirror_mode, &err)) {
+        if (!dit_build_mirror(&M, lora_lo, mirror_mode, &err, B > 1)) {
             lm_fatal(err.find("quantized") != std::string::npos ? "model-load" : "vram", err);
             dit_train_free(&M);
             return 1;
@@ -360,22 +502,36 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         ggml_init_params p = { 32 * ggml_tensor_overhead(), nullptr, true };
         ctx_static         = ggml_init(p);
     }
-    ggml_tensor * b_input = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) c.in_channels * crop_len);
-    ggml_tensor * b_enc   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) enc_H * enc_S);
-    ggml_tensor * b_pos   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, S_max);
-    ggml_tensor * t_temb  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, H);
-    ggml_tensor * t_tproj = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 6 * H);
-    ggml_tensor * b_sa    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F16, (int64_t) S_max * S_max);
-    ggml_tensor * b_ca    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F16, (int64_t) enc_S * S_max);
-    ggml_tensor * b_vtgt  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) Oc * crop_len);
+    // Every one is B-wide (design B1). b_sa is B-wide only for its PADDED shape:
+    // with nothing padded the sliding-window mask is [S,S] with ne2 == ne3 == 1
+    // and broadcasts over heads AND batch; a padded micro-batch needs one mask
+    // per element (dit-data.h), so the base is allocated for the wide case.
+    ggml_tensor * b_input = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) c.in_channels * crop_len * B);
+    ggml_tensor * b_enc   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) enc_H * enc_S * B);
+    ggml_tensor * b_pos   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, (int64_t) S_max * B);
+    ggml_tensor * b_temb  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) H * B);
+    ggml_tensor * b_tproj = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) 6 * H * B);
+    ggml_tensor * b_sa    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F16, (int64_t) S_max * S_max * B);
+    // The window-free pad mask for the full-attention layers. Only B > 1 can ever
+    // produce a padded element (a 1-element batch is padded to its own length), so
+    // at B == 1 this is never allocated and the graph is the pre-batching one.
+    ggml_tensor * b_sa_pad =
+        (B > 1) ? ggml_new_tensor_1d(ctx_static, GGML_TYPE_F16, (int64_t) S_max * S_max * B) : nullptr;
+    ggml_tensor * b_ca    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F16, (int64_t) enc_S * S_max * B);
+    ggml_tensor * b_vtgt  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) Oc * crop_len * B);
+    ggml_tensor * b_lw    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) crop_len * B);
+    ggml_tensor * b_lwu   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, (int64_t) crop_len * B);
     ggml_tensor * t_cw    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, Oc);
     ggml_tensor * t_adamw    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 7);
     ggml_tensor * t_lossgrad = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_clip     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_eps      = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_gnorm2   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
-    for (ggml_tensor * t : { b_input, b_enc, b_pos, t_temb, t_tproj, b_sa, b_ca, b_vtgt, t_cw }) {
+    for (ggml_tensor * t : { b_input, b_enc, b_pos, b_temb, b_tproj, b_sa, b_ca, b_vtgt, b_lw, b_lwu, t_cw }) {
         ggml_set_input(t);
+    }
+    if (b_sa_pad) {
+        ggml_set_input(b_sa_pad);
     }
     ggml_backend_buffer_t buf_static = ggml_backend_alloc_ctx_tensors(ctx_static, M.backend);
     if (!buf_static) {
@@ -455,7 +611,29 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     opt.weight_decay = a.weight_decay;
     opt.grad_clip    = a.grad_clip;
 
-    const int steps_per_ep = (n + a.grad_accum - 1) / a.grad_accum;
+    // ── checkpoint boundary buffers (C1) ─────────────────────────────────
+    // One device allocation for the whole run, sized for the widest micro-batch
+    // (S_max, B). Nothing is allocated when --ckpt 0 resolved to a single
+    // segment, so the monolithic path costs exactly what it did before.
+    DitCkptBufs ckbufs;
+    if (SEG > 1) {
+        std::string err;
+        if (!dit_ckpt_alloc(&ckbufs, M.backend, H, S_max, B, SEG, &err)) {
+            lm_fatal("vram", err);
+            lm_optim_free(&opt);
+            adapter->free();
+            ggml_backend_buffer_free(buf_static);
+            ggml_free(ctx_static);
+            dit_train_free(&M);
+            return 1;
+        }
+    }
+
+    // C5: --grad-accum counts MICRO-BATCHES now, so an optimizer step consumes
+    // B x grad_accum songs and stepsPerEpoch = ceil(n / (B*GA)). At B == 1 this
+    // is the pre-batching formula unchanged.
+    const int win_songs    = B * a.grad_accum;
+    const int steps_per_ep = (n + win_songs - 1) / win_songs;
     const int total_steps  = std::max(1, steps_per_ep * a.epochs);
     int       warmup_steps = (a.warmup_ratio > 0.0f)
                                  ? std::max(1, (int) ((double) total_steps * (double) a.warmup_ratio))
@@ -472,10 +650,12 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     // over-subscribed allocation with shared system memory. Sampled here, after
     // the mirror / adapter / optimizer are resident but before the probe.
     jl("{\"type\":\"vram\",\"freeMb\":%lld,\"totalMb\":%lld,\"freeSource\":\"%s\",\"reserveMb\":%d,\"mirrorMb\":%lld,"
-       "\"mirror\":\"%s\",\"crop\":%d,\"layers\":%d,\"loraParams\":%lld,\"estMb\":%lld,\"deviceWideMb\":%lld,"
-       "\"source\":\"%s\",\"cropSource\":\"%s\",\"layersSource\":\"%s\"}",
+       "\"mirror\":\"%s\",\"crop\":%d,\"layers\":%d,\"batch\":%d,\"ckptSegments\":%d,\"ckptSource\":\"%s\","
+       "\"boundaryMb\":%lld,\"loraParams\":%lld,\"estMb\":%lld,"
+       "\"deviceWideMb\":%lld,\"source\":\"%s\",\"cropSource\":\"%s\",\"layersSource\":\"%s\"}",
        (long long) fit.free_mb, (long long) fit.total_mb, fit.free_source, a.vram_reserve_mb,
-       (long long) (M.mirror.bytes / 1048576), dit_mirror_mode_name(mirror_mode), crop_len, K,
+       (long long) (M.mirror.bytes / 1048576), dit_mirror_mode_name(mirror_mode), crop_len, K, B, SEG,
+       (a.ckpt == 1) ? "auto" : "user", (long long) (ckbufs.bytes / 1048576),
        (long long) adapter->nParams(), (long long) (fit.est_bytes / 1048576.0),
        (long long) dit_gpu_mem_query(M.backend).used_mb(), (fit.crop_user && fit.layers_user) ? "user" : "auto",
        fit.crop_user ? "user" : "auto", fit.layers_user ? "user" : "auto");
@@ -516,91 +696,155 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     lm_rng_seed(&rng_crop, (uint64_t) a.seed ^ 0xbf58476d1ce4e5b9ull);
     lm_rng_seed(&rng_cond, (uint64_t) a.seed ^ 0xd1b54a32d192ed03ull);
 
-    // ── the micro-step ───────────────────────────────────────────────────
+    // ── the micro-batch ──────────────────────────────────────────────────
     std::vector<uint8_t> arena((size_t) 512 << 20);
-    std::vector<float>   input_buf((size_t) c.in_channels * crop_len, 0.0f);
-    std::vector<float>   flow_xt, flow_v;
-    std::vector<int32_t> pos_buf((size_t) S_max);
-    std::vector<uint16_t> sa_buf, ca_buf;
-    std::vector<float>    enc_buf((size_t) enc_H * enc_S, 0.0f);
-    int                   graph_nodes = 0;
-    int                   last_cfg_drop = 0, last_crop_start = 0;
+    DitBatchHost         bh;
+    DitBatchCfg          bcfg;
+    bcfg.in_ch          = c.in_channels;
+    bcfg.out_ch         = Oc;
+    bcfg.enc_H          = enc_H;
+    bcfg.enc_S          = enc_S;
+    bcfg.patch          = P;
+    bcfg.sliding_window = c.sliding_window;
+    bcfg.crop           = crop_len;
+    bcfg.weighted       = (a.loss_weighting == "flow_snr");
+    bcfg.null_cond      = &M.null_cond;
+    int graph_nodes = 0;
+    int last_cfg_drop = 0, last_crop_start = 0;
 
-    auto micro_step = [&](const DitSample & s, float t, const std::vector<float> & temb_h,
-                          const std::vector<float> & tproj_h, bool use_genre, bool cfg_drop, bool backward,
-                          double * raw_out) -> bool {
-        const DitCrop cr  = dit_sample_crop(&rng_crop, s.T, crop_len, P);
-        const int     len = cr.len;
-        const int     S   = len / P;
-        last_crop_start   = cr.start;
-        last_cfg_drop     = cfg_drop ? 1 : 0;
+    // One batched forward (+ backward). `els` carries the per-ELEMENT t / CFG /
+    // genre decisions (design B3); the crop and noise draws happen inside
+    // dit_batch_assemble, in the order the pre-batching trainer used.
+    //
+    // `lossgrad` is what t_lossgrad carries for THIS micro-batch (design B4: the
+    // grad-accum scale, times the flow_snr weight at B == 1). It is uploaded here
+    // rather than by the caller because the segment driver has to re-seed it per
+    // segment and must know the head segment's value.
+    auto micro_batch = [&](std::vector<DitBatchElem> & els, const std::vector<std::vector<float>> & temb_h,
+                           const std::vector<std::vector<float>> & tproj_h, const std::vector<int> & tidx,
+                           bool backward, float lossgrad, double * loss_out, double * raw_out) -> bool {
+        const int nb = (int) els.size();
+        dit_batch_assemble(bcfg, els, &rng_crop, &rng_noise, &bh);
+        const int len = bh.len;
+        const int S   = bh.S;
+        last_crop_start = els[(size_t) (nb - 1)].crop_start;
+        last_cfg_drop   = els[(size_t) (nb - 1)].cfg_drop ? 1 : 0;
 
-        // rectified flow (D15): one rng stream, index order
-        dit_flow_target(s.lat.data() + (size_t) cr.start * (size_t) s.Oc, (size_t) len * (size_t) s.Oc, t, &rng_noise,
-                        &flow_xt, &flow_v);
-
-        // pack [context(Cc) | xt(Oc)] per frame — hot-step-sampler.h:546/728
-        for (int f = 0; f < len; f++) {
-            float * dst = &input_buf[(size_t) f * (size_t) c.in_channels];
-            memcpy(dst, &s.ctxl[(size_t) (cr.start + f) * (size_t) s.Cc], (size_t) s.Cc * sizeof(float));
-            memcpy(dst + s.Cc, &flow_xt[(size_t) f * (size_t) s.Oc], (size_t) s.Oc * sizeof(float));
+        std::vector<float> temb_buf((size_t) H * (size_t) nb, 0.0f);
+        std::vector<float> tproj_buf((size_t) 6 * (size_t) H * (size_t) nb, 0.0f);
+        for (int b = 0; b < nb; b++) {
+            memcpy(&temb_buf[(size_t) b * (size_t) H], temb_h[(size_t) tidx[(size_t) b]].data(),
+                   (size_t) H * sizeof(float));
+            memcpy(&tproj_buf[(size_t) b * 6 * (size_t) H], tproj_h[(size_t) tidx[(size_t) b]].data(),
+                   (size_t) 6 * (size_t) H * sizeof(float));
         }
 
-        // encoder conditioning: genre variant | null (CFG dropout) | caption
-        const std::vector<float> * src_enc  = &s.enc;
-        const std::vector<float> * src_mask = &s.enc_mask;
-        if (use_genre && !s.enc_genre.empty()) {
-            src_enc  = &s.enc_genre;
-            src_mask = &s.enc_mask_genre;
-        }
-        if (cfg_drop) {
-            for (int i = 0; i < enc_S; i++) {
-                memcpy(&enc_buf[(size_t) i * (size_t) enc_H], M.null_cond.data(), (size_t) enc_H * sizeof(float));
+        // §3.0: EVERY input is re-uploaded, unconditionally, before EVERY graph
+        // compute — including each of the segmented path's 1+N computes, which is
+        // why this is a lambda the checkpoint driver also calls. GGML clobbers
+        // input buffers; "only upload if changed" is the bug class the per-section
+        // adapter masking work hit. That rule applies to the new B-wide buffers
+        // exactly as it did to the old ones. (t_lossgrad is NOT here: the segment
+        // driver re-seeds it per segment and must stay in charge of it.)
+        auto upload_inputs = [&]() {
+            ggml_backend_tensor_set(b_input, bh.input.data(), 0, bh.input.size() * sizeof(float));
+            ggml_backend_tensor_set(b_vtgt, bh.vtgt.data(), 0, bh.vtgt.size() * sizeof(float));
+            ggml_backend_tensor_set(b_enc, bh.enc.data(), 0, bh.enc.size() * sizeof(float));
+            ggml_backend_tensor_set(b_pos, bh.pos.data(), 0, bh.pos.size() * sizeof(int32_t));
+            ggml_backend_tensor_set(b_sa, bh.sa.data(), 0, bh.sa.size() * sizeof(uint16_t));
+            if (b_sa_pad && !bh.sa_pad.empty()) {
+                ggml_backend_tensor_set(b_sa_pad, bh.sa_pad.data(), 0, bh.sa_pad.size() * sizeof(uint16_t));
             }
-        } else {
-            memcpy(enc_buf.data(), src_enc->data(), enc_buf.size() * sizeof(float));
-        }
+            ggml_backend_tensor_set(b_ca, bh.ca.data(), 0, bh.ca.size() * sizeof(uint16_t));
+            ggml_backend_tensor_set(b_lw, bh.lw.data(), 0, bh.lw.size() * sizeof(float));
+            ggml_backend_tensor_set(b_lwu, bh.lwu.data(), 0, bh.lwu.size() * sizeof(float));
+            ggml_backend_tensor_set(b_temb, temb_buf.data(), 0, temb_buf.size() * sizeof(float));
+            ggml_backend_tensor_set(b_tproj, tproj_buf.data(), 0, tproj_buf.size() * sizeof(float));
+        };
+        upload_inputs();
+        ggml_backend_tensor_set(t_lossgrad, &lossgrad, 0, sizeof(float));
 
-        for (int i = 0; i < S; i++) {
-            pos_buf[(size_t) i] = i;
-        }
-        dit_sa_mask(S, c.sliding_window, &sa_buf);
-        dit_ca_mask(enc_S, S, *src_mask, &ca_buf);
+        // Every view is CONTIGUOUS at offset 0 — soft_max_ext will not take a
+        // strided mask, and ggml_reshape refuses a non-contiguous source. Built
+        // per GRAPH, because the segmented path builds one per segment.
+        auto mk_inputs = [&](ggml_context * gctx) {
+            const size_t f32 = sizeof(float), f16 = sizeof(ggml_fp16_t);
+            DitInputs    in;
+            in.t_input = ggml_view_3d(gctx, b_input, c.in_channels, len, nb, (size_t) c.in_channels * f32,
+                                      (size_t) c.in_channels * (size_t) len * f32, 0);
+            in.t_enc   = ggml_view_3d(gctx, b_enc, enc_H, enc_S, nb, (size_t) enc_H * f32,
+                                      (size_t) enc_H * (size_t) enc_S * f32, 0);
+            in.t_pos   = ggml_view_1d(gctx, b_pos, (int64_t) S * nb, 0);
+            in.t_temb  = ggml_view_3d(gctx, b_temb, H, 1, nb, (size_t) H * f32, (size_t) H * f32, 0);
+            in.t_tproj = ggml_view_3d(gctx, b_tproj, 6 * H, 1, nb, (size_t) 6 * H * f32, (size_t) 6 * H * f32, 0);
+            // [S,S] broadcast when nothing is padded; [S,S,1,B] per element when
+            // something is (soft_max_ext: a.ne2 % 1 == 0, a.ne3 % B == 0).
+            in.t_sa    = (bh.sa_B > 1) ? ggml_view_4d(gctx, b_sa, S, S, 1, nb, (size_t) S * f16,
+                                                      (size_t) S * (size_t) S * f16, (size_t) S * (size_t) S * f16, 0)
+                                       : ggml_view_2d(gctx, b_sa, S, S, (size_t) S * f16, 0);
+            in.t_sa_pad = (bh.sa_B > 1 && b_sa_pad)
+                              ? ggml_view_4d(gctx, b_sa_pad, S, S, 1, nb, (size_t) S * f16,
+                                             (size_t) S * (size_t) S * f16, (size_t) S * (size_t) S * f16, 0)
+                              : nullptr;
+            in.t_ca    = ggml_view_4d(gctx, b_ca, enc_S, S, 1, nb, (size_t) enc_S * f16,
+                                      (size_t) enc_S * (size_t) S * f16, (size_t) enc_S * (size_t) S * f16, 0);
+            in.t_vtgt =
+                ggml_view_3d(gctx, b_vtgt, Oc, len, nb, (size_t) Oc * f32, (size_t) Oc * (size_t) len * f32, 0);
+            in.t_lw  = ggml_view_3d(gctx, b_lw, 1, len, nb, f32, (size_t) len * f32, 0);
+            in.t_lwu = ggml_view_3d(gctx, b_lwu, 1, len, nb, f32, (size_t) len * f32, 0);
+            in.t_cw  = t_cw;
+            return in;
+        };
 
-        // §3.0: EVERY input is re-uploaded, unconditionally. GGML clobbers input
-        // buffers; "only upload if changed" is the bug class the per-section
-        // adapter masking work hit.
-        ggml_backend_tensor_set(b_input, input_buf.data(), 0, (size_t) c.in_channels * (size_t) len * sizeof(float));
-        ggml_backend_tensor_set(b_vtgt, flow_v.data(), 0, flow_v.size() * sizeof(float));
-        ggml_backend_tensor_set(b_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(b_pos, pos_buf.data(), 0, (size_t) S * sizeof(int32_t));
-        ggml_backend_tensor_set(b_sa, sa_buf.data(), 0, sa_buf.size() * sizeof(uint16_t));
-        ggml_backend_tensor_set(b_ca, ca_buf.data(), 0, ca_buf.size() * sizeof(uint16_t));
-        ggml_backend_tensor_set(t_temb, temb_h.data(), 0, temb_h.size() * sizeof(float));
-        ggml_backend_tensor_set(t_tproj, tproj_h.data(), 0, tproj_h.size() * sizeof(float));
+        // ── the segmented path (C1) ──────────────────────────────────────
+        // Only ever taken when the fit resolved more than one segment; --ckpt 0
+        // keeps the monolithic graph below, byte for byte.
+        if (SEG > 1 && backward) {
+            if (!dit_ckpt_begin(&ckbufs, H, S, nb, SEG)) {
+                return false;
+            }
+            DitCkptReq req;
+            req.M           = &M;
+            req.ad          = ad;
+            req.opt         = &opt;
+            req.sched       = M.sched;
+            req.arena       = &arena;
+            req.mk_inputs   = mk_inputs;
+            req.upload      = upload_inputs;  // §3.0: re-uploaded before every segment compute
+            req.T           = len;
+            req.enc_S       = enc_S;
+            req.B           = nb;
+            req.Oc          = Oc;
+            req.chan_bal    = chan_bal;
+            req.gscale      = bh.gscale;
+            req.want_report = (nb > 1 && bcfg.weighted);
+            req.loss_scale  = lossgrad;
+            const bool cok  = dit_ckpt_micro_batch(req, &ckbufs, ckplan, loss_out, raw_out);
+            graph_nodes     = req.nodes;
+            dit_ckpt_end(&ckbufs);
+            return cok;
+        }
 
         ggml_init_params ip  = { arena.size(), arena.data(), true };
         ggml_context *   ctx = ggml_init(ip);
         ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, /*grads=*/backward);
+        DitInputs        in  = mk_inputs(ctx);
 
-        DitInputs in;
-        in.t_input = ggml_view_2d(ctx, b_input, c.in_channels, len, (size_t) c.in_channels * sizeof(float), 0);
-        in.t_enc   = ggml_view_2d(ctx, b_enc, enc_H, enc_S, (size_t) enc_H * sizeof(float), 0);
-        in.t_pos   = ggml_view_1d(ctx, b_pos, S, 0);
-        in.t_temb  = t_temb;
-        in.t_tproj = t_tproj;
-        in.t_sa    = ggml_view_2d(ctx, b_sa, S, S, (size_t) S * sizeof(ggml_fp16_t), 0);
-        in.t_ca    = ggml_view_2d(ctx, b_ca, enc_S, S, (size_t) enc_S * sizeof(ggml_fp16_t), 0);
-        in.t_vtgt  = ggml_view_2d(ctx, b_vtgt, Oc, len, (size_t) Oc * sizeof(float), 0);
-        in.t_cw    = t_cw;
-
-        ggml_tensor * vpred = dit_train_forward(ctx, &M, ad, in, len, enc_S);
-        ggml_tensor * loss  = dit_train_loss(ctx, vpred, in, Oc, len, chan_bal);
+        // The unweighted report node only exists at B > 1, where the flow_snr
+        // weight has moved into t_lw and the loss node is no longer the raw mean.
+        ggml_tensor * report = nullptr;
+        ggml_tensor * vpred  = dit_train_forward(ctx, &M, ad, in, len, enc_S, nullptr, -1, -1, nb);
+        ggml_tensor * loss   = dit_train_loss(ctx, vpred, in, Oc, len, chan_bal, bh.gscale,
+                                              (nb > 1 && bcfg.weighted) ? &report : nullptr);
         if (backward) {
             ggml_set_loss(loss);
         }
         ggml_build_forward_expand(gf, loss);
+        if (report) {
+            ggml_build_forward_expand(gf, report);
+        }
         if (backward) {
+            // AFTER both forward expansions: gacc is indexed by forward-node index.
             std::vector<ggml_tensor *> gacc;
             lm_optim_fill_gacc(&opt, gf, &gacc);
             ggml_build_backward_expand(ctx, gf, gacc.data());
@@ -610,10 +854,19 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
         ggml_backend_sched_reset(M.sched);
         const bool ok = ggml_backend_sched_graph_compute(M.sched, gf) == GGML_STATUS_SUCCESS;
-        if (ok && raw_out) {
+        if (ok && loss_out) {
             float lv = 0.0f;
             ggml_backend_tensor_get(loss, &lv, 0, sizeof(float));
-            *raw_out = (double) lv;
+            *loss_out = (double) lv;
+            if (raw_out) {
+                if (report) {
+                    float rv = 0.0f;
+                    ggml_backend_tensor_get(report, &rv, 0, sizeof(float));
+                    *raw_out = (double) rv;
+                } else {
+                    *raw_out = (double) lv;
+                }
+            }
         }
         ggml_free(ctx);
         return ok;
@@ -621,6 +874,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
     // ── teardown helper (used by every failure path from here on) ────────
     auto teardown = [&]() {
+        dit_ckpt_free(&ckbufs);
         lm_optim_free(&opt);
         adapter->free();
         ggml_backend_buffer_free(buf_static);
@@ -630,10 +884,25 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
     // ── high-water probe (mandatory, §3.7) ───────────────────────────────
     //
-    // One throwaway micro-step at the chosen (crop, K) on the LONGEST sample,
+    // One throwaway micro-BATCH at the chosen (crop, K, B) on the LONGEST sample,
     // loss discarded. This forces ggml_gallocr to its peak up front, so a
     // 40-songs-in OOM becomes an immediate honest failure, and it establishes
-    // the leak counter's baseline.
+    // the leak counter's baseline. B copies of the longest song is the widest
+    // graph the run can build, which is exactly what the probe is for.
+    //
+    // THE PROBE SHARES rng_crop / rng_noise WITH TRAINING, ON PURPOSE. The
+    // pre-batching trainer probed through the same micro_step lambda, so its
+    // probe burned exactly one rng_crop draw (and one crop's worth of rng_noise)
+    // before step 1. At B == 1 this probe burns exactly the same, which is what
+    // makes the §2.3.1 byte-identity anchor hold. Giving the probe a private RNG
+    // would look tidier and would SHIFT every training crop by one draw — it
+    // breaks the anchor rather than protecting it. Do not "harden" this.
+    //
+    // Diagnosing an anchor mismatch: --order also decides the per-epoch song
+    // permutation, and a permutation change moves cropStart and loss while
+    // leaving t (rng_t) and cfgDrop (rng_cond) untouched — the exact fingerprint
+    // an rng_crop stream shift produces. Check `start.order` matches on BOTH
+    // sides before suspecting the RNG.
     LmVramTracker tracker;
     {
         size_t longest = 0;
@@ -642,7 +911,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 longest = i;
             }
         }
-        std::vector<float>              tv(1, 0.5f);
+        std::vector<float>              tv((size_t) B, 0.5f);
         std::vector<std::vector<float>> tb, tp;
         double                          lv  = 0.0;
         const int64_t                   tp0 = ggml_time_ms();
@@ -651,8 +920,15 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             teardown();
             return 1;
         }
-        if (!micro_step(samples[longest], 0.5f, tb[0], tp[0], false, false, true, &lv)) {
-            lm_fatal("vram", "the high-water probe failed — not enough VRAM for this crop/depth");
+        std::vector<DitBatchElem> els((size_t) B);
+        std::vector<int>          tidx((size_t) B);
+        for (int b = 0; b < B; b++) {
+            els[(size_t) b].s = &samples[longest];
+            els[(size_t) b].t = 0.5f;
+            tidx[(size_t) b]  = b;
+        }
+        if (!micro_batch(els, tb, tp, tidx, true, 1.0f, &lv, nullptr)) {
+            lm_fatal("vram", "the high-water probe failed — not enough VRAM for this crop/depth/batch");
             teardown();
             return 1;
         }
@@ -674,10 +950,16 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         const DitGpuMem gm_probe      = dit_gpu_mem_query(M.backend);
         const size_t    device_wide_mb = gm_probe.used_mb();
         const size_t    device_total_mb = gm_probe.total_mb();
+        char            seg_note[128]  = "";
+        if (SEG > 1) {
+            snprintf(seg_note, sizeof(seg_note), ", widest of %d graphs over %d checkpoint segments (%lld MB of "
+                                                 "boundary buffers)",
+                     1 + SEG, SEG, (long long) (ckbufs.bytes / 1048576));
+        }
         fprintf(stderr,
-                "[train-dit] graph %d nodes (fwd+bwd); high-water probe loss=%.6f in %lld ms; trainer-owned %zu MB "
+                "[train-dit] graph %d nodes (fwd+bwd)%s; high-water probe loss=%.6f in %lld ms; trainer-owned %zu MB "
                 "(est %lld MB), device-wide %zu MB\n",
-                graph_nodes, lv, (long long) (ggml_time_ms() - tp0), tracker.base_mb,
+                graph_nodes, seg_note, lv, (long long) (ggml_time_ms() - tp0), tracker.base_mb,
                 (long long) (fit.est_bytes / 1048576.0), device_wide_mb);
         // The probe succeeding does NOT mean it fitted: on Windows an
         // over-subscribed CUDA allocation is silently backed by shared system
@@ -698,10 +980,10 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     }
 
     jl("{\"type\":\"data\",\"samples\":%d,\"skipped\":0,\"minFrames\":%d,\"maxFrames\":%d,\"encSMax\":%d,"
-       "\"channelStats\":%s,\"genreSamples\":%d,\"stepsPerEpoch\":%d,\"totalSteps\":%d,\"warmupSteps\":%d,"
-       "\"graphNodes\":%d}",
-       n, min_T, max_T, enc_S, have_cstats ? "true" : "false", genre_samples, steps_per_ep, total_steps, warmup_steps,
-       graph_nodes);
+       "\"channelStats\":%s,\"genreSamples\":%d,\"batch\":%d,\"stepsPerEpoch\":%d,\"totalSteps\":%d,"
+       "\"warmupSteps\":%d,\"graphNodes\":%d}",
+       n, min_T, max_T, enc_S, have_cstats ? "true" : "false", genre_samples, B, steps_per_ep, total_steps,
+       warmup_steps, graph_nodes);
 
     dit_milestone_reset(a.out_dir);
 
@@ -711,6 +993,8 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     log->layers_source  = fit.layers_user ? "user" : "auto";
     log->crop           = crop_len;
     log->crop_source    = fit.crop_user ? "user" : "auto";
+    log->batch          = B;
+    log->ckpt           = SEG;
     log->samples        = n;
     log->partial_depth  = K < L;
     log->channel_balance = chan_bal;
@@ -751,11 +1035,15 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             LmStepStats last_stats;
             lm_optim_zero_grad(&opt);
 
-            for (int w0 = 0; w0 < n && rc == 0; w0 += a.grad_accum) {
-                const int wlen = std::min(a.grad_accum, n - w0);
+            // A WINDOW is one optimizer step: grad_accum micro-batches of B songs.
+            for (int w0 = 0; w0 < n && rc == 0; w0 += win_songs) {
+                const int wlen = std::min(win_songs, n - w0);      // songs in this window
+                const int n_mb = (wlen + B - 1) / B;               // micro-batches (the last may be short)
 
                 // Sample the WHOLE window's timesteps up front: the flow_snr mean
                 // needs them, and so does the temb precompute (§3.5's batch-of-1 trap).
+                // One t PER ELEMENT (design B3) — at B == 1 that is one per
+                // micro-step, i.e. exactly the pre-batching draw sequence.
                 std::vector<float> ts((size_t) wlen), wgt((size_t) wlen);
                 double             wsum = 0.0;
                 for (int i = 0; i < wlen; i++) {
@@ -776,29 +1064,77 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
 
                 double        win_loss = 0.0, win_raw = 0.0;
                 const int64_t t_win0 = ggml_time_ms();
-                for (int i = 0; i < wlen; i++) {
-                    const DitSample & s = samples[(size_t) order[(size_t) (w0 + i)]];
-                    const float       wnorm = (float) ((double) wgt[(size_t) i] / (wbar > 0.0 ? wbar : 1.0));
-                    const float       lg    = wnorm / (float) wlen;
-                    ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+                for (int mb = 0; mb < n_mb; mb++) {
+                    const int i0 = mb * B;
+                    const int nb = std::min(B, wlen - i0);
 
-                    const bool use_genre = a.genre_ratio > 0 && !s.enc_genre.empty() &&
-                                           (lm_rng_uniform(&rng_cond) * 100.0f < (float) a.genre_ratio);
-                    const bool cfg_drop =
-                        a.cfg_ratio > 0.0f && cfg_ok && (lm_rng_uniform(&rng_cond) < a.cfg_ratio);
+                    // Per-ELEMENT genre / CFG draws, in element order — the same
+                    // rng_cond sequence the pre-batching trainer consumed, including
+                    // its short-circuits (a draw only happens when the preceding
+                    // conditions hold).
+                    std::vector<DitBatchElem> els((size_t) nb);
+                    std::vector<int>          tidx((size_t) nb);
+                    for (int b = 0; b < nb; b++) {
+                        const DitSample & s = samples[(size_t) order[(size_t) (w0 + i0 + b)]];
+                        DitBatchElem &    e = els[(size_t) b];
+                        e.s         = &s;
+                        e.t         = ts[(size_t) (i0 + b)];
+                        e.w         = (float) ((double) wgt[(size_t) (i0 + b)] / (wbar > 0.0 ? wbar : 1.0));
+                        e.use_genre = a.genre_ratio > 0 && !s.enc_genre.empty() &&
+                                      (lm_rng_uniform(&rng_cond) * 100.0f < (float) a.genre_ratio);
+                        e.cfg_drop = a.cfg_ratio > 0.0f && cfg_ok && (lm_rng_uniform(&rng_cond) < a.cfg_ratio);
+                        tidx[(size_t) b] = i0 + b;
+                    }
 
-                    double raw = 0.0;
-                    if (!micro_step(s, ts[(size_t) i], temb_h[(size_t) i], tproj_h[(size_t) i], use_genre, cfg_drop,
-                                    true, &raw)) {
+                    // B4: at B > 1 the per-element weight has moved into t_lw and
+                    // the scalar is the pure grad-accum scale. At B == 1 it keeps
+                    // carrying wnorm, which is what makes §2.3.1 hold.
+                    //
+                    // THE SCALE IS AN ELEMENT SHARE, NOT 1/n_mb. Write the window
+                    // out. The in-graph t_lw already normalises WITHIN a
+                    // micro-batch: for flow_snr each element carries
+                    // w_b/(Oc*len_b*nb), so loss_mb = (1/nb) * sum_b w_b*m_b where
+                    // m_b is element b's own mean. The accumulated gradient is
+                    // sum_mb lg_mb * loss_mb. With lg_mb = nb/wlen that telescopes
+                    // to (1/wlen) * sum_over_every_element w_b*m_b — Side-Step's
+                    // global mean-of-per-sample-means over the whole optimizer
+                    // window. With the old lg_mb = 1/n_mb it was a mean of
+                    // MICRO-BATCH means instead, which is the same thing only while
+                    // every micro-batch is full: a tail of nb < B elements got
+                    // 1/n_mb of the window instead of nb/wlen, over-weighting each
+                    // of its elements by (B/nb).
+                    //
+                    // At B == 1, n_mb == wlen so nb/wlen == 1/n_mb exactly and the
+                    // §2.3.1 byte-identity anchor is untouched, short final window
+                    // included.
+                    //
+                    // For --loss-weighting none the in-graph weight is 1/(sum of
+                    // Oc*len_b over the MICRO-batch), so the combined reduction is
+                    // the exact global element mean when the crops are equal-length
+                    // (they are, except for songs shorter than the crop) and an
+                    // element-weighted approximation of it otherwise. Making that
+                    // exact would need the window's total frame count before any
+                    // crop has been drawn, which the streaming assembler cannot
+                    // give.
+                    const float share = (float) nb / (float) wlen;
+                    const float lg    = (nb == 1) ? (els[0].w * share) : share;
+
+                    double lv = 0.0, raw = 0.0;
+                    if (!micro_batch(els, temb_h, tproj_h, tidx, true, lg, &lv, &raw)) {
                         lm_fatal("vram", "graph compute failed mid-epoch");
                         rc = 1;
                         break;
                     }
-                    win_raw += raw;
-                    win_loss += (double) wnorm * raw;
-                    running += (double) wnorm * raw;
-                    running_raw += raw;
-                    n_micro++;
+                    // `lv` already carries the per-element weights at B > 1 and is
+                    // the raw mean at B == 1, so the host multiply only applies to
+                    // the single-element case.
+                    const double wl = (nb == 1) ? ((double) els[0].w * lv) : (lv * (double) nb);
+                    const double wr = (nb == 1) ? lv : (raw * (double) nb);
+                    win_loss += wl;
+                    win_raw += wr;
+                    running += wl;
+                    running_raw += wr;
+                    n_micro += nb;
                 }
                 if (rc != 0) {
                     break;
@@ -813,7 +1149,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 jl("{\"type\":\"step\",\"epoch\":%d,\"step\":%d,\"totalSteps\":%d,\"micro\":%d,\"loss\":%.6f,"
                    "\"rawLoss\":%.6f,\"lr\":%.9g,\"gradNorm\":%.6f,\"clipScale\":%.6f,\"t\":%.4f,\"crop\":%d,"
                    "\"cropStart\":%d,\"cfgDrop\":%d,\"ms\":%lld,\"vramMb\":%lld}",
-                   epoch + 1, global_step, total_steps, wlen, win_loss / (double) wlen, win_raw / (double) wlen,
+                   epoch + 1, global_step, total_steps, n_mb, win_loss / (double) wlen, win_raw / (double) wlen,
                    (double) last_stats.lr, (double) last_stats.grad_norm, (double) last_stats.clip,
                    (double) ts[(size_t) (wlen - 1)], crop_len, last_crop_start, last_cfg_drop,
                    (long long) (ggml_time_ms() - t_win0), (long long) vram_mb);
@@ -986,15 +1322,25 @@ static int dit_train_main(const DitTrainArgs & a) {
     } else {
         snprintf(adapter_fields, sizeof(adapter_fields), "\"rank\":%d,\"alpha\":%d", a.rank, a.alpha);
     }
+    // `start` is emitted BEFORE the model is loaded, so it cannot know the
+    // RESOLVED batch or segment count — those are what the VRAM fit, the dataset's
+    // song count and the A1 repeat_back cap leave of the request, and they are
+    // decided inside dit_train_stage. The two fields here are therefore named for
+    // what they are, REQUESTED, and the resolved pair is on the `vram` event
+    // (`batch` / `ckptSegments`, plus `ckptSource`), which is emitted after the
+    // fit. Design §2.1.
     jl("{\"type\":\"start\",\"stages\":[%s],\"tensors\":\"%s\",\"out\":\"%s\",\"dit\":\"%s\",\"adapterType\":\"%s\","
-       "%s,\"targetMlp\":%s,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"targetLoss\":%.9g,"
-       "\"gradClip\":%.9g,\"seed\":%d,\"lossWeighting\":\"%s\",\"channelBalance\":%s,\"cfgRatio\":%.9g,"
+       "%s,\"targetMlp\":%s,\"lr\":%.9g,\"epochs\":%d,\"gradAccum\":%d,\"batchRequested\":%d,\"ckptRequested\":%d,"
+       "\"targetLoss\":%.9g,"
+       "\"gradClip\":%.9g,\"seed\":%d,\"order\":\"%s\",\"lossWeighting\":\"%s\",\"channelBalance\":%s,"
+       "\"cfgRatio\":%.9g,"
        "\"genreRatio\":%d,\"mirror\":\"%s\"}",
        stage_csv.c_str(), lm_json_escape(a.tensors_dir).c_str(), lm_json_escape(a.out_dir).c_str(),
        lm_json_escape(a.dit_name.empty() ? a.dit_path : a.dit_name).c_str(), a.adapter_type.c_str(), adapter_fields,
-       a.target_mlp ? "true" : "false", (double) a.lr, a.epochs, a.grad_accum, (double) a.target_loss,
-       (double) a.grad_clip, a.seed, a.loss_weighting.c_str(), a.channel_balance ? "true" : "false",
-       (double) a.cfg_ratio, a.genre_ratio, a.mirror.c_str());
+       a.target_mlp ? "true" : "false", (double) a.lr, a.epochs, a.grad_accum, a.batch, a.ckpt,
+       (double) a.target_loss,
+       (double) a.grad_clip, a.seed, a.order.c_str(), a.loss_weighting.c_str(),
+       a.channel_balance ? "true" : "false", (double) a.cfg_ratio, a.genre_ratio, a.mirror.c_str());
 
     if (a.adapter_type != "lora" && !is_lokr) {
         lm_fatal("unsupported-adapter", "--adapter-type must be lora|lokr");
@@ -1031,6 +1377,8 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.lr              = a.lr;
     log.epochs          = a.epochs;
     log.grad_accum      = a.grad_accum;
+    log.batch           = a.batch;  // dit_train_stage overwrites with what actually ran
+    log.ckpt            = a.ckpt;   // ditto: the RESOLVED segment count replaces it
     log.grad_clip       = a.grad_clip;
     log.weight_decay    = a.weight_decay;
     log.warmup_ratio    = a.warmup_ratio;
@@ -1098,9 +1446,9 @@ static int dit_train_main(const DitTrainArgs & a) {
 
     const long long run_ms = (long long) (ggml_time_ms() - t_run0);
     jl("{\"type\":\"done\",\"stages\":[%s],\"epochsRun\":%d,\"finalLoss\":%.6f,\"stoppedOnTarget\":%s,"
-       "\"adapter\":\"%s\",\"samples\":%d,\"crop\":%d,\"layers\":%d,\"ms\":%lld}",
+       "\"adapter\":\"%s\",\"samples\":%d,\"crop\":%d,\"layers\":%d,\"batch\":%d,\"ckpt\":%d,\"ms\":%lld}",
        stage_csv.c_str(), out.epochs_run, out.final_loss, out.stopped_on_target ? "true" : "false",
-       lm_json_escape(a.out_dir).c_str(), out.samples, out.crop, out.layers, run_ms);
+       lm_json_escape(a.out_dir).c_str(), out.samples, out.crop, out.layers, out.batch, out.ckpt, run_ms);
 
     fprintf(stderr, "[train-dit] done in %.1f s\n", (double) run_ms / 1000.0);
     return 0;

@@ -276,6 +276,8 @@ export const TrainPanel: React.FC = () => {
       milestoneKeep: ditForm.milestoneKeep,
       vramReserveMb: ditForm.vramReserveMb,
       mirror: ditForm.mirror,
+      batch: ditForm.batch,
+      ckptSegments: ditForm.ckptSegments,
       stages: ditForm.stages,
       overwrite: ditForm.overwrite,
       stopEngine: ditForm.stopEngine,

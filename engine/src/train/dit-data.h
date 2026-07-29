@@ -333,14 +333,34 @@ static void dit_flow_target(const float * x0, size_t n, float t, LmRng * rng, st
 
 // ─── attention masks (byte-for-byte the sampler's) ──────────────────────────
 
-// Self-attention sliding window, F16, [S(kv), S(q)].
-static void dit_sa_mask(int S, int win, std::vector<uint16_t> * out) {
+// Self-attention sliding window, F16, [S(kv), S(q)] for ONE element.
+//
+// `valid_S` (0 or S = nothing padded) is the element's own valid token count.
+// When it is shorter than S, the padded tail is masked OUT AS KEYS for every
+// VALID query. That column mask is load-bearing, not cosmetic: padded latent
+// frames sit inside the KV window of the valid queries, so without it they feed
+// every valid query's attention output and from there the adapter gradients —
+// and the design-B4 loss mask cannot undo that, because it only zeroes the
+// padded frames' OWN loss contribution, never their influence on the valid ones.
+//
+// Padded QUERY rows deliberately keep the plain window mask instead of being
+// masked out entirely. A row whose every key is -inf makes soft_max produce NaN
+// (its max is -inf, so every exp() argument is -inf - -inf), and under a sliding
+// window a padded query far past the valid tail would have exactly that. They do
+// not need masking to be inert: a padded frame's loss weight is exactly 0, so
+// dL/d(its output) is 0, and a zero output gradient contributes exactly zero to
+// dQ/dK/dV. With the columns masked they are invisible to the valid rows too, so
+// a padded frame is inert in BOTH directions.
+static void dit_sa_mask(int S, int win, std::vector<uint16_t> * out, int valid_S = 0) {
+    const int vS = (valid_S > 0 && valid_S < S) ? valid_S : S;
     out->assign((size_t) S * (size_t) S, 0);
     for (int qi = 0; qi < S; qi++) {
         for (int ki = 0; ki < S; ki++) {
             const int  dist   = (qi > ki) ? (qi - ki) : (ki - qi);
             const bool in_win = (win <= 0) || (S <= win) || (dist <= win);
-            (*out)[(size_t) qi * (size_t) S + (size_t) ki] = ggml_fp32_to_fp16(in_win ? 0.0f : -INFINITY);
+            const bool pad_kv = (qi < vS) && (ki >= vS);
+            (*out)[(size_t) qi * (size_t) S + (size_t) ki] =
+                ggml_fp32_to_fp16((in_win && !pad_kv) ? 0.0f : -INFINITY);
         }
     }
 }
@@ -353,6 +373,213 @@ static void dit_ca_mask(int enc_S, int S, const std::vector<float> & m, std::vec
             const bool real = m.empty() || m[(size_t) ki] > 0.5f;
             (*out)[(size_t) qi * (size_t) enc_S + (size_t) ki] = ggml_fp32_to_fp16(real ? 0.0f : -INFINITY);
         }
+    }
+}
+
+// ─── micro-batch assembly (design B2 / B3 / B4) ─────────────────────────────
+//
+// A micro-batch is B crops from B DIFFERENT songs (Side-Step DataLoader parity),
+// each with its OWN timestep, CFG-dropout state, genre variant and encoder-padding
+// mask. Elements are padded to the batch's longest crop; the pad is WRAP-filled
+// from the element's own crop (in-distribution content) and carries loss weight
+// exactly 0, so it contributes nothing to the loss or the gradients.
+//
+// RNG ORDER IS LOAD-BEARING. The draws happen in exactly the order the
+// pre-batching trainer made them — crop then noise, element by element — so at
+// B == 1 the streams are consumed identically and §2.3.1 holds.
+//
+// SELF-ATTENTION MASK SHAPE. Design B1's [S,S] mask (ne2 == ne3 == 1, so it
+// broadcasts over heads AND batch) is kept as the FAST PATH — it is what every
+// micro-batch whose elements all crop to the same length uses, which is every
+// batch drawn from songs at least `crop` frames long, i.e. the common case.
+// The moment ANY element is padded the mask becomes per-element [S,S,1,B]
+// (`h->sa_B == B`) with that element's padded tail masked out as KEYS: padded
+// frames sit inside the valid queries' KV window, and the loss mask alone does
+// NOT stop them reaching the adapter gradients through it (see dit_sa_mask's
+// header for the full argument, and self-test rung SB3 for the measurement).
+// Wrap-filling the pad is still done, but it is now belt-and-braces rather than
+// the mechanism.
+
+struct DitBatchElem {
+    const DitSample * s         = nullptr;
+    float             t         = 0.5f;
+    float             w         = 1.0f;  // (w_i / wbar); always 1 for --loss-weighting none
+    bool              cfg_drop  = false;
+    bool              use_genre = false;
+    // filled in by dit_batch_assemble
+    int crop_start = 0;
+    int len        = 0;  // valid latent frames for this element
+};
+
+struct DitBatchHost {
+    std::vector<float>    input, vtgt, enc, lw, lwu;
+    std::vector<int32_t>  pos;
+    // `sa` is the sliding-window mask (layer_type 0). `sa_pad` is the SAME
+    // per-element pad-column mask with NO window, for the full-attention layers
+    // (layer_type 1), which take no mask at all when nothing is padded. Empty
+    // unless something is padded — which can only happen at B > 1, since a
+    // 1-element batch is padded to its own length.
+    std::vector<uint16_t> sa, sa_pad, ca;
+    int                   len    = 0;  // padded frames per element (the batch max)
+    int                   S      = 0;
+    int                   B      = 0;
+    // Elements carried by `sa`: 1 = the [S,S] broadcast mask (nothing padded),
+    // B = a per-element [S,S,1,B] mask. The graph input view shape follows this.
+    int                   sa_B   = 1;
+    float                 gscale = 1.0f;  // the graph's ggml_scale factor
+};
+
+struct DitBatchCfg {
+    int  in_ch          = 192;
+    int  out_ch         = 64;
+    int  enc_H          = 2048;
+    int  enc_S          = 0;
+    int  patch          = 2;
+    int  sliding_window = 0;
+    int  crop           = 0;
+    bool weighted       = true;  // --loss-weighting flow_snr
+    const std::vector<float> * null_cond = nullptr;
+};
+
+static void dit_batch_assemble(const DitBatchCfg & cfg, std::vector<DitBatchElem> & els, LmRng * rng_crop,
+                               LmRng * rng_noise, DitBatchHost * h) {
+    const int B  = (int) els.size();
+    const int Oc = cfg.out_ch;
+
+    // 1) crops, in element order.
+    int padded = 0;
+    for (int b = 0; b < B; b++) {
+        const DitCrop cr    = dit_sample_crop(rng_crop, els[(size_t) b].s->T, cfg.crop, cfg.patch);
+        els[(size_t) b].crop_start = cr.start;
+        els[(size_t) b].len        = cr.len;
+        padded                     = std::max(padded, cr.len);
+    }
+    h->B   = B;
+    h->len = padded;
+    h->S   = padded / cfg.patch;
+
+    h->input.assign((size_t) cfg.in_ch * (size_t) padded * (size_t) B, 0.0f);
+    h->vtgt.assign((size_t) Oc * (size_t) padded * (size_t) B, 0.0f);
+    h->enc.assign((size_t) cfg.enc_H * (size_t) cfg.enc_S * (size_t) B, 0.0f);
+    h->lw.assign((size_t) padded * (size_t) B, 0.0f);
+    h->lwu.assign((size_t) padded * (size_t) B, 0.0f);
+    h->pos.assign((size_t) h->S * (size_t) B, 0);
+    h->ca.assign((size_t) cfg.enc_S * (size_t) h->S * (size_t) B, 0);
+
+    // 2) per element: rectified-flow target over the VALID frames only (so the
+    //    noise stream draws exactly what the pre-batching trainer drew), then the
+    //    wrap-fill, the encoder slice and that element's cross-attention mask.
+    std::vector<float>    xt, v;
+    std::vector<uint16_t> ca_one;
+    for (int b = 0; b < B; b++) {
+        DitBatchElem &    e = els[(size_t) b];
+        const DitSample & s = *e.s;
+        dit_flow_target(s.lat.data() + (size_t) e.crop_start * (size_t) s.Oc, (size_t) e.len * (size_t) s.Oc, e.t,
+                        rng_noise, &xt, &v);
+        for (int f = 0; f < padded; f++) {
+            const int sf  = f % e.len;  // wrap-fill past the valid frames
+            float *   dst = &h->input[((size_t) b * (size_t) padded + (size_t) f) * (size_t) cfg.in_ch];
+            memcpy(dst, &s.ctxl[(size_t) (e.crop_start + sf) * (size_t) s.Cc], (size_t) s.Cc * sizeof(float));
+            memcpy(dst + s.Cc, &xt[(size_t) sf * (size_t) s.Oc], (size_t) s.Oc * sizeof(float));
+            memcpy(&h->vtgt[((size_t) b * (size_t) padded + (size_t) f) * (size_t) Oc],
+                   &v[(size_t) sf * (size_t) s.Oc], (size_t) Oc * sizeof(float));
+        }
+
+        // encoder conditioning: genre variant | null (CFG dropout) | caption. The
+        // padding MASK stays the song's own even when the states are replaced,
+        // which is what the pre-batching trainer did.
+        const std::vector<float> * src_enc  = &s.enc;
+        const std::vector<float> * src_mask = &s.enc_mask;
+        if (e.use_genre && !s.enc_genre.empty()) {
+            src_enc  = &s.enc_genre;
+            src_mask = &s.enc_mask_genre;
+        }
+        float * edst = &h->enc[(size_t) b * (size_t) cfg.enc_H * (size_t) cfg.enc_S];
+        if (e.cfg_drop && cfg.null_cond && (int) cfg.null_cond->size() == cfg.enc_H) {
+            for (int i = 0; i < cfg.enc_S; i++) {
+                memcpy(edst + (size_t) i * (size_t) cfg.enc_H, cfg.null_cond->data(),
+                       (size_t) cfg.enc_H * sizeof(float));
+            }
+        } else {
+            memcpy(edst, src_enc->data(),
+                   std::min(src_enc->size(), (size_t) cfg.enc_H * (size_t) cfg.enc_S) * sizeof(float));
+        }
+        dit_ca_mask(cfg.enc_S, h->S, *src_mask, &ca_one);
+        memcpy(&h->ca[(size_t) b * (size_t) cfg.enc_S * (size_t) h->S], ca_one.data(),
+               ca_one.size() * sizeof(uint16_t));
+
+        for (int i = 0; i < h->S; i++) {
+            h->pos[(size_t) b * (size_t) h->S + (size_t) i] = i;
+        }
+    }
+    // Self-attention mask: the shared [S,S] broadcast when every element fills
+    // the padded length, per-element [S,S,1,B] the moment one does not.
+    bool any_pad = false;
+    for (int b = 0; b < B; b++) {
+        any_pad = any_pad || (els[(size_t) b].len < padded);
+    }
+    h->sa_B = any_pad ? B : 1;
+    h->sa_pad.clear();
+    if (!any_pad) {
+        dit_sa_mask(h->S, cfg.sliding_window, &h->sa);
+    } else {
+        // TWO masks, because dit_train_layer gives layer_type 0 (sliding window)
+        // and layer_type 1 (full attention) different masks — and full attention
+        // gets NO mask at all in the unpadded case. A pad that is masked only in
+        // the windowed layers still leaks through every full-attention layer, so
+        // those need a window-free copy carrying the same padded KV columns.
+        const size_t per = (size_t) h->S * (size_t) h->S;
+        h->sa.assign(per * (size_t) B, 0);
+        h->sa_pad.assign(per * (size_t) B, 0);
+        std::vector<uint16_t> sa_one;
+        for (int b = 0; b < B; b++) {
+            const int valid_S = els[(size_t) b].len / cfg.patch;
+            dit_sa_mask(h->S, cfg.sliding_window, &sa_one, valid_S);
+            memcpy(&h->sa[(size_t) b * per], sa_one.data(), sa_one.size() * sizeof(uint16_t));
+            dit_sa_mask(h->S, 0 /* no window */, &sa_one, valid_S);
+            memcpy(&h->sa_pad[(size_t) b * per], sa_one.data(), sa_one.size() * sizeof(uint16_t));
+        }
+    }
+
+    // 3) design-B4 loss weights.
+    if (B == 1) {
+        // THE BYTE-IDENTITY ANCHOR (§2.3.1). One element cannot be padded, so the
+        // mask is all ones and x*1.0f is exact; the scale is the pre-batching
+        // 1/(Oc*len) and the flow_snr weight stays in the scalar t_lossgrad.
+        for (int f = 0; f < padded; f++) {
+            h->lw[(size_t) f]  = (f < els[0].len) ? 1.0f : 0.0f;
+            h->lwu[(size_t) f] = h->lw[(size_t) f];
+        }
+        h->gscale = 1.0f / (float) ((int64_t) Oc * (int64_t) els[0].len);
+    } else if (cfg.weighted) {
+        // flow_snr: mean of per-sample means, each scaled by w_i/wbar
+        // (Side-Step lora_module.py:578-593).
+        for (int b = 0; b < B; b++) {
+            const double denom = (double) Oc * (double) els[(size_t) b].len * (double) B;
+            const float  wl    = (float) ((double) els[(size_t) b].w / denom);
+            const float  ul    = (float) (1.0 / denom);
+            for (int f = 0; f < padded; f++) {
+                const bool valid = f < els[(size_t) b].len;
+                h->lw[(size_t) b * (size_t) padded + (size_t) f]  = valid ? wl : 0.0f;
+                h->lwu[(size_t) b * (size_t) padded + (size_t) f] = valid ? ul : 0.0f;
+            }
+        }
+        h->gscale = 1.0f;
+    } else {
+        // "none": masked GLOBAL element mean over the whole micro-batch.
+        double total = 0.0;
+        for (int b = 0; b < B; b++) {
+            total += (double) Oc * (double) els[(size_t) b].len;
+        }
+        const float g = (float) (1.0 / std::max(1.0, total));
+        for (int b = 0; b < B; b++) {
+            for (int f = 0; f < padded; f++) {
+                const bool valid = f < els[(size_t) b].len;
+                h->lw[(size_t) b * (size_t) padded + (size_t) f]  = valid ? g : 0.0f;
+                h->lwu[(size_t) b * (size_t) padded + (size_t) f] = valid ? g : 0.0f;
+            }
+        }
+        h->gscale = 1.0f;
     }
 }
 

@@ -1808,6 +1808,14 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const milestoneStep = numOpt(body.milestoneStep, 0.1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
     const vramReserveMb = numOpt(body.vramReserveMb, 2048);
+    // Micro-batching / checkpointing (design §2.2). ckptSegments mirrors the
+    // engine's --ckpt semantics directly: 0=off, 1=auto, 2-32=fixed segments.
+    // batch defaults to 1 = OFF (2026-07-29): measured ~2.5x SLOWER at full depth
+    // on a 32 GB card, ~2.4x faster on shallow/partial-depth runs. Same default
+    // as the engine's own DitTrainArgs, so an omitted field and an absent flag
+    // land on the same behaviour.
+    const batch = numOpt(body.batch, 1);
+    const ckptSegments = numOpt(body.ckptSegments, 1);
 
     const rangeFailure =
       outOfRange('epochs', epochs, 1, 2000)
@@ -1836,7 +1844,11 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       ?? outOfRange('seed', seed, 0, 2 ** 31 - 1)
       ?? outOfRange('milestoneStep', milestoneStep, 0, 5)
       ?? outOfRange('milestoneKeep', milestoneKeep, 0, 64)
-      ?? outOfRange('vramReserveMb', vramReserveMb, 0, 16384);
+      ?? outOfRange('vramReserveMb', vramReserveMb, 0, 16384)
+      ?? outOfRange('batch', batch, 1, 16)
+      // ckptSegments: 0=off, 1=auto, 2-32=fixed segment count (design §2.2).
+      ?? (ckptSegments !== 0 && ckptSegments !== 1 && (ckptSegments < 2 || ckptSegments > 32)
+        ? 'ckptSegments must be 0, 1, or between 2 and 32' : null);
     if (rangeFailure) {
       res.status(400).json({ error: rangeFailure });
       return;
@@ -1936,6 +1948,8 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // the exact string 'f32' opts back out. The engine itself falls back to
       // f32 with a warning on a non-CUDA backend (dit-train-run.h).
       mirror: body.mirror === 'f32' ? 'f32' : 'bf16',
+      batch: Math.trunc(batch),
+      ckptSegments: Math.trunc(ckptSegments),
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,

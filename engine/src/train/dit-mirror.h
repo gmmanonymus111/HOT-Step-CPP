@@ -73,7 +73,18 @@ struct DitSlot {
 
 // Collect every weight the training graph touches, with the §3.3 promotion
 // policy applied for `lora_lo`. Pure bookkeeping — allocates nothing.
-static void dit_mirror_slots(DiTGGML * m, int lora_lo, DitMirrorMode mode, std::vector<DitSlot> * slots) {
+//
+// `batched` (spike amendment A2c) is the micro-batch flag. proj_in / cond_emb
+// normally stay native because they consume graph INPUTS and never an activation
+// gradient — but a batch axis gives their mul_mat a src1 with ne2 > 1, and
+// ggml_cuda_mul_mat() dispatches on exactly that (`src1->ne[2]*src1->ne[3] > 1`
+// routes to the batched-cuBLAS path, ggml-cuda.cu:2618-2621), which on a BF16
+// base is a BF16 GEMM instead of the F32-accurate mmf path the single-sample
+// route takes. Measured on cond_emb: 3.5e-3 relative, i.e. BF16 eps. Promoting
+// the four tensors costs a few MB. STRICTLY B > 1 — at B == 1 the dispatch is
+// unchanged and promoting would break the §2.3.1 byte-identity anchor.
+static void dit_mirror_slots(DiTGGML * m, int lora_lo, DitMirrorMode mode, std::vector<DitSlot> * slots,
+                             bool batched = false) {
     slots->clear();
     auto add = [&](ggml_tensor ** f, bool promote) {
         if (f && *f) {
@@ -92,10 +103,10 @@ static void dit_mirror_slots(DiTGGML * m, int lora_lo, DitMirrorMode mode, std::
     // Globals: proj_in / cond_emb consume graph INPUTS (never an activation
     // gradient), so they stay native; the output head descends from every
     // trainable layer and must be F32.
-    add(&m->proj_in_w, false);
-    add(&m->proj_in_b, false);
-    add(&m->cond_emb_w, false);
-    add(&m->cond_emb_b, false);
+    add(&m->proj_in_w, batched);
+    add(&m->proj_in_b, batched);
+    add(&m->cond_emb_w, batched);
+    add(&m->cond_emb_b, batched);
     add(&m->norm_out, true);
     add(&m->out_scale_shift, true);
     add(&m->proj_out_w, true);
@@ -142,9 +153,9 @@ static void dit_mirror_slots(DiTGGML * m, int lora_lo, DitMirrorMode mode, std::
 // This is what the auto-fit's fixed term uses (see dit-vram.h). It derives from
 // the slot promote flags, so the precision mode is followed automatically — the
 // auto-fit can never size a run against a mirror the builder would not build.
-static size_t dit_mirror_bytes_for(DiTGGML * m, int lora_lo, DitMirrorMode mode) {
+static size_t dit_mirror_bytes_for(DiTGGML * m, int lora_lo, DitMirrorMode mode, bool batched = false) {
     std::vector<DitSlot> slots;
-    dit_mirror_slots(m, lora_lo, mode, &slots);
+    dit_mirror_slots(m, lora_lo, mode, &slots, batched);
     size_t total = 0;
     for (size_t i = 0; i < slots.size(); i++) {
         ggml_tensor * s   = *slots[i].field;
@@ -353,10 +364,11 @@ static bool dit_train_backend_init(DitTrainModel * M, std::string * err) {
 }
 
 // Build the mirror straight into VRAM at `lora_lo` and release the host copy.
-static bool dit_build_mirror(DitTrainModel * M, int lora_lo, DitMirrorMode mode, std::string * err) {
+static bool dit_build_mirror(DitTrainModel * M, int lora_lo, DitMirrorMode mode, std::string * err,
+                             bool batched = false) {
     M->lora_lo = lora_lo;
     std::vector<DitSlot> slots;
-    dit_mirror_slots(&M->m, lora_lo, mode, &slots);
+    dit_mirror_slots(&M->m, lora_lo, mode, &slots, batched);
 
     {
         ggml_init_params p = { (slots.size() + 16) * ggml_tensor_overhead(), nullptr, true };

@@ -1,6 +1,7 @@
 #pragma once
 // spike-run.h — `ace-train spike` subcommand dispatch (Phase-0 evidence).
 
+#include "spike-batch.h"
 #include "spike-bf16layer.h"
 #include "spike-dit2.h"
 #include "spike-gemmbench.h"
@@ -26,6 +27,10 @@ static void spike_usage(void) {
             "        [--layer-lo 0] [--lr 1e-4] [--grad-clip 1.0] [--seed 42]\n"
             "        [--mu -0.4] [--sigma 1.0] [--cfg-ratio 0.15] [--fixed-t <t>]\n"
             "        [--sweep] [--mirror-ca-kv]\n"
+            "  batch S-B1/S-B2/S-C1: DiT micro-batching + checkpointing mechanism proofs\n"
+            "        --dit <gguf> --sample <tensors-dir>\n"
+            "        [--batch 3] [--crop 64] [--enc-s 48] [--rank 8] [--seed 42]\n"
+            "        [--cpu] [--naive-bwd]\n"
             "  gemmbench  BF16-GEMM lever: time the real 4B trainer GEMM shapes\n"
             "        F32/TF32 vs BF16 vs transpose-route   [--seq N] [--reps N]\n"
             "  bf16layer  P2 prototype on ONE REAL layer: F32-window vs backward surgery\n"
@@ -44,6 +49,8 @@ static int cmd_spike(int argc, char ** argv) {
     int  seq = 256, rank = 16, steps = 20, row = 0, chunk = 512;
     int  reps = 0;  // gemmbench: 0 = auto-scale by shape
     bool no_cast = false, chunked = false;
+    int  sb_batch = 3, sb_enc_s = 48;
+    bool sb_naive = false, sb_cpu = false;
     D2Args d2;
     d2.rank = 16;
     for (int i = 2; i < argc; i++) {
@@ -75,6 +82,10 @@ static int cmd_spike(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--steps") && i + 1 < argc)  steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chunk") && i + 1 < argc)  chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reps") && i + 1 < argc)   reps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--batch") && i + 1 < argc)  sb_batch = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--enc-s") && i + 1 < argc)  sb_enc_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--naive-bwd"))              sb_naive = true;
+        else if (!strcmp(argv[i], "--cpu"))                    sb_cpu = true;
         else if (!strcmp(argv[i], "--chunked"))                chunked = true;
         else if (!strcmp(argv[i], "--no-cast"))                no_cast = true;
         else { fprintf(stderr, "ace-train spike: unknown option '%s'\n", argv[i]); return 2; }
@@ -84,6 +95,23 @@ static int cmd_spike(int argc, char ** argv) {
     if (!strcmp(rung, "bf16layer")) {
         if (lm_path.empty()) { fprintf(stderr, "spike bf16layer: --lm required\n"); return 2; }
         return spike_bf16layer(lm_path.c_str(), seq == 256 ? 1024 : seq, rank, row, reps > 0 ? reps : 20);
+    }
+    if (!strcmp(rung, "batch")) {
+        if (dit_path.empty() || sample_dir.empty()) {
+            fprintf(stderr, "spike batch: --dit and --sample <tensors-dir> required\n");
+            return 2;
+        }
+        SbArgs sb;
+        sb.dit_path    = dit_path;
+        sb.tensors_dir = sample_dir;
+        sb.seed        = d2.seed;
+        sb.T           = (d2.crop == 750) ? 64 : d2.crop;  // `--crop` shares D2Args' 750 default
+        sb.enc_S       = sb_enc_s;
+        sb.B           = sb_batch;
+        sb.rank        = rank;
+        sb.naive_bwd   = sb_naive;
+        sb.cpu         = sb_cpu;
+        return spike_batch(sb);
     }
     if (!strcmp(rung, "gemmbench")) {
         // `--seq 0` (the default here) means "sweep 512/2048/2944".

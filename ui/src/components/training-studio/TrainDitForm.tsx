@@ -73,6 +73,10 @@ export interface TrainDitFormState {
   milestoneKeep: number;
   vramReserveMb: number;
   mirror: 'f32' | 'bf16';
+  /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2). */
+  batch: number;
+  /** Gradient-checkpointing segments: 0 = off, 1 = auto, 2-32 = fixed. */
+  ckptSegments: number;
   stages: TrainDitStage[];
   overwrite: boolean;
   stopEngine: boolean;
@@ -125,6 +129,13 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   // spreads this object and doesn't override mirror, so LoKR inherits it too.
   // The engine itself falls back to 'f32' with a warning on a non-CUDA backend.
   mirror: 'bf16',
+  // Micro-batching + checkpointing defaults (design §2.2 / C3/C5) — the engine's
+  // own train-dit defaults. batch 1 = OFF (2026-07-29, measured): batching is
+  // ~2.5x SLOWER at full depth on a 32 GB card and ~2.4x faster on shallow /
+  // partial-depth runs, so it is opt-in for the latter. ckptSegments 1 = auto,
+  // which resolves to a single (i.e. unsegmented) run whenever full depth fits.
+  batch: 1,
+  ckptSegments: 1,
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,
@@ -796,6 +807,35 @@ export const TrainDitForm: React.FC<Props> = ({
           <span className="text-[11px] text-zinc-500 sm:col-span-2 -mt-1">
             {t('trainingStudio.train.dit.mirrorHelp')}
           </span>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.dit.batch')}</span>
+            <input
+              type="number" min={1} max={16} step={1}
+              value={value.batch} disabled={lock}
+              onChange={(e) => onChange({ batch: num(e.target.value, 1) })}
+              className={FIELD}
+            />
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.batchHelp')}</span>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className={LABEL}>{t('trainingStudio.train.dit.ckptSegments')}</span>
+            <select
+              value={value.ckptSegments}
+              disabled={lock}
+              onChange={(e) => onChange({ ckptSegments: Number(e.target.value) })}
+              className={FIELD}
+            >
+              <option value={1}>{t('trainingStudio.train.dit.ckptAuto')}</option>
+              <option value={0}>{t('trainingStudio.train.dit.ckptOff')}</option>
+              <option value={2}>2</option>
+              <option value={4}>4</option>
+              <option value={8}>8</option>
+              <option value={16}>16</option>
+            </select>
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.ckptSegmentsHelp')}</span>
+          </label>
         </div>
 
         <div className="mt-3 flex flex-col gap-2">

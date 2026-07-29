@@ -20,11 +20,21 @@
 //  LK4 finite differences         same bars as T4, probing w1 AND w2
 //  LK5 export/parse roundtrip     keys, shapes, alpha, lokr_config.linear_dim
 //
+// Micro-batching (docs/plans/2026-07-29-dit-batching-checkpointing.md §2.3):
+//  SB1 batched forward parity     CPU identity <= 1e-6, CUDA permutation == 0
+//  SB2 batched backward parity    CPU identity <= 1e-5 vs B single backwards
+//  SB3 mixed-length batch         padded frames move loss and grads by EXACTLY 0,
+//                                 whether the pad's TARGET or its INPUT is dirtied
+//  SC1 checkpointing parity       --ckpt 4 grads == --ckpt 0 grads, rel <= 1e-6
+//  SC2 batching + checkpointing   SB3's invariant under --batch 3 --ckpt 2
+//  SC3 LoKR + batching + ckpt     LK adapter under --batch 3 --ckpt 2, rel <= 1e-5
+//
 // Non-zero exit on any failure. The ENGINE implementer may not hand off before
 // every check passes.
 
 #include "train/dit-adapter-lokr.h"
 #include "train/dit-data.h"
+#include "train/dit-train-ckpt.h"
 #include "train/dit-train-graph.h"
 #include "train/dit-vram.h"
 #include "train/lm-optim.h"
@@ -385,6 +395,1226 @@ static void dit_st_adamw(std::vector<DitSelfTestResult> & rs, ggml_backend_t bac
         ggml_backend_buffer_free(tbuf);
     }
     ggml_free(tctx);
+}
+
+// ─── SB1 / SB2 / SB3: micro-batching (design §2.3 gates 2, 3 and 5) ─────────
+//
+// These run the PRODUCTION graph (dit_train_forward / dit_train_loss) and the
+// PRODUCTION batch assembler (dit_batch_assemble) — the spike proved the
+// mechanisms on a private copy of the layer, and these rungs are what keep the
+// shipped code honest afterwards.
+//
+//   SB1  batched forward parity     one B-element forward vs B single-sample ones
+//   SB2  batched backward parity    one B-element backward vs the weighted sum of
+//                                   B single-sample backwards accumulated into the
+//                                   SAME LmOptim::acc[]
+//   SB3  mixed-length batch         padded frames contribute EXACTLY zero to the
+//                                   loss and to every adapter gradient — measured
+//                                   by dirtying the pad's velocity TARGET (the
+//                                   loss-mask path) AND its INPUT (the
+//                                   self-attention KV-mask path, the one the loss
+//                                   mask cannot cover)
+//
+// WHAT IS ASSERTED WHERE (spike amendment A2). Batching changes the CUDA GEMM
+// route: `src1->ne[2]*src1->ne[3] > 1` sends a mul_mat to
+// ggml_cuda_mul_mat_batched_cublas instead of the F32-accurate mmf path the
+// single-sample graph takes, so a batched-vs-single comparison on CUDA sits on a
+// ~1e-5 relative floor (~1e-3 with TF32 on) BY CONSTRUCTION, and the design's
+// 1e-6/1e-5 bars are unreachable there. What is reachable, and what these rungs
+// gate on, is
+//   (a) the CPU-backend identity — one mul_mat kernel loops over ne2/ne3, so the
+//       batched and single-sample graphs execute the same code in the same order,
+//   (b) the CUDA batch-PERMUTATION control — same shapes, same routes, elements
+//       uploaded in reverse; the measurement that actually catches cross-element
+//       contamination.
+// The CUDA batched-vs-single delta is measured and printed, never gated.
+//
+// SB2 has no gated CUDA control: the adapter gradient is a reduction ACROSS the
+// batch, so permuting the elements permutes the summation order and bit-exactness
+// is not owed. Its CUDA numbers are reported; its gate is the CPU identity.
+
+struct DitStBatchMeas {
+    bool        ran       = false;
+    double      fwd_delta = 0.0;  // batched vs B single forwards, max |abs|
+    double      fwd_perm  = 0.0;  // reversed-element control, max |abs| on mirrored elements
+    double      vmag      = 0.0;
+    double      bwd_rel   = 0.0;  // batched vs the weighted sum of B single backwards
+    double      bwd_perm  = 0.0;
+    std::string bwd_worst = "-";
+    double      pad_loss  = 0.0;  // |loss(garbage pad target) - loss(clean pad target)|
+    double      pad_grad  = 0.0;
+    // The decisive pair: the same two numbers with the padded INPUT scribbled on
+    // instead of the padded target. Only the self-attention KV mask can make these
+    // zero — the loss mask cannot, because the leak is padded frames reaching the
+    // VALID queries as attention keys, upstream of the loss entirely.
+    double      pad_loss_in = 0.0;
+    double      pad_grad_in = 0.0;
+    double      pad_host  = 0.0;  // masked loss vs a host double recompute, relative
+    double      pad_acc = 0.0, pad_acc_all = 0.0, pad_lossv = 0.0, pad_velcmp = 0.0;
+    int         nodes_bat = 0, nodes_sin = 0;
+    int         short_len = 0, pad_len = 0;
+};
+
+// One measurement pass on one backend. `samples` must hold at least B songs.
+static bool dit_st_batch_measure(DitTrainModel * M, const std::vector<DitSample> & samples, uint64_t seed, int B,
+                                 int T, int enc_use, int rank, DitStBatchMeas * o, std::string * err) {
+    const DiTGGMLConfig & c = M->m.cfg;
+    const int L = c.n_layers, H = c.hidden_size, Oc = c.out_channels, P = c.patch_size, Ic = c.in_channels;
+    const int enc_H = (int) M->m.cond_emb_w->ne[0];
+    const int S     = T / P;
+    const int lo = L - 2, hi = L;
+
+    // ── static input bases (1-D; every graph tensor is a contiguous view) ─
+    ggml_context * ctxs;
+    {
+        ggml_init_params p = { 32 * ggml_tensor_overhead(), nullptr, true };
+        ctxs               = ggml_init(p);
+    }
+    ggml_tensor * b_input = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) Ic * T * B);
+    ggml_tensor * b_enc   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) enc_H * enc_use * B);
+    ggml_tensor * b_pos   = ggml_new_tensor_1d(ctxs, GGML_TYPE_I32, (int64_t) S * B);
+    ggml_tensor * b_temb  = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) H * B);
+    ggml_tensor * b_tproj = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) 6 * H * B);
+    // b_sa is B-wide: dit_batch_assemble emits a per-element [S,S,1,B] mask the
+    // moment any element is padded (the SB3 case), and the shared [S,S] one
+    // otherwise. The base is sized for the wide shape either way.
+    ggml_tensor * b_sa    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) S * S * B);
+    ggml_tensor * b_sapad = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) S * S * B);
+    ggml_tensor * b_ca    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) enc_use * S * B);
+    ggml_tensor * b_vtgt  = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) Oc * T * B);
+    ggml_tensor * b_lw    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) T * B);
+    ggml_tensor * b_lwu   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) T * B);
+    ggml_tensor * b_ones  = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) T);
+    ggml_tensor * t_adamw    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 7);
+    ggml_tensor * t_lossgrad = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_clip     = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_eps      = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_gnorm2   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    for (ggml_tensor * t :
+         { b_input, b_enc, b_pos, b_temb, b_tproj, b_sa, b_sapad, b_ca, b_vtgt, b_lw, b_lwu, b_ones }) {
+        ggml_set_input(t);
+    }
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctxs, M->backend);
+    if (!buf) {
+        *err = "static input allocation failed";
+        ggml_free(ctxs);
+        return false;
+    }
+    {
+        const float epsv = 1e-6f, clipv = 1.0f, lg = 1.0f;
+        ggml_backend_tensor_set(t_eps, &epsv, 0, 4);
+        ggml_backend_tensor_set(t_clip, &clipv, 0, 4);
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, 4);
+    }
+
+    DitAdapterLora lora;
+    LmOptim        opt;
+    bool           have_opt = false;
+    auto           cleanup  = [&]() {
+        if (have_opt) {
+            lm_optim_free(&opt);
+        }
+        lora.free();
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctxs);
+    };
+    {
+        DitAdapterCfg cfg;
+        cfg.rank    = rank;
+        cfg.alpha   = (float) (2 * rank);
+        cfg.seed    = seed ^ 0x1234ull;
+        cfg.b_sigma = 1e-2f;  // B == 0 would make dL/dA identically zero
+        if (!lora.init(&M->m, M->backend, lo, hi, cfg, err)) {
+            cleanup();
+            return false;
+        }
+        if (!lm_optim_init(&opt, lora.params(), M->backend, err)) {
+            cleanup();
+            return false;
+        }
+        have_opt = true;
+    }
+    opt.t_adamw    = t_adamw;
+    opt.t_lossgrad = t_lossgrad;
+    opt.t_clip     = t_clip;
+    opt.t_eps      = t_eps;
+    opt.t_gnorm2   = t_gnorm2;
+
+    std::vector<uint8_t> arena((size_t) 512 << 20);
+
+    // ── host-side batch (the PRODUCTION assembler) ───────────────────────
+    //
+    // B different songs, per-element t / CFG state / encoder-padding mask, and
+    // element 1 CFG-dropped so the elements really do differ.
+    LmRng rng_t, rng_crop, rng_noise;
+    lm_rng_seed(&rng_t, seed);
+    lm_rng_seed(&rng_crop, seed ^ 0xbf58476d1ce4e5b9ull);
+    lm_rng_seed(&rng_noise, seed ^ 0x9e3779b97f4a7c15ull);
+
+    DitBatchCfg bcfg;
+    bcfg.in_ch          = Ic;
+    bcfg.out_ch         = Oc;
+    bcfg.enc_H          = enc_H;
+    bcfg.enc_S          = enc_use;
+    bcfg.patch          = P;
+    bcfg.sliding_window = c.sliding_window;
+    bcfg.crop           = T;
+    bcfg.weighted       = true;
+    bcfg.null_cond      = &M->null_cond;
+
+    std::vector<DitBatchElem> els((size_t) B);
+    {
+        double wsum = 0.0;
+        std::vector<double> w((size_t) B, 1.0);
+        for (int b = 0; b < B; b++) {
+            els[(size_t) b].s = &samples[(size_t) b];
+            els[(size_t) b].t = dit_sample_t(&rng_t, -0.4f, 1.0f, 0.0f, 1.0f);
+            w[(size_t) b]     = (double) dit_flow_snr_w(els[(size_t) b].t, 0.5f, 5.0f);
+            wsum += w[(size_t) b];
+        }
+        const double wbar = wsum / (double) B;
+        for (int b = 0; b < B; b++) {
+            els[(size_t) b].w = (float) (w[(size_t) b] / (wbar > 0.0 ? wbar : 1.0));
+        }
+        if ((int) M->null_cond.size() == enc_H && B > 1) {
+            els[1].cfg_drop = true;
+        }
+    }
+    DitBatchHost bh;
+    dit_batch_assemble(bcfg, els, &rng_crop, &rng_noise, &bh);
+    if (bh.len != T) {
+        char b2[128];
+        snprintf(b2, sizeof(b2), "batch assembled at len %d, expected %d", bh.len, T);
+        *err = b2;
+        cleanup();
+        return false;
+    }
+
+    // temb / tproj per element (design B3)
+    std::vector<float> temb_buf((size_t) H * B, 0.0f), tproj_buf((size_t) 6 * H * B, 0.0f);
+    {
+        std::vector<float> ts((size_t) B);
+        for (int b = 0; b < B; b++) {
+            ts[(size_t) b] = els[(size_t) b].t;
+        }
+        std::vector<std::vector<float>> tb, tp;
+        if (!dit_train_temb(M, ts, &tb, &tp)) {
+            *err = "temb precompute failed";
+            cleanup();
+            return false;
+        }
+        for (int b = 0; b < B; b++) {
+            memcpy(&temb_buf[(size_t) b * H], tb[(size_t) b].data(), (size_t) H * sizeof(float));
+            memcpy(&tproj_buf[(size_t) b * 6 * H], tp[(size_t) b].data(), (size_t) 6 * H * sizeof(float));
+        }
+    }
+
+    // Every input re-uploaded before every compute (§3.0 clobber rule). `rev`
+    // uploads the SAME elements in reversed order: shapes, kernels and cuBLAS
+    // routes are then bit-identical, so element b of a reversed run vs element
+    // B-1-b of a forward run is a route-identical contamination test.
+    std::vector<float>    rv_f;
+    std::vector<uint16_t> rv_u;
+    std::vector<float>    vtgt_use, input_use;
+    const std::vector<float> ones_host((size_t) T, 1.0f);
+    auto upload = [&](bool rev) {
+        auto put_f = [&](ggml_tensor * dst, const std::vector<float> & src, size_t per) {
+            if (!rev) {
+                ggml_backend_tensor_set(dst, src.data(), 0, src.size() * sizeof(float));
+                return;
+            }
+            rv_f.resize(src.size());
+            for (int b = 0; b < B; b++) {
+                memcpy(&rv_f[(size_t) b * per], &src[(size_t) (B - 1 - b) * per], per * sizeof(float));
+            }
+            ggml_backend_tensor_set(dst, rv_f.data(), 0, rv_f.size() * sizeof(float));
+        };
+        // Element-reversal never applies to a 1-element buffer, so put_u16 takes
+        // the per-element stride and the element COUNT the host buffer holds.
+        auto put_u16 = [&](ggml_tensor * dst, const std::vector<uint16_t> & src, size_t per, int nel) {
+            if (!rev || nel <= 1) {
+                ggml_backend_tensor_set(dst, src.data(), 0, src.size() * sizeof(uint16_t));
+                return;
+            }
+            rv_u.resize(src.size());
+            for (int b = 0; b < nel; b++) {
+                memcpy(&rv_u[(size_t) b * per], &src[(size_t) (nel - 1 - b) * per], per * sizeof(uint16_t));
+            }
+            ggml_backend_tensor_set(dst, rv_u.data(), 0, rv_u.size() * sizeof(uint16_t));
+        };
+        put_f(b_input, input_use, (size_t) Ic * T);
+        put_f(b_vtgt, vtgt_use, (size_t) Oc * T);
+        put_f(b_enc, bh.enc, (size_t) enc_H * enc_use);
+        put_f(b_lw, bh.lw, (size_t) T);
+        put_f(b_lwu, bh.lwu, (size_t) T);
+        put_f(b_temb, temb_buf, (size_t) H);
+        put_f(b_tproj, tproj_buf, (size_t) 6 * H);
+        ggml_backend_tensor_set(b_pos, bh.pos.data(), 0, bh.pos.size() * sizeof(int32_t));
+        // §3.0 applies to the all-ones single-sample mask too: it is a graph INPUT
+        // (mk_single's t_lw), so it is re-uploaded with everything else rather than
+        // once at setup.
+        ggml_backend_tensor_set(b_ones, ones_host.data(), 0, ones_host.size() * sizeof(float));
+        put_u16(b_sa, bh.sa, (size_t) S * (size_t) S, bh.sa_B);
+        if (!bh.sa_pad.empty()) {
+            put_u16(b_sapad, bh.sa_pad, (size_t) S * (size_t) S, bh.sa_B);
+        }
+        put_u16(b_ca, bh.ca, (size_t) enc_use * (size_t) S, B);
+    };
+    vtgt_use  = bh.vtgt;
+    input_use = bh.input;
+
+    const size_t f32b = sizeof(float), f16b = sizeof(ggml_fp16_t);
+    auto mk_batched = [&](ggml_context * ctx, int nb) {
+        DitInputs in;
+        in.t_input = ggml_view_3d(ctx, b_input, Ic, T, nb, (size_t) Ic * f32b, (size_t) Ic * T * f32b, 0);
+        in.t_enc   = ggml_view_3d(ctx, b_enc, enc_H, enc_use, nb, (size_t) enc_H * f32b,
+                                  (size_t) enc_H * enc_use * f32b, 0);
+        in.t_pos   = ggml_view_1d(ctx, b_pos, (int64_t) S * nb, 0);
+        in.t_temb  = ggml_view_3d(ctx, b_temb, H, 1, nb, (size_t) H * f32b, (size_t) H * f32b, 0);
+        in.t_tproj = ggml_view_3d(ctx, b_tproj, 6 * H, 1, nb, (size_t) 6 * H * f32b, (size_t) 6 * H * f32b, 0);
+        in.t_sa    = (bh.sa_B > 1) ? ggml_view_4d(ctx, b_sa, S, S, 1, nb, (size_t) S * f16b, (size_t) S * S * f16b,
+                                                  (size_t) S * S * f16b, 0)
+                                   : ggml_view_2d(ctx, b_sa, S, S, (size_t) S * f16b, 0);
+        in.t_sa_pad = (bh.sa_B > 1) ? ggml_view_4d(ctx, b_sapad, S, S, 1, nb, (size_t) S * f16b,
+                                                   (size_t) S * S * f16b, (size_t) S * S * f16b, 0)
+                                    : nullptr;
+        in.t_ca    = ggml_view_4d(ctx, b_ca, enc_use, S, 1, nb, (size_t) enc_use * f16b, (size_t) enc_use * S * f16b,
+                                  (size_t) enc_use * S * f16b, 0);
+        in.t_vtgt  = ggml_view_3d(ctx, b_vtgt, Oc, T, nb, (size_t) Oc * f32b, (size_t) Oc * T * f32b, 0);
+        in.t_lw    = ggml_view_3d(ctx, b_lw, 1, T, nb, f32b, (size_t) T * f32b, 0);
+        in.t_lwu   = ggml_view_3d(ctx, b_lwu, 1, T, nb, f32b, (size_t) T * f32b, 0);
+        return in;
+    };
+    // Element b of the SAME buffers, in the single-sample shapes, with the
+    // all-ones mask and the pre-batching 1/(Oc*len) scale.
+    auto mk_single = [&](ggml_context * ctx, int b) {
+        DitInputs in;
+        in.t_input = ggml_view_2d(ctx, b_input, Ic, T, (size_t) Ic * f32b, (size_t) b * Ic * T * f32b);
+        in.t_enc   = ggml_view_2d(ctx, b_enc, enc_H, enc_use, (size_t) enc_H * f32b,
+                                  (size_t) b * enc_H * enc_use * f32b);
+        in.t_pos   = ggml_view_1d(ctx, b_pos, S, (size_t) b * S * sizeof(int32_t));
+        in.t_temb  = ggml_view_1d(ctx, b_temb, H, (size_t) b * H * f32b);
+        in.t_tproj = ggml_view_1d(ctx, b_tproj, 6 * H, (size_t) b * 6 * H * f32b);
+        in.t_sa    = ggml_view_2d(ctx, b_sa, S, S, (size_t) S * f16b,
+                                  (bh.sa_B > 1) ? (size_t) b * (size_t) S * (size_t) S * f16b : 0);
+        in.t_sa_pad = (bh.sa_B > 1) ? ggml_view_2d(ctx, b_sapad, S, S, (size_t) S * f16b,
+                                                   (size_t) b * (size_t) S * (size_t) S * f16b)
+                                    : nullptr;
+        in.t_ca    = ggml_view_2d(ctx, b_ca, enc_use, S, (size_t) enc_use * f16b, (size_t) b * enc_use * S * f16b);
+        in.t_vtgt  = ggml_view_2d(ctx, b_vtgt, Oc, T, (size_t) Oc * f32b, (size_t) b * Oc * T * f32b);
+        in.t_lw    = ggml_view_2d(ctx, b_ones, 1, T, f32b, 0);
+        return in;
+    };
+
+    auto read_accs = [&](std::vector<std::vector<float>> * dst) {
+        dst->assign(opt.acc.size(), std::vector<float>());
+        for (size_t j = 0; j < opt.acc.size(); j++) {
+            (*dst)[j].resize((size_t) ggml_nelements(opt.acc[j]));
+            ggml_backend_tensor_get(opt.acc[j], (*dst)[j].data(), 0, (*dst)[j].size() * sizeof(float));
+        }
+    };
+    // max_j ( max_k |x-y| / max_k |y| ) over the parameter tensors.
+    auto cmp_accs = [&](const std::vector<std::vector<float>> & x, const std::vector<std::vector<float>> & y,
+                        std::string * worst) {
+        double best = 0.0;
+        *worst      = "-";
+        for (size_t j = 0; j < y.size() && j < x.size(); j++) {
+            double num = 0.0, den = 0.0;
+            for (size_t k = 0; k < y[j].size() && k < x[j].size(); k++) {
+                num = std::max(num, fabs((double) x[j][k] - (double) y[j][k]));
+                den = std::max(den, fabs((double) y[j][k]));
+            }
+            const double rel = num / std::max(den, 1e-30);
+            if (rel > best) {
+                best   = rel;
+                *worst = opt.params[j]->name;
+            }
+        }
+        return best;
+    };
+
+    // ── SB1: forward ─────────────────────────────────────────────────────
+    std::vector<float> v_bat, v_rev, v_sin((size_t) Oc * T);
+    bool               ok = true;
+    auto run_batched_fwd = [&](bool rev, std::vector<float> * out, int * nodes) -> bool {
+        upload(rev);
+        ggml_init_params ip  = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(ip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, false);
+        DitInputs        in  = mk_batched(ctx, B);
+        ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, B);
+        ggml_set_output(vel);
+        ggml_build_forward_expand(gf, vel);
+        dit_protect_output_views(gf);
+        *nodes = ggml_graph_n_nodes(gf);
+        ggml_backend_sched_reset(M->sched);
+        const bool good = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+        if (good) {
+            out->resize((size_t) Oc * T * B);
+            ggml_backend_tensor_get(vel, out->data(), 0, out->size() * sizeof(float));
+        }
+        ggml_free(ctx);
+        return good;
+    };
+    ok = run_batched_fwd(false, &v_bat, &o->nodes_bat) && run_batched_fwd(true, &v_rev, &o->nodes_bat);
+    if (ok) {
+        const size_t per = (size_t) Oc * T;
+        for (int b = 0; b < B; b++) {
+            for (size_t k = 0; k < per; k++) {
+                o->fwd_perm = std::max(o->fwd_perm, fabs((double) v_rev[(size_t) b * per + k] -
+                                                         (double) v_bat[(size_t) (B - 1 - b) * per + k]));
+            }
+        }
+    }
+    for (int b = 0; b < B && ok; b++) {
+        upload(false);
+        ggml_init_params ip  = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(ip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, false);
+        DitInputs        in  = mk_single(ctx, b);
+        ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, 1);
+        ggml_set_output(vel);
+        ggml_build_forward_expand(gf, vel);
+        dit_protect_output_views(gf);
+        o->nodes_sin = ggml_graph_n_nodes(gf);
+        ggml_backend_sched_reset(M->sched);
+        ok = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+        if (ok) {
+            ggml_backend_tensor_get(vel, v_sin.data(), 0, v_sin.size() * sizeof(float));
+            for (size_t k = 0; k < v_sin.size(); k++) {
+                o->vmag      = std::max(o->vmag, fabs((double) v_sin[k]));
+                o->fwd_delta = std::max(o->fwd_delta,
+                                        fabs((double) v_bat[(size_t) b * v_sin.size() + k] - (double) v_sin[k]));
+            }
+        }
+        ggml_free(ctx);
+    }
+    if (!ok) {
+        *err = "forward compute failed";
+        cleanup();
+        return false;
+    }
+
+    // ── SB2: backward ────────────────────────────────────────────────────
+    //
+    // Reference: B single-sample fwd+bwd graphs computed one after another into
+    // the SAME LmOptim::acc[] with no zeroing between them (design C1's
+    // accumulation rule). Element b is seeded with w_b/B, which is exactly the
+    // weight design B4 puts in t_lw for the batched graph.
+    std::vector<std::vector<float>> gref, gbat, gperm;
+    lm_optim_zero_grad(&opt);
+    for (int b = 0; b < B && ok; b++) {
+        upload(false);
+        const float lg = els[(size_t) b].w / (float) B;
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+        ggml_init_params ip  = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(ip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+        DitInputs        in  = mk_single(ctx, b);
+        ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, 1);
+        ggml_tensor *    ls  = dit_train_loss(ctx, vel, in, Oc, T, false);
+        ggml_set_loss(ls);
+        ggml_build_forward_expand(gf, ls);
+        std::vector<ggml_tensor *> ga;
+        lm_optim_fill_gacc(&opt, gf, &ga);
+        ggml_build_backward_expand(ctx, gf, ga.data());
+        ggml_backend_sched_reset(M->sched);
+        ok = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+        ggml_free(ctx);
+    }
+    if (ok) {
+        read_accs(&gref);
+    }
+    // The batched backward: one graph, t_lossgrad a pure scale of 1.
+    auto run_batched_bwd = [&](bool rev, std::vector<std::vector<float>> * dst, double * loss_out) -> bool {
+        lm_optim_zero_grad(&opt);
+        upload(rev);
+        const float lg = 1.0f;
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+        ggml_init_params ip  = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(ip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+        DitInputs        in  = mk_batched(ctx, B);
+        ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, B);
+        ggml_tensor *    ls  = dit_train_loss(ctx, vel, in, Oc, T, false, bh.gscale);
+        ggml_set_loss(ls);
+        ggml_build_forward_expand(gf, ls);
+        std::vector<ggml_tensor *> ga;
+        lm_optim_fill_gacc(&opt, gf, &ga);
+        ggml_build_backward_expand(ctx, gf, ga.data());
+        ggml_backend_sched_reset(M->sched);
+        const bool good = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+        if (good && loss_out) {
+            float lv = 0.0f;
+            ggml_backend_tensor_get(ls, &lv, 0, sizeof(float));
+            *loss_out = (double) lv;
+        }
+        ggml_free(ctx);
+        if (good) {
+            read_accs(dst);
+        }
+        return good;
+    };
+    ok = ok && run_batched_bwd(false, &gbat, nullptr) && run_batched_bwd(true, &gperm, nullptr);
+    if (!ok) {
+        *err = "backward compute failed";
+        cleanup();
+        return false;
+    }
+    o->bwd_rel = cmp_accs(gbat, gref, &o->bwd_worst);
+    {
+        std::string w2;
+        o->bwd_perm = cmp_accs(gperm, gbat, &w2);
+    }
+
+    // ── SB3: mixed-length batch (design §2.3 gate 5) ─────────────────────
+    //
+    // One element is a SHORT song, so dit_batch_assemble pads it to the batch max.
+    //
+    // TWO perturbations, both barred at EXACTLY zero:
+    //
+    //  (a) the padded region of the velocity TARGET. This only exercises the
+    //      design-B4 loss mask (t_lw is 0 on a padded frame), and it is what this
+    //      rung originally measured.
+    //  (b) the padded region of the INPUT. This is the decisive one. Scribbling on
+    //      a padded frame's input changes its hidden state in every layer, and if
+    //      valid queries can see that frame as an attention KEY then the change
+    //      reaches their outputs and, through them, every adapter gradient — while
+    //      the loss barely moves, which is exactly why (a) alone cannot detect it.
+    //      It is zero only because dit_sa_mask now masks the padded KV columns
+    //      per element. Before that fix (a shared [S,S] mask) this measurement is
+    //      NON-zero by construction, so it is a real regression gate, not a
+    //      restatement of the loss mask.
+    //
+    // Plus: the loss must equal a host double recompute over the valid frames only.
+    if (B >= 2) {
+        DitSample shortened = samples[(size_t) (B - 1)];
+        const int T_short   = std::max(P, T - 8 * P);
+        shortened.T         = T_short;
+        shortened.lat.resize((size_t) T_short * (size_t) shortened.Oc);
+        shortened.ctxl.resize((size_t) T_short * (size_t) shortened.Cc);
+        std::vector<DitBatchElem> els2 = els;
+        els2[(size_t) (B - 1)].s       = &shortened;
+        lm_rng_seed(&rng_crop, seed ^ 0xbf58476d1ce4e5b9ull);
+        lm_rng_seed(&rng_noise, seed ^ 0x9e3779b97f4a7c15ull);
+        dit_batch_assemble(bcfg, els2, &rng_crop, &rng_noise, &bh);
+        o->short_len = els2[(size_t) (B - 1)].len;
+        o->pad_len   = bh.len;
+
+        double             loss_clean = 0.0, loss_dirty = 0.0;
+        std::vector<float> vel_host;
+        std::vector<std::vector<float>> g_clean, g_dirty;
+
+        // 0 = clean, 1 = padded TARGET scribbled, 2 = padded INPUT scribbled.
+        auto run_pad = [&](int dirty, double * loss_out, std::vector<std::vector<float>> * gdst,
+                           std::vector<float> * vout) -> bool {
+            vtgt_use  = bh.vtgt;
+            input_use = bh.input;
+            if (dirty == 1) {
+                const int    b   = B - 1;
+                const size_t off = (size_t) b * (size_t) bh.len * (size_t) Oc;
+                for (int f = o->short_len; f < bh.len; f++) {
+                    for (int ch = 0; ch < Oc; ch++) {
+                        vtgt_use[off + (size_t) f * (size_t) Oc + (size_t) ch] = 137.0f + (float) ch;
+                    }
+                }
+            } else if (dirty == 2) {
+                // Modest magnitude on purpose: the padded frames still go through
+                // every mul_mat, and a value large enough to overflow to inf there
+                // would turn the masked softmax argument into -inf + inf = NaN and
+                // contaminate the valid rows for a reason that is not the leak.
+                // 2.5 is far outside the latent distribution and perfectly finite.
+                const int    b   = B - 1;
+                const size_t off = (size_t) b * (size_t) bh.len * (size_t) Ic;
+                for (int f = o->short_len; f < bh.len; f++) {
+                    for (int ch = 0; ch < Ic; ch++) {
+                        input_use[off + (size_t) f * (size_t) Ic + (size_t) ch] = 2.5f - 0.01f * (float) ch;
+                    }
+                }
+            }
+            lm_optim_zero_grad(&opt);
+            upload(false);
+            const float lg = 1.0f;
+            ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+            ggml_init_params ip  = { arena.size(), arena.data(), true };
+            ggml_context *   ctx = ggml_init(ip);
+            ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+            DitInputs        in  = mk_batched(ctx, B);
+            ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, B);
+            ggml_tensor *    ls  = dit_train_loss(ctx, vel, in, Oc, T, false, bh.gscale);
+            ggml_set_loss(ls);
+            ggml_set_output(vel);
+            ggml_build_forward_expand(gf, ls);
+            dit_protect_output_views(gf);
+            std::vector<ggml_tensor *> ga;
+            lm_optim_fill_gacc(&opt, gf, &ga);
+            ggml_build_backward_expand(ctx, gf, ga.data());
+            ggml_backend_sched_reset(M->sched);
+            const bool good = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+            if (good) {
+                float lv = 0.0f;
+                ggml_backend_tensor_get(ls, &lv, 0, sizeof(float));
+                *loss_out = (double) lv;
+                if (vout) {
+                    vout->resize((size_t) Oc * bh.len * B);
+                    ggml_backend_tensor_get(vel, vout->data(), 0, vout->size() * sizeof(float));
+                }
+            }
+            ggml_free(ctx);
+            if (good) {
+                read_accs(gdst);
+            }
+            return good;
+        };
+
+        double                          loss_dirty_in = 0.0;
+        std::vector<std::vector<float>> g_dirty_in;
+        ok = run_pad(0, &loss_clean, &g_clean, &vel_host) && run_pad(1, &loss_dirty, &g_dirty, nullptr) &&
+             run_pad(2, &loss_dirty_in, &g_dirty_in, nullptr);
+        // FINDING (measured here, 2026-07-29, on BOTH backends): reading a
+        // mid-graph ACTIVATION back after ggml_build_backward_expand is NOT
+        // trustworthy, even when the tensor and its whole view chain carry
+        // GGML_TENSOR_FLAG_OUTPUT — `velcmp` below measures 3.6 on a |v|max 3.6
+        // tensor, i.e. the storage is fully reused by the backward pass. The
+        // scalar LOSS is unaffected (the host recompute from a forward-only
+        // velocity agrees with the fwd+bwd graph's loss to 2e-8, which is also
+        // what the trainer relies on when it reads the loss after a backward).
+        // So the host cross-check takes its velocity from a FORWARD-ONLY graph
+        // with the same uploads, and reports the discrepancy as evidence.
+        std::vector<float> vel_fwd;
+        if (ok) {
+            vtgt_use  = bh.vtgt;
+            input_use = bh.input;
+            upload(false);
+            ggml_init_params ip  = { arena.size(), arena.data(), true };
+            ggml_context *   ctx = ggml_init(ip);
+            ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, false);
+            DitInputs        in  = mk_batched(ctx, B);
+            ggml_tensor *    vel = dit_train_forward(ctx, M, &lora, in, T, enc_use, nullptr, lo, hi, B);
+            ggml_set_output(vel);
+            ggml_build_forward_expand(gf, vel);
+            dit_protect_output_views(gf);
+            ggml_backend_sched_reset(M->sched);
+            ok = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+            if (ok) {
+                vel_fwd.resize((size_t) Oc * bh.len * B);
+                ggml_backend_tensor_get(vel, vel_fwd.data(), 0, vel_fwd.size() * sizeof(float));
+            }
+            ggml_free(ctx);
+        }
+        if (ok) {
+            double dmax = 0.0;
+            for (size_t k = 0; k < vel_fwd.size() && k < vel_host.size(); k++) {
+                dmax = std::max(dmax, fabs((double) vel_fwd[k] - (double) vel_host[k]));
+            }
+            o->pad_velcmp = dmax;
+            vel_host      = vel_fwd;
+        }
+        vtgt_use  = bh.vtgt;
+        input_use = bh.input;
+        if (!ok) {
+            *err = "mixed-length compute failed";
+            cleanup();
+            return false;
+        }
+        o->pad_loss = fabs(loss_clean - loss_dirty);
+        {
+            std::string w3;
+            o->pad_grad = cmp_accs(g_dirty, g_clean, &w3);
+        }
+        o->pad_loss_in = fabs(loss_clean - loss_dirty_in);
+        {
+            std::string w4;
+            o->pad_grad_in = cmp_accs(g_dirty_in, g_clean, &w4);
+        }
+        // host double recompute over the VALID frames only
+        double acc = 0.0, acc_all = 0.0;
+        for (int b = 0; b < B; b++) {
+            for (int f = 0; f < bh.len; f++) {
+                const double w = (double) bh.lw[(size_t) b * (size_t) bh.len + (size_t) f];
+                for (int ch = 0; ch < Oc; ch++) {
+                    const size_t k = ((size_t) b * (size_t) bh.len + (size_t) f) * (size_t) Oc + (size_t) ch;
+                    const double e = (double) vel_host[k] - (double) bh.vtgt[k];
+                    acc_all += e * e * w;
+                    if (f < els2[(size_t) b].len) {
+                        acc += e * e * w;
+                    }
+                }
+            }
+        }
+        acc *= (double) bh.gscale;
+        acc_all *= (double) bh.gscale;
+        o->pad_acc     = acc;
+        o->pad_acc_all = acc_all;
+        o->pad_lossv   = loss_clean;
+        o->pad_host    = fabs(acc - loss_clean) / std::max(1e-12, fabs(acc));
+    }
+
+    cleanup();
+    o->ran = true;
+    return true;
+}
+
+// Runs the measurement on the shipping (GPU) model and on a CPU-backend copy,
+// then reports SB1/SB2/SB3 against the amendment-A2 bars.
+static void dit_st_batch_gates(std::vector<DitSelfTestResult> & rs, DitTrainModel * Mg, const std::string & dit_path,
+                               const std::vector<DitSample> & samples, uint64_t seed) {
+    const int B = 3, T = 64, rank = 8;
+    if ((int) samples.size() < B) {
+        char d[160];
+        snprintf(d, sizeof(d), "need >= %d cached songs for a B=%d batch of DIFFERENT songs (design B2), found %d", B,
+                 B, (int) samples.size());
+        dit_st_report(rs, "SB1", false, d);
+        dit_st_report(rs, "SB2", false, d);
+        dit_st_report(rs, "SB3", false, d);
+        return;
+    }
+    int enc_use = 64;
+    for (int b = 0; b < B; b++) {
+        enc_use = std::min(enc_use, samples[(size_t) b].enc_S);
+    }
+
+    DitStBatchMeas gm, cm;
+    std::string    gerr = "-", cerr = "-";
+    const bool     gok  = dit_st_batch_measure(Mg, samples, seed, B, T, enc_use, rank, &gm, &gerr);
+
+    // The CPU copy: the ONLY place a batched-vs-single identity is measurable
+    // (one mul_mat kernel, one accumulation order). Mirrored at lora_lo = L-2 so
+    // only the two layers under test are promoted, and with the A2c batched flag
+    // so proj_in/cond_emb are F32 like every other input-side weight.
+    DitTrainModel Mc;
+    bool          cok = false;
+    {
+        std::string err;
+        if (!dit_train_load(&Mc, dit_path.c_str(), 0, &err)) {
+            cerr = "CPU-backend copy failed to load: " + err;
+        } else {
+            Mc.backend = cpu_backend_new(16);
+            if (!Mc.backend) {
+                cerr = "no CPU backend available for the identity run";
+            } else if (!dit_build_mirror(&Mc, Mc.m.cfg.n_layers - 2, DIT_MIRROR_F32, &err, /*batched=*/true)) {
+                cerr = "CPU mirror failed: " + err;
+            } else {
+                BackendPair bp;
+                bp.backend     = Mc.backend;
+                bp.cpu_backend = Mc.backend;  // n == 1: nothing can silently land elsewhere
+                bp.has_gpu     = false;
+                Mc.sched       = backend_sched_new(bp, 65536);
+                cok            = dit_st_batch_measure(&Mc, samples, seed, B, T, enc_use, rank, &cm, &cerr);
+            }
+        }
+    }
+    dit_train_free(&Mc);
+
+    const char * gname = ggml_backend_name(Mg->backend);
+    char         d[2048];
+
+    snprintf(d, sizeof(d),
+             "B=%d forward on real layers %d-%d (%d batched nodes / %d single): CPU identity vs %d single-sample "
+             "forwards max|delta|=%.3e (bar 1e-6, |v|max %.4f) [%s]; %s batch-permutation control (elements reversed, "
+             "route-identical) max|delta|=%.3e (bar 0) and its batched-vs-single delta %.3e REPORTED only — batching "
+             "changes the CUDA GEMM route (amendment A2), so that bar is unreachable there by construction",
+             B, Mg->m.cfg.n_layers - 2, Mg->m.cfg.n_layers - 1, gm.nodes_bat, gm.nodes_sin, B, cm.fwd_delta,
+             cm.vmag, cok ? "cpu ok" : cerr.c_str(), gname, gm.fwd_perm, gm.fwd_delta);
+    dit_st_report(rs, "SB1", gok && cok && cm.fwd_delta <= 1e-6 && gm.fwd_perm == 0.0, d);
+
+    snprintf(d, sizeof(d),
+             "B=%d backward: ONE batched backward vs the sum of %d single-sample backwards accumulated into the same "
+             "LmOptim::acc[] with no zeroing between them (design B4 weights, C1 accumulation) — CPU max relative "
+             "delta %.3e on %s (bar 1e-5) [%s]; %s reports %.3e, and %.3e under a reversed-element run (a batch "
+             "reduction, so permutation is not owed bit-exactness — reported, not gated)",
+             B, B, cm.bwd_rel, cm.bwd_worst.c_str(), cok ? "cpu ok" : cerr.c_str(), gname, gm.bwd_rel, gm.bwd_perm);
+    dit_st_report(rs, "SB2", gok && cok && cm.bwd_rel <= 1e-5, d);
+
+    snprintf(d, sizeof(d),
+             "mixed-length B=%d (one song %d of %d frames, %d padded): perturbing the padded velocity TARGET moves "
+             "the loss by %.3e (CPU) / %.3e (%s) and the adapter grads by %.3e / %.3e; perturbing the padded INPUT "
+             "— the decisive one, since padded frames sit in the valid queries' KV window and only the per-element "
+             "sa_mask can stop them — moves the loss by %.3e / %.3e and the adapter grads by %.3e / %.3e. Bar for "
+             "all eight: EXACTLY 0. Masked loss vs a host double recompute over the valid frames only, rel %.3e / "
+             "%.3e (bar 1e-5) [cpu: graph %.9f, host over valid frames %.9f, host over ALL frames %.9f (equal => the "
+             "pad weight is exactly 0); post-backward velocity readback differs from the forward-only one by %.3e, "
+             "which is why the cross-check reads it forward-only]",
+             B, cm.short_len, cm.pad_len, cm.pad_len - cm.short_len, cm.pad_loss, gm.pad_loss, gname, cm.pad_grad,
+             gm.pad_grad, cm.pad_loss_in, gm.pad_loss_in, cm.pad_grad_in, gm.pad_grad_in, cm.pad_host, gm.pad_host,
+             cm.pad_lossv, cm.pad_acc, cm.pad_acc_all, cm.pad_velcmp);
+    dit_st_report(rs, "SB3",
+                  gok && cok && cm.pad_loss == 0.0 && cm.pad_grad == 0.0 && gm.pad_loss == 0.0 &&
+                      gm.pad_grad == 0.0 && cm.pad_loss_in == 0.0 && cm.pad_grad_in == 0.0 &&
+                      gm.pad_loss_in == 0.0 && gm.pad_grad_in == 0.0 && cm.pad_host < 1e-5 && gm.pad_host < 1e-5,
+                  d);
+    if (!gok) {
+        dit_st_report(rs, "SBG", false, std::string("the ") + gname + " measurement failed: " + gerr);
+    }
+}
+
+// ─── SC1 / SC2 / SC3: gradient checkpointing (design §2.3 gates 4 and 6) ────
+//
+// All three run the PRODUCTION segment driver (dit_ckpt_micro_batch) against the
+// PRODUCTION monolithic graph on the same uploads, same seed, same adapter state.
+//
+//   SC1  --ckpt N grads == --ckpt 0 grads          (gate 4; LoRA, B=3, 4 segments)
+//   SC2  the SB3 masked-loss property under        (gate 6; LoRA, B=3, 2 segments)
+//        --batch 3 --ckpt 2
+//   SC3  LoKR under --batch 3 --ckpt 2             (gate 6; the LK-series adapter)
+//
+// The bar is 1e-6 RELATIVE and it is meaningful on CUDA too, unlike the SB rungs:
+// checkpointing does not change a single op's shape or dtype, so every segment
+// graph takes exactly the routes the monolithic graph took for those layers. The
+// only new arithmetic is an F32 copy of the boundary (exact) and the surrogate
+// loss sum(h (*) G), whose gradient IS G. The S-C1 spike measured 0.000e+00 on
+// both backends; anything above the bar here means the driver is wrong, not that
+// the hardware is.
+//
+// The monolithic reference runs the WHOLE stack (layers 0..L), because that is
+// what the segmented path computes: the driver's phase 1 forwards the untrained
+// layers below the adapter once and hands segment 0 their output.
+
+struct DitStCkptMeas {
+    bool        ran = false;
+    double      grad_rel = 0.0, ref_mag = 0.0;
+    double      loss_mono = 0.0, loss_seg = 0.0, bnd_mag = 0.0;
+    double      pad_loss = 0.0, pad_grad = 0.0;
+    double      pad_loss_in = 0.0, pad_grad_in = 0.0;  // the padded-INPUT (KV-mask) pair
+    std::string worst = "-";
+    int         nodes_mono = 0, nodes_seg = 0, graphs = 0;
+    int         short_len = 0, pad_len = 0;
+};
+
+static bool dit_st_ckpt_measure(DitTrainModel * M, const std::vector<DitSample> & samples, uint64_t seed, int B,
+                                int T, int enc_use, int n_train, int segments, bool use_lokr, bool mixed,
+                                DitStCkptMeas * o, std::string * err) {
+    const DiTGGMLConfig & c = M->m.cfg;
+    const int L = c.n_layers, H = c.hidden_size, Oc = c.out_channels, P = c.patch_size, Ic = c.in_channels;
+    const int enc_H = (int) M->m.cond_emb_w->ne[0];
+    const int S     = T / P;
+    const int lo    = std::max(0, L - n_train);
+
+    ggml_context * ctxs;
+    {
+        ggml_init_params p = { 32 * ggml_tensor_overhead(), nullptr, true };
+        ctxs               = ggml_init(p);
+    }
+    ggml_tensor * b_input = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) Ic * T * B);
+    ggml_tensor * b_enc   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) enc_H * enc_use * B);
+    ggml_tensor * b_pos   = ggml_new_tensor_1d(ctxs, GGML_TYPE_I32, (int64_t) S * B);
+    ggml_tensor * b_temb  = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) H * B);
+    ggml_tensor * b_tproj = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) 6 * H * B);
+    // B-wide: `mixed` makes dit_batch_assemble emit a per-element [S,S,1,B] mask
+    // plus its window-free twin for the full-attention layers.
+    ggml_tensor * b_sa    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) S * S * B);
+    ggml_tensor * b_sapad = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) S * S * B);
+    ggml_tensor * b_ca    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F16, (int64_t) enc_use * S * B);
+    ggml_tensor * b_vtgt  = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) Oc * T * B);
+    ggml_tensor * b_lw    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) T * B);
+    ggml_tensor * b_lwu   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, (int64_t) T * B);
+    ggml_tensor * t_adamw    = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 7);
+    ggml_tensor * t_lossgrad = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_clip     = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_eps      = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    ggml_tensor * t_gnorm2   = ggml_new_tensor_1d(ctxs, GGML_TYPE_F32, 1);
+    for (ggml_tensor * t : { b_input, b_enc, b_pos, b_temb, b_tproj, b_sa, b_sapad, b_ca, b_vtgt, b_lw, b_lwu }) {
+        ggml_set_input(t);
+    }
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctxs, M->backend);
+    if (!buf) {
+        *err = "static input allocation failed";
+        ggml_free(ctxs);
+        return false;
+    }
+    {
+        const float epsv = 1e-6f, clipv = 1.0f, lg = 1.0f;
+        ggml_backend_tensor_set(t_eps, &epsv, 0, 4);
+        ggml_backend_tensor_set(t_clip, &clipv, 0, 4);
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, 4);
+    }
+
+    DitAdapterLora lora;
+    DitAdapterLoKr lokr;
+    DitAdapter *   ad = use_lokr ? (DitAdapter *) &lokr : (DitAdapter *) &lora;
+    LmOptim        opt;
+    DitCkptBufs    ckb;
+    bool           have_opt = false;
+    auto           cleanup  = [&]() {
+        dit_ckpt_free(&ckb);
+        if (have_opt) {
+            lm_optim_free(&opt);
+        }
+        ad->free();
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctxs);
+    };
+    {
+        DitAdapterCfg cfg;
+        cfg.rank       = 8;
+        cfg.alpha      = 16.0f;
+        cfg.seed       = seed ^ 0x5c1c5c1cull;
+        cfg.b_sigma    = 1e-2f;  // a zero B/w2 makes half the gradients trivially 0
+        cfg.target_mlp = true;
+        cfg.lokr_dim = 512;
+        cfg.lokr_alpha = 512.0f;
+        cfg.lokr_factor = 6;
+        cfg.lokr_decompose_both = true;
+        if (!ad->init(&M->m, M->backend, lo, L, cfg, err)) {
+            cleanup();
+            return false;
+        }
+        if (!lm_optim_init(&opt, ad->params(), M->backend, err)) {
+            cleanup();
+            return false;
+        }
+        have_opt = true;
+    }
+    opt.t_adamw    = t_adamw;
+    opt.t_lossgrad = t_lossgrad;
+    opt.t_clip     = t_clip;
+    opt.t_eps      = t_eps;
+    opt.t_gnorm2   = t_gnorm2;
+
+    std::vector<uint8_t> arena((size_t) 512 << 20);
+
+    // ── the production batch assembler (B DIFFERENT songs, per-element t) ─
+    LmRng rng_t, rng_crop, rng_noise;
+    lm_rng_seed(&rng_t, seed);
+    DitBatchCfg bcfg;
+    bcfg.in_ch          = Ic;
+    bcfg.out_ch         = Oc;
+    bcfg.enc_H          = enc_H;
+    bcfg.enc_S          = enc_use;
+    bcfg.patch          = P;
+    bcfg.sliding_window = c.sliding_window;
+    bcfg.crop           = T;
+    bcfg.weighted       = true;
+    bcfg.null_cond      = &M->null_cond;
+
+    DitSample                 shortened;
+    std::vector<DitBatchElem> els((size_t) B);
+    {
+        double              wsum = 0.0;
+        std::vector<double> w((size_t) B, 1.0);
+        for (int b = 0; b < B; b++) {
+            els[(size_t) b].s = &samples[(size_t) b];
+            els[(size_t) b].t = dit_sample_t(&rng_t, -0.4f, 1.0f, 0.0f, 1.0f);
+            w[(size_t) b]     = (double) dit_flow_snr_w(els[(size_t) b].t, 0.5f, 5.0f);
+            wsum += w[(size_t) b];
+        }
+        const double wbar = wsum / (double) B;
+        for (int b = 0; b < B; b++) {
+            els[(size_t) b].w = (float) (w[(size_t) b] / (wbar > 0.0 ? wbar : 1.0));
+        }
+        if ((int) M->null_cond.size() == enc_H && B > 1) {
+            els[1].cfg_drop = true;
+        }
+        if (mixed && B >= 2) {
+            // One song shorter than the crop: dit_batch_assemble pads it and gives
+            // the pad loss weight exactly 0 (design B4 / §2.3.5).
+            shortened     = samples[(size_t) (B - 1)];
+            const int Ts  = std::max(P, T - 8 * P);
+            shortened.T   = Ts;
+            shortened.lat.resize((size_t) Ts * (size_t) shortened.Oc);
+            shortened.ctxl.resize((size_t) Ts * (size_t) shortened.Cc);
+            els[(size_t) (B - 1)].s = &shortened;
+        }
+    }
+    lm_rng_seed(&rng_crop, seed ^ 0xbf58476d1ce4e5b9ull);
+    lm_rng_seed(&rng_noise, seed ^ 0x9e3779b97f4a7c15ull);
+    DitBatchHost bh;
+    dit_batch_assemble(bcfg, els, &rng_crop, &rng_noise, &bh);
+    if (bh.len != T) {
+        char b2[128];
+        snprintf(b2, sizeof(b2), "batch assembled at len %d, expected %d", bh.len, T);
+        *err = b2;
+        cleanup();
+        return false;
+    }
+    o->short_len = els[(size_t) (B - 1)].len;
+    o->pad_len   = bh.len;
+
+    std::vector<float> temb_buf((size_t) H * B, 0.0f), tproj_buf((size_t) 6 * H * B, 0.0f);
+    {
+        std::vector<float> ts((size_t) B);
+        for (int b = 0; b < B; b++) {
+            ts[(size_t) b] = els[(size_t) b].t;
+        }
+        std::vector<std::vector<float>> tb, tp;
+        if (!dit_train_temb(M, ts, &tb, &tp)) {
+            *err = "temb precompute failed";
+            cleanup();
+            return false;
+        }
+        for (int b = 0; b < B; b++) {
+            memcpy(&temb_buf[(size_t) b * H], tb[(size_t) b].data(), (size_t) H * sizeof(float));
+            memcpy(&tproj_buf[(size_t) b * 6 * H], tp[(size_t) b].data(), (size_t) 6 * H * sizeof(float));
+        }
+    }
+
+    std::vector<float> vtgt_use = bh.vtgt, input_use = bh.input;
+    auto               upload   = [&]() {  // §3.0: every input, every compute
+        ggml_backend_tensor_set(b_input, input_use.data(), 0, input_use.size() * sizeof(float));
+        ggml_backend_tensor_set(b_vtgt, vtgt_use.data(), 0, vtgt_use.size() * sizeof(float));
+        ggml_backend_tensor_set(b_enc, bh.enc.data(), 0, bh.enc.size() * sizeof(float));
+        ggml_backend_tensor_set(b_pos, bh.pos.data(), 0, bh.pos.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(b_sa, bh.sa.data(), 0, bh.sa.size() * sizeof(uint16_t));
+        if (!bh.sa_pad.empty()) {
+            ggml_backend_tensor_set(b_sapad, bh.sa_pad.data(), 0, bh.sa_pad.size() * sizeof(uint16_t));
+        }
+        ggml_backend_tensor_set(b_ca, bh.ca.data(), 0, bh.ca.size() * sizeof(uint16_t));
+        ggml_backend_tensor_set(b_lw, bh.lw.data(), 0, bh.lw.size() * sizeof(float));
+        ggml_backend_tensor_set(b_lwu, bh.lwu.data(), 0, bh.lwu.size() * sizeof(float));
+        ggml_backend_tensor_set(b_temb, temb_buf.data(), 0, temb_buf.size() * sizeof(float));
+        ggml_backend_tensor_set(b_tproj, tproj_buf.data(), 0, tproj_buf.size() * sizeof(float));
+        const float lg = 1.0f;
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+    };
+
+    const size_t f32b = sizeof(float), f16b = sizeof(ggml_fp16_t);
+    auto         mk_inputs = [&](ggml_context * ctx) {
+        DitInputs in;
+        in.t_input = ggml_view_3d(ctx, b_input, Ic, T, B, (size_t) Ic * f32b, (size_t) Ic * T * f32b, 0);
+        in.t_enc =
+            ggml_view_3d(ctx, b_enc, enc_H, enc_use, B, (size_t) enc_H * f32b, (size_t) enc_H * enc_use * f32b, 0);
+        in.t_pos   = ggml_view_1d(ctx, b_pos, (int64_t) S * B, 0);
+        in.t_temb  = ggml_view_3d(ctx, b_temb, H, 1, B, (size_t) H * f32b, (size_t) H * f32b, 0);
+        in.t_tproj = ggml_view_3d(ctx, b_tproj, 6 * H, 1, B, (size_t) 6 * H * f32b, (size_t) 6 * H * f32b, 0);
+        in.t_sa    = (bh.sa_B > 1) ? ggml_view_4d(ctx, b_sa, S, S, 1, B, (size_t) S * f16b, (size_t) S * S * f16b,
+                                                  (size_t) S * S * f16b, 0)
+                                   : ggml_view_2d(ctx, b_sa, S, S, (size_t) S * f16b, 0);
+        in.t_sa_pad = (bh.sa_B > 1) ? ggml_view_4d(ctx, b_sapad, S, S, 1, B, (size_t) S * f16b,
+                                                   (size_t) S * S * f16b, (size_t) S * S * f16b, 0)
+                                    : nullptr;
+        in.t_ca    = ggml_view_4d(ctx, b_ca, enc_use, S, 1, B, (size_t) enc_use * f16b, (size_t) enc_use * S * f16b,
+                                  (size_t) enc_use * S * f16b, 0);
+        in.t_vtgt  = ggml_view_3d(ctx, b_vtgt, Oc, T, B, (size_t) Oc * f32b, (size_t) Oc * T * f32b, 0);
+        in.t_lw    = ggml_view_3d(ctx, b_lw, 1, T, B, f32b, (size_t) T * f32b, 0);
+        in.t_lwu   = ggml_view_3d(ctx, b_lwu, 1, T, B, f32b, (size_t) T * f32b, 0);
+        return in;
+    };
+
+    auto read_accs = [&](std::vector<std::vector<float>> * dst) {
+        dst->assign(opt.acc.size(), std::vector<float>());
+        for (size_t j = 0; j < opt.acc.size(); j++) {
+            (*dst)[j].resize((size_t) ggml_nelements(opt.acc[j]));
+            ggml_backend_tensor_get(opt.acc[j], (*dst)[j].data(), 0, (*dst)[j].size() * sizeof(float));
+        }
+    };
+    auto cmp_accs = [&](const std::vector<std::vector<float>> & x, const std::vector<std::vector<float>> & y,
+                        std::string * worst, double * mag) {
+        double best = 0.0;
+        *worst      = "-";
+        for (size_t j = 0; j < y.size() && j < x.size(); j++) {
+            double num = 0.0, den = 0.0;
+            for (size_t k = 0; k < y[j].size() && k < x[j].size(); k++) {
+                num = std::max(num, fabs((double) x[j][k] - (double) y[j][k]));
+                den = std::max(den, fabs((double) y[j][k]));
+            }
+            if (mag) {
+                *mag = std::max(*mag, den);
+            }
+            const double rel = num / std::max(den, 1e-30);
+            if (rel > best) {
+                best   = rel;
+                *worst = opt.params[j]->name;
+            }
+        }
+        return best;
+    };
+
+    // ── monolithic (--ckpt 0): the whole stack, one fwd+bwd graph ─────────
+    auto run_mono = [&](double * loss_out, std::vector<std::vector<float>> * dst) -> bool {
+        lm_optim_zero_grad(&opt);
+        upload();
+        ggml_init_params ip  = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(ip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+        DitInputs        in  = mk_inputs(ctx);
+        ggml_tensor *    vel = dit_train_forward(ctx, M, ad, in, T, enc_use, nullptr, -1, -1, B);
+        ggml_tensor *    ls  = dit_train_loss(ctx, vel, in, Oc, T, false, bh.gscale);
+        ggml_set_loss(ls);
+        ggml_build_forward_expand(gf, ls);
+        std::vector<ggml_tensor *> ga;
+        lm_optim_fill_gacc(&opt, gf, &ga);
+        ggml_build_backward_expand(ctx, gf, ga.data());
+        o->nodes_mono = ggml_graph_n_nodes(gf);
+        ggml_backend_sched_reset(M->sched);
+        const bool good = ggml_backend_sched_graph_compute(M->sched, gf) == GGML_STATUS_SUCCESS;
+        if (good) {
+            float lv = 0.0f;
+            ggml_backend_tensor_get(ls, &lv, 0, sizeof(float));
+            *loss_out = (double) lv;
+        }
+        ggml_free(ctx);
+        if (good) {
+            read_accs(dst);
+        }
+        return good;
+    };
+
+    // ── segmented (--ckpt N): the PRODUCTION driver ───────────────────────
+    const DitCkptPlan plan = dit_ckpt_plan(lo, L, segments);
+    if (!dit_ckpt_alloc(&ckb, M->backend, H, S, B, plan.segments, err)) {
+        cleanup();
+        return false;
+    }
+    auto run_seg = [&](double * loss_out, std::vector<std::vector<float>> * dst) -> bool {
+        lm_optim_zero_grad(&opt);
+        upload();
+        if (!dit_ckpt_begin(&ckb, H, S, B, plan.segments)) {
+            *err = "checkpoint boundary carve failed";
+            return false;
+        }
+        DitCkptReq req;
+        req.M            = M;
+        req.ad           = ad;
+        req.opt          = &opt;
+        req.sched        = M->sched;
+        req.arena        = &arena;
+        req.mk_inputs    = mk_inputs;
+        req.upload       = upload;  // §3.0: re-uploaded before each of the 1+N computes
+        req.T            = T;
+        req.enc_S        = enc_use;
+        req.B            = B;
+        req.Oc           = Oc;
+        req.chan_bal     = false;
+        req.gscale       = bh.gscale;
+        req.want_report  = false;
+        req.loss_scale   = 1.0f;
+        req.bnd_grad_max = &o->bnd_mag;
+        const bool good  = dit_ckpt_micro_batch(req, &ckb, plan, loss_out, nullptr);
+        o->nodes_seg     = std::max(o->nodes_seg, req.nodes);
+        o->graphs        = req.graphs;
+        dit_ckpt_end(&ckb);
+        if (good) {
+            read_accs(dst);
+        }
+        return good;
+    };
+
+    std::vector<std::vector<float>> gmono, gseg;
+    bool                            ok = run_mono(&o->loss_mono, &gmono) && run_seg(&o->loss_seg, &gseg);
+    if (!ok) {
+        *err = "checkpoint compute failed";
+        cleanup();
+        return false;
+    }
+    o->grad_rel = cmp_accs(gseg, gmono, &o->worst, &o->ref_mag);
+
+    // ── the masked-loss property, THROUGH the segmented path ──────────────
+    //
+    // Both perturbations SB3 makes, re-measured with checkpointing on: the padded
+    // velocity TARGET (loss mask) and the padded INPUT (the per-element
+    // self-attention KV mask, which the segment driver has to reproduce in every
+    // one of its 1+N graphs because each rebuilds the inputs from scratch).
+    if (mixed && B >= 2) {
+        std::vector<std::vector<float>> gdirty, gdirty_in;
+        double                          loss_dirty = 0.0, loss_dirty_in = 0.0;
+        {
+            const size_t off = (size_t) (B - 1) * (size_t) bh.len * (size_t) Oc;
+            for (int f = o->short_len; f < bh.len; f++) {
+                for (int ch = 0; ch < Oc; ch++) {
+                    vtgt_use[off + (size_t) f * (size_t) Oc + (size_t) ch] = 137.0f + (float) ch;
+                }
+            }
+        }
+        ok       = run_seg(&loss_dirty, &gdirty);
+        vtgt_use = bh.vtgt;
+        if (ok) {
+            // Modest magnitude — see SB3's run_pad for why an enormous one would
+            // turn the masked softmax argument into a NaN instead of a test.
+            const size_t off = (size_t) (B - 1) * (size_t) bh.len * (size_t) Ic;
+            for (int f = o->short_len; f < bh.len; f++) {
+                for (int ch = 0; ch < Ic; ch++) {
+                    input_use[off + (size_t) f * (size_t) Ic + (size_t) ch] = 2.5f - 0.01f * (float) ch;
+                }
+            }
+            ok        = run_seg(&loss_dirty_in, &gdirty_in);
+            input_use = bh.input;
+        }
+        if (!ok) {
+            *err = "mixed-length checkpoint compute failed";
+            cleanup();
+            return false;
+        }
+        std::string w2;
+        o->pad_loss    = fabs(loss_dirty - o->loss_seg);
+        o->pad_grad    = cmp_accs(gdirty, gseg, &w2, nullptr);
+        o->pad_loss_in = fabs(loss_dirty_in - o->loss_seg);
+        o->pad_grad_in = cmp_accs(gdirty_in, gseg, &w2, nullptr);
+    }
+
+    cleanup();
+    o->ran = true;
+    return true;
+}
+
+static void dit_st_ckpt_gates(std::vector<DitSelfTestResult> & rs, DitTrainModel * M,
+                              const std::vector<DitSample> & samples, uint64_t seed) {
+    const int B = 3, T = 64;
+    if ((int) samples.size() < B) {
+        char d[160];
+        snprintf(d, sizeof(d), "need >= %d cached songs for a B=%d batch of DIFFERENT songs (design B2), found %d", B,
+                 B, (int) samples.size());
+        dit_st_report(rs, "SC1", false, d);
+        dit_st_report(rs, "SC2", false, d);
+        dit_st_report(rs, "SC3", false, d);
+        return;
+    }
+    int enc_use = 64;
+    for (int b = 0; b < B; b++) {
+        enc_use = std::min(enc_use, samples[(size_t) b].enc_S);
+    }
+    const char * bk = ggml_backend_name(M->backend);
+    char         d[2048];
+
+    // SC1 — gate 4. Four trained layers split into four segments, so every
+    // segment boundary is exercised and the surrogate loss runs three times.
+    {
+        DitStCkptMeas m;
+        std::string   err = "-";
+        const bool    ok  = dit_st_ckpt_measure(M, samples, seed, B, T, enc_use, 4, 4, false, false, &m, &err);
+        snprintf(d, sizeof(d),
+                 "[%s] --ckpt 4 vs --ckpt 0 at B=%d, LoRA on the top 4 of %d layers: monolithic %d-node fwd+bwd "
+                 "(loss %.9f) vs %d graphs, widest %d nodes (loss %.9f); max|dL/dboundary| = %.4e; max relative "
+                 "grad delta %.3e on %s (bar 1e-6), reference |grad|max %.3e%s",
+                 bk, B, M->m.cfg.n_layers, m.nodes_mono, m.loss_mono, m.graphs, m.nodes_seg, m.loss_seg, m.bnd_mag,
+                 m.grad_rel, m.worst.c_str(), m.ref_mag, ok ? "" : (" — FAILED: " + err).c_str());
+        dit_st_report(rs, "SC1", ok && m.grad_rel <= 1e-6 && m.bnd_mag > 0.0 && m.ref_mag > 0.0, d);
+    }
+
+    // SC2 — gate 6, the SB side: the masked-loss invariant re-measured with
+    // batching AND checkpointing both on.
+    {
+        DitStCkptMeas m;
+        std::string   err = "-";
+        const bool    ok  = dit_st_ckpt_measure(M, samples, seed, B, T, enc_use, 2, 2, false, true, &m, &err);
+        snprintf(d, sizeof(d),
+                 "[%s] --batch %d --ckpt 2, mixed length (one song %d of %d frames, %d padded): segmented grads vs "
+                 "monolithic max rel %.3e (bar 1e-6); through the SEGMENTED path, perturbing the padded velocity "
+                 "TARGET moves the loss by %.3e and every adapter gradient by %.3e, and perturbing the padded INPUT "
+                 "(the per-element self-attention KV mask, rebuilt in each of the 1+N segment graphs) moves them by "
+                 "%.3e and %.3e — bar EXACTLY 0 for all four%s",
+                 bk, B, m.short_len, m.pad_len, m.pad_len - m.short_len, m.grad_rel, m.pad_loss, m.pad_grad,
+                 m.pad_loss_in, m.pad_grad_in, ok ? "" : (" — FAILED: " + err).c_str());
+        dit_st_report(rs, "SC2",
+                      ok && m.grad_rel <= 1e-6 && m.pad_loss == 0.0 && m.pad_grad == 0.0 && m.pad_loss_in == 0.0 &&
+                          m.pad_grad_in == 0.0 && m.ref_mag > 0.0,
+                      d);
+    }
+
+    // SC3 — gate 6, the LK side: the LoKR kron-matvec adapter under the same
+    // --batch 3 --ckpt 2. Its bar is 1e-5: apply() retains two activation-shaped
+    // tensors per site and the segmented reduction order differs there.
+    {
+        DitStCkptMeas m;
+        std::string   err = "-";
+        const bool    ok  = dit_st_ckpt_measure(M, samples, seed, B, T, enc_use, 2, 2, true, false, &m, &err);
+        snprintf(d, sizeof(d),
+                 "[%s] LoKR (dim 512, factor 6, mlp) --batch %d --ckpt 2 on the top 2 layers: monolithic loss %.9f "
+                 "vs segmented %.9f; max|dL/dboundary| = %.4e; max relative grad delta %.3e on %s (bar 1e-5), "
+                 "reference |grad|max %.3e%s",
+                 bk, B, m.loss_mono, m.loss_seg, m.bnd_mag, m.grad_rel, m.worst.c_str(), m.ref_mag,
+                 ok ? "" : (" — FAILED: " + err).c_str());
+        dit_st_report(rs, "SC3", ok && m.grad_rel <= 1e-5 && m.bnd_mag > 0.0 && m.ref_mag > 0.0, d);
+    }
 }
 
 // ─── LK5: export / parse roundtrip ──────────────────────────────────────────
@@ -1602,6 +2832,24 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
     // ── T11 ──────────────────────────────────────────────────────────────
     if (!fd_only) {
         dit_st_adamw(rs, M.backend, M.sched, t_adamw, t_lossgrad, t_clip, t_eps, t_gnorm2);
+    }
+
+    // ── SC1 / SC2 / SC3: gradient checkpointing ──────────────────────────
+    // Before the SB rungs: these run on the already-loaded model, whereas the SB
+    // ones pay for a second, CPU-backend copy of the base.
+    if (!fd_only) {
+        const float lg1 = 1.0f;
+        ggml_backend_tensor_set(t_lossgrad, &lg1, 0, sizeof(float));
+        dit_st_ckpt_gates(rs, &M, samples, seed);
+    }
+
+    // ── SB1 / SB2 / SB3: micro-batching ──────────────────────────────────
+    // Last, because the CPU-backend identity run loads a second copy of the base
+    // and everything above should have reported before that cost is paid.
+    if (!fd_only) {
+        const float lg1 = 1.0f;
+        ggml_backend_tensor_set(t_lossgrad, &lg1, 0, sizeof(float));
+        dit_st_batch_gates(rs, &M, dit_path, samples, seed);
     }
 
     // ── verdict ──────────────────────────────────────────────────────────

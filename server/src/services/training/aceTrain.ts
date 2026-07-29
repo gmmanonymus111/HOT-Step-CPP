@@ -308,6 +308,7 @@ export interface ResolvedTrainDitOptions {
   seed: number; order: 'shuffle' | 'fixed';
   milestoneStep: number; milestoneKeep: number; vramReserveMb: number;
   mirror: 'f32' | 'bf16';
+  batch: number; ckptSegments: number;
   stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
 }
 
@@ -418,6 +419,11 @@ export function buildTrainDitArgs(input: {
     // Always emitted, both sides: an ace-train that predates the flag rejects it
     // loudly rather than silently running the other precision.
     '--mirror', o.mirror,
+    // Batching/checkpointing (design §2.2): always emitted on both sides —
+    // an ace-train that predates the flags rejects them loudly rather than
+    // silently training at batch 1 / no checkpointing.
+    '--batch', String(o.batch),
+    '--ckpt', String(o.ckptSegments),
     '--milestone-step', String(o.milestoneStep),
     '--milestone-keep', String(o.milestoneKeep),
   ];

@@ -526,6 +526,16 @@ export interface TrainDitOptions {
    *  (dit-train-run.h), so an explicit 'f32' request is the only way to opt
    *  out deliberately. */
   mirror?: 'f32' | 'bf16';         // default 'bf16'
+  /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2 /
+   *  C5). Effective samples/optimizer-step is batch x gradAccum.
+   *  Default 1 = OFF (2026-07-29, measured): batching is ~2.5x SLOWER at full
+   *  depth on a 32 GB card and ~2.4x faster on shallow/partial-depth runs, so
+   *  raising it is a deliberate choice for the latter. */
+  batch?: number;                  // default 1, range [1,16]
+  /** Gradient-checkpointing segments (design §2.2 / C3). 0 = off (today's
+   *  monolithic graph); 1 = auto (engine picks segment count from free
+   *  VRAM); 2-32 = that many segments, fixed. */
+  ckptSegments?: number;           // default 1 (auto); 0 = off; 2-32 fixed
   stages?: TrainDitStage[];        // default ['train','export']
   overwrite?: boolean;             // default false
   stopEngine?: boolean;            // default TRUE
