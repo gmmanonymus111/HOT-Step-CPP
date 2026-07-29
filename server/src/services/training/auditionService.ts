@@ -342,9 +342,12 @@ export interface SideHooks {
 export interface SideOutcome {
   result: AuditionSideResult;
   audio: PreviewAudio | null;
-  /** The opt-in DiT render, null when renderDit was off or the render failed
-   *  (the failure is on result.renderError — never on result.error). */
-  renderAudio: PreviewAudio | null;
+  /** The raw codes CSV, kept so the runner can render this side through the
+   *  DiT AFTER the pinned LM has been evicted. Rendering inside the side —
+   *  with keep_loaded holding the 4B planner resident — loaded the DiT on top
+   *  of it and spilled VRAM into shared memory (Rob, 2026-07-29). '' on
+   *  failure. */
+  audioCodes: string;
 }
 
 /** Poll one engine job to completion under a deadline, cancelling the engine
@@ -379,8 +382,13 @@ async function awaitEngineJob(
  * fixed step count on a DiT shared by both sides, with NO sound adapter — the
  * planner adapter must remain the A/B's only variable. Request built FRESH,
  * exactly like the /codes-decode one (module-header sideband rule).
+ *
+ * Called by the RUNNER after every LM side has finished and the pinned LM has
+ * been evicted — never inside a side, where keep_loaded's EVICT_NEVER would
+ * stack the DiT on top of a resident 4B planner and overflow into shared
+ * memory. Exported for exactly that caller.
  */
-async function renderSideThroughDit(
+export async function renderSideThroughDit(
   resolved: ResolvedAudition,
   result: AuditionSideResult,
   audioCodes: string,
@@ -477,7 +485,7 @@ export async function runOneSide(
     // ── 2. no codes → a soft failure, not a thrown job ───────────────────
     if (!audioCodes.trim()) {
       result.error = 'LM returned no audio codes';
-      return { result, audio: null, renderAudio: null };
+      return { result, audio: null, audioCodes: '' };
     }
 
     result.codesSha1 = sha1(audioCodes);
@@ -496,30 +504,16 @@ export async function runOneSide(
     result.decodeMs = Date.now() - t1;
     result.ok = true;
 
-    // ── 4. opt-in DiT render — its failure never fails the side ───────────
-    let renderAudio: PreviewAudio | null = null;
-    if (resolved.renderDit) {
-      hooks.onPhase?.('audition-render');
-      const t2 = Date.now();
-      try {
-        renderAudio = await renderSideThroughDit(resolved, result, audioCodes, hooks);
-        result.renderMs = Date.now() - t2;
-      } catch (err: any) {
-        // A cancel must still cancel the whole side, not degrade to a warning.
-        if (hooks.isCancelled?.()) throw err;
-        result.renderError = err instanceof Error ? err.message : String(err);
-      }
-    }
-
+    // The DiT render deliberately does NOT happen here — see SideOutcome.
     return {
       result,
       audio: { slot: side.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav' },
-      renderAudio,
+      audioCodes,
     };
   } catch (err: any) {
     result.ok = false;
     result.error = err instanceof Error ? err.message : String(err);
-    return { result, audio: null, renderAudio: null };
+    return { result, audio: null, audioCodes: '' };
   }
 }
 

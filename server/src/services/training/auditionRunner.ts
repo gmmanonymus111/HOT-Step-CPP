@@ -20,7 +20,9 @@ import { pushLog } from '../../routes/logs.js';
 import { aceClient } from '../aceClient.js';
 import { getDataset } from './datasetsRepo.js';
 import { writePreview, type PreviewAudio } from './auditionStore.js';
-import { resolveAuditionInputs, runOneSide } from './auditionService.js';
+import {
+  renderSideThroughDit, resolveAuditionInputs, runOneSide, type SideOutcome,
+} from './auditionService.js';
 import {
   emitJob, emitProgress, finishJob, isCancelled, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
@@ -80,6 +82,7 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
 
     const results: AuditionSideResult[] = [];
     const audio: PreviewAudio[] = [];
+    const renderQueue: SideOutcome[] = [];
     const previewId = randomUUID();
 
     // Armed BEFORE the first post, because the first post is what flips the flag.
@@ -102,19 +105,12 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
         audio.push(outcome.audio);
         outcome.result.audioUrl = `/api/training/previews/${previewId}/${side.slot}`;
       }
-      if (outcome.renderAudio) {
-        audio.push(outcome.renderAudio);
-        outcome.result.renderUrl = `/api/training/previews/${previewId}/${side.slot}-render`;
-      }
+      renderQueue.push(outcome);
 
       if (outcome.result.ok) {
         log(job, 'info',
           `${side.label}: ${outcome.result.codesCount} codes (${outcome.result.codesSha1.slice(0, 8)}) ` +
-          `— LM ${outcome.result.lmMs} ms, decode ${outcome.result.decodeMs} ms` +
-          (outcome.result.renderMs ? `, DiT render ${outcome.result.renderMs} ms` : ''));
-        if (outcome.result.renderError) {
-          log(job, 'warn', `${side.label}: DiT render failed — ${outcome.result.renderError} (the codes sketch is still playable)`);
-        }
+          `— LM ${outcome.result.lmMs} ms, decode ${outcome.result.decodeMs} ms`);
       } else {
         job.failed++;
         log(job, 'error', `${side.label}: ${outcome.result.error}`);
@@ -129,6 +125,37 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
     // side. Without this a cancelled single-side audition still writes a preview
     // dir full of a half-finished run.
     if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
+
+    // ── Opt-in DiT renders — AFTER the LM sides, AFTER the LM is evicted ──
+    // keep_loaded pins the planner (a 4B is ~8 GB BF16) for the whole job;
+    // rendering inside a side loaded xl-turbo + VAE on top of it and spilled
+    // VRAM into shared memory (Rob, 2026-07-29). Evicting first gives the
+    // render a normal generation's footprint, and both LM sides still shared
+    // one resident load — the whole point of co-residency.
+    if (resolved.renderDit) {
+      await evictLmIfFlipped();
+      job.phase = 'audition-render';
+      emitProgress(job);
+      for (const outcome of renderQueue) {
+        if (!outcome.result.ok || !outcome.audioCodes) continue;
+        if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
+        const t0 = Date.now();
+        try {
+          const rendered = await renderSideThroughDit(resolved, outcome.result, outcome.audioCodes, {
+            isCancelled: () => isCancelled(job),
+          });
+          outcome.result.renderMs = Date.now() - t0;
+          audio.push(rendered);
+          outcome.result.renderUrl = `/api/training/previews/${previewId}/${outcome.result.slot}-render`;
+          log(job, 'info', `${outcome.result.label}: DiT render ${outcome.result.renderMs} ms`);
+        } catch (err: any) {
+          if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
+          outcome.result.renderError = err instanceof Error ? err.message : String(err);
+          log(job, 'warn',
+            `${outcome.result.label}: DiT render failed — ${outcome.result.renderError} (the codes sketch is still playable)`);
+        }
+      }
+    }
 
     // ── Write the preview ────────────────────────────────────────────────
     job.phase = 'audition-writing';
