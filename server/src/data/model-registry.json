@@ -1511,6 +1511,20 @@
       "tags": []
     },
     {
+      "id": "vae-regrind-v7-st",
+      "filename": "vae-Regrind-V7.safetensors",
+      "role": "vae",
+      "displayName": "Regrind V7 (Safetensors)",
+      "scale": null,
+      "variant": "Regrind-V7",
+      "quant": "BF16",
+      "sizeBytes": 337431732,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V7.safetensors",
+      "description": "Regrind V7 — earlier retrained decoder for improved spectral fidelity.",
+      "tags": []
+    },
+    {
       "id": "vae-regrind-v9b-bf16",
       "filename": "vae-Regrind-V9b-BF16.gguf",
       "role": "vae",
@@ -1519,7 +1533,9 @@
       "variant": "Regrind-V9b",
       "quant": "BF16",
       "sizeBytes": 337420928,
-      "description": "Regrind V9b — latest iteration with refined high-frequency response and reduced artifacts.",
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V9b-BF16.gguf",
+      "description": "Regrind V9b — refined high-frequency response and reduced artifacts.",
       "tags": []
     },
     {
@@ -1531,8 +1547,84 @@
       "variant": "Regrind-V9b-Blend50",
       "quant": "BF16",
       "sizeBytes": 337420928,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V9b_blend50-BF16.gguf",
       "description": "Regrind V9b Blend50 — 50/50 blend of Regrind V9b with stock weights for balanced clarity.",
       "tags": []
+    },
+    {
+      "id": "vae-regrind-v9b-blend50-st",
+      "filename": "vae-Regrind-V9b-Blend50.safetensors",
+      "role": "vae",
+      "displayName": "Regrind V9b Blend50 (Safetensors)",
+      "scale": null,
+      "variant": "Regrind-V9b-Blend50",
+      "quant": "BF16",
+      "sizeBytes": 337431732,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V9b_blend50.safetensors",
+      "description": "Regrind V9b Blend50 in safetensors format — 50/50 blend of Regrind V9b with stock weights for balanced clarity.",
+      "tags": []
+    },
+    {
+      "id": "vae-regrind-v10b-bf16",
+      "filename": "vae-Regrind-V10b-BF16.gguf",
+      "role": "vae",
+      "displayName": "Regrind V10b",
+      "scale": null,
+      "variant": "Regrind-V10b",
+      "quant": "BF16",
+      "sizeBytes": 337420960,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V10b-BF16.gguf",
+      "description": "Regrind V10b — latest iteration with more aggressive artifact suppression. Use when Blend50 isn't cleaning up enough.",
+      "tags": []
+    },
+    {
+      "id": "vae-regrind-v10b-st",
+      "filename": "vae-Regrind-V10b.safetensors",
+      "role": "vae",
+      "displayName": "Regrind V10b (Safetensors)",
+      "scale": null,
+      "variant": "Regrind-V10b",
+      "quant": "BF16",
+      "sizeBytes": 337431732,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V10b.safetensors",
+      "description": "Regrind V10b in safetensors format — latest iteration with more aggressive artifact suppression.",
+      "tags": []
+    },
+    {
+      "id": "vae-regrind-v10b-blend50-bf16",
+      "filename": "vae-Regrind-V10b-Blend50-BF16.gguf",
+      "role": "vae",
+      "displayName": "Regrind V10b Blend50",
+      "scale": null,
+      "variant": "Regrind-V10b-Blend50",
+      "quant": "BF16",
+      "sizeBytes": 337420928,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V10b_blend50-BF16.gguf",
+      "description": "Regrind V10b Blend50 — 50/50 blend of V10b with stock weights. Recommended starting point for most material.",
+      "tags": [
+        "recommended"
+      ]
+    },
+    {
+      "id": "vae-regrind-v10b-blend50-st",
+      "filename": "vae-Regrind-V10b-Blend50.safetensors",
+      "role": "vae",
+      "displayName": "Regrind V10b Blend50 (Safetensors)",
+      "scale": null,
+      "variant": "Regrind-V10b-Blend50",
+      "quant": "BF16",
+      "sizeBytes": 337431948,
+      "repo": "mdmachine/ACEStep-XL-Regrind-V1",
+      "repoPath": "vae/acestep_1.5_vae_Regrind_V10b_blend50.safetensors",
+      "description": "Regrind V10b Blend50 in safetensors format — 50/50 blend of V10b with stock weights. Recommended starting point for most material.",
+      "tags": [
+        "recommended"
+      ]
     },
     {
       "id": "pp-vae-f32",

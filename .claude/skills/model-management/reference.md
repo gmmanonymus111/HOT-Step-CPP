@@ -95,12 +95,12 @@ RegistryFile   = { id, filename, role, subdir?, repoPath?, displayName, scale, v
 - Variant filtering (getRegistry, lines 122-173): `.variant` and `.cuda-version` marker files beside ace-server.exe hide CUDA-only files/packs on vulkan/cpu builds; CUDA ≤ 12 shows the `cuda12-runtime` pack and remaps `cuda-rt-*` ids to `-12` variants inside packs.
 - `cleanupJobs()` (lines 341-348): comment says "older than 60s" but it deletes ALL terminal jobs immediately — and nothing in `server/src` calls it.
 
-## 8. Catalogue statistics (`server/src/data/model-registry.json`, verified 2026-07-02)
+## 8. Catalogue statistics (`server/src/data/model-registry.json`, verified 2026-07-29)
 
-- **132 files** by role: 86 dit, 8 lm, 2 embedding, 7 vae, 3 pp-vae, 4 supersep, 18 runtime, 4 whisper.
-- **8 packs**: `quick-start`, `minimal`, `xl-quality`, `blackwell`, `cuda-runtime`, `cuda12-runtime`, `stem-separation`, `supersep-runtime`.
-- Repos (8 unique): `Serveurperso/ACE-Step-1.5-GGUF`, `ACE-Step/Ace-Step1.5`, `scragnog/ace-step-1.5-gguf-merge-models`, `scragnog/Ace-Step-1.5-MXFP4-Quants`, `scragnog/HOT-Step-CPP-PP-VAE`, `scragnog/Ace-Step-1.5-ScragVAE`, `scragnog/HOT-Step-CPP-SuperSep` (also hosts runtime DLLs), `ggerganov/whisper.cpp`.
-- Entries with **no `repo` field** (download would hit `https://huggingface.co/undefined/...` and fail): `vae-dreamvae-onnx`, `vae-regrind-v9b-bf16`, `vae-regrind-v9b-blend50-bf16`. Local/display-only.
+- **152 files** by role: 86 dit, 18 runtime, 13 stablestep, 13 vae, 8 lm, 5 supersep, 4 whisper, 3 pp-vae, 2 embedding.
+- **9 packs**: `quick-start`, `minimal`, `xl-quality`, `blackwell`, `cuda-runtime`, `cuda12-runtime`, `stem-separation`, `stablestep-separation`, `supersep-runtime`.
+- Repos (10 unique): `Serveurperso/ACE-Step-1.5-GGUF`, `ACE-Step/Ace-Step1.5`, `scragnog/ace-step-1.5-gguf-merge-models`, `scragnog/Ace-Step-1.5-MXFP4-Quants`, `scragnog/HOT-Step-CPP-PP-VAE`, `scragnog/Ace-Step-1.5-ScragVAE`, `scragnog/HOT-Step-CPP-SuperSep` (also hosts runtime DLLs), `scragnog/HOT-Step-CPP-StableStep`, `mdmachine/ACEStep-XL-Regrind-V1` (Regrind VAEs, `vae/` subfolder), `ggerganov/whisper.cpp`.
+- Entry with **no `repo` field** (download would hit `https://huggingface.co/undefined/...` and fail): `vae-dreamvae-onnx`. Local/display-only. (The Regrind entries used to be in this bucket; since 2026-07-29 all 8 Regrind VAEs download from `mdmachine/ACEStep-XL-Regrind-V1` via `repoPath`.)
 
 ## 9. Model Manager API summary (`server/src/routes/modelManager.ts`, mount `/api/model-manager`)
 
@@ -123,4 +123,4 @@ UI: `ui/src/components/model-manager/ModelCatalogueTab.tsx:18-28` defines 7 tabs
 
 ## 11. Design-doc drift (code wins)
 
-The original design doc (`docs/plans/2026-05-03-model-manager-design.md`, gitignored — may be absent) describes 5 roles / 5 repos / ~104 files / 5 UI tabs, pause-resume ETA fields, and `recommendedSettings` per entry. The shipped code has 8 roles, 8 repos, 132 files, 7 tabs, `role: runtime` + `subdir` + `repoPath` fields the doc lacks, and no `recommendedSettings` in actual entries. Always trust the code and the JSON over that doc.
+The original design doc (`docs/plans/2026-05-03-model-manager-design.md`, gitignored — may be absent) describes 5 roles / 5 repos / ~104 files / 5 UI tabs, pause-resume ETA fields, and `recommendedSettings` per entry. The shipped code has 9 roles, 10 repos, 152 files, 7 tabs, `role: runtime` + `subdir` + `repoPath` fields the doc lacks, and no `recommendedSettings` in actual entries. Always trust the code and the JSON over that doc.

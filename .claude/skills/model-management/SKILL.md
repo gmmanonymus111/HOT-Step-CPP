@@ -144,7 +144,7 @@ Download mechanics: HuggingFace URL `https://huggingface.co/{repo}/resolve/main/
 | `server/src/services/modelDownloadService.ts` | Download jobs, resume, validation, installed-check, variant filtering |
 | `server/src/routes/modelManager.ts` | `/api/model-manager/*` REST + SSE |
 | `server/src/routes/models.ts` | `/api/models` (proxies engine `/props`), `/api/models/pp-vae` |
-| `server/src/data/model-registry.json` | Curated catalogue: 132 files, 8 packs |
+| `server/src/data/model-registry.json` | Curated catalogue: 152 files, 9 packs |
 | `server/src/index.ts` | ace-server spawn/respawn limiter (152-156, 284-308); first-launch CUDA DLL bootstrap (318-380) |
 | `ui/src/components/model-manager/` | Modal UI: `ModelManagerModal.tsx`, `ModelCatalogueTab.tsx` (7 tabs), `ModelRow.tsx`, `StarterPackCard.tsx`, `DownloadProgressBar.tsx`, `useModelRegistry.ts`, `useDownloadStream.ts` |
 
@@ -162,13 +162,13 @@ Download mechanics: HuggingFace URL `https://huggingface.co/{repo}/resolve/main/
 | Crash-loop "3 times within 30s" + missing-DLL hint | cuBLAS/cudart DLLs absent beside ace-server.exe (CUDA variant) | Model Manager "CUDA Runtime" pack; first-launch bootstrap normally handles it |
 | Model shows "installed" in Model Manager but absent from generation dropdowns | GGUF in a subdir (Node scans subdirs, engine scans root only), unknown arch, or engine down (`aceServerDown: true`) | Move to models root / check engine log |
 | Cover/repaint fails while text2music works, ONNX VAE selected | ONNX VAEs are **decoder-only**; VAE encode requires a non-ONNX VAE (`registry_find_non_onnx`, `model-registry.h:62-85`) | Install a GGUF/safetensors VAE alongside |
-| Download of DreamVAE / Regrind entries fails instantly | Those catalogue entries have no `repo` field → URL contains `undefined` | Treat as local/display-only entries (see below) |
+| Download of the DreamVAE entry fails instantly | That catalogue entry has no `repo` field → URL contains `undefined` | Treat as local/display-only (see below). Regrind entries were fixed 2026-07-29 (now download from `mdmachine/ACEStep-XL-Regrind-V1`) |
 
 ## Institutional knowledge
 
 - **VALIDATED — subdir-GGUF blind spot:** engine scans root-only for `.gguf`; Node installed-check scans one subdir level. This mismatch is a real, recurring "installed but not selectable" source (code cited in golden rule 2).
 - **VALIDATED — truncation guard exists for a reason:** the byte-range check in `gf_load()` (`gguf-weights.h:132-150`) was added specifically because truncated downloads used to segfault deep in `cuMemcpyHtoDAsync`. Keep it if touching the loader.
-- **VALIDATED — catalogue entries without `repo`:** `vae-dreamvae-onnx`, `vae-regrind-v9b-bf16`, `vae-regrind-v9b-blend50-bf16` in `model-registry.json` have no `repo` field, so `startDownload` builds `https://huggingface.co/undefined/...` and fails. They exist locally on the dev machine; display-only.
+- **VALIDATED — catalogue entry without `repo`:** `vae-dreamvae-onnx` in `model-registry.json` has no `repo` field, so `startDownload` builds `https://huggingface.co/undefined/...` and fails. It exists locally on the dev machine; display-only. (The Regrind V9b entries had the same gap until 2026-07-29 — all 8 Regrind VAEs now carry `repo: mdmachine/ACEStep-XL-Regrind-V1` + `repoPath: vae/...`; that repo keeps files in `vae/`/`dit/`/`lora/` subfolders, so `repoPath` is mandatory for anything added from it.)
 - **VALIDATED — installed-check is name-only:** filename presence, no size/hash (`modelDownloadService.ts:177-208`). A stale/partial file with the right name shows "installed".
 - **VALIDATED — `--keep-loaded` trade-off:** default EVICT_STRICT reloads models per request; `ACESTEPCPP_KEEP_LOADED=1` → `--keep-loaded` (EVICT_NEVER) avoids ~17 s LoKr adapter precompute per request but pins ~13 GB VRAM (`config.ts:124-132`, `index.ts:177-184`). Warm-on-startup env vars (`ACESTEPCPP_WARM_DIT`/`_VAE`/`_ADAPTER`) only fire when keepLoaded is on.
 - **VALIDATED — DiT instances cache per adapter combo:** ModelKey includes adapter path/scale, per-group scales, basin re-base (`rebase_source`/`rebase_beta`), and multi-adapter `adapter_stack` signature (`model-store.h:83-103`) — different values = distinct cached DiTs, each costing VRAM under keep-loaded.
