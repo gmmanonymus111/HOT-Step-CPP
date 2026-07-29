@@ -255,6 +255,17 @@ jobs:
             echo "Stale-cache guard: no valid .built-commit stamp — touched all engine sources"
           fi
 
+      - name: Apply engine patches
+        shell: bash
+        run: |
+          # HOT-Step keeps the engine/ggml submodule upstream-clean; local
+          # modifications live as patch files in engine/patches/. MUST run
+          # after "Restore source file timestamps": patched files get a
+          # fresh mtime so their cached objects rebuild (content changed).
+          # See engine/patches/README.md.
+          git apply --stat  engine/patches/bf16-out-prod.patch
+          git apply --verbose engine/patches/bf16-out-prod.patch
+
       - name: Build C++ engine
         shell: pwsh
         run: |
@@ -706,6 +717,17 @@ jobs:
             echo "Stale-cache guard: no valid .built-commit stamp — touched all engine sources"
           fi
 
+      - name: Apply engine patches
+        shell: bash
+        run: |
+          # HOT-Step keeps the engine/ggml submodule upstream-clean; local
+          # modifications live as patch files in engine/patches/. MUST run
+          # after "Restore source file timestamps": patched files get a
+          # fresh mtime so their cached objects rebuild (content changed).
+          # See engine/patches/README.md.
+          git apply --stat  engine/patches/bf16-out-prod.patch
+          git apply --verbose engine/patches/bf16-out-prod.patch
+
       - name: Build C++ engine
         run: |
           mkdir -p engine/build && cd engine/build
@@ -1095,6 +1117,17 @@ jobs:
             find engine/src engine/tools -type f -exec touch {} +
             echo "Stale-cache guard: no valid .built-commit stamp — touched all engine sources"
           fi
+
+      - name: Apply engine patches
+        shell: bash
+        run: |
+          # HOT-Step keeps the engine/ggml submodule upstream-clean; local
+          # modifications live as patch files in engine/patches/. MUST run
+          # after "Restore source file timestamps": patched files get a
+          # fresh mtime so their cached objects rebuild (content changed).
+          # See engine/patches/README.md.
+          git apply --stat  engine/patches/bf16-out-prod.patch
+          git apply --verbose engine/patches/bf16-out-prod.patch
 
       - name: Build C++ engine
         run: |

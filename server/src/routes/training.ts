@@ -1541,12 +1541,13 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
-    // Both defaults ARE the CLI defaults, so an omitted field emits no flag at
-    // all (buildTrainLmArgs) and the argv stays byte-identical to today. The
-    // engine owns the semantic rules (bf16 needs a BF16 base; batch>1 implies
-    // low-VRAM) — this is a value whitelist only, so a stale UI can never make
-    // the runner stop ace-server for an argument ace-train would reject.
-    const weights = body.weights === undefined ? 'f32-window' : body.weights;
+    // The 'weights' default flipped to 'bf16' (2026-07-29) and is no longer the
+    // CLI default ('f32-window'), so an omitted field now DOES emit an explicit
+    // --weights bf16 flag (buildTrainLmArgs). The engine owns the semantic
+    // rules (bf16 needs a BF16 base; batch>1 implies low-VRAM) — this is a
+    // value whitelist only, so a stale UI can never make the runner stop
+    // ace-server for an argument ace-train would reject.
+    const weights = body.weights === undefined ? 'bf16' : body.weights;
     if (weights !== 'f32-window' && weights !== 'bf16') {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
@@ -1849,8 +1850,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'cropMax must be greater than or equal to cropMin' });
       return;
     }
-    // Refused here rather than coerced: 'bf16' halves the frozen-weight mirror
-    // and is experimental, so a typo must not silently land on either side.
+    // Refused here rather than coerced: an unrecognised value must not
+    // silently land on either side. 'bf16' halves the frozen-weight mirror
+    // and is the default (2026-07-29); the engine falls back to 'f32' itself
+    // on a non-CUDA backend, so an explicit 'f32' remains the opt-out.
     if (body.mirror !== undefined && body.mirror !== 'f32' && body.mirror !== 'bf16') {
       res.status(400).json({ error: 'mirror must be f32 or bf16' });
       return;
@@ -1929,9 +1932,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       milestoneStep,
       milestoneKeep: Math.trunc(milestoneKeep),
       vramReserveMb: Math.trunc(vramReserveMb),
-      // Frozen-weight mirror precision. Anything but the exact string 'bf16'
-      // falls back to 'f32' — the experimental path is opt-in only.
-      mirror: body.mirror === 'bf16' ? 'bf16' : 'f32',
+      // Frozen-weight mirror precision. Default is 'bf16' (2026-07-29); only
+      // the exact string 'f32' opts back out. The engine itself falls back to
+      // f32 with a warning on a non-CUDA backend (dit-train-run.h).
+      mirror: body.mirror === 'f32' ? 'f32' : 'bf16',
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,

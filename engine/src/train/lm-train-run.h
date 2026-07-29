@@ -147,22 +147,50 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
 
     // ── Lever A gating (§3.4), before the mirror decision ────────────────
     //
-    // bf16 is meaningless on the naive path: it mirrors every weight to F32 and
-    // releases the BF16 buffer, so there is nothing left to run a BF16 GEMM on.
-    // --low-vram off + --weights bf16 was already rejected at exit 2 in
-    // cmd_train_lm, so forcing the mode here can never contradict the user.
-    const bool weights_bf16 = (a.weights == "bf16");
+    // bf16 requires BOTH the CUDA backend and a BF16-native base. Neither
+    // condition used to have a graceful path (a fatal exit-1, or on CPU an
+    // outright GGML_ABORT deep in the backward pass — lm-graph.h §property
+    // 5 — since ggml_out_prod is F32-only on CUDA and aborts for BF16 on
+    // CPU). Now that the server defaults `weights` to 'bf16' (2026-07-29)
+    // and CPU/Vulkan release builds exist, both checks warn and fall back to
+    // 'f32-window' instead — mirroring the DiT trainer's --mirror bf16 CUDA
+    // gate (dit-train-run.h). `weights_used` (not `a.weights`) drives every
+    // downstream report (vram JSONL, dit/lm_train_log.json) so a fallback is
+    // never mislabelled as the bf16 run it wasn't.
+    bool        weights_bf16 = (a.weights == "bf16");
+    std::string weights_used = a.weights;
     if (weights_bf16) {
-        mode = LM_VRAM_LOWVRAM;
-        if (!lm_bf16_base_is_bf16(lm)) {
-            // NEVER a silent fallback (S18): a bf16-labelled run that quietly
-            // used the F32 cast would be a TF32 run wearing a BF16 label.
-            lm_fatal("model-load", std::string("--weights bf16 needs a BF16 base; ") + a.lm_name +
-                                       " loads its projections as " + lm_bf16_base_proj_type_name(lm) +
-                                       " — rerun with --weights f32-window");
-            qw3lm_free(&lm);
-            return 1;
+        std::string fallback_reason;
+        if (strncmp(ggml_backend_name(lm.backend), "CUDA", 4) != 0) {
+            // Gate BEFORE the graph is ever built: only ggml-cuda's out_prod
+            // carries the BF16 patch (engine/patches/bf16-out-prod.patch);
+            // CPU/Vulkan would GGML_ABORT mid-backward-pass instead of
+            // failing cleanly.
+            char b[192];
+            snprintf(b, sizeof(b), "BF16 weights require CUDA — falling back to f32-window (this run picked '%s')",
+                      ggml_backend_name(lm.backend));
+            fallback_reason = b;
+        } else if (!lm_bf16_base_is_bf16(lm)) {
+            char b[256];
+            snprintf(b, sizeof(b),
+                     "BF16 weights require a BF16-native LM base — falling back to f32-window (%s loads its "
+                     "projections as %s)",
+                     a.lm_name.c_str(), lm_bf16_base_proj_type_name(lm));
+            fallback_reason = b;
         }
+        if (!fallback_reason.empty()) {
+            lm_log("warn", fallback_reason);
+            weights_bf16 = false;
+            weights_used = "f32-window";
+        }
+    }
+    if (weights_bf16) {
+        // bf16 is meaningless on the naive path: it mirrors every weight to F32
+        // and releases the BF16 buffer, so there is nothing left to run a BF16
+        // GEMM on. --low-vram off + --weights bf16 was already rejected at exit
+        // 2 in cmd_train_lm, so forcing the mode here can never contradict the
+        // user. Only reached when bf16 survived both fallback checks above.
+        mode = LM_VRAM_LOWVRAM;
     }
 
     size_t base_bytes = lm_base_weight_bytes(lm);
@@ -392,8 +420,10 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
        low ? lc.chunk : 0,
        // §2.2: three additive fields. In a default run they read
        // "f32-window", 1, "user", so the event stays byte-compatible in meaning
-       // and [P] §2.9's SSE mapping needs no change.
-       a.weights.c_str(), 1, "user");
+       // and [P] §2.9's SSE mapping needs no change. weights_used (not
+       // a.weights) so a CUDA/base-dtype fallback reports "f32-window", the
+       // mode actually run, not the "bf16" the caller requested.
+       weights_used.c_str(), 1, "user");
 
     // `skippedBad` is additive (§2.2: consumers ignore unknown fields) and keeps
     // `skippedLong` meaning what its name says.
@@ -707,7 +737,7 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     meta->low_vram        = low;
     meta->attn_head_block = low ? lc.attn_head_block : 0;
     meta->chunk           = low ? lc.chunk : 0;
-    meta->weights         = a.weights;   // §2.3 — recorded so a resume can refuse (S6)
+    meta->weights         = weights_used;   // §2.3 — recorded so a resume can refuse (S6); ACTUAL mode, not requested
     meta->batch           = 1;
     meta->vram_mode       = low ? "lowvram" : "naive";
     meta->vram_base_mb    = (size_t) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0);

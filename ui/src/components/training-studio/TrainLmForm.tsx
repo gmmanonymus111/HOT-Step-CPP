@@ -65,9 +65,11 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
-  // Both levers default to the shipped behaviour, and the server emits no CLI
-  // flag at all for these values — a default run is byte-identical to today.
-  weights: 'f32-window',
+  // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
+  // weights no longer does: the server default flipped to 'bf16' (2026-07-29),
+  // so a default run now explicitly requests --weights bf16 — which is a hard
+  // fatal against a non-BF16-quantized LM base (see aceTrain.ts/types.ts docs).
+  weights: 'bf16',
   batch: 1,
 };
 

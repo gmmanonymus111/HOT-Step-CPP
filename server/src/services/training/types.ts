@@ -410,11 +410,17 @@ export interface TrainLmOptions {
   attnHeadBlock?: number;            // default 0 = engine picks
   chunk?: number;                    // default 0 = engine default (128)
   // ── LM speed levers (2026-07-28 plan §2.4). Verbatim contract text. ──────
-  /** Projection GEMM dtype. 'f32-window' (default) is the shipped per-segment F32
-   *  weight cast. 'bf16' runs the projections in BF16 and rewrites the backward
-   *  activation-gradient nodes; ~1.65-1.78x on the projection mix, but it changes
-   *  the trained weights (BF16 gradient rounding) and requires a BF16 base + low-VRAM. */
-  weights?: 'f32-window' | 'bf16';   // default 'f32-window'
+  /** Projection GEMM dtype. 'f32-window' is the shipped per-segment F32 weight
+   *  cast (still the CLI's own default, ace-train.cpp). 'bf16' runs the
+   *  projections in BF16 and rewrites the backward activation-gradient nodes;
+   *  ~1.65-1.78x on the projection mix, but it changes the trained weights
+   *  (BF16 gradient rounding) and requires the CUDA backend + a BF16-native
+   *  base + low-VRAM (the engine forces low-VRAM mode itself). Neither of the
+   *  other two is a hard fatal any more (2026-07-29): a non-CUDA backend or a
+   *  non-BF16-native base each warn and fall back to 'f32-window'
+   *  (lm-train-run.h) — the same graceful-fallback treatment as the DiT
+   *  mirror. The SERVER default is 'bf16' (training.ts train-lm handler). */
+  weights?: 'f32-window' | 'bf16';   // default 'bf16'
   /** Micro-batch size 1..8, or 'auto' (largest of {1,2,4} that fits without
    *  dropping a song). >1 forces low-VRAM mode. */
   batch?: number | 'auto';           // default 1
@@ -512,12 +518,14 @@ export interface TrainDitOptions {
   milestoneStep?: number;          // default 0.1;  0 disables
   milestoneKeep?: number;          // default 6
   vramReserveMb?: number;          // default 2048
-  /** Frozen-weight mirror precision. Default 'f32'. 'bf16' keeps the trainable
-   *  layers' matmul weights in the base's native BF16 instead of promoting them
-   *  to F32, roughly halving the mirror's VRAM — CUDA-only (it needs the patched
-   *  out_prod in engine/patches/bf16-out-prod.patch) and EXPERIMENTAL: adapter
-   *  quality at BF16 is not yet validated. */
-  mirror?: 'f32' | 'bf16';         // default 'f32'
+  /** Frozen-weight mirror precision. Default 'bf16' (2026-07-29) — keeps the
+   *  trainable layers' matmul weights in the base's native BF16 instead of
+   *  promoting them to F32, roughly halving the mirror's VRAM. Needs the
+   *  patched out_prod in engine/patches/bf16-out-prod.patch and the CUDA
+   *  backend; on CPU/Vulkan the engine warns and falls back to 'f32' itself
+   *  (dit-train-run.h), so an explicit 'f32' request is the only way to opt
+   *  out deliberately. */
+  mirror?: 'f32' | 'bf16';         // default 'bf16'
   stages?: TrainDitStage[];        // default ['train','export']
   overwrite?: boolean;             // default false
   stopEngine?: boolean;            // default TRUE

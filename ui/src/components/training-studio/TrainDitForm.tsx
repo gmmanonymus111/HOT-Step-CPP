@@ -121,8 +121,10 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   milestoneStep: 0.1,
   milestoneKeep: 6,
   vramReserveMb: 2048,
-  // Stays 'f32' for both adapter types until BF16 is ear-validated.
-  mirror: 'f32',
+  // Default 'bf16' for both adapter types (2026-07-29); TRAIN_DIT_LOKR_DEFAULTS
+  // spreads this object and doesn't override mirror, so LoKR inherits it too.
+  // The engine itself falls back to 'f32' with a warning on a non-CUDA backend.
+  mirror: 'bf16',
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,

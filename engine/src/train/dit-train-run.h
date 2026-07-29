@@ -134,7 +134,9 @@ static std::string dit_milestone_label(double v, float step) {
 static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOutcome * out) {
     const int64_t       t_stage0 = ggml_time_ms();
     const bool          is_lokr  = (a.adapter_type == "lokr");
-    const DitMirrorMode mirror_mode = (a.mirror == "bf16") ? DIT_MIRROR_BF16 : DIT_MIRROR_F32;
+    // Not const: the CUDA-only guard below downgrades this to DIT_MIRROR_F32
+    // on a non-CUDA backend instead of refusing the run outright.
+    DitMirrorMode mirror_mode = (a.mirror == "bf16") ? DIT_MIRROR_BF16 : DIT_MIRROR_F32;
     jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"begin\",\"total\":%d}", a.epochs);
 
     // ── samples (host-resident for the whole run) ────────────────────────
@@ -241,16 +243,23 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     // ── --mirror bf16 is CUDA-only ───────────────────────────────────────
     // Only ggml-cuda's out_prod carries the BF16 patch; the CPU and Vulkan
     // implementations still assert F32 src0, so a BF16 mirror there would abort
-    // deep inside the first backward pass. Refuse up front instead.
+    // deep inside the first backward pass. bf16 is now the server's default
+    // mirror choice (BF16 training defaults, 2026-07-29), and CPU/Vulkan
+    // release builds exist, so this is no longer a rare CLI misuse — soften
+    // from a fatal refusal to a graceful fallback: warn and continue the run
+    // with the f32 mirror. Downstream reporting (vram JSONL, mirror log line,
+    // dit_train_log.json) must reflect the ACTUAL mode used, never the
+    // requested one — hence reassigning mirror_mode/log->mirror here rather
+    // than just skipping the refusal.
     if (mirror_mode == DIT_MIRROR_BF16 && strncmp(ggml_backend_name(M.backend), "CUDA", 4) != 0) {
         char b[256];
         snprintf(b, sizeof(b),
-                 "--mirror bf16 needs the CUDA backend (this run picked '%s'): only ggml-cuda's out_prod carries the "
-                 "BF16 patch — see engine/patches/bf16-out-prod.patch. Re-run with --mirror f32.",
+                 "BF16 mirror requires CUDA — falling back to f32 mirror (this run picked '%s'; only ggml-cuda's "
+                 "out_prod carries the BF16 patch — see engine/patches/bf16-out-prod.patch).",
                  ggml_backend_name(M.backend));
-        lm_fatal("unsupported-backend", b);
-        dit_train_free(&M);
-        return 1;
+        lm_log("warn", b);
+        mirror_mode  = DIT_MIRROR_F32;
+        log->mirror  = "f32";
     }
 
     // ── honest device VRAM (gpu-mem.h) ───────────────────────────────────
