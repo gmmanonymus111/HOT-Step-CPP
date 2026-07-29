@@ -100,6 +100,9 @@ export interface GenerationParams {
   lmTopK: number;
   lmTopP: number;
   lmNegativePrompt: string;
+  /** LM repetition penalty (>1 enables) + lookback window in codes. */
+  lmRepPenalty?: number;
+  lmRepWindow?: number;
   useCotCaption: boolean;
   skipLrc?: boolean;  // Skip LRC (timed-lyrics) generation
 
@@ -140,6 +143,9 @@ export interface GenerationParams {
   // Adapter
   loraPath: string;
   loraScale: number;
+  /** Planner-LM adapter (runtime LoRA on the 5Hz LM): path/registry name + scale. */
+  lmAdapter?: string;
+  lmAdapterScale?: number;
   /** Multi-adapter stack: applied together, each with its own scale. When set
    *  (and non-empty) it supersedes the single loraPath/loraScale. */
   loraStack?: { path: string; scale: number }[];
