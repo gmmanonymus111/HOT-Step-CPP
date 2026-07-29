@@ -602,6 +602,12 @@ export interface AuditionSideResult {
   ok: boolean;
   error: string;            // '' when ok
   audioUrl: string;         // '' when !ok — /api/training/previews/<id>/<slot>
+  /** Opt-in DiT render of this side's codes (same DiT/seed/steps both sides,
+   *  NO sound adapter — the LM adapter stays the only variable). Absent on
+   *  previews recorded before the feature and when renderDit was off. */
+  renderUrl?: string;       // /api/training/previews/<id>/<slot>-render
+  renderMs?: number;        // wall clock of the /synth render
+  renderError?: string;     // render failed; the codes sketch above is still valid
   codesCount: number;       // number of 5 Hz codes the LM emitted
   codesSha1: string;        // sha1 of the raw audio_codes string — the determinism receipt
   durationSec: number;      // codesCount / 5, rounded to 0.1
@@ -629,6 +635,9 @@ export interface AuditionPreview {
   sampleId: string;         // '' unless kind === 'sample' or the prompt came from a sample
   variantKey: string;       // '' when the prompt was free text
   sides: AuditionSideResult[];
+  /** Set when the sides carry DiT renders — reproducibility receipt. */
+  renderDitModel?: string;
+  renderSteps?: number;
 }
 
 export interface AuditionOptions {
@@ -649,6 +658,12 @@ export interface AuditionOptions {
   format?: 'wav16' | 'mp3';       // default 'wav16' (C10)
   coResident?: boolean;           // default true (C15)
   kind?: 'ab' | 'milestone';      // default 'ab'
+  /** Also render each side's codes through a DiT so the A/B is audible as
+   *  MUSIC, not a 5 Hz sketch. Same DiT, same seed, same steps on both sides
+   *  and never a sound adapter — the LM adapter stays the only variable. */
+  renderDit?: boolean;            // default false
+  renderSteps?: number;           // default 8, clamp 2..60
+  renderDitModel?: string;        // default: newest installed xl-turbo, else the detok DiT
 }
 
 export interface AuditionListResponse {

@@ -25,6 +25,9 @@ const MAX_BYTES = 1024 * 1024 * 1024;
 
 const PREVIEW_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SLOT_RE = /^(base|adapter)$/;
+// A slot's stored audio: the codes sketch (`base.wav`) or its opt-in DiT
+// render (`base-render.wav`). Both are addressed by the same static route.
+const FILE_KEY_RE = /^(base|adapter)(-render)?$/;
 
 export function previewsRoot(): string {
   return path.join(config.training.dir, 'previews');
@@ -45,19 +48,24 @@ export function isPreviewSlot(value: unknown): value is AuditionSlot {
   return typeof value === 'string' && SLOT_RE.test(value);
 }
 
-/** `<previews>/<id>/<slot>.<ext>` — both tokens validated, '' when either is not. */
-export function previewFile(previewId: string, slot: string, ext = 'wav'): string {
-  const dir = previewDir(previewId);
-  if (!dir || !isPreviewSlot(slot)) return '';
-  const safeExt = ext === 'mp3' ? 'mp3' : 'wav';
-  return path.join(dir, `${slot}.${safeExt}`);
+/** slot OR slot-render — everything the static preview route may serve. */
+export function isPreviewFileKey(value: unknown): value is string {
+  return typeof value === 'string' && FILE_KEY_RE.test(value);
 }
 
-/** The file actually on disk for a slot, whichever extension it was written
- *  with. '' when nothing is there. */
-export function resolvePreviewFile(previewId: string, slot: string): string {
+/** `<previews>/<id>/<key>.<ext>` — both tokens validated, '' when either is not. */
+export function previewFile(previewId: string, key: string, ext = 'wav'): string {
+  const dir = previewDir(previewId);
+  if (!dir || !isPreviewFileKey(key)) return '';
+  const safeExt = ext === 'mp3' ? 'mp3' : 'wav';
+  return path.join(dir, `${key}.${safeExt}`);
+}
+
+/** The file actually on disk for a slot/key, whichever extension it was
+ *  written with. '' when nothing is there. */
+export function resolvePreviewFile(previewId: string, key: string): string {
   for (const ext of ['wav', 'mp3']) {
-    const p = previewFile(previewId, slot, ext);
+    const p = previewFile(previewId, key, ext);
     if (p && fs.existsSync(p)) return p;
   }
   return '';
@@ -67,6 +75,8 @@ export interface PreviewAudio {
   slot: AuditionSlot;
   buf: Buffer;
   ext: 'wav' | 'mp3';
+  /** True for the opt-in DiT render — stored as `<slot>-render.<ext>`. */
+  render?: boolean;
 }
 
 /**
@@ -85,7 +95,7 @@ export function writePreview(rec: AuditionPreview, audio: PreviewAudio[]): boole
   try {
     fs.mkdirSync(dir, { recursive: true });
     for (const a of audio) {
-      const file = previewFile(rec.previewId, a.slot, a.ext);
+      const file = previewFile(rec.previewId, a.render ? `${a.slot}-render` : a.slot, a.ext);
       if (!file) continue;
       fs.writeFileSync(file, a.buf);
     }

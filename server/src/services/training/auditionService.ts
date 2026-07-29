@@ -166,6 +166,22 @@ export interface ResolvedAudition {
   repPenalty: number;
   format: 'wav16' | 'mp3';
   coResident: boolean;
+  renderDit: boolean;
+  renderSteps: number;
+  renderDitModel: string;   // '' = let the engine resolve its default DiT
+}
+
+/**
+ * The DiT the opt-in render runs on when the user names none: the newest
+ * installed xl-turbo (fast, 8-step-friendly), else any turbo, else the detok
+ * DiT the codes were decoded against. Never a hard failure — a render on a
+ * slower base is still a render.
+ */
+function pickRenderDit(detokDit: string): string {
+  const dits = getModelSnapshot().dit;
+  return dits.find(m => /xl[-_]?turbo/i.test(m))
+    ?? dits.find(m => /turbo/i.test(m))
+    ?? detokDit;
 }
 
 /**
@@ -270,6 +286,11 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     repPenalty: clamp(opts.repPenalty, 1.0, 1, 1.5),
     format: opts.format === 'mp3' ? 'mp3' : 'wav16',
     coResident: opts.coResident !== false,
+    renderDit: opts.renderDit === true,
+    renderSteps: Math.trunc(clamp(opts.renderSteps, 8, 2, 60)),
+    renderDitModel: opts.renderDit === true
+      ? (str(opts.renderDitModel) || pickRenderDit(ditModel))
+      : '',
   };
 }
 
@@ -321,6 +342,72 @@ export interface SideHooks {
 export interface SideOutcome {
   result: AuditionSideResult;
   audio: PreviewAudio | null;
+  /** The opt-in DiT render, null when renderDit was off or the render failed
+   *  (the failure is on result.renderError — never on result.error). */
+  renderAudio: PreviewAudio | null;
+}
+
+/** Poll one engine job to completion under a deadline, cancelling the engine
+ *  job on our own cancel/timeout (same discipline as the /lm loop — an
+ *  abandoned engine job pins VRAM and wedges the global queue chain). */
+async function awaitEngineJob(
+  jobId: string,
+  what: string,
+  hooks: SideHooks,
+): Promise<void> {
+  const deadline = Date.now() + LM_DEADLINE_MS;
+  for (;;) {
+    if (hooks.isCancelled?.()) {
+      await aceClient.cancelJob(jobId).catch(() => { /* engine may already be gone */ });
+      throw new Error('Cancelled');
+    }
+    if (Date.now() > deadline) {
+      await aceClient.cancelJob(jobId).catch(() => { /* best effort */ });
+      throw new Error(`${what} timed out after ${Math.round(LM_DEADLINE_MS / 60_000)} min`);
+    }
+    const status = await aceClient.pollJob(jobId);
+    if (status.status === 'done') return;
+    if (status.status === 'failed') throw new Error(`${what} failed — see ace_engine.log`);
+    if (status.status === 'cancelled') throw new Error(`${what} cancelled`);
+    await new Promise(r => setTimeout(r, 200));
+  }
+}
+
+/**
+ * The opt-in DiT render of one side's codes (§Rob 2026-07-29): a fresh /synth
+ * request carrying the side's audio_codes and the ECHOED plan fields, at a
+ * fixed step count on a DiT shared by both sides, with NO sound adapter — the
+ * planner adapter must remain the A/B's only variable. Request built FRESH,
+ * exactly like the /codes-decode one (module-header sideband rule).
+ */
+async function renderSideThroughDit(
+  resolved: ResolvedAudition,
+  result: AuditionSideResult,
+  audioCodes: string,
+  hooks: SideHooks,
+): Promise<PreviewAudio> {
+  const req: AceRequest = {
+    caption: result.caption || resolved.caption,
+    lyrics: result.lyrics || resolved.lyrics,
+    duration: result.durationSec || resolved.durationSec,
+    ...(result.bpm > 0 ? { bpm: result.bpm } : {}),
+    ...(result.keyscale ? { keyscale: result.keyscale } : {}),
+    ...(result.timesignature ? { timesignature: result.timesignature } : {}),
+    seed: resolved.seed,
+    audio_codes: audioCodes,
+    inference_steps: resolved.renderSteps,
+    task_type: 'text2music',
+    ...(resolved.renderDitModel ? { synth_model: resolved.renderDitModel } : {}),
+    ...(resolved.vaeModel ? { vae_model: resolved.vaeModel } : {}),
+    // NO adapter / adapters / lm_* fields — deliberately.
+  };
+  const jobId = await aceClient.submitSynth(req, resolved.format);
+  await awaitEngineJob(jobId, 'DiT render', hooks);
+  const res = await aceClient.getJobResult(jobId);
+  if (!res.ok) throw new Error(`DiT render result fetch failed (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('DiT render returned no audio');
+  return { slot: result.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav', render: true };
 }
 
 /**
@@ -368,26 +455,11 @@ export async function runOneSide(
     // EVERY dataset stuck at 'queued' with no error and no log line. A wedged
     // engine LM job (OOM-stall, driver hang, or a worker that died without ever
     // setting status 2) is exactly how that happens. Bound + cancel, mirroring
-    // understandClient's deadline/abort handling.
-    const lmDeadline = Date.now() + LM_DEADLINE_MS;
-    for (;;) {
-      // Cancel the ENGINE job too, not just our wait. Abandoning it leaves the
-      // GPU working on a result nobody will fetch, and with ?keep_loaded=1 the
-      // 4B stays pinned — the next train-lm run then kills ace-server mid-flight.
-      if (hooks.isCancelled?.()) {
-        await aceClient.cancelJob(lmJobId).catch(() => { /* engine may already be gone */ });
-        throw new Error('Cancelled');
-      }
-      if (Date.now() > lmDeadline) {
-        await aceClient.cancelJob(lmJobId).catch(() => { /* best effort */ });
-        throw new Error(`LM job timed out after ${Math.round(LM_DEADLINE_MS / 60_000)} min`);
-      }
-      const status = await aceClient.pollJob(lmJobId);
-      if (status.status === 'done') break;
-      if (status.status === 'failed') throw new Error('LM job failed — see ace_engine.log');
-      if (status.status === 'cancelled') throw new Error('LM job cancelled');
-      await new Promise(r => setTimeout(r, 200));
-    }
+    // understandClient's deadline/abort handling. (awaitEngineJob also cancels
+    // the ENGINE job on our cancel/timeout: abandoning it leaves the GPU
+    // working on a result nobody will fetch, and with ?keep_loaded=1 the 4B
+    // stays pinned — the next train-lm run then kills ace-server mid-flight.)
+    await awaitEngineJob(lmJobId, 'LM job', hooks);
     const lmRes = await aceClient.getJobResult(lmJobId);
     if (!lmRes.ok) throw new Error(`LM result fetch failed (${lmRes.status})`);
     const echoed = await lmRes.json() as AceRequest[];
@@ -405,7 +477,7 @@ export async function runOneSide(
     // ── 2. no codes → a soft failure, not a thrown job ───────────────────
     if (!audioCodes.trim()) {
       result.error = 'LM returned no audio codes';
-      return { result, audio: null };
+      return { result, audio: null, renderAudio: null };
     }
 
     result.codesSha1 = sha1(audioCodes);
@@ -422,16 +494,32 @@ export async function runOneSide(
       output_format: resolved.format,
     }, undefined, hooks.isCancelled);
     result.decodeMs = Date.now() - t1;
-
     result.ok = true;
+
+    // ── 4. opt-in DiT render — its failure never fails the side ───────────
+    let renderAudio: PreviewAudio | null = null;
+    if (resolved.renderDit) {
+      hooks.onPhase?.('audition-render');
+      const t2 = Date.now();
+      try {
+        renderAudio = await renderSideThroughDit(resolved, result, audioCodes, hooks);
+        result.renderMs = Date.now() - t2;
+      } catch (err: any) {
+        // A cancel must still cancel the whole side, not degrade to a warning.
+        if (hooks.isCancelled?.()) throw err;
+        result.renderError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
     return {
       result,
       audio: { slot: side.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav' },
+      renderAudio,
     };
   } catch (err: any) {
     result.ok = false;
     result.error = err instanceof Error ? err.message : String(err);
-    return { result, audio: null };
+    return { result, audio: null, renderAudio: null };
   }
 }
 

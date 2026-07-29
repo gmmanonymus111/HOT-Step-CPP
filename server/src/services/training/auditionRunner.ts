@@ -9,7 +9,8 @@
 // everything: {type:'job'} (phase + counters), 'progress', 'log', 'status'.
 //
 // Phase strings (FROZEN): audition-lm-base, audition-lm-adapter,
-// audition-decode, audition-writing.
+// audition-decode, audition-writing. Additive (2026-07-29): audition-render —
+// the opt-in DiT pass between decode and writing.
 //
 // Spec: docs/plans/2026-07-28-codes-preview.md §5.4, C6, C15
 
@@ -101,11 +102,19 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
         audio.push(outcome.audio);
         outcome.result.audioUrl = `/api/training/previews/${previewId}/${side.slot}`;
       }
+      if (outcome.renderAudio) {
+        audio.push(outcome.renderAudio);
+        outcome.result.renderUrl = `/api/training/previews/${previewId}/${side.slot}-render`;
+      }
 
       if (outcome.result.ok) {
         log(job, 'info',
           `${side.label}: ${outcome.result.codesCount} codes (${outcome.result.codesSha1.slice(0, 8)}) ` +
-          `— LM ${outcome.result.lmMs} ms, decode ${outcome.result.decodeMs} ms`);
+          `— LM ${outcome.result.lmMs} ms, decode ${outcome.result.decodeMs} ms` +
+          (outcome.result.renderMs ? `, DiT render ${outcome.result.renderMs} ms` : ''));
+        if (outcome.result.renderError) {
+          log(job, 'warn', `${side.label}: DiT render failed — ${outcome.result.renderError} (the codes sketch is still playable)`);
+        }
       } else {
         job.failed++;
         log(job, 'error', `${side.label}: ${outcome.result.error}`);
@@ -140,6 +149,9 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
       sampleId: resolved.sampleId,
       variantKey: resolved.variantKey,
       sides: results,
+      ...(resolved.renderDit
+        ? { renderDitModel: resolved.renderDitModel, renderSteps: resolved.renderSteps }
+        : {}),
     };
 
     // Written UNCONDITIONALLY, even when every side failed. The record is
@@ -150,7 +162,7 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
     // fixing whatever broke.
     if (!writePreview(preview, audio)) {
       log(job, 'warn', 'The preview could not be written to disk');
-      for (const r of preview.sides) r.audioUrl = '';
+      for (const r of preview.sides) { r.audioUrl = ''; r.renderUrl = ''; }
     }
 
     // C14 receipt, surfaced in the log as well as the UI: two identical hashes

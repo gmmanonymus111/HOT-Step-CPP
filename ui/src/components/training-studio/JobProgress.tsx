@@ -42,6 +42,7 @@ const PHASE_KEYS: Record<string, string> = {
   'audition-lm-base': 'trainingStudio.job.phaseAuditionLmBase',
   'audition-lm-adapter': 'trainingStudio.job.phaseAuditionLmAdapter',
   'audition-decode': 'trainingStudio.job.phaseAuditionDecode',
+  'audition-render': 'trainingStudio.job.phaseAuditionRender',
   'audition-writing': 'trainingStudio.job.phaseAuditionWriting',
 };
 

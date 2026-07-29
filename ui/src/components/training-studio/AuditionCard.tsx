@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AuditionOptions, AuditionPreview, AuditionSideSpec } from '../../services/trainingApi';
+import { usePersistedState } from '../../hooks/usePersistedState';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { AuditionPlayer } from './AuditionPlayer';
 import { JobProgress } from './JobProgress';
@@ -77,6 +78,9 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   const [adapterPath, setAdapterPath] = useState('');
   const [adapterScale, setAdapterScale] = useState(1);
   const [baseScale, setBaseScale] = useState(1);
+  // Persisted (Rob, 2026-07-29): the "hear it as music" choice tends to be a
+  // standing preference, not a per-run one.
+  const [renderDit, setRenderDit] = usePersistedState('hs-auditionRenderDit', false);
   const [temperature, setTemperature] = useState(0.85);
   const [topP, setTopP] = useState(0.9);
   const [cfgScale, setCfgScale] = useState(2);
@@ -220,6 +224,9 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       format: 'wav16',
       coResident: true,
       kind,
+      // Opt-in DiT render (Rob, 2026-07-29): steps/model stay server defaults
+      // (xl-turbo @ 8 steps, no sound adapter) — the toggle is the whole knob.
+      ...(renderDit ? { renderDit: true } : {}),
     };
   };
 
@@ -554,6 +561,22 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
         </div>
         <p className="text-[10px] text-zinc-500 mt-2">{t('trainingStudio.audition.coResidentHint')}</p>
       </details>
+
+      {/* ── Render-through-DiT opt-in ────────────────────────────────────── */}
+      <label className="flex items-start gap-2.5 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={renderDit}
+          onChange={(e) => setRenderDit(e.target.checked)}
+          className="mt-0.5 accent-amber-500"
+        />
+        <span className="text-xs text-zinc-700 dark:text-zinc-300">
+          <span className="font-semibold">{t('trainingStudio.audition.renderDit')}</span>
+          <span className="block text-[11px] text-zinc-500 mt-0.5">
+            {t('trainingStudio.audition.renderDitHint')}
+          </span>
+        </span>
+      </label>
 
       {/* ── Run ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 flex-wrap">

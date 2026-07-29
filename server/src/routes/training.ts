@@ -93,7 +93,7 @@ import {
 } from '../services/training/trainDitStatus.js';
 import { lmAdapterRoots } from '../services/training/adapterLayout.js';
 import {
-  deleteDatasetPreviews, isPreviewId, isPreviewSlot, listPreviews, previewsRoot,
+  deleteDatasetPreviews, isPreviewFileKey, isPreviewId, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
 } from '../services/training/auditionStore.js';
 import { AuditionError, decodeStoredCodes } from '../services/training/auditionService.js';
@@ -394,8 +394,8 @@ router.get('/jobs/:jobId/stream', (req: Request, res: Response) => {
 router.get('/previews/:previewId/:slot', (req: Request, res: Response) => {
   try {
     const previewId = req.params.previewId;
-    const slot = req.params.slot;
-    if (!isPreviewId(previewId) || !isPreviewSlot(slot)) {
+    const slot = req.params.slot;   // 'base' | 'adapter' | '<slot>-render'
+    if (!isPreviewId(previewId) || !isPreviewFileKey(slot)) {
       res.status(404).json({ error: 'Preview not found' });
       return;
     }

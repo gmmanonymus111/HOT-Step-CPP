@@ -77,11 +77,43 @@ export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
               The codes still exist, so the meta line and the planned-output
               details below stay — the plan is half the evidence (C13) and it is
               still valid even when the audio could not be written. */}
+          {/* Opt-in DiT render — the codes played as MUSIC. Listed first when
+              present: it is the human-comparable artifact; the sketch below
+              stays for the structural view. */}
+          {side.renderUrl && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                {t('trainingStudio.audition.renderedLabel')}
+                {!!side.renderMs && (
+                  <span className="ml-2 normal-case font-normal text-zinc-500 tabular-nums">
+                    {t('trainingStudio.audition.renderMs', { ms: Math.round(side.renderMs) })}
+                  </span>
+                )}
+              </span>
+              <audio src={side.renderUrl} controls preload="none" className="w-full h-9" />
+            </div>
+          )}
+          {side.renderError && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+              <span className="min-w-0 break-words">
+                {t('trainingStudio.audition.renderFailed', { error: side.renderError })}
+              </span>
+            </div>
+          )}
+
           {side.audioUrl ? (
             /* Local to the card — preview audio is not a library song, so it
                never goes through the global playback store (same rule as
                SampleDrawer). */
-            <audio src={side.audioUrl} controls preload="none" className="w-full h-9" />
+            <div className="flex flex-col gap-1">
+              {side.renderUrl && (
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                  {t('trainingStudio.audition.sketchLabel')}
+                </span>
+              )}
+              <audio src={side.audioUrl} controls preload="none" className="w-full h-9" />
+            </div>
           ) : (
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
               <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
