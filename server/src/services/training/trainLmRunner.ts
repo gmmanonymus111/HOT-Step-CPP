@@ -21,6 +21,7 @@ import { pushLog } from '../../routes/logs.js';
 import { restartAceServer, stopAceServer } from '../aceEngineProcess.js';
 import { aceTrainExe, buildTrainLmArgs, type ResolvedTrainLmOptions } from './aceTrain.js';
 import { getDataset } from './datasetsRepo.js';
+import { refreshPresetsForNewRun } from './lyricStudioExport.js';
 import {
   emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
@@ -441,6 +442,14 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
           pushLog(`[Training] train-lm job ${job.id}: engine is back up`);
         }
       }
+    }
+
+    // Album presets follow the newest run automatically (Rob, 2026-07-29):
+    // any Lyric Studio preset pointing at an older run of this artist folder
+    // now plays this one. Advisory — a lireek hiccup must not fail the run.
+    const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'lm');
+    if (presetsTouched) {
+      pushLog(`[Training] train-lm job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
     }
 
     pushLog(`[Training] train-lm job ${job.id} finished — adapter at ${opts.adapterDir}`);

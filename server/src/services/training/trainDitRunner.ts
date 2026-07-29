@@ -22,6 +22,7 @@ import { pushLog } from '../../routes/logs.js';
 import { restartAceServer, stopAceServer } from '../aceEngineProcess.js';
 import { aceTrainExe, buildTrainDitArgs, type ResolvedTrainDitOptions } from './aceTrain.js';
 import { getDataset } from './datasetsRepo.js';
+import { refreshPresetsForNewRun } from './lyricStudioExport.js';
 import {
   emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
@@ -449,6 +450,12 @@ export async function runTrainDitJob(job: TrainingJob): Promise<void> {
           pushLog(`[Training] train-dit job ${job.id}: engine is back up`);
         }
       }
+    }
+
+    // Album presets follow the newest run automatically (Rob, 2026-07-29).
+    const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'dit');
+    if (presetsTouched) {
+      pushLog(`[Training] train-dit job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
     }
 
     pushLog(`[Training] train-dit job ${job.id} finished — adapter at ${opts.adapterDir}`);

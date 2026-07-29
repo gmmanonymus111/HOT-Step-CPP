@@ -18,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../../config.js';
 import {
-  findArtistByName, findLyricsSetByAlbum, getOrCreateArtist, getPreset,
+  findArtistByName, findLyricsSetByAlbum, getAllPresets, getOrCreateArtist, getPreset,
   replaceLyricsSetSongs, saveLyricsSet, updateArtistImage, upsertPreset,
 } from '../../db/lireekDb.js';
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
@@ -200,6 +200,74 @@ export function previewLyricStudioExport(
 
 export class LyricStudioExportError extends Error {}
 
+/** An album_presets row mapped back into upsertPreset's input — upsertPreset
+ *  overwrites EVERY column, so any partial update must round-trip the rest. */
+function presetDataFromRow(row: Record<string, any> | null): {
+  adapterPath: string | null; adapterScale: number | null; adapterGroupScales: any;
+  referenceTrackPath: string | null; audioCoverStrength: number | null;
+  lmAdapterPath: string | null; lmAdapterScale: number | null;
+} {
+  let groupScales: any = row?.adapter_group_scales ?? null;
+  if (typeof groupScales === 'string') {
+    try { groupScales = JSON.parse(groupScales); } catch { groupScales = null; }
+  }
+  return {
+    adapterPath: row?.adapter_path ?? null,
+    adapterScale: row?.adapter_scale ?? null,
+    adapterGroupScales: groupScales,
+    referenceTrackPath: row?.reference_track_path ?? null,
+    audioCoverStrength: row?.audio_cover_strength ?? null,
+    lmAdapterPath: row?.lm_adapter_path ?? null,
+    lmAdapterScale: row?.lm_adapter_scale ?? null,
+  };
+}
+
+/** Windows-safe path identity for run-dir comparison. */
+function normPath(p: string): string {
+  return path.resolve(String(p ?? '').replace(/[\\/]+$/, '')).toLowerCase();
+}
+
+/**
+ * A training run just exported into `newRunDir` (`<adapters>/…/<artist>/<stamp>`).
+ * Point every Lyric Studio album preset that references an OLDER run of the same
+ * artist folder — or the unversioned artist folder itself — at the new run, so
+ * presets always play the most recent training (Rob, 2026-07-29). Presets
+ * referencing other adapters entirely are never touched. Returns the number of
+ * presets updated; never throws (callers run inside a training job's success
+ * path where a lireek hiccup must not fail the run).
+ */
+export function refreshPresetsForNewRun(newRunDir: string, kind: 'dit' | 'lm'): number {
+  let updated = 0;
+  try {
+    // A run whose stages skipped 'export' (or whose export failed upstream)
+    // has no weights — never point a preset at an empty dir.
+    const hasWeights = ['adapter_model.safetensors', 'lokr_weights.safetensors']
+      .some(f => fs.existsSync(path.join(newRunDir, f)));
+    if (!hasWeights) return 0;
+    const newDir = normPath(newRunDir);
+    const artistDir = path.dirname(newDir);
+    const column = kind === 'dit' ? 'adapter_path' : 'lm_adapter_path';
+    for (const preset of getAllPresets()) {
+      const stored = preset[column];
+      if (!stored || typeof stored !== 'string') continue;
+      const storedNorm = normPath(stored);
+      if (storedNorm === newDir) continue;                     // already current
+      const isSibling = path.dirname(storedNorm) === artistDir // older stamped run
+        || storedNorm === artistDir;                           // unversioned legacy dir
+      if (!isSibling) continue;
+      const data = presetDataFromRow(preset);
+      if (kind === 'dit') data.adapterPath = newRunDir;
+      else data.lmAdapterPath = newRunDir;
+      upsertPreset(preset.lyrics_set_id, data);
+      updated++;
+      console.log(`[Training] Album preset (lyrics set ${preset.lyrics_set_id}) ${column} → ${newRunDir}`);
+    }
+  } catch (err: any) {
+    console.warn(`[Training] Preset refresh after training failed: ${err?.message ?? err}`);
+  }
+  return updated;
+}
+
 export async function commitLyricStudioExport(
   ds: TrainingDatasetRow, samples: TrainingSample[], input: LyricStudioExportInput,
 ): Promise<LyricStudioExportResult> {
@@ -248,20 +316,10 @@ export async function commitLyricStudioExport(
     const dit = findDitAdapter(ds);
     const lm = findLmAdapter(ds);
     if (dit || lm) {
-      const existing = getPreset(lyricsSetId);
-      let groupScales: any = existing?.adapter_group_scales ?? null;
-      if (typeof groupScales === 'string') {
-        try { groupScales = JSON.parse(groupScales); } catch { groupScales = null; }
-      }
-      upsertPreset(lyricsSetId, {
-        adapterPath: dit ? dit.path : existing?.adapter_path ?? null,
-        adapterScale: existing?.adapter_scale ?? null,
-        adapterGroupScales: groupScales,
-        referenceTrackPath: existing?.reference_track_path ?? null,
-        audioCoverStrength: existing?.audio_cover_strength ?? null,
-        lmAdapterPath: lm ? lm.path : existing?.lm_adapter_path ?? null,
-        lmAdapterScale: existing?.lm_adapter_scale ?? null,
-      });
+      const data = presetDataFromRow(getPreset(lyricsSetId));
+      if (dit) data.adapterPath = dit.path;
+      if (lm) data.lmAdapterPath = lm.path;
+      upsertPreset(lyricsSetId, data);
       presetUpdated = true;
     }
   }

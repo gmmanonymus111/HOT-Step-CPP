@@ -97,13 +97,33 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
     void loadAuditions();
   }, [selectedDatasetId, expanded, loadAuditions]);
 
-  // Seed side B from the adapter this panel just trained, once it exists.
+  // Seed side B from the adapter this panel just trained, and FOLLOW it when a
+  // newer run lands. The old seed-once (`prev ? prev : trainedDir`) captured
+  // whatever run dir the status held at first render — after a failed run that
+  // still wrote weights, the audition stayed pinned to the FAILED run even once
+  // a later run completed (observed live, alk3_infirmary 2026-07-29). Only an
+  // EXPLICIT user pick (picker or milestone badge) stops the auto-follow, and a
+  // dataset switch re-arms it.
   const trainedDir = trainLmStatus?.adapterDir ?? '';
-  useEffect(() => {
-    if (!adapterExists || !trainedDir) return;
-    setAdapterPath(prev => (prev ? prev : trainedDir));
-    setAdapterLabel(prev => (prev ? prev : trainedDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''));
-  }, [adapterExists, trainedDir]);
+  const [adapterPickedByUser, setAdapterPickedByUser] = useState(false);
+  // Dataset switch re-arms the auto-follow — adjust-during-render, the React-
+  // sanctioned form of "reset some state when a prop changes".
+  const [seenDatasetId, setSeenDatasetId] = useState(selectedDatasetId);
+  const [seenTrainedDir, setSeenTrainedDir] = useState('');
+  if (selectedDatasetId !== seenDatasetId) {
+    setSeenDatasetId(selectedDatasetId);
+    setSeenTrainedDir('');
+    setAdapterPickedByUser(false);
+    setAdapterPath('');
+    setAdapterLabel('');
+  } else if (adapterExists && trainedDir && trainedDir !== seenTrainedDir) {
+    setSeenTrainedDir(trainedDir);
+    if (!adapterPickedByUser) {
+      setAdapterPath(trainedDir);
+      // artist/run-stamp — the stamp alone is unreadable across 190+ adapters.
+      setAdapterLabel(trainedDir.replace(/[\\/]+$/, '').split(/[\\/]/).slice(-2).join('/'));
+    }
+  }
 
   const jobActive = activeJob?.status === 'queued' || activeJob?.status === 'running';
   const auditionJobActive = activeJob?.kind === 'audition' && jobActive;
@@ -216,6 +236,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   useEffect(() => {
     if (!milestoneRequest || milestoneRequest.nonce === lastMilestoneNonce.current) return;
     lastMilestoneNonce.current = milestoneRequest.nonce;
+    setAdapterPickedByUser(true);
     setExpandedByUser(true);
     setTwoSided(true);
     setAdapterPath(milestoneRequest.path);
@@ -452,7 +473,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
             />
             <LmAdapterPicker
               value={adapterPath}
-              onChange={setAdapterPath}
+              onChange={(v) => { setAdapterPickedByUser(true); setAdapterPath(v); }}
               disabled={!twoSided}
               extraOptions={milestoneOptions}
             />
