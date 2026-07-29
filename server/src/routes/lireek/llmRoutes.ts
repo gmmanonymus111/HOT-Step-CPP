@@ -8,6 +8,7 @@ import type { Router, Request, Response } from 'express';
 import * as db from '../../db/lireekDb.js';
 import * as llmService from '../../services/lireek/llmService.js';
 import * as profilerService from '../../services/lireek/profilerService.js';
+import { computeAlbumEnrichment } from '../../services/lireek/prompts.js';
 
 /** Safely extract a route param as string (Express 5 types params as string | string[]) */
 function param(req: Request, name: string): string {
@@ -176,6 +177,13 @@ export function registerLlmRoutes(router: Router): void {
       const artistId = lyricsSet?.artist_id;
       const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
 
+      // Profiles built before audio enrichment existed: derive it live from the
+      // lyrics set (Training Studio exports carry bpm/key/genre/caption per
+      // song). Sets without enrichment yield null and the prompts skip it.
+      if (!profile.profile_data.audio_enrichment && lyricsSet) {
+        profile.profile_data.audio_enrichment = computeAlbumEnrichment(lyricsSet.songs);
+      }
+
       const generated = await llmService.generateLyricsStreaming(
         profile.profile_data, provider_name, model, extra_instructions,
         usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations,
@@ -221,6 +229,13 @@ export function registerLlmRoutes(router: Router): void {
       const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
       const artistId = lyricsSet?.artist_id;
       const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
+
+      // Profiles built before audio enrichment existed: derive it live from the
+      // lyrics set (Training Studio exports carry bpm/key/genre/caption per
+      // song). Sets without enrichment yield null and the prompts skip it.
+      if (!profile.profile_data.audio_enrichment && lyricsSet) {
+        profile.profile_data.audio_enrichment = computeAlbumEnrichment(lyricsSet.songs);
+      }
 
       const generated = await llmService.generateLyricsStreaming(
         profile.profile_data, provider_name, model, extra_instructions,

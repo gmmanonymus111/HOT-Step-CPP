@@ -63,6 +63,14 @@ export interface SongLyric {
   title: string;
   lyrics: string;
   url?: string;
+  album?: string;
+  /** Enriched fields from a Training Studio export (absent on plain Genius fetches). */
+  caption?: string;
+  genre?: string;
+  bpm?: number;
+  key?: string;
+  signature?: string;
+  language?: string;
 }
 
 export interface Profile {

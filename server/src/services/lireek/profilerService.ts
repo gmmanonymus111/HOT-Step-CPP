@@ -11,6 +11,9 @@ export interface LyricsProfile {
   artist_id?: number;
   artist: string;
   album?: string;
+  /** Measured audio facts from a Training Studio export (bpm range, keys,
+   *  genre, caption examples) — null/absent for plain Genius-fetched sets. */
+  audio_enrichment?: AlbumEnrichment | null;
   themes: string[];
   common_subjects: string[];
   rhyme_schemes: string[];
@@ -71,7 +74,9 @@ import {
   STYLE_CAPTION_PROMPT,
   SUBJECT_ANALYSIS_PROMPT,
   buildProfilePrompt,
-  buildSubjectAnalysisPrompt
+  buildSubjectAnalysisPrompt,
+  computeAlbumEnrichment,
+  type AlbumEnrichment,
 } from './prompts.js';
 
 // The imported dict is a default export depending on interop.
@@ -767,6 +772,8 @@ export async function buildProfile(
   return {
     artist,
     album: album || undefined,
+    // Deterministic, never LLM-derived — measured facts from the source audio.
+    audio_enrichment: computeAlbumEnrichment(songs),
     themes: merged.themes || [],
     common_subjects: merged.common_subjects || [],
     rhyme_schemes: merged.rhyme_schemes || rhyme.schemes,
@@ -812,6 +819,7 @@ export function recalculateProfileStats(songs: SongLyrics[], profileData: any): 
   return {
     ...profileData,
     // Overwrite computed stats
+    audio_enrichment: computeAlbumEnrichment(songs),
     vocabulary_stats: vocab,
     meter_stats: meter,
     rhyme_schemes: rhyme.schemes,

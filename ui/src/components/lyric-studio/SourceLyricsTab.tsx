@@ -80,6 +80,17 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
               <span className="flex-1 text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
                 {song.title}
               </span>
+              {song.genre ? (
+                <span className="text-[11px] text-amber-500/80 truncate max-w-[180px]" title={song.genre}>
+                  {song.genre.split(',')[0].trim()}
+                </span>
+              ) : null}
+              {song.bpm ? (
+                <span className="text-[11px] text-zinc-500 font-mono">{song.bpm} BPM</span>
+              ) : null}
+              {song.key ? (
+                <span className="text-[11px] text-zinc-500 font-mono">{song.key}</span>
+              ) : null}
               <span className="text-xs text-zinc-500">
                 {lyrics.split('\n').length} lines
               </span>
@@ -88,6 +99,49 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
             {/* Expanded content */}
             {isExpanded && (
               <div className="border-t border-zinc-200 dark:border-white/5">
+                {/* Enriched metadata from a Training Studio export */}
+                {(song.caption || song.genre || song.bpm || song.key || song.signature) && (
+                  <div className="px-4 pt-3 space-y-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {song.genre && (
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5 col-span-2 sm:col-span-4">
+                          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Genre</label>
+                          <p className="text-sm text-amber-300">{song.genre}</p>
+                        </div>
+                      )}
+                      {song.bpm ? (
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">BPM</label>
+                          <p className="text-sm text-pink-300">{song.bpm}</p>
+                        </div>
+                      ) : null}
+                      {song.key && (
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Key</label>
+                          <p className="text-sm text-blue-300">{song.key}</p>
+                        </div>
+                      )}
+                      {song.signature && (
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Time Sig</label>
+                          <p className="text-sm text-purple-300">{song.signature}</p>
+                        </div>
+                      )}
+                      {song.language && (
+                        <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Language</label>
+                          <p className="text-sm text-emerald-300">{song.language}</p>
+                        </div>
+                      )}
+                    </div>
+                    {song.caption && (
+                      <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                        <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Caption</label>
+                        <p className="text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed">{song.caption}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="px-4 py-3">
                   {isEditing ? (
                     <textarea

@@ -84,6 +84,105 @@ export function blueprintToSections(bp: string): string[] {
   });
 }
 
+// ── Album audio enrichment ──────────────────────────────────────────────────
+//
+// A lyrics set exported from the Training Studio carries per-song audio truth
+// measured from the source recordings: caption + genre (Gemini, audio-grounded)
+// and bpm/key/signature (Essentia). When present, that data grounds the
+// metadata planner (BPM range, key palette, genre, caption format) far better
+// than the LLM's guess — and matching the training captions' format keeps a
+// sound adapter trained on the same album accurate. Sets without enrichment
+// (plain Genius fetches) get null here and every consumer skips silently.
+
+export interface AlbumEnrichment {
+  bpmMin: number;               // 0 when no track had a BPM
+  bpmMax: number;
+  keys: string[];               // unique, most-frequent first
+  genres: string[];             // unique tags (comma-split), most-frequent first
+  signatures: string[];         // unique, most-frequent first
+  captionExamples: string[];    // up to 3 verbatim training captions
+  enrichedSongs: number;        // songs carrying at least one enriched field
+  totalSongs: number;
+}
+
+/** Unique non-empty values ordered by frequency (ties keep first-seen order). */
+function freqRank(values: string[]): string[] {
+  const counts = new Map<string, { display: string; n: number; at: number }>();
+  values.forEach((raw, i) => {
+    const v = String(raw ?? '').trim();
+    if (!v) return;
+    const k = v.toLowerCase();
+    const hit = counts.get(k);
+    if (hit) hit.n++;
+    else counts.set(k, { display: v, n: 1, at: i });
+  });
+  return [...counts.values()].sort((a, b) => b.n - a.n || a.at - b.at).map(c => c.display);
+}
+
+/**
+ * Distill one lyrics set's per-song enrichment into album-level facts.
+ * null when NO song carries any enriched field — callers must then behave
+ * exactly as before enrichment existed.
+ */
+export function computeAlbumEnrichment(
+  songs: Array<Record<string, any>> | null | undefined,
+): AlbumEnrichment | null {
+  if (!Array.isArray(songs) || !songs.length) return null;
+
+  const bpms: number[] = [];
+  const keys: string[] = [];
+  const genres: string[] = [];
+  const signatures: string[] = [];
+  const captions: string[] = [];
+  let enriched = 0;
+
+  for (const s of songs) {
+    if (!s || typeof s !== 'object') continue;
+    const bpm = Number(s.bpm);
+    const key = typeof s.key === 'string' ? s.key.trim() : '';
+    const genre = typeof s.genre === 'string' ? s.genre.trim() : '';
+    const signature = typeof s.signature === 'string' ? s.signature.trim() : '';
+    const caption = typeof s.caption === 'string' ? s.caption.trim() : '';
+    const has = (Number.isFinite(bpm) && bpm > 0) || !!key || !!genre || !!caption || !!signature;
+    if (!has) continue;
+    enriched++;
+    if (Number.isFinite(bpm) && bpm > 0) bpms.push(Math.round(bpm));
+    if (key) keys.push(key);
+    // Genre fields are usually comma-separated tag lists — count each tag.
+    if (genre) genres.push(...genre.split(',').map(g => g.trim()).filter(Boolean));
+    if (signature) signatures.push(signature);
+    if (caption) captions.push(caption);
+  }
+
+  if (!enriched) return null;
+
+  return {
+    bpmMin: bpms.length ? Math.min(...bpms) : 0,
+    bpmMax: bpms.length ? Math.max(...bpms) : 0,
+    keys: freqRank(keys),
+    genres: freqRank(genres),
+    signatures: freqRank(signatures),
+    captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, 500)),
+    enrichedSongs: enriched,
+    totalSongs: songs.length,
+  };
+}
+
+/** The shared "=== AUDIO ANALYSIS ===" prompt block (facts only, no guidance). */
+export function formatAlbumEnrichment(e: AlbumEnrichment): string[] {
+  const lines = ["=== AUDIO ANALYSIS (measured from this album's source recordings) ==="];
+  if (e.bpmMax > 0) {
+    lines.push(e.bpmMin === e.bpmMax
+      ? `BPM: ${e.bpmMax} on every analysed track`
+      : `BPM range: ${e.bpmMin}–${e.bpmMax}`);
+  }
+  if (e.keys.length) lines.push(`Keys used: ${e.keys.join(', ')}`);
+  if (e.genres.length) lines.push(`Detected genre: ${e.genres.join(', ')}`);
+  if (e.signatures.length) lines.push(`Time signatures: ${e.signatures.join(', ')}`);
+  lines.push(`(from ${e.enrichedSongs} of ${e.totalSongs} tracks)`);
+  return lines;
+}
+
 // ── System Prompts ──────────────────────────────────────────────────────────
 
 export const GENERATION_SYSTEM_PROMPT = `You are a talented, creative songwriter who specialises in emulating specific artistic styles with uncanny accuracy.
@@ -678,6 +777,27 @@ export function buildMetadataPrompt(
   if (profile.additional_notes) lines.push(`Additional notes: ${profile.additional_notes}`);
   if (profile.perspective) lines.push(`Perspective / voice: ${profile.perspective}`);
 
+  // Audio truth from the source recordings (Training Studio export). Guidance,
+  // not a cage: the planner may leave the ranges when the subject demands it.
+  const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+  if (enrich) {
+    lines.push('', ...formatAlbumEnrichment(enrich));
+    if (enrich.bpmMax > 0) {
+      lines.push(`Choose a BPM inside the album's measured range (${enrich.bpmMin}–${enrich.bpmMax}) unless the subject truly demands otherwise.`);
+    }
+    if (enrich.keys.length) {
+      lines.push('Prefer a key from this album\'s list (or a closely related key) so the song sits in the same tonal world.');
+    }
+    if (enrich.genres.length) {
+      lines.push(`Anchor the caption's genre language to the detected genre: ${enrich.genres.slice(0, 6).join(', ')}.`);
+    }
+    if (enrich.captionExamples.length) {
+      lines.push('', 'Captions describing this album\'s actual recordings:');
+      enrich.captionExamples.forEach((c, i) => lines.push(`  ${i + 1}. "${c}"`));
+      lines.push('Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.');
+    }
+  }
+
   const observedStructures = cleanBlueprints(profile.structure_blueprints);
   if (observedStructures.length) {
     lines.push(`\nStructures observed in this artist's songs (codes: ${BLUEPRINT_CODES_LEGEND}):`);
@@ -727,6 +847,17 @@ export function buildGenerationPrompt(
   if (profile.vocabulary_notes) lines.push(`Vocabulary: ${stripLyricQuotes(profile.vocabulary_notes)}`);
   if (profile.tone_and_mood) lines.push(`Tone & mood: ${stripLyricQuotes(profile.tone_and_mood)}`);
   if (profile.structural_patterns) lines.push(`Structural patterns: ${stripLyricQuotes(profile.structural_patterns)}`);
+  {
+    // One context line of measured audio truth — genre + tempo shape the lyric's
+    // energy and pacing even though bpm/key/caption are planned elsewhere.
+    const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+    if (enrich && (enrich.genres.length || enrich.bpmMax > 0)) {
+      const bits: string[] = [];
+      if (enrich.genres.length) bits.push(`genre ${enrich.genres.slice(0, 5).join(', ')}`);
+      if (enrich.bpmMax > 0) bits.push(enrich.bpmMin === enrich.bpmMax ? `${enrich.bpmMax} BPM` : `${enrich.bpmMin}–${enrich.bpmMax} BPM`);
+      lines.push(`Musical context (measured from the source recordings): ${bits.join('; ')}.`);
+    }
+  }
 
   // Structure: planned by the metadata step if provided, otherwise sampled from
   // the artist's observed blueprints. Presented as a default shape, not a mandate.
@@ -924,7 +1055,17 @@ export function buildProfilePrompt(
 ): string {
   let header = `Artist: ${artist}\n`;
   if (album) header += `Album: ${album}\n`;
-  header += `Songs analysed: ${songs.length}\n\n=== RULE-BASED ANALYSIS ===\n`;
+  header += `Songs analysed: ${songs.length}\n`;
+
+  // Songs exported from the Training Studio carry measured audio facts — give
+  // the analyst ground truth for genre/tempo instead of a lyrics-only guess.
+  const enrich = computeAlbumEnrichment(songs);
+  if (enrich) {
+    header += '\n' + formatAlbumEnrichment(enrich).join('\n') + '\n';
+    header += 'Treat the detected genre and tempo as ground truth — fold them into tone_and_mood and additional_notes rather than inferring a genre from the lyrics alone.\n';
+  }
+
+  header += `\n=== RULE-BASED ANALYSIS ===\n`;
 
   header += `Average verse length: ${ruleStats.avg_verse_lines} lines\n`;
   header += `Average chorus length: ${ruleStats.avg_chorus_lines} lines\n`;

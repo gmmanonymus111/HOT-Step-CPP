@@ -154,6 +154,13 @@ server.tool(
     const pd = profile.profile_data;
     const history = db.getGenerationHistory(profile.artist_id);
 
+    // Profiles built before audio enrichment existed: derive it live from the
+    // lyrics set (Training Studio exports carry bpm/key/genre/caption per song).
+    if (!pd.audio_enrichment) {
+      const set = db.getLyricsSet(profile.lyrics_set_id);
+      if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
+    }
+
     const metadataUserPrompt = prompts.buildMetadataPrompt(
       pd, history.usedSubjects, history.usedBpms, history.usedKeys, history.usedDurations, user_subject
     );
@@ -209,6 +216,12 @@ server.tool(
       return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
     }
     const pd = profile.profile_data;
+
+    // Same live-derivation fallback as prepare_generation (old profiles).
+    if (!pd.audio_enrichment) {
+      const set = db.getLyricsSet(profile.lyrics_set_id);
+      if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
+    }
 
     // Add subject to extra instructions
     let fullInstructions = `The song must be about: ${subject}`;
@@ -480,10 +493,18 @@ server.tool(
     // or filled in from the lyrics set data.
 
     const songList = songs.map((s: any) => `--- ${s.title} ---\n${s.lyrics}`).join('\n\n');
+    // Measured audio facts from a Training Studio export — ground truth for
+    // genre/tempo. Plain Genius-fetched sets yield null and the block is absent.
+    const enrichment = prompts.computeAlbumEnrichment(songs);
     const header = [
       `Artist: ${artistName}`,
       album ? `Album: ${album}` : '',
       `Songs analysed: ${songs.length}`,
+      ...(enrichment ? [
+        '',
+        ...prompts.formatAlbumEnrichment(enrichment),
+        'Treat the detected genre and tempo as ground truth — fold them into tone_and_mood and additional_notes rather than inferring a genre from the lyrics alone.',
+      ] : []),
       '',
       '=== COMPLETE LYRICS ===',
       '',
@@ -570,6 +591,8 @@ server.tool(
     // Add artist name to the profile data
     parsed.artist = lyricsSet.artist_name;
     if (lyricsSet.album) parsed.album = lyricsSet.album;
+    // Deterministic, never agent-derived — measured facts from the source audio.
+    parsed.audio_enrichment = prompts.computeAlbumEnrichment(lyricsSet.songs);
 
     const saved = db.saveProfile(lyrics_set_id, 'antigravity', 'claude-opus-4', parsed);
 
