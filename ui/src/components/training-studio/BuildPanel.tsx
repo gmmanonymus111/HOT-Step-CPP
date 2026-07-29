@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import type { PatchDatasetInput, TagPosition } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
+import { SendToLyricStudio } from './SendToLyricStudio';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
 /** One PATCH per keystroke / slider tick would also rewind the control from the
@@ -182,6 +183,8 @@ export const BuildPanel: React.FC = () => {
           </button>
         </div>
       )}
+
+      <SendToLyricStudio />
     </div>
   );
 };

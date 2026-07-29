@@ -569,6 +569,63 @@ export interface CaptionOptions {
   temperature?: number;
 }
 
+// ─── Lyric Studio export ──────────────────────────────────────────────────
+//
+// A labeled dataset already holds everything a Lyric Studio artist/album entry
+// needs (Genius lyrics, LLM caption+genre, Essentia bpm/key/signature), so a
+// dataset can be exported straight into the lireek tables. Artist/album are
+// DETECTED (embedded-tag majority vote → dataset defaults → folder name) and
+// user-overridable; an existing artist+album set is updated in place, never
+// duplicated. Trained adapters for the dataset are offered as the album preset.
+
+export type LyricStudioFieldSource = 'tags' | 'default' | 'filename' | 'folder' | 'dataset-name';
+
+export interface LyricStudioExportSong {
+  sampleId: string;
+  title: string;
+  album: string;              // per-song album (own tag first, set album else)
+  hasCaption: boolean;
+}
+
+export interface LyricStudioAdapterHit {
+  path: string;               // absolute adapter run dir (folder-only presets)
+  kind: 'dit' | 'lm';
+  detail: string;             // dit-<base> shorthand / LM size — display only
+  trainedAt: string;          // ISO or ''
+}
+
+export interface LyricStudioExportPreview {
+  artist: string;             // detected, pre-fills the override field
+  album: string;
+  artistSource: LyricStudioFieldSource;
+  albumSource: LyricStudioFieldSource;
+  songs: LyricStudioExportSong[];   // includable songs, dataset order
+  skippedInstrumental: number;
+  skippedNoLyrics: number;
+  skippedExcluded: number;
+  existingArtistId: number | null;    // COLLATE NOCASE match on the DETECTED names;
+  existingLyricsSetId: number | null; // the commit re-resolves after overrides
+  existingSongCount: number;
+  ditAdapter: LyricStudioAdapterHit | null;
+  lmAdapter: LyricStudioAdapterHit | null;
+  geniusConfigured: boolean;  // album/artist art fetch will be attempted
+}
+
+export interface LyricStudioExportInput {
+  artist?: string;            // override; omit/'' = detected value
+  album?: string;
+  linkAdapters?: boolean;     // default true — write the album preset from trained adapters
+}
+
+export interface LyricStudioExportResult {
+  artistId: number;
+  lyricsSetId: number;
+  updatedExisting: boolean;
+  songCount: number;
+  presetUpdated: boolean;
+  imageUrl: string;           // album art fetched during export, '' if none
+}
+
 // ── Batch pipeline (multi-folder import + auto-chained stages) ─────────────
 //
 // Verbatim copy of docs/plans/2026-07-28-training-batch-pipeline.md §2.1 /
@@ -812,6 +869,21 @@ export const jobStreamUrl = (jobId: string) => `${API_BASE}/jobs/${encodeURIComp
 /** Built dataset.json, parsed. */
 export async function getDatasetJson(id: string): Promise<{ path: string; builtAt: string; dataset: unknown }> {
   return request<{ path: string; builtAt: string; dataset: unknown }>(`/datasets/${encodeURIComponent(id)}/dataset-json`);
+}
+
+// ── Lyric Studio export ──────────────────────────────────────────────────
+
+export async function getLyricStudioPreview(id: string): Promise<LyricStudioExportPreview> {
+  return request<LyricStudioExportPreview>(`/datasets/${encodeURIComponent(id)}/lyric-studio`);
+}
+
+export async function exportToLyricStudio(
+  id: string, input: LyricStudioExportInput,
+): Promise<LyricStudioExportResult> {
+  return request<LyricStudioExportResult>(
+    `/datasets/${encodeURIComponent(id)}/lyric-studio`,
+    { method: 'POST', ...jsonBody(input) },
+  );
 }
 
 // ─── Codes audition (pure-LM preview) ─────────────────────────────────────

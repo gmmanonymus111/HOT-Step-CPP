@@ -64,6 +64,14 @@ export function getArtist(id: number): Record<string, any> | undefined {
   return getDb().prepare('SELECT * FROM artists WHERE id = ?').get(id) as any;
 }
 
+/** Case-insensitive artist lookup that never creates — preview code must not
+ *  leave rows behind for an export the user then cancels. */
+export function findArtistByName(name: string): Record<string, any> | null {
+  return (getDb().prepare(
+    'SELECT * FROM artists WHERE name = ? COLLATE NOCASE'
+  ).get(name) as any) ?? null;
+}
+
 
 // ── Lyrics Sets ─────────────────────────────────────────────────────────────
 
@@ -80,6 +88,35 @@ export function saveLyricsSet(
     id: result.lastInsertRowid, artist_id: artistId, album, max_songs: maxSongs,
     total_songs: songs.length, image_url: imageUrl ?? null, fetched_at: now,
   };
+}
+
+/** Case-insensitive artist+album match — the update-in-place target for a
+ *  Training Studio export. `songs` stays parsed out like getLyricsSets(). */
+export function findLyricsSetByAlbum(artistId: number, album: string): Record<string, any> | null {
+  const row = getDb().prepare(
+    'SELECT * FROM lyrics_sets WHERE artist_id = ? AND album = ? COLLATE NOCASE'
+  ).get(artistId, album) as any;
+  if (!row) return null;
+  const songs = JSON.parse(row.songs);
+  const { songs: _, ...rest } = row;
+  return { ...rest, total_songs: songs.length };
+}
+
+/** Replace a set's whole song list in place (re-export from Training Studio).
+ *  Album is rewritten too so an override can fix casing/spelling; the image is
+ *  only touched when a non-null one is passed — never cleared. */
+export function replaceLyricsSetSongs(
+  id: number, album: string | null, songs: any[], imageUrl?: string | null,
+): Record<string, any> | null {
+  const now = new Date().toISOString();
+  const db = getDb();
+  db.prepare(
+    'UPDATE lyrics_sets SET album = ?, max_songs = ?, songs = ?, fetched_at = ? WHERE id = ?'
+  ).run(album, songs.length, JSON.stringify(songs), now, id);
+  if (imageUrl) {
+    db.prepare('UPDATE lyrics_sets SET image_url = ? WHERE id = ?').run(imageUrl, id);
+  }
+  return getLyricsSet(id);
 }
 
 export function getLyricsSets(artistId?: number): Record<string, any>[] {

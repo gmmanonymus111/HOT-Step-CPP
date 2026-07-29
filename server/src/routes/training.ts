@@ -39,6 +39,8 @@
 //   POST   /datasets/:id/enhance/caption                — start an LLM caption job
 //   POST   /datasets/:id/build                          — start a build job
 //   GET    /datasets/:id/dataset-json                   — read back the built file
+//   GET    /datasets/:id/lyric-studio                   — export preview (detected artist/album, adapters)
+//   POST   /datasets/:id/lyric-studio                   — commit export into Lyric Studio
 //   POST   /datasets/:id/preprocess                     — start a tensor-cache job
 //   GET    /datasets/:id/preprocess                     — tensor-cache status
 //   DELETE /datasets/:id/preprocess/:variantKey         — delete one cache variant
@@ -95,9 +97,13 @@ import {
   prunePreviews, resolvePreviewFile,
 } from '../services/training/auditionStore.js';
 import { AuditionError, decodeStoredCodes } from '../services/training/auditionService.js';
+import {
+  commitLyricStudioExport, LyricStudioExportError, previewLyricStudioExport,
+} from '../services/training/lyricStudioExport.js';
 import type {
   AuditionListResponse, AuditionOptions, AuditionSideSpec,
   BulkSetInput, CaptionOptions, CreateDatasetInput, FieldSource, GeniusOptions, LabelOptions, LmSize,
+  LyricStudioExportInput,
   PatchSampleInput, PipelineFolderSpec, PipelineStage,
   PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetRow, TrainingDefaults, TrainingSample,
@@ -1133,6 +1139,53 @@ router.get('/datasets/:id/dataset-json', (req: Request, res: Response) => {
     res.json({ path: target, builtAt: ds.builtAt, dataset });
   } catch (err: any) {
     console.error(`[Training] dataset-json read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Lyric Studio export ──────────────────────────────────────────────────
+
+router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const samples = await buildSamples(ds, { warnings: [] });
+    res.json(previewLyricStudioExport(ds, samples));
+  } catch (err: any) {
+    if (err instanceof ScanLimitError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error(`[Training] Lyric Studio preview failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/datasets/:id/lyric-studio', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const body = (req.body ?? {}) as LyricStudioExportInput;
+    const input: LyricStudioExportInput = {
+      artist: typeof body.artist === 'string' ? body.artist.slice(0, 200) : undefined,
+      album: typeof body.album === 'string' ? body.album.slice(0, 200) : undefined,
+      linkAdapters: body.linkAdapters !== false,
+    };
+    const samples = await buildSamples(ds, { warnings: [] });
+    const result = await commitLyricStudioExport(ds, samples, input);
+    res.json(result);
+  } catch (err: any) {
+    if (err instanceof LyricStudioExportError || err instanceof ScanLimitError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error(`[Training] Lyric Studio export failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
