@@ -44,7 +44,11 @@ export interface TrainLmFormState {
 }
 
 export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
-  lmSize: '0.6B',
+  // 4B is the base Rob actually trains against (Rob, 2026-07-29) — 0.6B was
+  // only ever the safe-for-any-GPU seed and meant every real run started with
+  // a size click. The server contract's own default stays 0.6B; this is the
+  // FORM seed, and stored per-stage defaults still override it.
+  lmSize: '4B',
   lmModel: '',
   adapterName: '',
   targetLoss: 4.0,

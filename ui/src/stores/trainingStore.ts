@@ -878,6 +878,16 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     switch (ev.type) {
       case 'job':
         set({ activeJob: ev.job });
+        // finishJob() emits this terminal 'job' frame BEFORE the 'status'
+        // frame — and setting a terminal activeJob closes the EventSource
+        // (useTrainingStream keys on jobActive), racing the status frame's
+        // delivery. When the close won, refreshAfterJob never ran and a
+        // finished audition's previews (or a trained adapter's status) only
+        // appeared after a manual page refresh. Terminal is terminal whichever
+        // frame says it first; refreshedJobs dedupes the double-fire.
+        if (ev.job.status !== 'queued' && ev.job.status !== 'running') {
+          refreshAfterJob(get, ev.job.id);
+        }
         break;
 
       case 'progress': {
