@@ -246,15 +246,30 @@ export function refreshPresetsForNewRun(newRunDir: string, kind: 'dit' | 'lm'): 
     if (!hasWeights) return 0;
     const newDir = normPath(newRunDir);
     const artistDir = path.dirname(newDir);
+    const artistName = path.basename(artistDir);
     const column = kind === 'dit' ? 'adapter_path' : 'lm_adapter_path';
+    const otherColumn = kind === 'dit' ? 'lm_adapter_path' : 'adapter_path';
     for (const preset of getAllPresets()) {
       const stored = preset[column];
-      if (!stored || typeof stored !== 'string') continue;
-      const storedNorm = normPath(stored);
-      if (storedNorm === newDir) continue;                     // already current
-      const isSibling = path.dirname(storedNorm) === artistDir // older stamped run
-        || storedNorm === artistDir;                           // unversioned legacy dir
-      if (!isSibling) continue;
+      let retarget = false;
+      if (stored && typeof stored === 'string') {
+        const storedNorm = normPath(stored);
+        if (storedNorm === newDir) continue;                   // already current
+        retarget = path.dirname(storedNorm) === artistDir      // older stamped run
+          || storedNorm === artistDir;                         // unversioned legacy dir
+      } else {
+        // Column empty — e.g. the album was exported after LM training but
+        // before any DiT run existed. If the preset's OTHER column already
+        // points at this same artist's adapter, this run belongs to the same
+        // album: fill the gap so the preset carries both adapters.
+        const other = preset[otherColumn];
+        if (other && typeof other === 'string') {
+          const otherNorm = normPath(other);
+          retarget = path.basename(path.dirname(otherNorm)) === artistName
+            || path.basename(otherNorm) === artistName;
+        }
+      }
+      if (!retarget) continue;
       const data = presetDataFromRow(preset);
       if (kind === 'dit') data.adapterPath = newRunDir;
       else data.lmAdapterPath = newRunDir;
