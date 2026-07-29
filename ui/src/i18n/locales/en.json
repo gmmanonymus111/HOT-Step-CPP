@@ -209,7 +209,7 @@
     "trainingStudio.audition.sideFailed": "This side failed.",
     "trainingStudio.audition.noPreviewFile": "Decoded, but the preview could not be written to disk — there is nothing to play.",
     "trainingStudio.audition.renderDit": "Render through DiT — hear it as music",
-    "trainingStudio.audition.renderDitHint": "Runs each side's codes through xl-turbo at 8 steps with NO sound adapter, same seed both sides — the planner adapter stays the only variable. Slower, but human ears can actually judge it.",
+    "trainingStudio.audition.renderDitHint": "Runs each side's codes through your selected DiT at 8 steps with NO sound adapter, same seed both sides — the planner adapter stays the only variable. Slower, but human ears can actually judge it.",
     "trainingStudio.audition.renderedLabel": "Rendered through DiT",
     "trainingStudio.audition.sketchLabel": "5 Hz codes sketch",
     "trainingStudio.audition.renderMs": "{{ms}}ms render",

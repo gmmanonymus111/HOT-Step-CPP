@@ -16,6 +16,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import type { AuditionOptions, AuditionPreview, AuditionSideSpec } from '../../services/trainingApi';
 import { usePersistedState } from '../../hooks/usePersistedState';
+import { useGlobalParamsStore } from '../../stores/globalParamsStore';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { AuditionPlayer } from './AuditionPlayer';
 import { JobProgress } from './JobProgress';
@@ -81,6 +82,10 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   // Persisted (Rob, 2026-07-29): the "hear it as music" choice tends to be a
   // standing preference, not a per-run one.
   const [renderDit, setRenderDit] = usePersistedState('hs-auditionRenderDit', false);
+  // The render runs on whatever DiT the user has selected in the models tab
+  // (Rob, 2026-07-29) — the same hs-ditModel every generation uses. '' falls
+  // back server-side (newest xl-turbo, else the detok DiT).
+  const selectedDitModel: string = useGlobalParamsStore(s => s.ditModel) || '';
   const [temperature, setTemperature] = useState(0.85);
   const [topP, setTopP] = useState(0.9);
   const [cfgScale, setCfgScale] = useState(2);
@@ -224,9 +229,12 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       format: 'wav16',
       coResident: true,
       kind,
-      // Opt-in DiT render (Rob, 2026-07-29): steps/model stay server defaults
-      // (xl-turbo @ 8 steps, no sound adapter) — the toggle is the whole knob.
-      ...(renderDit ? { renderDit: true } : {}),
+      // Opt-in DiT render (Rob, 2026-07-29): the user's selected DiT at the
+      // server-default 8 steps, never a sound adapter — the toggle is the
+      // whole knob.
+      ...(renderDit
+        ? { renderDit: true, ...(selectedDitModel ? { renderDitModel: selectedDitModel } : {}) }
+        : {}),
     };
   };
 
