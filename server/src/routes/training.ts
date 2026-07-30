@@ -1576,17 +1576,20 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
-    // 'weights' went bf16 (2026-07-29) and back to 'f32-window' (Rob,
-    // 2026-07-30) to match the DiT's F32 mirror. This is once again the CLI's
-    // own default, so an omitted field emits no --weights flag at all.
+    // The 'weights' default flipped to 'bf16' (2026-07-29) and is no longer the
+    // CLI default ('f32-window'), so an omitted field now DOES emit an explicit
+    // --weights bf16 flag (buildTrainLmArgs).
     //
-    // KNOWN COST: bf16 was also how the LM reached the mul_mat backward, via
-    // lm-bf16.h's in-place out_prod rewrite (~1.7-1.8x on the GEMM mix). It
-    // cannot be bought back with --bwd mm here — see the bwd comment below.
+    // It was briefly moved to 'f32-window' on 2026-07-30, to mirror the DiT's
+    // F32 mirror, and reverted the same day: on the LM, bf16 is ALSO the only
+    // route to the mul_mat backward (lm-bf16.h rewrites out_prod in place,
+    // ~1.7-1.8x on the GEMM mix) and --bwd mm cannot substitute — see below.
+    // Unlike the DiT's mirror, this is not a free precision/speed dial.
+    //
     // The engine owns the semantic rules (bf16 needs a BF16 base; batch>1
     // implies low-VRAM) — this is a value whitelist only, so a stale UI can
     // never make the runner stop ace-server for an argument ace-train rejects.
-    const weights = body.weights === undefined ? 'f32-window' : body.weights;
+    const weights = body.weights === undefined ? 'bf16' : body.weights;
     if (weights !== 'f32-window' && weights !== 'bf16') {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
