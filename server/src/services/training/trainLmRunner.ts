@@ -416,14 +416,19 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
 
       // ── 4. post-check ──────────────────────────────────────────────────
       if (opts.stages.includes('export')) {
-        // LoKr exports write lokr_weights.safetensors and deliberately NO
-        // adapter_model.safetensors — checking only the PEFT name would report
-        // "wrote no adapter" for a perfectly good LoKr run (the DiT runner hit
-        // this first; same fix).
-        const model = path.join(opts.adapterDir,
-          opts.adapterType === 'lokr' ? 'lokr_weights.safetensors' : 'adapter_model.safetensors');
-        const cfg = path.join(opts.adapterDir, 'adapter_config.json');
-        if (!fs.existsSync(model) || !fs.existsSync(cfg)) {
+        // A LoKr export writes lokr_weights.safetensors and deliberately NO
+        // adapter_config.json — that file is PEFT-only, and alpha rides the
+        // per-module tensors plus __metadata__.lokr_config instead. Demanding
+        // the PEFT PAIR here failed a completed 400 MB LoKr run that had
+        // already hit its target loss (2026-07-30). Fixing only the model
+        // filename and leaving the config requirement, as a first pass did,
+        // fails it in exactly the same place — the whole pair has to be
+        // conditional. Same shape as trainDitRunner's check.
+        const wrote = opts.adapterType === 'lokr'
+          ? fs.existsSync(path.join(opts.adapterDir, 'lokr_weights.safetensors'))
+          : fs.existsSync(path.join(opts.adapterDir, 'adapter_model.safetensors'))
+            && fs.existsSync(path.join(opts.adapterDir, 'adapter_config.json'));
+        if (!wrote) {
           throw new Error('ace-train finished but wrote no adapter');
         }
       }
