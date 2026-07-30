@@ -1857,7 +1857,7 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const ckptSegments = numOpt(body.ckptSegments, 1);
     // Optimizer (2026-07-30). Default 'adamw' — the shipped path — so an
     // omitted field can never move an existing caller onto Muon.
-    const muonLrScale = numOpt(body.muonLrScale, 1.0);
+    const muonLrScale = numOpt(body.muonLrScale, 20.0);
     const muonMomentum = numOpt(body.muonMomentum, 0.95);
     const muonNsSteps = numOpt(body.muonNsSteps, 5);
     const muonMinDim = numOpt(body.muonMinDim, 16);
@@ -2012,8 +2012,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // only the exact string 'outprod' opts back out to upstream ggml's
       // F32-only out_prod backward.
       bwd: body.bwd === 'outprod' ? 'outprod' : 'mm',
-      // Only the exact string 'muon' opts in; anything else is AdamW.
-      optimizer: body.optimizer === 'muon' ? 'muon' : 'adamw',
+      // DEFAULT MUON (2026-07-30, after the ear test). Only the exact string
+      // 'adamw' opts back out. Measured on gunship_unicorn: 161 epochs to ma5
+      // 0.6 vs AdamW's 227, and with bucketing that is ~1.23x on wall-clock —
+      // Rob's own run reached 0.6 in ~5 minutes and the adapter was judged
+      // perfect by ear, which is what made this a default rather than a flag.
+      optimizer: body.optimizer === 'adamw' ? 'adamw' : 'muon',
       muonLrScale,
       muonMomentum,
       muonNsSteps: Math.trunc(muonNsSteps),

@@ -63,6 +63,23 @@ struct LmTrainArgs {
     // backward graph is built (ace-train.cpp).
     std::string bwd = "outprod";
 
+    // Optimizer (2026-07-30, ported from the DiT trainer — lm-optim.h is shared,
+    // so the rule split, batched Newton-Schulz and shape bucketing were already
+    // sitting underneath this trainer unused). "adamw" is the default and the
+    // shipped path. "muon" puts every 2-D parameter whose SHORT side is >=
+    // muon_min_dim on orthogonalized-momentum updates.
+    //
+    // NOTE FOR LoRA: A is [H, r], so the SHORT SIDE IS THE RANK. At the default
+    // rank 16 that is exactly muon_min_dim, and a rank-8 adapter would fall
+    // entirely through to AdamW — lm_optim_init logs the split, so check it.
+    std::string optimizer     = "adamw";
+    float       muon_lr_scale = 1.0f;
+    float       muon_momentum = 0.95f;
+    int         muon_ns_steps = 5;
+    bool        muon_nesterov = true;
+    int         muon_min_dim  = 16;
+    int         muon_bucket   = 16;
+
     // Trigger word embedded in the exported adapter. Empty = fall back to the
     // variant's preprocess_meta.json custom_tag/tag_position; still empty after
     // that = no trigger keys written and the adapter is byte-identical to a
@@ -528,6 +545,15 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     LmOptim opt;
     {
         std::string err;
+        // BEFORE init: the rule split and the optimizer-state allocation are both
+        // decided there (a Muon parameter gets no second momentum buffer).
+        opt.optimizer     = a.optimizer;
+        opt.muon.lr_scale = a.muon_lr_scale;
+        opt.muon.momentum = a.muon_momentum;
+        opt.muon.ns_steps = a.muon_ns_steps;
+        opt.muon.nesterov = a.muon_nesterov;
+        opt.muon.min_dim  = a.muon_min_dim;
+        opt.muon.bucket   = a.muon_bucket;
         if (!lm_optim_init(&opt, lora.params, lm.backend, &err)) {
             lm_fatal("vram", err);
             return 1;

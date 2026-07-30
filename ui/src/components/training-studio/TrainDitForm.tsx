@@ -141,11 +141,12 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   // (2026-07-29): identical maths to out_prod but dtype-agnostic, so the BF16
   // mirror above rides BF16 tensor cores instead of being promoted to F32.
   bwd: 'mm',
-  // Optimizer (2026-07-30). AdamW is the shipped path and stays the default:
-  // Muon measured at PARITY on epochs-to-target while costing ~46% more per
-  // epoch, so it is an experiment to opt into, not a better default. See
-  // docs/TRAINING.md. muonMomentum/muonMinDim are left to the engine.
-  optimizer: 'adamw',
+  // Muon is the DEFAULT (2026-07-30). The 10-epoch comparison that suggested
+  // parity was too short a window: over a full run Muon reached ma5 0.6 in 161
+  // epochs against AdamW's 227, and once the Newton-Schulz was bucketed that
+  // became ~1.23x on wall-clock. Ear-validated before the flip.
+  // muonMomentum/muonMinDim/muonBucket are left to the engine defaults.
+  optimizer: 'muon',
   muonLrScale: 20,
   muonNsSteps: 5,
   // Micro-batching + checkpointing defaults (design §2.2 / C3/C5) — the engine's
@@ -938,7 +939,7 @@ export const TrainDitForm: React.FC<Props> = ({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            {P('optimizer', 'Default AdamW · Muon is experimental')}
+            {P('optimizer', 'Default Muon · AdamW to compare')}
             <StyledSelect
               accent="amber"
               value={value.optimizer}

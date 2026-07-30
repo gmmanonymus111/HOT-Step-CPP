@@ -208,6 +208,24 @@ static void print_usage(void) {
             "                                                      ~1.7-1.8x per layer per step on an\n"
             "                                                      RTX 5090. Needs the vendored patch\n"
             "                                                      engine/patches/mm-backward.patch.\n"
+            "    --optimizer <adamw|muon>    adamw       muon puts every 2-D parameter whose SHORT side is\n"
+            "                                            >= --muon-min-dim on orthogonalized-momentum\n"
+            "                                            (Newton-Schulz) updates. FOR A LoRA THE SHORT\n"
+            "                                            SIDE IS THE RANK, so at rank 16 (the default)\n"
+            "                                            every adapter matrix qualifies and at rank 8\n"
+            "                                            none do — the startup line reports the split.\n"
+            "                                            On the DiT this measured 1.41x fewer epochs to\n"
+            "                                            target; it is untested on the LM.\n"
+            "    --muon-lr-scale <f>         1.0         multiplies the shared LR schedule for Muon\n"
+            "                                            params only. Muon's update is normalized, so its\n"
+            "                                            LR does NOT mean AdamW's — the DiT needed ~20.\n"
+            "    --muon-momentum <f>         0.95\n"
+            "    --muon-ns-steps <n>         5           Newton-Schulz iterations\n"
+            "    --muon-min-dim <n>          16          short-side floor for Muon eligibility\n"
+            "    --muon-bucket <n>           16          params per batched Newton-Schulz (measured\n"
+            "                                            optimum 8-16; larger is worse, the gather is\n"
+            "                                            quadratic in bucket size)\n"
+            "    --no-muon-nesterov                      use the plain momentum buffer, not g + mu*m\n"
             "    --batch <n|auto>            1           micro-batch size. NOT SUPPORTED in this build:\n"
             "                                            micro-batching was never written — the host\n"
             "                                            overhead it would amortise measures 9.3%% at 4B,\n"
@@ -941,6 +959,13 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
+        else if (!strcmp(argv[i], "--optimizer") && i + 1 < argc) a.optimizer = argv[++i];
+        else if (!strcmp(argv[i], "--muon-lr-scale") && i + 1 < argc) a.muon_lr_scale = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-momentum") && i + 1 < argc) a.muon_momentum = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-ns-steps") && i + 1 < argc) a.muon_ns_steps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-bucket") && i + 1 < argc) a.muon_bucket = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
