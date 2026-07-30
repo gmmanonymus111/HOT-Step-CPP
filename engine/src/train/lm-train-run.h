@@ -678,7 +678,23 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     bp.backend     = lm.backend;
     bp.cpu_backend = lm.cpu_backend;
     bp.has_gpu     = lm.backend != lm.cpu_backend;
-    ggml_backend_sched_t sched = backend_sched_new(bp, std::max(8192, graph_nodes + graph_nodes / 2 + 2048));
+    // THE SCHEDULER IS SHARED WITH THE OPTIMIZER STEP, so it must be sized for
+    // whichever of the two graphs is larger — not just the training one.
+    //
+    // This bit a real 4B Muon run (2026-07-30): the low-VRAM path segments the
+    // model, so `graph_nodes` was 569 and the sched took the 8192 floor, while
+    // Muon's optimizer graph for 612 parameters is ~7-9k nodes. ggml asserts
+    // `hash_set.size >= n_nodes + n_leafs` (ggml-backend.cpp:1866) and aborts
+    // mid-run. It did NOT show on the 0.6B, where the graph is unsegmented and
+    // big enough that the sched was large enough by accident — which is exactly
+    // the kind of luck that makes a smoke test lie.
+    //
+    // opt.est_nodes is the optimizer's own cap (AdamW ~8/param, Muon ~(20+10*ns)
+    // per bucket plus ~10/param) and already carries 25%; the extra quarter here
+    // covers leafs, which the assert counts and est_nodes does not.
+    const int sched_nodes = std::max(std::max(8192, graph_nodes + graph_nodes / 2 + 2048),
+                                     opt.est_nodes + opt.est_nodes / 4 + 1024);
+    ggml_backend_sched_t sched = backend_sched_new(bp, sched_nodes);
     if (low) {
         run.sched = sched;
     }
