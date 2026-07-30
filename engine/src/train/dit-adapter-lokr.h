@@ -17,6 +17,7 @@
 // against x directly (§2.3) and its retained intermediates scale with the
 // activations instead.
 
+#include "lokr-common.h"
 #include "train/dit-adapter.h"
 
 #include <algorithm>
@@ -31,41 +32,16 @@
 // past the crossover to m = dimension, n = 1 and then spins forever looking for
 // a divisor above `dimension`. The plan's §1 pseudocode drops it; LyCORIS has
 // it, and (2048, -1) -> (32, 64) only comes out with it.
-static void dit_lokr_factorization(int64_t dimension, int factor, int64_t * out_m, int64_t * out_n) {
-    if (factor > 0 && (dimension % (int64_t) factor) == 0) {
-        int64_t m = (int64_t) factor, n = dimension / (int64_t) factor;
-        if (m > n) {
-            std::swap(m, n);
-        }
-        *out_m = m;
-        *out_n = n;
-        return;
-    }
-    const int64_t cap    = (factor < 0) ? dimension : (int64_t) factor;
-    int64_t       m      = 1, n = dimension;
-    const int64_t length = m + n;
-    while (m < n) {
-        int64_t new_m = m + 1;
-        while (dimension % new_m != 0) {
-            new_m++;
-        }
-        const int64_t new_n = dimension / new_m;
-        if (new_m + new_n > length || new_m > cap) {
-            break;
-        }
-        m = new_m;
-        n = new_n;
-    }
-    if (m > n) {
-        std::swap(m, n);
-    }
-    *out_m = m;
-    *out_n = n;
+// Moved to engine/src/lokr-common.h (2026-07-30) so the LM trainer uses the
+// SAME rules — a trainer/loader disagreement here is not a crash, it is an
+// adapter that loads and quietly computes something else.
+static inline void dit_lokr_factorization(int64_t dimension, int factor, int64_t * out_m, int64_t * out_n) {
+    lokr_factorization(dimension, factor, out_m, out_n);
 }
 
 // LyCORIS keeps w2 monolithic unless the factorized form is strictly cheaper.
 static inline bool dit_lokr_w2_mono(int dim, int64_t out_k, int64_t in_n) {
-    return !((double) dim < (double) std::max(out_k, in_n) / 2.0);
+    return lokr_w2_mono(dim, out_k, in_n);
 }
 
 // K3: HOT-Step's loaders read only `lokr_w1`, so w1 is always monolithic. This

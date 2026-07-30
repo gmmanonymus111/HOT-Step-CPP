@@ -22,6 +22,7 @@
 // docs/plans/2026-07-27-lm-trainer-implementation.md §3.4
 
 #include "qwen3-lm.h"
+#include "lokr-common.h"
 #include "qwen3-lora.h"
 #include "train/lm-bf16.h"  // LmWtCollect — Lever A (--weights bf16)
 #include "train/lm-common.h"
@@ -181,6 +182,16 @@ struct LmLora {
     float                      alpha     = 0.0f;
     float                      scale     = 1.0f;
     size_t                     n_params  = 0;
+
+    // LoKr (2026-07-30). The factors themselves hang off QwLoraPair, so the
+    // graph, the optimizer, the checkpoint driver and the training loop are all
+    // untouched — lm_linear dispatches on pr->has_lokr() and everything
+    // downstream just sees a different set of ggml_set_param'd tensors.
+    bool  is_lokr        = false;
+    int   lokr_dim       = 0;
+    int   lokr_factor    = 0;
+    float lokr_alpha     = 0.0f;
+    bool  lokr_decompose = true;
 };
 
 static void lm_lora_free(LmLora * L) {
@@ -296,6 +307,146 @@ static bool lm_lora_init(LmLora * L, Qwen3LM * lm, int layer_lo, int layer_hi, i
             layer_lo, layer_hi, rank, (double) alpha, n_par, (double) n_par * 4.0 / 1048576.0);
     return true;
 }
+
+// ─── LoKr parameterization (2026-07-30) ─────────────────────────────────────
+//
+// LyCORIS parity via the shared rules in lokr-common.h, so a file written here
+// has the same layout as one written by the DiT trainer and is read by the same
+// adapter-merge.h kron path.
+//
+//   (out_l, out_k) = factorization(out, factor)
+//   (in_m,  in_n)  = factorization(in,  factor)
+//   dW = kron(w1, w2) * (alpha / dim),  w1 ggml [in_m, out_l], w2 [in_n, out_k]
+//
+// Init mirrors the DiT's: the delta must start at EXACTLY zero or the first
+// step perturbs a base that has not been trained toward yet — monolithic w2 is
+// zeroed and w1 kaiming; factorized w2_a is kaiming and w2_b zeroed.
+static bool lm_lokr_init(LmLora * L, Qwen3LM * lm, int layer_lo, int layer_hi, int dim, float alpha, int factor,
+                         bool decompose_both, uint64_t seed, std::string * err) {
+    const Qwen3LMConfig & c = lm->cfg;
+    L->is_lokr        = true;
+    L->lokr_dim       = dim;
+    L->lokr_factor    = factor;
+    L->lokr_alpha     = alpha;
+    L->lokr_decompose = decompose_both;
+    L->layer_lo       = layer_lo;
+    L->layer_hi       = layer_hi;
+
+    const int n_lay = layer_hi - layer_lo;
+    const int n_ten = n_lay * QW_LORA_NSLOTS * 3;  // w1 + (w2 | w2_a + w2_b)
+    ggml_init_params p = { (size_t) (n_ten + 8) * ggml_tensor_overhead(), nullptr, true };
+    L->ctx             = ggml_init(p);
+    if (!L->ctx) {
+        *err = "cannot create the LoKr context";
+        return false;
+    }
+    for (int i = 0; i < QW3LM_MAX_LAYERS; i++) {
+        L->layers[i] = QwLoraLayer{};
+    }
+
+    int n_mono = 0, n_fact = 0;
+    for (int l = layer_lo; l < layer_hi; l++) {
+        for (int s = 0; s < QW_LORA_NSLOTS; s++) {
+            int in_dim = 0, out_dim = 0;
+            lm_slot_dims(c, s, &in_dim, &out_dim);
+            QwLoraPair & pr = L->layers[l].p[s];
+            lokr_factorization(out_dim, factor, &pr.out_l, &pr.out_k);
+            lokr_factorization(in_dim, factor, &pr.in_m, &pr.in_n);
+
+            // Refuse rather than train something that cannot be exported: the
+            // kron of the chosen factors has to reconstruct the base shape
+            // exactly, or the adapter is unloadable.
+            if (pr.out_l * pr.out_k != (int64_t) out_dim || pr.in_m * pr.in_n != (int64_t) in_dim) {
+                char b[192];
+                snprintf(b, sizeof(b), "layer %d slot %s does not factorize: base [%d,%d] but kron gives [%lld,%lld]",
+                         l, lm_slot_peft_name(s), in_dim, out_dim, (long long) (pr.in_m * pr.in_n),
+                         (long long) (pr.out_l * pr.out_k));
+                *err = b;
+                return false;
+            }
+
+            const bool mono = lokr_w2_mono(dim, pr.out_k, pr.in_n);
+            // LyCORIS forces alpha = dim when both factors are monolithic, which
+            // makes the in-graph scale exactly 1 (DiT K6).
+            float a_eff = (alpha == 0.0f) ? (float) dim : alpha;
+            if (mono) {
+                a_eff = (float) dim;
+            }
+            pr.lokr_scale = a_eff / (float) dim;
+
+            char nm[128];
+            pr.w1 = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, pr.in_m, pr.out_l);
+            snprintf(nm, sizeof(nm), "L%d.%s.lokr_w1", l, lm_slot_peft_name(s));
+            ggml_set_name(pr.w1, nm);
+            ggml_set_param(pr.w1);
+            L->params.push_back(pr.w1);
+            if (mono) {
+                pr.w2 = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, pr.in_n, pr.out_k);
+                snprintf(nm, sizeof(nm), "L%d.%s.lokr_w2", l, lm_slot_peft_name(s));
+                ggml_set_name(pr.w2, nm);
+                ggml_set_param(pr.w2);
+                L->params.push_back(pr.w2);
+                n_mono++;
+            } else {
+                pr.w2_a = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, dim, pr.out_k);
+                pr.w2_b = ggml_new_tensor_2d(L->ctx, GGML_TYPE_F32, pr.in_n, dim);
+                snprintf(nm, sizeof(nm), "L%d.%s.lokr_w2_a", l, lm_slot_peft_name(s));
+                ggml_set_name(pr.w2_a, nm);
+                snprintf(nm, sizeof(nm), "L%d.%s.lokr_w2_b", l, lm_slot_peft_name(s));
+                ggml_set_name(pr.w2_b, nm);
+                ggml_set_param(pr.w2_a);
+                ggml_set_param(pr.w2_b);
+                L->params.push_back(pr.w2_a);
+                L->params.push_back(pr.w2_b);
+                n_fact++;
+            }
+        }
+    }
+
+    L->buf = ggml_backend_alloc_ctx_tensors(L->ctx, lm->backend);
+    if (!L->buf) {
+        *err = "LoKr parameter buffer allocation failed";
+        return false;
+    }
+
+    LmRng rng;
+    lm_rng_seed(&rng, seed);
+    std::vector<float> v;
+    size_t             n_par = 0;
+    for (int l = layer_lo; l < layer_hi; l++) {
+        for (int s = 0; s < QW_LORA_NSLOTS; s++) {
+            QwLoraPair & pr = L->layers[l].p[s];
+            auto kaiming = [&](ggml_tensor * t) {
+                v.assign((size_t) ggml_nelements(t), 0.0f);
+                lm_rng_fill_normal(&rng, v, 1.0f / sqrtf((float) t->ne[0]));
+                ggml_backend_tensor_set(t, v.data(), 0, v.size() * sizeof(float));
+                n_par += v.size();
+            };
+            auto zeros = [&](ggml_tensor * t) {
+                v.assign((size_t) ggml_nelements(t), 0.0f);
+                ggml_backend_tensor_set(t, v.data(), 0, v.size() * sizeof(float));
+                n_par += v.size();
+            };
+            kaiming(pr.w1);
+            if (pr.w2) {
+                zeros(pr.w2);
+            } else {
+                kaiming(pr.w2_a);
+                zeros(pr.w2_b);
+            }
+        }
+        // ATTACH, exactly as lm_lora_init does. Without this the model's layers
+        // carry no adapter pointer, the graph applies nothing, every parameter
+        // is unreachable, and ggml_build_backward_expand aborts with "no
+        // trainable parameters found" — which is what it did.
+        lm->layers[l].lora = &L->layers[l];
+    }
+    L->n_params = n_par;
+    fprintf(stderr, "[train-lm] LoKr: dim %d factor %d alpha %.4g, %d monolithic / %d factorized w2, %zu params\n",
+            dim, factor, (double) alpha, n_mono, n_fact, n_par);
+    return true;
+}
+
 
 // Detach the LoRA slots from the model (used by the self-test between phases).
 static void lm_lora_detach(LmLora * L, Qwen3LM * lm) {

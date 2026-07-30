@@ -33,6 +33,14 @@ struct LmTrainArgs {
     std::string dit_path, lm_path, lm_name, lm_size;  // already resolved by cmd_train_lm
 
     int   rank = 16, alpha = 32;
+    // Adapter parameterization (2026-07-30). "lora" is the shipped path and the
+    // default. "lokr" writes lokr_weights.safetensors in the SAME LyCORIS layout
+    // the DiT trainer writes, so adapter-merge.h's kron reader applies.
+    std::string adapter_type        = "lora";
+    int         lokr_dim            = 512;
+    float       lokr_alpha          = 512.0f;
+    int         lokr_factor         = 6;
+    bool        lokr_decompose_both = true;
     float lr = 1e-4f;
     int   epochs = 75, grad_accum = 2;   // GA2 = Side-Step parity (GA4 halves optimizer steps/epoch)
     float warmup_ratio = 0.05f, grad_clip = 1.0f, weight_decay = 0.01f;
@@ -260,11 +268,26 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     vm.vocab        = V;
     vm.mirror_bytes = mirror.bytes;
     {
-        size_t np = 0;
+        // The fit charges 4 buffers per parameter (param + acc + m + v), so this
+        // count has to match the parameterization actually built or the budget
+        // is wrong in the dangerous direction: a dim-512 LoKr on 0.6B is 22.0M
+        // parameters against a rank-16 LoRA's 10.1M.
+        const bool is_lokr = (a.adapter_type == "lokr");
+        size_t     np      = 0;
         for (int s = 0; s < QW_LORA_NSLOTS; s++) {
             int in_dim = 0, out_dim = 0;
             lm_slot_dims(c, s, &in_dim, &out_dim);
-            np += (size_t) in_dim * (size_t) a.rank + (size_t) a.rank * (size_t) out_dim;
+            if (is_lokr) {
+                int64_t out_l, out_k, in_m, in_n;
+                lokr_factorization(out_dim, a.lokr_factor, &out_l, &out_k);
+                lokr_factorization(in_dim, a.lokr_factor, &in_m, &in_n);
+                np += (size_t) (in_m * out_l);
+                np += lokr_w2_mono(a.lokr_dim, out_k, in_n)
+                          ? (size_t) (in_n * out_k)
+                          : (size_t) ((int64_t) a.lokr_dim * out_k + in_n * (int64_t) a.lokr_dim);
+            } else {
+                np += (size_t) in_dim * (size_t) a.rank + (size_t) a.rank * (size_t) out_dim;
+            }
         }
         vm.lora_params = np * (size_t) c.n_layers;
     }
@@ -530,8 +553,13 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     LmLora lora;
     {
         std::string err;
-        if (!lm_lora_init(&lora, &lm, 0, c.n_layers, a.rank, (float) a.alpha, (uint64_t) a.seed, /*b_sigma=*/0.0f,
-                          &err)) {
+        const bool init_ok =
+            (a.adapter_type == "lokr")
+                ? lm_lokr_init(&lora, &lm, 0, c.n_layers, a.lokr_dim, a.lokr_alpha, a.lokr_factor,
+                               a.lokr_decompose_both, (uint64_t) a.seed, &err)
+                : lm_lora_init(&lora, &lm, 0, c.n_layers, a.rank, (float) a.alpha, (uint64_t) a.seed, /*b_sigma=*/0.0f,
+                               &err);
+        if (!init_ok) {
             lm_fatal("vram", err);
             return 1;
         }
@@ -882,7 +910,9 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         meta->best_epoch = out->best_epoch;
         {
             LmExportResult xr;
-            if (!lm_export_peft(lora, c, *meta, a.out_dir, &xr, &export_err)) {
+            const bool xok = lora.is_lokr ? lm_export_lokr(lora, *meta, a.out_dir, &xr, &export_err)
+                                          : lm_export_peft(lora, c, *meta, a.out_dir, &xr, &export_err);
+            if (!xok) {
                 lm_fatal("export", export_err);
                 rc = 1;
                 break;
@@ -903,7 +933,9 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
                 const std::string mdir  = lm_join(a.out_dir, rel);
                 LmExportResult    mr;
                 std::string       merr;
-                if (lm_export_peft(lora, c, *meta, mdir, &mr, &merr)) {
+                const bool mok = lora.is_lokr ? lm_export_lokr(lora, *meta, mdir, &mr, &merr)
+                                              : lm_export_peft(lora, c, *meta, mdir, &mr, &merr);
+                if (mok) {
                     LmMilestoneRec ms;
                     ms.loss  = lval;
                     ms.epoch = epoch + 1;

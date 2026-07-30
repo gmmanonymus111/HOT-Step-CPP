@@ -966,6 +966,11 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--muon-bucket") && i + 1 < argc) a.muon_bucket = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];

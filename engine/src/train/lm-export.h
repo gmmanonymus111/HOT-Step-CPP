@@ -315,6 +315,112 @@ static bool lm_export_peft(const LmLora & L, const Qwen3LMConfig & cfg, const Lm
     return true;
 }
 
+// ─── LoKr export (2026-07-30) ───────────────────────────────────────────────
+//
+// LyCORIS layout, IDENTICAL to what the DiT trainer writes, so adapter-merge.h's
+// existing kron reader applies and there is not a second format to support:
+//
+//   <stem>.alpha        [1]
+//   <stem>.lokr_w1      [out_l, in_m]                    (row-major, so the ggml
+//   <stem>.lokr_w2      [out_k, in_n]   monolithic        tensors are written
+//   <stem>.lokr_w2_a    [out_k, dim]    factorized        transposed — ne1 first)
+//   <stem>.lokr_w2_b    [dim,   in_n]
+//
+// stem = "lycoris_layers_<L>_<site with dots as underscores>", matching the DiT.
+// BF16 like the DiT's (the LM's PEFT LoRA export stays F32 for Side-Step
+// parity, but nothing external produces LM LoKr files to be compatible with).
+static bool lm_export_lokr(const LmLora & L, const LmExportMeta & meta, const std::string & out_dir,
+                           LmExportResult * res, std::string * err) {
+    if (!pm_mkdir_p(out_dir)) {
+        *err = "cannot create " + out_dir;
+        return false;
+    }
+    std::vector<STWTensor>          tensors;
+    std::vector<std::vector<float>> store;
+
+    for (int l = L.layer_lo; l < L.layer_hi; l++) {
+        for (int s = 0; s < QW_LORA_NSLOTS; s++) {
+            const QwLoraPair & pr = L.layers[l].p[s];
+            if (!pr.has_lokr()) {
+                continue;
+            }
+            std::string site(lm_slot_peft_name(s));
+            for (size_t i = 0; i < site.size(); i++) {
+                if (site[i] == '.') {
+                    site[i] = '_';
+                }
+            }
+            char stemb[128];
+            snprintf(stemb, sizeof(stemb), "lycoris_layers_%d_%s", l, site.c_str());
+            const std::string stem(stemb);
+
+            // alpha, reconstructed from the in-graph scale so the file always
+            // agrees with what training actually applied.
+            store.push_back(std::vector<float>(1, pr.lokr_scale * (float) L.lokr_dim));
+            STWTensor sa;
+            sa.name  = stem + ".alpha";
+            sa.shape = { 1 };
+            sa.data  = nullptr;
+            tensors.push_back(sa);
+
+            ggml_tensor * ts[3]  = { pr.w1, pr.w2 ? pr.w2 : pr.w2_a, pr.w2 ? nullptr : pr.w2_b };
+            const char *  sfx[3] = { "lokr_w1", pr.w2 ? "lokr_w2" : "lokr_w2_a", "lokr_w2_b" };
+            for (int i = 0; i < 3 && ts[i]; i++) {
+                store.push_back(std::vector<float>((size_t) ggml_nelements(ts[i])));
+                std::vector<float> & v = store.back();
+                ggml_backend_tensor_get(ts[i], v.data(), 0, v.size() * sizeof(float));
+                STWTensor st;
+                st.name  = stem + "." + sfx[i];
+                st.shape = { ts[i]->ne[1], ts[i]->ne[0] };  // row-major (rows, cols)
+                st.data  = nullptr;
+                tensors.push_back(st);
+            }
+        }
+    }
+    // `store` reallocates as it grows; re-point once it has stopped moving.
+    if (store.size() != tensors.size()) {
+        *err = "lokr export bookkeeping mismatch";
+        return false;
+    }
+    for (size_t i = 0; i < tensors.size(); i++) {
+        tensors[i].data = store[i].data();
+    }
+
+    char cfgb[256];
+    snprintf(cfgb, sizeof(cfgb),
+             "{\"linear_dim\":%d,\"linear_alpha\":%.6g,\"factor\":%d,\"decompose_both\":%s,\"target_mlp\":true}",
+             L.lokr_dim, (double) L.lokr_alpha, L.lokr_factor, L.lokr_decompose ? "true" : "false");
+
+    std::vector<std::pair<std::string, std::string>> md;
+    md.push_back({ "format", "lycoris" });
+    md.push_back({ "algo", "lokr" });
+    md.push_back({ "producer", meta.producer });
+    // Distinguishes an LM LoKr from a DiT one: the stems collide by design (both
+    // are lycoris_layers_<L>_<site>) and only the site set differs, so a loader
+    // that guesses wrong would silently apply an LM adapter to a DiT.
+    md.push_back({ "hot_step_lm_lokr", "v1" });
+    md.push_back({ "lokr_config", std::string(cfgb) });
+    if (!meta.trigger.empty()) {
+        md.push_back({ "hot_step_trigger", meta.trigger });
+        md.push_back({ "hot_step_trigger_position",
+                       meta.trigger_position.empty() ? std::string("prepend") : meta.trigger_position });
+        md.push_back({ "modelspec.trigger_phrase", meta.trigger });
+    }
+
+    const std::string sf = lm_join(out_dir, "lokr_weights.safetensors");
+    if (!st_write_file(sf.c_str(), tensors, md, STW_BF16)) {
+        *err = "cannot write " + sf;
+        return false;
+    }
+    long long bytes = 0;
+    pm_stat_file(sf, &bytes, NULL);
+    if (res) {
+        res->tensors = (int) tensors.size();
+        res->bytes   = bytes;
+    }
+    return true;
+}
+
 // ─── milestone snapshots (L20) ──────────────────────────────────────────────
 
 // Remove milestone directories left behind by a PREVIOUS run into the same <out>.
