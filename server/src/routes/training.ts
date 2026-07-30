@@ -923,17 +923,34 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
     const useEssentia = body.useEssentia !== false;
     // 2026-07-27 pivot: understand is LEGACY and opt-in; the default flow is
     // Essentia + Genius + LLM caption, all engine-free.
+    //
+    // Genius and caption DEFAULT ON (2026-07-30), matching LabelPanel, which has
+    // shipped with all three boxes ticked. They were `=== true` — default OFF —
+    // so the batch pipeline, which POSTs only the stored per-stage defaults
+    // (`{}` in practice), silently ran Essentia-only and produced datasets with
+    // no lyrics and no captions. Same class of bug as the train-dit adapterType
+    // and train-lm lmSize divergences: the form's numbers and this handler's
+    // numbers are two different sets reached by two different callers.
     const useUnderstand = body.useUnderstand === true;
-    const useGenius = body.useGenius === true;
-    const useCaption = body.useCaption === true;
-    if (!useEssentia && !useUnderstand && !useGenius && !useCaption) {
-      res.status(400).json({ error: 'No labeling steps enabled' });
-      return;
-    }
+    let useGenius = body.useGenius !== false;
+    let useCaption = body.useCaption !== false;
+
+    // Capability handling has to distinguish ASKED-FOR from DEFAULTED-ON, now
+    // that these default on. An explicit `useGenius: true` with no token is a
+    // request the server cannot honour and must refuse. A default-on step with
+    // no token is just a machine that does not have that capability — skip it,
+    // exactly as LabelPanel does by disabling the checkbox (effectiveGenius =
+    // useGenius && geniusOk). Otherwise every keyless install would 503 on a
+    // plain label call that never mentioned Genius.
+    const geniusAsked  = body.useGenius === true;
+    const captionAsked = body.useCaption === true;
 
     if (useGenius && !config.lireek.geniusAccessToken) {
-      res.status(503).json({ error: 'GENIUS_ACCESS_TOKEN is not set' });
-      return;
+      if (geniusAsked) {
+        res.status(503).json({ error: 'GENIUS_ACCESS_TOKEN is not set' });
+        return;
+      }
+      useGenius = false;
     }
     if (useCaption) {
       const providerName = body.caption?.provider || config.lireek.defaultProvider;
@@ -941,15 +958,31 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       try {
         provider = getProvider(providerName);
       } catch (err: any) {
-        res.status(400).json({ error: err.message });
-        return;
+        if (captionAsked) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        provider = null;
       }
-      if (!provider.isAvailable()) {
-        res.status(503).json({
-          error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
-        });
-        return;
+      if (provider && !provider.isAvailable()) {
+        if (captionAsked) {
+          res.status(503).json({
+            error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
+          });
+          return;
+        }
+        provider = null;
       }
+      if (!provider) {
+        useCaption = false;
+      }
+    }
+
+    // Checked AFTER the capability downgrades above, or a keyless machine would
+    // pass this test on steps that are about to be switched off.
+    if (!useEssentia && !useUnderstand && !useGenius && !useCaption) {
+      res.status(400).json({ error: 'No labeling steps enabled' });
+      return;
     }
 
     if (useUnderstand) {
