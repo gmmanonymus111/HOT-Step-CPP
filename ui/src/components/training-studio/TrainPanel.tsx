@@ -229,6 +229,12 @@ export const TrainPanel: React.FC = () => {
       // CLI default ('outprod'), so omitting it would hide which formulation ran
       // and make the drawer's 'outprod' option indistinguishable from "unset".
       bwd: form.bwd,
+      adapterType: form.adapterType,
+      optimizer: form.optimizer,
+      ...(form.optimizer === 'muon' ? { muonLrScale: form.muonLrScale } : {}),
+      ...(form.adapterType === 'lokr'
+        ? { lokrDim: form.lokrDim, lokrAlpha: form.lokrAlpha, lokrFactor: form.lokrFactor }
+        : {}),
     };
     setStarting(true);
     try { await startTrainLm(opts); } finally { setStarting(false); }

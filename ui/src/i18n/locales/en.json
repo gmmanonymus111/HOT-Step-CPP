@@ -1409,6 +1409,22 @@
     "trainingStudio.train.dit.muonLrScale": "Muon LR scale",
     "trainingStudio.train.dit.muonLrScaleInfo": "Multiplies the learning-rate schedule for Muon parameters ONLY. Muon's update is normalised by construction, so its learning rate does not mean what AdamW's does — per element an orthogonalised update is roughly 20x smaller, which is why the default is 20. Measured on a LoKR dim-512 run: 5 undershoots, 20 matches AdamW, 50 overshoots. Non-Muon parameters keep the plain learning rate.",
     "trainingStudio.train.dit.muonNsSteps": "Newton-Schulz steps",
-    "trainingStudio.train.dit.muonNsStepsInfo": "How many Newton-Schulz iterations orthogonalise each update. Five is the reference value and pulls the singular values into a band around 1; the iteration targets that band rather than converging, so more steps buy little. Fewer steps make each optimizer step cheaper but only slightly — most of the cost is the number of separate operations, not the iteration count."
+    "trainingStudio.train.dit.muonNsStepsInfo": "How many Newton-Schulz iterations orthogonalise each update. Five is the reference value and pulls the singular values into a band around 1; the iteration targets that band rather than converging, so more steps buy little. Fewer steps make each optimizer step cheaper but only slightly — most of the cost is the number of separate operations, not the iteration count.",
+    "trainingStudio.train.lm.adapterType": "Adapter type",
+    "trainingStudio.train.lm.adapterTypeInfo": "How the adapter is parameterised. LoRA is the default and the long-proven path: two low-rank matrices per site. LoKr instead factorises each site as a Kronecker product, which reaches a different capacity/size trade — a dim-512 LoKr on the 0.6B is 22.0M parameters against a rank-16 LoRA’s 10.1M. The maths is gated (a zero-init LoKr perturbs nothing, and the contraction matches a materialised Kronecker product exactly), but the hyperparameters below are carried over from the DiT and have not been tuned on an LM, so treat LoKr as experimental here. A LoKr writes lokr_weights.safetensors instead of adapter_model.safetensors.",
+    "trainingStudio.train.lm.adapterLora": "LoRA",
+    "trainingStudio.train.lm.adapterLokr": "LoKr (experimental)",
+    "trainingStudio.train.lm.adapterTypeHint": "LoRA unless you are deliberately testing LoKr.",
+    "trainingStudio.train.lm.lokrDim": "LoKr dim",
+    "trainingStudio.train.lm.lokrDimInfo": "Inner dimension of the Kronecker factorisation. Larger means more capacity and a bigger adapter. 512 is carried over from the DiT, where it was tuned against a 2.5B model — it is not a measured value for an LM.",
+    "trainingStudio.train.lm.lokrFactor": "LoKr factor",
+    "trainingStudio.train.lm.lokrFactorInfo": "Caps how each dimension splits into Kronecker factors: the largest divisor at or below this becomes the small side. 6 splits a 2560-wide projection into 5 x 512. Use -1 for the most balanced split available. Every projection in the model must factorise or training refuses up front rather than producing an unloadable adapter.",
+    "trainingStudio.train.lm.optimizer": "Optimizer",
+    "trainingStudio.train.lm.optimizerInfo": "Which update rule the adapter parameters use. AdamW is the default and the long-proven path. Muon instead orthogonalises the update for every 2-D parameter whose short side is at least 16 — and for a LoRA the short side is the RANK, so at rank 16 every matrix qualifies and at rank 8 none would (the run log reports the split). On the DiT Muon reached the target in 1.41x fewer epochs and was ear-validated; on the LM only a short smoke run exists, so it is unproven here. Muon also needs one momentum buffer instead of two, which frees VRAM.",
+    "trainingStudio.train.lm.optimizerAdamw": "AdamW",
+    "trainingStudio.train.lm.optimizerMuon": "Muon (experimental on LM)",
+    "trainingStudio.train.lm.optimizerHint": "AdamW unless you are deliberately testing Muon.",
+    "trainingStudio.train.lm.muonLrScale": "Muon LR scale",
+    "trainingStudio.train.lm.muonLrScaleInfo": "Multiplies the learning-rate schedule for Muon parameters only. Muon’s update is normalised by construction, so its learning rate does not mean what AdamW’s does — per element it is roughly 20x smaller, which is where the default comes from. That 20 was measured on the DiT, not the LM, so it is the first knob to move if a Muon run looks wrong early."
   }
 }

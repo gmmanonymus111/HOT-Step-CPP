@@ -193,6 +193,22 @@ export interface TrainLmOptions {
   epochs?: number;                 // default 16 (hard cap)
   rank?: number;                   // default 16
   alpha?: number;                  // default 32
+  /** Adapter parameterization (2026-07-30). 'lora' is the shipped path and the
+   *  default. 'lokr' writes lokr_weights.safetensors in the SAME LyCORIS layout
+   *  the DiT trainer writes, gated by the LK1/LK2 rungs. */
+  adapterType?: 'lora' | 'lokr';   // default 'lora'
+  /** Optimizer (2026-07-30). 'adamw' is the default and the shipped path.
+   *  'muon' puts every 2-D parameter whose short side is >= 16 on
+   *  orthogonalized-momentum updates — FOR A LoRA THE SHORT SIDE IS THE RANK,
+   *  so at rank 16 every matrix qualifies and at rank 8 none would. On the DiT
+   *  Muon measured 1.41x fewer epochs to target; on the LM it is unproven. */
+  optimizer?: 'adamw' | 'muon';    // default 'adamw'
+  muonLrScale?: number;            // default 20 (the DiT's measured value)
+  muonNsSteps?: number;            // default 5
+  lokrDim?: number;                // default 512  (adapterType==='lokr' only)
+  lokrAlpha?: number;              // default 512; 0 = dim
+  lokrFactor?: number;             // default 6
+  lokrDecomposeBoth?: boolean;     // default true
   learningRate?: number;           // default 0.0001
   gradAccum?: number;              // default 4
   gradClip?: number;               // default 1.0;  0 disables

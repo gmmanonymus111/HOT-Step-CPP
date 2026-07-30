@@ -416,7 +416,12 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
 
       // ── 4. post-check ──────────────────────────────────────────────────
       if (opts.stages.includes('export')) {
-        const model = path.join(opts.adapterDir, 'adapter_model.safetensors');
+        // LoKr exports write lokr_weights.safetensors and deliberately NO
+        // adapter_model.safetensors — checking only the PEFT name would report
+        // "wrote no adapter" for a perfectly good LoKr run (the DiT runner hit
+        // this first; same fix).
+        const model = path.join(opts.adapterDir,
+          opts.adapterType === 'lokr' ? 'lokr_weights.safetensors' : 'adapter_model.safetensors');
         const cfg = path.join(opts.adapterDir, 'adapter_config.json');
         if (!fs.existsSync(model) || !fs.existsSync(cfg)) {
           throw new Error('ace-train finished but wrote no adapter');

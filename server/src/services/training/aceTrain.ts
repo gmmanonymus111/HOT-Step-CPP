@@ -194,8 +194,20 @@ export interface ResolvedTrainLmOptions {
   adapterDir: string;
   targetLoss: number;
   epochs: number;
+  /** Adapter parameterization. 'lokr' emits the LyCORIS kron factors and makes
+   *  rank/alpha inert; the exporter writes lokr_weights.safetensors. */
+  adapterType: 'lora' | 'lokr';
+  /** Optimizer rule set. 'muon' orthogonalizes 2-D parameters (short side >=
+   *  16, which for a LoRA is the RANK) and leaves the rest on AdamW. */
+  optimizer: 'adamw' | 'muon';
+  muonLrScale: number;
+  muonNsSteps: number;
   rank: number;
   alpha: number;
+  lokrDim: number;
+  lokrAlpha: number;
+  lokrFactor: number;
+  lokrDecomposeBoth: boolean;
   learningRate: number;
   gradAccum: number;
   gradClip: number;
@@ -259,8 +271,18 @@ export function buildTrainLmArgs(input: {
     ...(o.ditModel ? ['--dit', o.ditModel] : []),
     '--lm', o.lmModel,
     '--lm-size', o.lmSize,
-    '--rank', String(o.rank),
-    '--alpha', String(o.alpha),
+    // Always emitted so an ace-train that predates --adapter-type rejects it
+    // loudly rather than silently training a LoRA when a LoKr was asked for.
+    '--adapter-type', o.adapterType,
+    // Always emitted so an ace-train that predates --optimizer rejects it loudly
+    // rather than silently training on AdamW when Muon was asked for.
+    '--optimizer', o.optimizer,
+    ...(o.optimizer === 'muon'
+      ? ['--muon-lr-scale', String(o.muonLrScale), '--muon-ns-steps', String(o.muonNsSteps)]
+      : []),
+    ...(o.adapterType === 'lokr'
+      ? ['--lokr-dim', String(o.lokrDim), '--lokr-alpha', String(o.lokrAlpha), '--lokr-factor', String(o.lokrFactor)]
+      : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
     '--lr', String(o.learningRate),
     '--epochs', String(o.epochs),
     '--grad-accum', String(o.gradAccum),

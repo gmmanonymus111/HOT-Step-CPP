@@ -64,7 +64,8 @@ export function adapterDirFor(name: string, size: LmSize): string {
   const latest = latestRunDir(lmArtistDirFor(name, size));
   if (latest) return latest;
   const legacy = path.join(adapterLmRoot(), `${safeAdapterName(name)}-${size}`);
-  if (fs.existsSync(path.join(legacy, 'adapter_model.safetensors'))) return legacy;
+  if (fs.existsSync(path.join(legacy, 'adapter_model.safetensors'))
+      || fs.existsSync(path.join(legacy, 'lokr_weights.safetensors'))) return legacy;
   return lmArtistDirFor(name, size);  // nothing trained yet — where runs will go
 }
 
@@ -351,7 +352,12 @@ export function readTrainLmStatus(
   }
 
   try {
-    const model = path.join(adapterDir, 'adapter_model.safetensors');
+    // PEFT first (lora is still the default), then the LoKr name.
+    let model = path.join(adapterDir, 'adapter_model.safetensors');
+    if (!fs.existsSync(model)) {
+      const lokr = path.join(adapterDir, 'lokr_weights.safetensors');
+      if (fs.existsSync(lokr)) model = lokr;
+    }
     const st = fs.statSync(model);
     status.adapterExists = st.isFile();
     status.adapterBytes = st.size;

@@ -23,8 +23,14 @@ export interface TrainLmFormState {
   adapterName: string;
   targetLoss: number;
   epochs: number;
+  adapterType: 'lora' | 'lokr';
+  optimizer: 'adamw' | 'muon';
+  muonLrScale: number;
   rank: number;
   alpha: number;
+  lokrDim: number;
+  lokrAlpha: number;
+  lokrFactor: number;
   learningRate: number;
   gradAccum: number;
   gradClip: number;
@@ -58,8 +64,19 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   adapterName: '',
   targetLoss: 4.0,
   epochs: 75,
+  // LoRA stays the LM default: LoKr is gated (LK1/LK2 exact) but its
+  // hyperparameters are borrowed from the DiT and unproven on an LM.
+  adapterType: 'lora',
+  // AdamW stays the LM default. Muon is 1.41x more sample-efficient on the DiT
+  // and ear-validated there, but on the LM only an 8-epoch smoke exists — and
+  // 8 epochs is exactly the window that showed false parity on the DiT.
+  optimizer: 'adamw',
+  muonLrScale: 20,
   rank: 16,
   alpha: 32,
+  lokrDim: 512,
+  lokrAlpha: 512,
+  lokrFactor: 6,
   learningRate: 0.0001,
   gradAccum: 2,
   gradClip: 1.0,
@@ -314,6 +331,72 @@ export const TrainLmForm: React.FC<Props> = ({
             />
           </div>
 
+          <div className="flex flex-col gap-1.5">
+            {P('lm.optimizer', 'Default AdamW · Muon unproven on the LM')}
+            <StyledSelect
+              accent="amber"
+              value={value.optimizer}
+              disabled={lock}
+              onChange={(v) => onChange({ optimizer: v })}
+              options={[
+                { value: 'adamw' as const, label: t('trainingStudio.train.lm.optimizerAdamw') },
+                { value: 'muon' as const, label: t('trainingStudio.train.lm.optimizerMuon') },
+              ]}
+            />
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.lm.optimizerHint')}</span>
+          </div>
+
+          {value.optimizer === 'muon' && (
+            <label className="flex flex-col gap-1.5">
+              {P('lm.muonLrScale', 'Default 20 · multiplies the LR for Muon params only')}
+              <input
+                type="number" min={0.001} max={1000} step={1}
+                value={value.muonLrScale} disabled={lock}
+                onChange={(e) => onChange({ muonLrScale: num(e.target.value, 20) })}
+                className={FIELD}
+              />
+            </label>
+          )}
+
+          <div className="flex flex-col gap-1.5">
+            {P('lm.adapterType', 'Default LoRA · LoKr is experimental on the LM')}
+            <StyledSelect
+              accent="amber"
+              value={value.adapterType}
+              disabled={lock}
+              onChange={(v) => onChange({ adapterType: v })}
+              options={[
+                { value: 'lora' as const, label: t('trainingStudio.train.lm.adapterLora') },
+                { value: 'lokr' as const, label: t('trainingStudio.train.lm.adapterLokr') },
+              ]}
+            />
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.lm.adapterTypeHint')}</span>
+          </div>
+
+          {value.adapterType === 'lokr' && (
+            <label className="flex flex-col gap-1.5">
+              {P('lm.lokrDim', 'Default 512 · 4–4096')}
+              <input
+                type="number" min={4} max={4096} step={1}
+                value={value.lokrDim} disabled={lock}
+                onChange={(e) => onChange({ lokrDim: num(e.target.value, 512) })}
+                className={FIELD}
+              />
+            </label>
+          )}
+          {value.adapterType === 'lokr' && (
+            <label className="flex flex-col gap-1.5">
+              {P('lm.lokrFactor', 'Default 6 · -1 or 2–64')}
+              <input
+                type="number" min={-1} max={64} step={1}
+                value={value.lokrFactor} disabled={lock}
+                onChange={(e) => onChange({ lokrFactor: num(e.target.value, 6) })}
+                className={FIELD}
+              />
+            </label>
+          )}
+
+          {value.adapterType === 'lora' && (
           <label className="flex flex-col gap-1.5">
             {P('rank', 'Default 16 · 1–256')}
             <input
@@ -323,7 +406,9 @@ export const TrainLmForm: React.FC<Props> = ({
               className={FIELD}
             />
           </label>
+          )}
 
+          {value.adapterType === 'lora' && (
           <label className="flex flex-col gap-1.5">
             {P('alpha', 'Default 32 · 1–1024')}
             <input
@@ -333,6 +418,7 @@ export const TrainLmForm: React.FC<Props> = ({
               className={FIELD}
             />
           </label>
+          )}
 
           <label className="flex flex-col gap-1.5">
             {P('learningRate', 'Default 1e-4')}

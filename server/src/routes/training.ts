@@ -1483,6 +1483,38 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const epochs = numOpt(body.epochs, 75);
     const targetLoss = numOpt(body.targetLoss, 4.0);
     const rank = numOpt(body.rank, 16);
+    // LoKr (2026-07-30). Default 'lora' — the shipped path — so an omitted
+    // field can never move an existing caller onto a different parameterization.
+    const lmIsLokr = body.adapterType === 'lokr';
+    const lmMuonLrScale = numOpt(body.muonLrScale, 20.0);
+    const lmMuonNsSteps = numOpt(body.muonNsSteps, 5);
+    if (body.optimizer !== undefined && body.optimizer !== 'adamw' && body.optimizer !== 'muon') {
+      res.status(400).json({ error: 'optimizer must be adamw or muon' });
+      return;
+    }
+    if (lmMuonLrScale < 0.001 || lmMuonLrScale > 1000) {
+      res.status(400).json({ error: 'muonLrScale must be between 0.001 and 1000' });
+      return;
+    }
+    if (lmMuonNsSteps < 1 || lmMuonNsSteps > 20) {
+      res.status(400).json({ error: 'muonNsSteps must be between 1 and 20' });
+      return;
+    }
+    const lmLokrDim = numOpt(body.lokrDim, 512);
+    const lmLokrAlpha = numOpt(body.lokrAlpha, 512);
+    const lmLokrFactor = numOpt(body.lokrFactor, 6);
+    if (body.adapterType !== undefined && body.adapterType !== 'lora' && body.adapterType !== 'lokr') {
+      res.status(400).json({ error: 'adapterType must be lora or lokr' });
+      return;
+    }
+    if (lmIsLokr && (lmLokrDim < 4 || lmLokrDim > 4096)) {
+      res.status(400).json({ error: 'lokrDim must be between 4 and 4096' });
+      return;
+    }
+    if (lmIsLokr && (lmLokrFactor !== -1 && (lmLokrFactor < 2 || lmLokrFactor > 64))) {
+      res.status(400).json({ error: 'lokrFactor must be -1 or between 2 and 64' });
+      return;
+    }
     const alpha = numOpt(body.alpha, 32);
     const learningRate = numOpt(body.learningRate, 0.0001);
     const gradAccum = numOpt(body.gradAccum, 2);
@@ -1629,8 +1661,18 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       adapterDir,
       targetLoss,
       epochs: Math.trunc(epochs),
+      // Only the exact string 'lokr' opts in; anything else is a LoRA.
+      adapterType: lmIsLokr ? 'lokr' : 'lora',
+      // Only the exact string 'muon' opts in; anything else is AdamW.
+      optimizer: body.optimizer === 'muon' ? 'muon' : 'adamw',
+      muonLrScale: lmMuonLrScale,
+      muonNsSteps: Math.trunc(lmMuonNsSteps),
       rank: Math.trunc(rank),
       alpha: Math.trunc(alpha),
+      lokrDim: Math.trunc(lmLokrDim),
+      lokrAlpha: lmLokrAlpha,
+      lokrFactor: Math.trunc(lmLokrFactor),
+      lokrDecomposeBoth: body.lokrDecomposeBoth !== false,
       learningRate,
       gradAccum: Math.trunc(gradAccum),
       gradClip,
