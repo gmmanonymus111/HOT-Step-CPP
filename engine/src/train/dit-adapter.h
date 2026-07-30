@@ -326,7 +326,11 @@ struct DitAdapterLora final : DitAdapter {
         }
 
         const std::string sf = lm_join(d, "adapter_model.safetensors");
-        if (!st_write_file(sf.c_str(), tensors, md, STW_F32)) {
+        // BF16 for the same reason as the LoKR writer (dit-adapter-lokr.h): a
+        // DiT LoRA r128 is 1.2 GB in F32 and every consumer of a PEFT adapter
+        // takes BF16. The LM trainer's PEFT export stays F32 — Side-Step's LM
+        // adapters are F32, and matching them keeps the sizes comparable.
+        if (!st_write_file(sf.c_str(), tensors, md, STW_BF16)) {
             *err = "cannot write " + sf;
             return false;
         }

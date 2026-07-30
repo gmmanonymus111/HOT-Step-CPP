@@ -363,7 +363,13 @@ struct DitAdapterLoKr final : DitAdapter {
         }
 
         const std::string sf = lm_join(d, "lokr_weights.safetensors");
-        if (!st_write_file(sf.c_str(), tensors, md, STW_F32)) {
+        // BF16, not F32: LyCORIS writes its lokr_weights.safetensors in BF16 and
+        // Side-Step's are byte-comparable at half our old size (872 MB vs 444 MB
+        // for the same dim-512/factor-6 census). Every consumer reads it —
+        // adapter-merge.h:60-64 handles "F32"/"BF16"/"F16", ComfyUI and LyCORIS
+        // are BF16-native — and nothing round-trips this file back into training
+        // (no resume path), so the export dtype is purely a storage decision.
+        if (!st_write_file(sf.c_str(), tensors, md, STW_BF16)) {
             *err = "cannot write " + sf;
             return false;
         }
