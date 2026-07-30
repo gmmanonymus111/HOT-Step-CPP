@@ -829,9 +829,16 @@ static std::string resolve_lm_adapter_path(const std::string & name_or_path) {
         if (registry_is_file(name_or_path.c_str())) {
             return name_or_path;
         }
-        std::string peft = name_or_path + "/adapter_model.safetensors";
-        if (registry_is_file(peft.c_str())) {
-            return name_or_path;
+        // PEFT dir, else the LyCORIS LoKR layout ace-train --adapter-type lokr
+        // writes: lokr_weights.safetensors and deliberately NO
+        // adapter_config.json (alpha rides the per-module tensors). Probing only
+        // the PEFT leaf here rejected LoKR adapters before lm_adapter_load ever
+        // saw them, so its own fallback never ran (2026-07-30).
+        const char * leaves[2] = { "/adapter_model.safetensors", "/lokr_weights.safetensors" };
+        for (int li = 0; li < 2; li++) {
+            if (registry_is_file((name_or_path + leaves[li]).c_str())) {
+                return name_or_path;
+            }
         }
     }
     fprintf(stderr, "[Server] LM adapter not found: %s (looked in adapters/lm/ registry%s)\n",

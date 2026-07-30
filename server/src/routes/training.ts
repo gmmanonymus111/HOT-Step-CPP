@@ -91,7 +91,7 @@ import {
 import {
   adapterDitRoot, ditRunDirFor, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
-import { lmAdapterRoots } from '../services/training/adapterLayout.js';
+import { hasWeights, lmAdapterRoots } from '../services/training/adapterLayout.js';
 import {
   deleteDatasetPreviews, isPreviewFileKey, isPreviewId, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
@@ -2136,8 +2136,13 @@ function auditionAdapterError(value: string): string | null {
   if (!insideSome) {
     return `lmAdapter must be a registry name or a directory inside ${roots.join(' | ')}`;
   }
-  if (!fs.existsSync(path.join(resolved, 'adapter_model.safetensors'))) {
-    return `lmAdapter has no adapter_model.safetensors: ${resolved}`;
+  // A LoKr adapter dir has NO adapter_model.safetensors — its weights live in
+  // lokr_weights.safetensors and there is deliberately no adapter_config.json
+  // (alpha rides the per-module tensors + __metadata__.lokr_config). Checking
+  // only the PEFT name rejected every LoKr adapter before the engine ever saw
+  // it; lm-adapter.h reads both layouts.
+  if (!hasWeights(resolved)) {
+    return `lmAdapter has no adapter_model.safetensors or lokr_weights.safetensors: ${resolved}`;
   }
   return null;
 }

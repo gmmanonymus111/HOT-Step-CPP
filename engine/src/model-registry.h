@@ -525,12 +525,17 @@ static bool registry_scan_lm_adapters(ModelRegistry * reg, const char * adapters
     registry_list_subdirs(lm_dir.c_str(), &subdirs);
     std::sort(subdirs.begin(), subdirs.end());
     for (const auto & dname : subdirs) {
-        std::string adapter = lm_dir + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
-        if (registry_is_file(adapter.c_str())) {
-            std::string full = lm_dir + REGISTRY_SEP + dname;
-            reg->lm_adapters.push_back({ dname, full });
-            fprintf(stderr, "[Registry] LM adapter: %s (PEFT)\n", dname.c_str());
-            count++;
+        // Same two layouts the DiT scan above accepts: PEFT, else LyCORIS LoKR.
+        const char * leaves[2] = { "adapter_model.safetensors", "lokr_weights.safetensors" };
+        for (int li = 0; li < 2; li++) {
+            std::string adapter = lm_dir + REGISTRY_SEP + dname + REGISTRY_SEP + leaves[li];
+            if (registry_is_file(adapter.c_str())) {
+                std::string full = lm_dir + REGISTRY_SEP + dname;
+                reg->lm_adapters.push_back({ dname, full });
+                fprintf(stderr, "[Registry] LM adapter: %s (%s)\n", dname.c_str(), li == 0 ? "PEFT" : "LoKR");
+                count++;
+                break;
+            }
         }
     }
 

@@ -142,7 +142,7 @@ export function runStamp(when = new Date()): string {
  *  ace-train `--adapter-type lokr` writes (`lokr_weights.safetensors`, no
  *  adapter_config.json — lokr-dit-training plan §2.4). Checking only the PEFT
  *  leaf made every LoKR run dir invisible to latestRunDir(). */
-function hasWeights(dir: string): boolean {
+export function hasWeights(dir: string): boolean {
   return fs.existsSync(path.join(dir, 'adapter_model.safetensors'))
     || fs.existsSync(path.join(dir, 'lokr_weights.safetensors'));
 }
