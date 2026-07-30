@@ -174,13 +174,25 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   lokrAlpha: 512,
   lokrFactor: 6,
   lokrDecomposeBoth: true,
-  learningRate: 0.01,
-  // The 1e-2 above is Side-Step's, and Side-Step's effective batch is 20
-  // (batch 5 x GA 4). Carrying the LR over without the batch left the gradient
-  // ~5x noisier per step than the LR assumes, and three DiT LoKR runs blew up
-  // on the warmup ramp (2026-07-29). Matches the train-dit route's own
-  // isLokr fallback in server/src/routes/training.ts.
-  gradAccum: 20,
+  // 2026-07-30 retune, from a five-run A/B on gunship_unicorn (14 songs, XL
+  // thirds). GA 20 @ 1e-2 was Side-Step's effective batch of 20 reached by
+  // accumulation; GA 4 @ 2e-3 is the same effective LR per sample by linear
+  // scaling, and measured IDENTICAL epochs-to-target (227 vs 228) with strictly
+  // better-behaved gradients: median grad-norm 0.062 vs 0.031 (the sqrt(5) the
+  // smaller batch predicts) and NO warmup spike — the GA 20 run peaked at 13.5
+  // on epoch 1, which is the same cliff three LoKR runs fell off on 2026-07-29.
+  // The LR must move WITH the accumulation; 2e-3 without GA 4 is a different,
+  // untested config. Mirrored by the train-dit route's isLokr fallbacks.
+  learningRate: 0.002,
+  gradAccum: 4,
+  // 250, not 400: every 400-horizon run stopped with the cosine only halfway
+  // down (LR still ~50% of peak at the stop), so the schedule never decayed
+  // INTO the target. Shortening the horizon cut epochs-to-0.6 from 228 to 203
+  // (-11%) and audio-seconds-to-target by 14% — the only knob of five tested
+  // that reduced the work required rather than rearranging it. Don't shorten
+  // much further: that run used 203 of its 250, and a horizon below the epochs
+  // actually needed leaves the LR at its 10% floor with the tail unfinished.
+  epochs: 250,
   lossWeighting: 'none',
   targetLoss: 0.6,
   weightDecay: 0.001,
@@ -216,6 +228,16 @@ const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
  *  type-aware — every other preset field means the same thing for both. */
 const DIT_LOKR_TARGET_LOSS: Record<DitQuality, number> = {
   fast: 0.6, balanced: 0.6, thorough: 0.5,
+};
+
+/** Same reasoning for the epoch counts: the presets above are LoRA's 100/400/800,
+ *  and LoKR's validated horizon is 250 (2026-07-30 A/B — see the epochs comment
+ *  in TRAIN_DIT_LOKR_DEFAULTS). Balanced MUST be 250 here for the same reason it
+ *  is 400 there: it is the default state, so clicking the already-highlighted
+ *  button has to be a no-op rather than a silent undo of the retune. Fast and
+ *  Thorough keep the dial monotone around it. */
+const DIT_LOKR_EPOCHS: Record<DitQuality, number> = {
+  fast: 120, balanced: 250, thorough: 500,
 };
 
 const ALL_STAGES: TrainDitStage[] = ['train', 'export'];
@@ -305,7 +327,7 @@ export const TrainDitForm: React.FC<Props> = ({
   const pickQuality = (q: DitQuality) => onChange({
     quality: q,
     ...DIT_QUALITY_PRESETS[q],
-    ...(value.adapterType === 'lokr' ? { targetLoss: DIT_LOKR_TARGET_LOSS[q] } : {}),
+    ...(value.adapterType === 'lokr' ? { targetLoss: DIT_LOKR_TARGET_LOSS[q], epochs: DIT_LOKR_EPOCHS[q] } : {}),
   });
 
   // §4: switching adapter type swaps the WHOLE form state to that type's

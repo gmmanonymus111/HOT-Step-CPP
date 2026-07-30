@@ -1803,7 +1803,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // K2 (lokr-dit-training plan §0): when adapterType==='lokr', four of these
     // omitted-field fallbacks change to Rob's Uber-LoKR-4 preset values. The
     // 'lora' path's fallbacks are untouched — byte-identical to before LoKR.
-    const epochs = numOpt(body.epochs, 400);
+    // 250 for LoKR (2026-07-30 retune): a 400-epoch cosine horizon left every
+    // measured run stopping at ~50% of peak LR, so the schedule never decayed
+    // into the target. 250 cut epochs-to-0.6 from 228 to 203. LoRA keeps 400.
+    const epochs = numOpt(body.epochs, isLokr ? 250 : 400);
     const targetLoss = numOpt(body.targetLoss, isLokr ? 0.6 : 0.4);
     const rank = numOpt(body.rank, 128);
     const alpha = numOpt(body.alpha, 256);
@@ -1815,13 +1818,17 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const crop = numOpt(body.crop, 0);
     const cropMin = numOpt(body.cropMin, 375);
     const cropMax = numOpt(body.cropMax, 1250);
-    const learningRate = numOpt(body.learningRate, isLokr ? 0.01 : 0.0005);
-    // LoKR's 1e-2 comes from Side-Step, whose effective batch is 20 (batch 5 x
-    // GA 4). Porting the LR without the batch made the gradient noise per step
-    // ~5x larger than the LR was tuned for and three DiT LoKR runs blew up on
-    // the warmup ramp (2026-07-29). 20 restores the recipe's effective batch;
-    // the LoRA path (lr 5e-4) is unchanged, as is ace-train's own CLI default.
-    const gradAccum = numOpt(body.gradAccum, isLokr ? 20 : 4);
+    // LoKR 2e-3 @ GA 4 (2026-07-30 retune) replaces 1e-2 @ GA 20. Side-Step
+    // reaches an effective batch of 20 as batch 5 x GA 4; we reached it by
+    // accumulating 20, which is the same effective LR per sample under linear
+    // scaling. Measured on gunship_unicorn: IDENTICAL epochs-to-target (227 vs
+    // 228) with strictly better-behaved gradients — median grad-norm 0.062 vs
+    // 0.031 (the sqrt(5) a 5x smaller batch predicts) and no warmup spike, where
+    // GA 20 peaked at 13.5 on epoch 1. THE TWO MOVE TOGETHER: 2e-3 at GA 20, or
+    // 1e-2 at GA 4, are both untested configurations. The LoRA path (5e-4, GA 4)
+    // is unchanged, as is ace-train's own CLI default.
+    const learningRate = numOpt(body.learningRate, isLokr ? 0.002 : 0.0005);
+    const gradAccum = numOpt(body.gradAccum, 4);
     const gradClip = numOpt(body.gradClip, 1.0);
     const warmupRatio = numOpt(body.warmupRatio, 0.05);
     const weightDecay = numOpt(body.weightDecay, isLokr ? 0.001 : 0.01);
