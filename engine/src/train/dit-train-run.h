@@ -24,6 +24,9 @@
 #include "train/dit-export.h"
 #include "train/dit-selftest.h"
 #include "train/dit-train-ckpt.h"
+
+#include <algorithm>
+#include <map>
 #include "train/dit-train-graph.h"
 #include "train/dit-vram.h"
 #include "train/lm-optim.h"
@@ -99,6 +102,16 @@ struct DitTrainArgs {
     // backward graph is built (ace-train.cpp).
     std::string bwd = "outprod";
 
+    // Step-time profiling (docs/plans/2026-07-30-dit-trainer-step-profile.md §2).
+    // 0 = OFF and nothing about the run changes. N > 0 = time every micro-step
+    // into the DitStepProf buckets and print a breakdown every N micro-steps.
+    // Exists because the trainer's own fitted model predicts ~144 ms/step at
+    // S=342 and the measured runs sit at ~1753 ms, and nobody could say of what.
+    int profile_step = 0;
+    // Op-level histogram for ONE warmed-up micro-step (plan §2.3). Implies the
+    // bucket profiler, since it hangs off the same step counter.
+    bool profile_ops = false;
+
     // Trigger word embedded in the exported adapter. Empty = fall back to the
     // variant's preprocess_meta.json custom_tag/tag_position; still empty after
     // that = no trigger keys written and the adapter is byte-identical to a
@@ -134,6 +147,159 @@ static inline bool dit_has_stage(const DitTrainArgs & a, const char * s) {
         }
     }
     return false;
+}
+
+// ─── step-time profile (plan §2) ─────────────────────────────────────────────
+//
+// Wall-clock buckets around ONE micro-step, so "1753 ms per crop" becomes a
+// breakdown instead of a mystery. Costs nothing when off: every timer sits
+// behind `on`, and the un-profiled path keeps the original single
+// `ggml_backend_sched_graph_compute` call rather than the
+// alloc / compute_async / synchronize decomposition it is literally defined as
+// (ggml-backend.cpp:1883-1887). Same three calls either way — the split only
+// exists so the allocator/split pass can be told apart from the GPU work — but
+// keeping the default path on the original call means a normal run cannot have
+// been perturbed by this at all.
+enum DitProfBucket {
+    DPB_ASSEMBLE = 0,  // crop draw, flow target, masks, host buffers
+    DPB_UPLOAD,        // the 11 unconditional tensor_set uploads + t_lossgrad
+    DPB_BUILD,         // ggml_init + new_graph + forward + loss + forward_expand
+    DPB_BACKWARD,      // fill_gacc + build_backward_expand
+    DPB_ALLOC,         // sched_reset + sched_alloc_graph (split + gallocr)
+    DPB_COMPUTE,       // compute_async + synchronize (the only GPU bucket)
+    DPB_READBACK,      // loss / report tensor_get
+    DPB_FREE,          // ggml_free(ctx)
+    DPB_N
+};
+
+static const char * const DIT_PROF_NAMES[DPB_N] = { "assemble", "upload",   "build",    "backward",
+                                                    "alloc",    "compute",  "readback", "free" };
+
+struct DitStepProf {
+    bool      on    = false;
+    int       every = 0;  // report cadence, micro-steps
+    long long win[DPB_N] = {};  // us since the last report
+    long long tot[DPB_N] = {};  // us over the whole run
+    long long win_steps  = 0;
+    long long tot_steps  = 0;
+    // Graph shape, captured every timed micro-step (constant in practice — if it
+    // is not, that is itself the finding).
+    // No leaf count: this ggml exposes only ggml_graph_n_nodes publicly, and
+    // n_leafs is not worth reaching into ggml-impl.h for.
+    int nodes = 0, splits = 0, copies = 0;
+
+    inline long long t() const { return on ? ggml_time_us() : 0; }
+    inline void add(DitProfBucket b, long long t0, long long t1) {
+        if (!on) {
+            return;
+        }
+        win[b] += t1 - t0;
+        tot[b] += t1 - t0;
+    }
+    inline long long win_total() const {
+        long long s = 0;
+        for (int i = 0; i < DPB_N; i++) {
+            s += win[i];
+        }
+        return s;
+    }
+    inline long long tot_total() const {
+        long long s = 0;
+        for (int i = 0; i < DPB_N; i++) {
+            s += tot[i];
+        }
+        return s;
+    }
+};
+
+// One breakdown per `--profile-step N` micro-steps: window mean per bucket in ms
+// and its share, then the window resets. `splits` is the one to read first — any
+// value above 1 means the scheduler put part of the graph on another backend and
+// is copying activations across the bus every step.
+static void dit_prof_report(DitStepProf & p) {
+    if (p.win_steps <= 0) {
+        return;
+    }
+    const double    n   = (double) p.win_steps;
+    const long long tot = p.win_total();
+
+    std::string line = "[train-dit] profile ";
+    char        b[160];
+    snprintf(b, sizeof(b), "(%lld steps, %.1f ms/step):", p.win_steps, (double) tot / n / 1000.0);
+    line += b;
+
+    std::string js = "{\"type\":\"profile\",\"buckets\":{";
+    for (int i = 0; i < DPB_N; i++) {
+        const double ms  = (double) p.win[i] / n / 1000.0;
+        const double pct = tot > 0 ? 100.0 * (double) p.win[i] / (double) tot : 0.0;
+        snprintf(b, sizeof(b), " %s %.1f (%.0f%%)", DIT_PROF_NAMES[i], ms, pct);
+        line += b;
+        snprintf(b, sizeof(b), "%s\"%s\":%.3f", i ? "," : "", DIT_PROF_NAMES[i], ms);
+        js += b;
+    }
+    fprintf(stderr, "%s; nodes %d splits %d copies %d\n", line.c_str(), p.nodes, p.splits, p.copies);
+
+    snprintf(b, sizeof(b), "},\"steps\":%lld,\"msPerStep\":%.3f,", p.win_steps, (double) tot / n / 1000.0);
+    js += b;
+    snprintf(b, sizeof(b), "\"nodes\":%d,\"splits\":%d,\"copies\":%d}", p.nodes, p.splits, p.copies);
+    js += b;
+    jl("%s", js.c_str());
+
+    for (int i = 0; i < DPB_N; i++) {
+        p.win[i] = 0;
+    }
+    p.win_steps = 0;
+}
+
+// ─── op-level profile (plan §2.3) ────────────────────────────────────────────
+//
+// Times ONE micro-step node by node through the scheduler's eval callback and
+// aggregates by (op, output shape) — the shape is what identifies which op in
+// which chain, without having to name every intermediate. Armed for a single
+// step because the callback serialises the whole graph: absolute times are
+// inflated, so ONLY the relative shares mean anything, and the printout says so.
+struct DitOpProf {
+    bool                                          armed = false;
+    long long                                     t0    = 0;
+    std::map<std::string, std::pair<long long, int>> agg;  // key -> (us, count)
+};
+
+static bool dit_op_eval_cb(struct ggml_tensor * t, bool ask, void * ud) {
+    DitOpProf * p = (DitOpProf *) ud;
+    if (ask) {
+        p->t0 = ggml_time_us();
+        return true;  // yes, call us back once it has been computed
+    }
+    const long long dt = ggml_time_us() - p->t0;
+    char            key[160];
+    snprintf(key, sizeof(key), "%-14s [%lld,%lld,%lld,%lld]", ggml_op_name(t->op), (long long) t->ne[0],
+             (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3]);
+    std::pair<long long, int> & e = p->agg[key];
+    e.first += dt;
+    e.second++;
+    return true;
+}
+
+static void dit_op_prof_print(DitOpProf & p) {
+    std::vector<std::pair<std::string, std::pair<long long, int>>> v(p.agg.begin(), p.agg.end());
+    std::sort(v.begin(), v.end(),
+              [](const std::pair<std::string, std::pair<long long, int>> & a,
+                 const std::pair<std::string, std::pair<long long, int>> & b) {
+                  return a.second.first > b.second.first;
+              });
+    long long tot = 0;
+    for (size_t i = 0; i < v.size(); i++) {
+        tot += v[i].second.first;
+    }
+    fprintf(stderr,
+            "[train-dit] op profile: %.0f ms over %zu op/shape keys — eval-callback SERIALISED, so absolute times are "
+            "inflated and only the shares are meaningful\n",
+            (double) tot / 1000.0, v.size());
+    for (size_t i = 0; i < v.size() && i < 24; i++) {
+        fprintf(stderr, "[train-dit]   %8.1f ms  %5.1f%%  x%-6d %s\n", (double) v[i].second.first / 1000.0,
+                tot > 0 ? 100.0 * (double) v[i].second.first / (double) tot : 0.0, v[i].second.second,
+                v[i].first.c_str());
+    }
 }
 
 struct DitTrainOutcome {
@@ -718,6 +884,19 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     lm_rng_seed(&rng_cond, (uint64_t) a.seed ^ 0xd1b54a32d192ed03ull);
 
     // ── the micro-batch ──────────────────────────────────────────────────
+    DitStepProf prf;
+    // --profile-ops implies the step timer, since it fires off its step counter;
+    // without an explicit cadence it just never reports a window.
+    prf.on    = (a.profile_step > 0 || a.profile_ops);
+    prf.every = (a.profile_step > 0) ? a.profile_step : 1000000;
+    if (prf.on && SEG > 1) {
+        // The segmented path builds 1+SEG graphs inside dit_ckpt_micro_batch and
+        // does not expose the seams; profiling it would silently attribute the
+        // whole thing to one bucket, which is worse than refusing.
+        lm_log("warn", "--profile-step is only instrumented for the unsegmented graph; run it with --ckpt 0");
+        prf.on = false;
+    }
+    DitOpProf            opprof;
     std::vector<uint8_t> arena((size_t) 512 << 20);
     DitBatchHost         bh;
     DitBatchCfg          bcfg;
@@ -730,7 +909,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     bcfg.crop           = crop_len;
     bcfg.weighted       = (a.loss_weighting == "flow_snr");
     bcfg.null_cond      = &M.null_cond;
-    int graph_nodes = 0;
+    int graph_nodes = 0, sched_splits = 0, sched_copies = 0;
     int last_cfg_drop = 0, last_crop_start = 0;
 
     // One batched forward (+ backward). `els` carries the per-ELEMENT t / CFG /
@@ -744,6 +923,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     auto micro_batch = [&](std::vector<DitBatchElem> & els, const std::vector<std::vector<float>> & temb_h,
                            const std::vector<std::vector<float>> & tproj_h, const std::vector<int> & tidx,
                            bool backward, float lossgrad, double * loss_out, double * raw_out) -> bool {
+        const long long p_t0 = prf.t();
         const int nb = (int) els.size();
         dit_batch_assemble(bcfg, els, &rng_crop, &rng_noise, &bh);
         const int len = bh.len;
@@ -782,8 +962,12 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             ggml_backend_tensor_set(b_temb, temb_buf.data(), 0, temb_buf.size() * sizeof(float));
             ggml_backend_tensor_set(b_tproj, tproj_buf.data(), 0, tproj_buf.size() * sizeof(float));
         };
+        const long long p_t1 = prf.t();  // end of assemble + host-buffer prep
         upload_inputs();
         ggml_backend_tensor_set(t_lossgrad, &lossgrad, 0, sizeof(float));
+        const long long p_t2 = prf.t();  // end of upload
+        prf.add(DPB_ASSEMBLE, p_t0, p_t1);
+        prf.add(DPB_UPLOAD, p_t1, p_t2);
 
         // Every view is CONTIGUOUS at offset 0 — soft_max_ext will not take a
         // strided mask, and ggml_reshape refuses a non-contiguous source. Built
@@ -864,17 +1048,42 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         if (report) {
             ggml_build_forward_expand(gf, report);
         }
+        const long long p_t3 = prf.t();  // end of forward build
         if (backward) {
             // AFTER both forward expansions: gacc is indexed by forward-node index.
             std::vector<ggml_tensor *> gacc;
             lm_optim_fill_gacc(&opt, gf, &gacc);
             ggml_build_backward_expand(ctx, gf, gacc.data());
         }
+        const long long p_t4 = prf.t();  // end of backward expand
         graph_nodes = ggml_graph_n_nodes(gf);
         GGML_ASSERT(graph_nodes < 65536);
 
+        // Arm the op profiler on one warmed-up micro-step, then disarm.
+        const bool op_now = (a.profile_ops && prf.tot_steps == 15);
+        if (op_now) {
+            ggml_backend_sched_set_eval_callback(M.sched, dit_op_eval_cb, &opprof);
+        }
         ggml_backend_sched_reset(M.sched);
+        const long long p_t5 = prf.t();
+        if (prf.on) {
+            // Pull the split + gallocr pass out of the GPU bucket. compute_async
+            // skips its own alloc once is_alloc is set, so this is the same work
+            // in the same order (ggml-backend.cpp:1889-1895) — only the seam is
+            // new. Off this path, the original single call stands untouched.
+            if (!ggml_backend_sched_alloc_graph(M.sched, gf)) {
+                ggml_free(ctx);
+                return false;
+            }
+        }
+        const long long p_t6 = prf.t();
         const bool ok = ggml_backend_sched_graph_compute(M.sched, gf) == GGML_STATUS_SUCCESS;
+        const long long p_t7 = prf.t();
+        if (op_now) {
+            ggml_backend_sched_set_eval_callback(M.sched, nullptr, nullptr);
+            dit_op_prof_print(opprof);
+            opprof.agg.clear();
+        }
         if (ok && loss_out) {
             float lv = 0.0f;
             ggml_backend_tensor_get(loss, &lv, 0, sizeof(float));
@@ -889,7 +1098,32 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 }
             }
         }
+        const long long p_t8 = prf.t();
+        // Graph shape and, more to the point, the SPLIT COUNT: anything above 1
+        // means the scheduler could not keep the whole graph on one backend and
+        // is copying activations across the bus every micro-step. Three getters,
+        // recorded whether or not profiling is on, so every run carries them.
+        sched_splits = ggml_backend_sched_get_n_splits(M.sched);
+        sched_copies = ggml_backend_sched_get_n_copies(M.sched);
         ggml_free(ctx);
+        const long long p_t9 = prf.t();
+
+        if (prf.on) {
+            prf.add(DPB_BUILD, p_t2, p_t3);
+            prf.add(DPB_BACKWARD, p_t3, p_t4);
+            prf.add(DPB_ALLOC, p_t5, p_t6);
+            prf.add(DPB_COMPUTE, p_t6, p_t7);
+            prf.add(DPB_READBACK, p_t7, p_t8);
+            prf.add(DPB_FREE, p_t8, p_t9);
+            prf.nodes  = graph_nodes;
+            prf.splits = sched_splits;
+            prf.copies = sched_copies;
+            prf.win_steps++;
+            prf.tot_steps++;
+            if (prf.win_steps >= (long long) prf.every) {
+                dit_prof_report(prf);
+            }
+        }
         return ok;
     };
 
@@ -1017,6 +1251,14 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     log->batch          = B;
     log->ckpt           = SEG;
     log->samples        = n;
+    // Runtime facts, known once the high-water probe has built and run one graph.
+    // The backend in particular: it used to reach only a stderr tail the server
+    // discards, which left "was this run even on CUDA?" unanswerable after the
+    // fact for a whole day of runs.
+    log->backend      = ggml_backend_name(M.backend);
+    log->graph_nodes  = graph_nodes;
+    log->sched_splits = sched_splits;
+    log->sched_copies = sched_copies;
     log->partial_depth  = K < L;
     log->channel_balance = chan_bal;
     log->vram_free_mb   = fit.free_mb;
@@ -1263,6 +1505,16 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 }
             }
 
+            if (prf.tot_steps > 0) {
+                // Run-mean per bucket, refreshed every epoch so a killed run still
+                // leaves its profile behind.
+                log->profile_steps = prf.tot_steps;
+                log->profile_ms.clear();
+                for (int i = 0; i < DPB_N; i++) {
+                    log->profile_ms.push_back(
+                        { DIT_PROF_NAMES[i], (double) prf.tot[i] / (double) prf.tot_steps / 1000.0 });
+                }
+            }
             log->vram_peak_mb = tracker.peak_mb;
             log->total_ms     = (long long) (ggml_time_ms() - t_stage0);
             if (!dit_write_train_log(a.out_dir, *log)) {
@@ -1291,6 +1543,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             }
         }
 
+        dit_prof_report(prf);  // flush a partial window, if any
         log->vram_peak_mb = tracker.peak_mb;
         out->samples      = n;
         out->ms           = (long long) (ggml_time_ms() - t_stage0);

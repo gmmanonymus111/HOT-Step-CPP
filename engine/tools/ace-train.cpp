@@ -321,6 +321,21 @@ static void print_usage(void) {
             "                                                      RTX 5090. Needs the vendored patch\n"
             "                                                      engine/patches/mm-backward.patch.\n"
             "\n"
+            "  Diagnostics:\n"
+            "    --profile-step <n>          0           0 = off. n > 0 times every micro-step into\n"
+            "                                            assemble / upload / build / backward / alloc /\n"
+            "                                            compute / readback / free and prints the mean\n"
+            "                                            every n steps, with graph node, leaf and\n"
+            "                                            scheduler split counts. The run-mean lands in\n"
+            "                                            dit_train_log.json under runtime.profile_ms.\n"
+            "                                            Needs --ckpt 0 (the segmented path is not\n"
+            "                                            instrumented). Off, the graph compute path is\n"
+            "                                            byte-identical to a build without this flag.\n"
+            "    --profile-ops               off         times ONE warmed-up micro-step node by node and\n"
+            "                                            prints the top op/shape keys by share. The eval\n"
+            "                                            callback serialises the graph, so absolute times\n"
+            "                                            are inflated - read the shares, not the ms.\n"
+            "\n"
             "  Adapter identity:\n"
             "    --trigger <word>            \"\"          trigger word embedded in the adapter's\n"
             "                                            metadata. Default: custom_tag from the\n"
@@ -1201,6 +1216,8 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--vram-safety") && i + 1 < argc) { a.vram_safety = (float) atof(argv[++i]); safety_user = true; }
         else if (!strcmp(argv[i], "--mirror") && i + 1 < argc) a.mirror = argv[++i];
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
+        else if (!strcmp(argv[i], "--profile-step") && i + 1 < argc) a.profile_step = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--profile-ops")) a.profile_ops = true;
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);

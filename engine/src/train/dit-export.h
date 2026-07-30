@@ -14,6 +14,7 @@
 #include "train/lm-common.h"
 
 #include <string>
+#include <utility>  // std::pair (profile_ms) — MSVC gets it via <vector>, gcc/clang do not
 #include <vector>
 
 #ifdef _WIN32
@@ -85,6 +86,20 @@ struct DitTrainLog {
 
     size_t    vram_free_mb = 0, vram_total_mb = 0, vram_mirror_mb = 0, vram_est_mb = 0, vram_peak_mb = 0;
     long long total_ms = 0;
+
+    // ─── runtime facts (2026-07-30) ──────────────────────────────────────────
+    //
+    // Every one of these was needed to interpret a run this week and had been
+    // thrown away: the backend went only to a stderr tail the server drops, and
+    // the graph/split counts went nowhere at all. `ckpt` above is already the
+    // RESOLVED segment count; these join it so a finished run explains itself.
+    std::string backend;                                  // "CUDA0" / "CPU" / ...
+    int         graph_nodes = 0;                          // the fwd+bwd graph
+    int         sched_splits = 0, sched_copies = 0;       // > 1 split = backend fallback
+    // Mean us per micro-step bucket, only when --profile-step ran (steps == 0
+    // means it did not, and the whole block is omitted from the JSON).
+    long long        profile_steps = 0;
+    std::vector<std::pair<std::string, double>> profile_ms;
 };
 
 static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) {
@@ -185,6 +200,22 @@ static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) 
     yyjson_mut_obj_add_int(doc, vr, "mirror_mb", (int64_t) m.vram_mirror_mb);
     yyjson_mut_obj_add_int(doc, vr, "est_mb", (int64_t) m.vram_est_mb);
     yyjson_mut_obj_add_int(doc, vr, "peak_mb", (int64_t) m.vram_peak_mb);
+
+    yyjson_mut_val * rt = yyjson_mut_obj_add_obj(doc, root, "runtime");
+    yyjson_mut_obj_add_strcpy(doc, rt, "backend", m.backend.c_str());
+    yyjson_mut_obj_add_int(doc, rt, "graph_nodes", m.graph_nodes);
+    yyjson_mut_obj_add_int(doc, rt, "sched_splits", m.sched_splits);
+    yyjson_mut_obj_add_int(doc, rt, "sched_copies", m.sched_copies);
+    if (m.profile_steps > 0) {
+        yyjson_mut_val * pf = yyjson_mut_obj_add_obj(doc, rt, "profile_ms");
+        yyjson_mut_obj_add_int(doc, pf, "steps", (int64_t) m.profile_steps);
+        for (size_t i = 0; i < m.profile_ms.size(); i++) {
+            // strcpy the KEY: the add_* helpers take the key by pointer without
+            // copying, and these come from a vector rather than string literals.
+            yyjson_mut_obj_add(pf, yyjson_mut_strcpy(doc, m.profile_ms[i].first.c_str()),
+                               yyjson_mut_real(doc, m.profile_ms[i].second));
+        }
+    }
 
     yyjson_mut_obj_add_int(doc, root, "total_ms", (int64_t) m.total_ms);
 

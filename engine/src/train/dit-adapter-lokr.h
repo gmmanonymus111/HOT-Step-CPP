@@ -281,6 +281,24 @@ struct DitAdapterLoKr final : DitAdapter {
     //                                        row index l*out_k + k)
     // ggml_permute(t, 1, 0, 2, 3) sends src axis0 to position 1 and axis1 to
     // position 0 — the ne0/ne1 swap both steps need. LK3 is the arbiter.
+    // THE TOKEN AXIS MUST NOT REACH ne2 OF A MUL_MAT HERE (measured 2026-07-30).
+    //
+    // Both contractions below have a 2-D trainable factor (ne2 == 1) as src0. If
+    // src1 carries the token count in ne2, ggml's backward emits the weight
+    // gradient as out_prod(src1, grad) with dst->ne[2] == S — and ggml-cuda's
+    // out_prod takes its `dps2 > 1` FALLBACK there: one cublasSgemm per token
+    // (out-prod.cu:96-108), i.e. 344 launches of a 512x5 GEMM for ONE node, plus
+    // a repeat_back to reduce the per-token gradient slabs afterwards. With 352
+    // sites that was ~80% out_prod + ~8% repeat_back of the whole step and made
+    // LoKR training 16.4x slower than the same run with a LoRA (1902 vs 116
+    // ms/step at S=344, 32 layers). See docs/plans/2026-07-30-dit-trainer-step-profile.md.
+    //
+    // The cure is free: [in_n, in_m, S] and [in_n, in_m*S] are the SAME BYTES —
+    // element (a,b,c) sits at a + in_n*b + in_m*in_n*c either way — so folding
+    // the token axis into the column count is a pure reshape, not a maths
+    // change. It leaves dst->ne[2] == 1, which takes out_prod's strided-batched
+    // fast path in ONE call and removes the repeat_back entirely. The 3-D form
+    // is restored around each permute, where the ne0/ne1 swap actually needs it.
     ggml_tensor * apply(ggml_context * ctx_g, ggml_tensor * w, int layer, int s, ggml_tensor * x) const override {
         ggml_tensor *       y = ggml_mul_mat(ctx_g, w, x);
         const DitLokrSite * k = site(layer, s);
@@ -289,13 +307,18 @@ struct DitAdapterLoKr final : DitAdapter {
         }
         ggml_tensor * xc = ggml_is_contiguous(x) ? x : ggml_cont(ctx_g, x);
         const int64_t S  = ggml_nelements(xc) / xc->ne[0];
-        ggml_tensor * X3 = ggml_reshape_3d(ctx_g, xc, k->in_n, k->in_m, S);
-        ggml_tensor * T1 = k->mono ? ggml_mul_mat(ctx_g, k->w2, X3)
-                                   : ggml_mul_mat(ctx_g, k->w2_a, ggml_mul_mat(ctx_g, k->w2_b, X3));
-        ggml_tensor * T1p   = ggml_cont(ctx_g, ggml_permute(ctx_g, T1, 1, 0, 2, 3));
-        ggml_tensor * w1s   = ggml_scale(ctx_g, k->w1, k->scale);  // alpha/dim on the tiny side
-        ggml_tensor * T2    = ggml_mul_mat(ctx_g, w1s, T1p);
-        ggml_tensor * T2p   = ggml_cont(ctx_g, ggml_permute(ctx_g, T2, 1, 0, 2, 3));
+        // [in_n, in_m*S] — same bytes as the old [in_n, in_m, S], ne2 == 1.
+        ggml_tensor * X2 = ggml_reshape_2d(ctx_g, xc, k->in_n, k->in_m * S);
+        ggml_tensor * T1 = k->mono ? ggml_mul_mat(ctx_g, k->w2, X2)
+                                   : ggml_mul_mat(ctx_g, k->w2_a, ggml_mul_mat(ctx_g, k->w2_b, X2));
+        // back to 3-D purely so the ne0/ne1 swap is expressible; both are views.
+        ggml_tensor * T13 = ggml_reshape_3d(ctx_g, T1, k->out_k, k->in_m, S);
+        ggml_tensor * T1p = ggml_cont(ctx_g, ggml_permute(ctx_g, T13, 1, 0, 2, 3));  // [in_m, out_k, S]
+        ggml_tensor * T1f = ggml_reshape_2d(ctx_g, T1p, k->in_m, k->out_k * S);
+        ggml_tensor * w1s = ggml_scale(ctx_g, k->w1, k->scale);  // alpha/dim on the tiny side
+        ggml_tensor * T2  = ggml_mul_mat(ctx_g, w1s, T1f);       // [out_l, out_k*S]
+        ggml_tensor * T23 = ggml_reshape_3d(ctx_g, T2, k->out_l, k->out_k, S);
+        ggml_tensor * T2p = ggml_cont(ctx_g, ggml_permute(ctx_g, T23, 1, 0, 2, 3));
         ggml_tensor * delta = ggml_reshape_4d(ctx_g, T2p, y->ne[0], y->ne[1], y->ne[2], y->ne[3]);
         return ggml_add(ctx_g, y, delta);
     }

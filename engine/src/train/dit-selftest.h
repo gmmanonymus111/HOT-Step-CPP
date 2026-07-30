@@ -1739,9 +1739,11 @@ static void dit_st_lokr_export(std::vector<DitSelfTestResult> & rs, const DitAda
                 continue;
             }
             checked++;
+            // BF16, not F32, since 2026-07-30: the writer matches LyCORIS /
+            // Side-Step, which halves a dim-512 census from 872 to 436 MB.
             yyjson_val * dt = yyjson_obj_get(e, "dtype");
-            if (!dt || !yyjson_is_str(dt) || strcmp(yyjson_get_str(dt), "F32") != 0) {
-                fail(want[i].name + " is not F32");
+            if (!dt || !yyjson_is_str(dt) || strcmp(yyjson_get_str(dt), "BF16") != 0) {
+                fail(want[i].name + " is not BF16");
             }
             yyjson_val * sh   = yyjson_obj_get(e, "shape");
             const size_t nd   = sh ? yyjson_arr_size(sh) : 0;
@@ -1760,15 +1762,22 @@ static void dit_st_lokr_export(std::vector<DitSelfTestResult> & rs, const DitAda
                 const size_t o0  = (off && yyjson_arr_size(off) == 2)
                                        ? (size_t) yyjson_get_uint(yyjson_arr_get(off, 0))
                                        : SIZE_MAX;
-                float        av  = 0.0f;
-                if (o0 == SIZE_MAX || data0 + o0 + sizeof(float) > raw.size()) {
+                if (o0 == SIZE_MAX || data0 + o0 + sizeof(uint16_t) > raw.size()) {
                     fail(want[i].name + " data_offsets out of range");
                 } else {
-                    memcpy(&av, raw.data() + data0 + o0, sizeof(float));
-                    if (av != k->alpha_eff) {
-                        char b[160];
-                        snprintf(b, sizeof(b), "%s = %.6g but the site's effective alpha is %.6g",
-                                 want[i].name.c_str(), (double) av, (double) k->alpha_eff);
+                    // Compare BIT PATTERNS against the writer's own rounding, so
+                    // the rung stays honest for an alpha that is not exactly
+                    // representable in BF16 (512 and 256 are; 0.7 would not be).
+                    uint16_t got = 0;
+                    memcpy(&got, raw.data() + data0 + o0, sizeof(uint16_t));
+                    const uint16_t exp_bits = stw_f32_to_bf16(k->alpha_eff);
+                    if (got != exp_bits) {
+                        const uint32_t gu = (uint32_t) got << 16;
+                        float          av = 0.0f;
+                        memcpy(&av, &gu, sizeof(float));
+                        char b[176];
+                        snprintf(b, sizeof(b), "%s = %.6g (bf16 0x%04x) but the site's effective alpha is %.6g",
+                                 want[i].name.c_str(), (double) av, (unsigned) got, (double) k->alpha_eff);
                         fail(b);
                     }
                 }
