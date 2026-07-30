@@ -18,6 +18,8 @@
     "sidebar.trainingStudio": "Training",
     "trainingStudio.title": "Training",
     "trainingStudio.subtitle": "Build datasets and train your own adapters — fully local",
+    "trainingStudio.sideStepNote": "For a more comprehensive training suite, please check out",
+    "trainingStudio.sideStepNoteTail": "— adapters trained there load here unchanged.",
     "trainingStudio.phase.dataset": "Dataset",
     "trainingStudio.phase.preprocess": "Preprocess",
     "trainingStudio.phase.train": "Train",
