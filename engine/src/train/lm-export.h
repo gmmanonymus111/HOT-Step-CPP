@@ -65,6 +65,12 @@ struct LmExportMeta {
     double                      target_stop_loss  = 0.0;
     double                      final_loss = -1.0, best_loss = -1.0;
     int                         best_epoch = 0, epochs_run = 0;
+    // Which epoch's adapter this file actually holds (2026-07-30). The export
+    // is best-only now, so final_loss is not what shipped. saved_reason is
+    // "target" (the epoch that tripped the auto-stop) or "best".
+    double                      saved_loss = -1.0;
+    int                         saved_epoch = 0;
+    std::string                 saved_reason;
 
     size_t    vram_free_mb = 0, vram_total_mb = 0, vram_mirror_mb = 0, vram_est_mb = 0, vram_peak_mb = 0;
     long long total_ms = 0;
@@ -221,6 +227,10 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_real(doc, root, "final_loss", m.final_loss);
     yyjson_mut_obj_add_real(doc, root, "best_loss", m.best_loss);
     yyjson_mut_obj_add_int(doc, root, "best_epoch", m.best_epoch);
+    yyjson_mut_obj_add_real(doc, root, "saved_loss", m.saved_loss);
+    yyjson_mut_obj_add_int(doc, root, "saved_epoch", m.saved_epoch);
+    yyjson_mut_obj_add_strcpy(doc, root, "saved_reason",
+                              m.saved_reason.empty() ? "best" : m.saved_reason.c_str());
     yyjson_mut_obj_add_int(doc, root, "epochs_run", m.epochs_run);
 
     yyjson_mut_val * ms = yyjson_mut_obj_add_arr(doc, root, "milestones");

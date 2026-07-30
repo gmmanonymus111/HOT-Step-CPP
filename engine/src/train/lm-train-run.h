@@ -132,6 +132,11 @@ struct LmTrainOutcome {
     double    final_loss       = -1.0;
     double    best_loss        = -1.0;
     int       best_epoch       = 0;
+    // Which epoch's adapter is actually in out_dir (2026-07-30). Since the
+    // export became best-only, final_loss is no longer what shipped.
+    double      saved_loss   = -1.0;
+    int         saved_epoch  = 0;
+    std::string saved_reason;
     bool      stopped_on_target = false;
     int       samples          = 0;
     int       skipped_long     = 0;
@@ -924,14 +929,34 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         rec.ms        = ems;
         meta->epoch_log.push_back(rec);
 
-        // Export EVERY epoch, BEFORE the stop test — the checkpoint that
-        // triggered the stop is already on disk (train_lm.py:325,333), and a
-        // cancelled/crashed run still leaves a usable adapter.
+        // Export the BEST epoch, not the last one (2026-07-30) — mirrors the
+        // same change in dit-train-run.h. This used to export unconditionally
+        // every epoch, so a run that never reached its target shipped whatever
+        // the final epoch produced. Exporting only on improvement still leaves
+        // a usable adapter on disk from epoch 1 onward (the original reason for
+        // the unconditional export) and writes strictly less.
+        //
+        // Selection is on the per-epoch mean, NOT an MA5 as on the DiT: an LM
+        // epoch is a full teacher-forced pass over every sample with no random
+        // timestep draw, so its loss is far less noisy than a DiT epoch's and
+        // needs no smoothing. It is also the metric the target test below uses,
+        // so the two stay consistent.
+        //
+        // hit_target forces the export even when it is not an improvement: a
+        // run that stops on target must ship the epoch that tripped it.
         meta->epochs_run = out->epochs_run;
         meta->final_loss = out->final_loss;
         meta->best_loss  = out->best_loss;
         meta->best_epoch = out->best_epoch;
-        {
+        const bool lm_hit_target = (a.target_loss > 0.0f && avg <= (double) a.target_loss);
+        if (best || lm_hit_target) {
+            out->saved_loss   = best ? avg : out->saved_loss;
+            out->saved_epoch  = epoch + 1;
+            out->saved_reason = lm_hit_target ? "target" : "best";
+            meta->saved_loss   = out->saved_loss;
+            meta->saved_epoch  = out->saved_epoch;
+            meta->saved_reason = out->saved_reason;
+
             LmExportResult xr;
             const bool xok = lora.is_lokr ? lm_export_lokr(lora, *meta, a.out_dir, &xr, &export_err)
                                           : lm_export_peft(lora, c, *meta, a.out_dir, &xr, &export_err);
@@ -1019,9 +1044,15 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
        (long long) tracker.base_mb, (long long) tracker.peak_mb, tracker.max_delta, global_step);
 
     if (rc == 0) {
+        // savedEpoch/savedLoss/savedReason say which epoch's adapter is in the
+        // run dir. finalLoss is the LAST epoch and is usually NOT it.
+        fprintf(stderr, "[train-lm] adapter saved from epoch %d (loss %.4f, %s) of %d run\n",
+                out->saved_epoch, out->saved_loss, out->saved_reason.c_str(), out->epochs_run);
         jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"end\",\"epochsRun\":%d,\"finalLoss\":%.6f,"
-           "\"bestLoss\":%.6f,\"stoppedOnTarget\":%s,\"ms\":%lld}",
-           out->epochs_run, out->final_loss, out->best_loss, out->stopped_on_target ? "true" : "false", out->ms);
+           "\"bestLoss\":%.6f,\"savedEpoch\":%d,\"savedLoss\":%.6f,\"savedReason\":\"%s\","
+           "\"stoppedOnTarget\":%s,\"ms\":%lld}",
+           out->epochs_run, out->final_loss, out->best_loss, out->saved_epoch, out->saved_loss,
+           out->saved_reason.c_str(), out->stopped_on_target ? "true" : "false", out->ms);
     }
 
     // teardown (free the GPU before the export stage does its file writes)

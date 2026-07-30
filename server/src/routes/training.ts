@@ -1480,12 +1480,15 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
-    const epochs = numOpt(body.epochs, 75);
-    const targetLoss = numOpt(body.targetLoss, 4.0);
+    const epochs = numOpt(body.epochs, 150);
+    const targetLoss = numOpt(body.targetLoss, 2.0);
     const rank = numOpt(body.rank, 16);
-    // LoKr (2026-07-30). Default 'lora' — the shipped path — so an omitted
-    // field can never move an existing caller onto a different parameterization.
-    const lmIsLokr = body.adapterType === 'lokr';
+    // LoKr is the DEFAULT (Rob, 2026-07-30) — an omitted adapterType now means
+    // LoKr, so a caller that wants the old LoRA path must say so explicitly.
+    // NOTE the sense: `!== 'lora'`, not `=== 'lokr'`. The batch pipeline stores
+    // partial option bags, and an absent field there has to land on the default
+    // a user would have seen in the form, not on the other branch.
+    const lmIsLokr = body.adapterType !== 'lora';
     const lmMuonLrScale = numOpt(body.muonLrScale, 20.0);
     const lmMuonNsSteps = numOpt(body.muonNsSteps, 5);
     if (body.optimizer !== undefined && body.optimizer !== 'adamw' && body.optimizer !== 'muon') {
@@ -1500,8 +1503,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'muonNsSteps must be between 1 and 20' });
       return;
     }
-    const lmLokrDim = numOpt(body.lokrDim, 512);
-    const lmLokrAlpha = numOpt(body.lokrAlpha, 512);
+    const lmLokrDim = numOpt(body.lokrDim, 128);
+    const lmLokrAlpha = numOpt(body.lokrAlpha, 128);
     const lmLokrFactor = numOpt(body.lokrFactor, 6);
     if (body.adapterType !== undefined && body.adapterType !== 'lora' && body.adapterType !== 'lokr') {
       res.status(400).json({ error: 'adapterType must be lora or lokr' });
@@ -1523,7 +1526,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const weightDecay = numOpt(body.weightDecay, 0.01);
     const maxLen = numOpt(body.maxLen, 0);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 1);
+    const milestoneStep = numOpt(body.milestoneStep, 0);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
 
     const rangeFailure =
@@ -1573,13 +1576,17 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
-    // The 'weights' default flipped to 'bf16' (2026-07-29) and is no longer the
-    // CLI default ('f32-window'), so an omitted field now DOES emit an explicit
-    // --weights bf16 flag (buildTrainLmArgs). The engine owns the semantic
-    // rules (bf16 needs a BF16 base; batch>1 implies low-VRAM) — this is a
-    // value whitelist only, so a stale UI can never make the runner stop
-    // ace-server for an argument ace-train would reject.
-    const weights = body.weights === undefined ? 'bf16' : body.weights;
+    // 'weights' went bf16 (2026-07-29) and back to 'f32-window' (Rob,
+    // 2026-07-30) to match the DiT's F32 mirror. This is once again the CLI's
+    // own default, so an omitted field emits no --weights flag at all.
+    //
+    // KNOWN COST: bf16 was also how the LM reached the mul_mat backward, via
+    // lm-bf16.h's in-place out_prod rewrite (~1.7-1.8x on the GEMM mix). It
+    // cannot be bought back with --bwd mm here — see the bwd comment below.
+    // The engine owns the semantic rules (bf16 needs a BF16 base; batch>1
+    // implies low-VRAM) — this is a value whitelist only, so a stale UI can
+    // never make the runner stop ace-server for an argument ace-train rejects.
+    const weights = body.weights === undefined ? 'f32-window' : body.weights;
     if (weights !== 'f32-window' && weights !== 'bf16') {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
@@ -1664,7 +1671,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       // Only the exact string 'lokr' opts in; anything else is a LoRA.
       adapterType: lmIsLokr ? 'lokr' : 'lora',
       // Only the exact string 'muon' opts in; anything else is AdamW.
-      optimizer: body.optimizer === 'muon' ? 'muon' : 'adamw',
+      optimizer: body.optimizer === 'adamw' ? 'adamw' : 'muon',
       muonLrScale: lmMuonLrScale,
       muonNsSteps: Math.trunc(lmMuonNsSteps),
       rank: Math.trunc(rank),
@@ -1848,8 +1855,8 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // 250 for LoKR (2026-07-30 retune): a 400-epoch cosine horizon left every
     // measured run stopping at ~50% of peak LR, so the schedule never decayed
     // into the target. 250 cut epochs-to-0.6 from 228 to 203. LoRA keeps 400.
-    const epochs = numOpt(body.epochs, isLokr ? 250 : 400);
-    const targetLoss = numOpt(body.targetLoss, isLokr ? 0.6 : 0.4);
+    const epochs = numOpt(body.epochs, 500);
+    const targetLoss = numOpt(body.targetLoss, 0.2);
     const rank = numOpt(body.rank, 128);
     const alpha = numOpt(body.alpha, 256);
     const lokrDim = numOpt(body.lokrDim, 512);
@@ -1886,7 +1893,7 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // handle without the caption path going untrained.
     const genreRatio = numOpt(body.genreRatio, 30);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 0.1);
+    const milestoneStep = numOpt(body.milestoneStep, 0);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
     const vramReserveMb = numOpt(body.vramReserveMb, 2048);
     // Micro-batching / checkpointing (design §2.2). ckptSegments mirrors the
@@ -1897,8 +1904,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // land on the same behaviour.
     const batch = numOpt(body.batch, 1);
     const ckptSegments = numOpt(body.ckptSegments, 1);
-    // Optimizer (2026-07-30). Default 'adamw' — the shipped path — so an
-    // omitted field can never move an existing caller onto Muon.
+    // Optimizer (2026-07-30). Muon is the DEFAULT for the DiT, after a full-run
+    // A/B (161 epochs to target vs AdamW's 227) and ear validation. Resolved
+    // below as `=== 'adamw' ? 'adamw' : 'muon'`, so an omitted field means Muon.
     const muonLrScale = numOpt(body.muonLrScale, 20.0);
     const muonMomentum = numOpt(body.muonMomentum, 0.95);
     const muonNsSteps = numOpt(body.muonNsSteps, 5);
@@ -2049,7 +2057,7 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // Frozen-weight mirror precision. Default is 'bf16' (2026-07-29); only
       // the exact string 'f32' opts back out. The engine itself falls back to
       // f32 with a warning on a non-CUDA backend (dit-train-run.h).
-      mirror: body.mirror === 'f32' ? 'f32' : 'bf16',
+      mirror: body.mirror === 'bf16' ? 'bf16' : 'f32',
       // MUL_MAT activation-gradient formulation. Default 'mm' (2026-07-29);
       // only the exact string 'outprod' opts back out to upstream ggml's
       // F32-only out_prod backward.

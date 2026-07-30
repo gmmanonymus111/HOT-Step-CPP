@@ -45,7 +45,7 @@ export interface TrainLmFormState {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
-  /** Projection GEMM dtype (speed lever A). 'f32-window' is the shipped path. */
+  /** Projection GEMM dtype (speed lever A). 'f32-window' is the default. */
   weights: 'f32-window' | 'bf16';
   /** Micro-batch size (speed lever B). 1 is the shipped path. */
   batch: number | 'auto';
@@ -62,20 +62,29 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmSize: '4B',
   lmModel: '',
   adapterName: '',
-  targetLoss: 4.0,
-  epochs: 75,
-  // LoRA stays the LM default: LoKr is gated (LK1/LK2 exact) but its
-  // hyperparameters are borrowed from the DiT and unproven on an LM.
-  adapterType: 'lora',
-  // AdamW stays the LM default. Muon is 1.41x more sample-efficient on the DiT
-  // and ear-validated there, but on the LM only an 8-epoch smoke exists — and
-  // 8 epochs is exactly the window that showed false parity on the DiT.
-  optimizer: 'adamw',
+  targetLoss: 2.0,
+  epochs: 150,
+  adapterType: 'lokr',
+  optimizer: 'muon',
   muonLrScale: 20,
   rank: 16,
   alpha: 32,
-  lokrDim: 512,
-  lokrAlpha: 512,
+  // dim 128, NOT the DiT's 512 (Rob, 2026-07-30). At 512 every attention site
+  // is monolithic and every MLP site factorized; at 128 EVERY site factorizes
+  // (the mono test is dim >= max(out_k,in_n)/2, and the smallest max on a 4B
+  // Qwen3 is 512). That cuts a 4B adapter from ~420 MB to ~124 MB.
+  //
+  // lokrAlpha MUST TRACK lokrDim. scale = alpha_eff/dim, and LyCORIS forces
+  // alpha_eff = dim only on MONOLITHIC sites — at dim 128 there are none, so
+  // alpha 512 would leave every site running at scale 4.0, i.e. a silent 4x on
+  // the adapter's effective learning rate. That is the same class of failure as
+  // the Uber-LoKR alpha asymmetry. Keep them equal unless you mean it.
+  lokrDim: 128,
+  lokrAlpha: 128,
+  // 6 stays. The 4B LM's hidden size is 2560 — the same as the DiT's — so
+  // factor 6 yields the identical, proven splits: 2560 -> 5x512, 4096 -> 4x1024,
+  // 1024 -> 4x256, 9728 -> 4x2432. Verified against a trained adapter's tensor
+  // shapes, not assumed.
   lokrFactor: 6,
   learningRate: 0.0001,
   gradAccum: 2,
@@ -86,23 +95,31 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   seed: 42,
   order: 'shuffle',
   lossOnCot: true,
-  milestoneStep: 1,
+  // Milestones OFF by default (Rob, 2026-07-30). The run now always leaves the
+  // BEST adapter in the run dir, so the main reason to snapshot mid-run — "grab
+  // something before it overfits" — is covered without writing N extra copies.
+  milestoneStep: 0,
   milestoneKeep: 6,
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
   // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
-  // weights no longer does: the server default flipped to 'bf16' (2026-07-29),
-  // so a default run now explicitly requests --weights bf16 — which is a hard
-  // fatal against a non-BF16-quantized LM base (see aceTrain.ts/types.ts docs).
-  weights: 'bf16',
+  //
+  // f32-window, not bf16 (Rob, 2026-07-30) — matching the DiT's F32 mirror.
+  // KNOWN COST: `weights: 'bf16'` was also what reached the mul_mat backward,
+  // by rewriting ggml's out_prod nodes in place (lm-bf16.h Lever A, ~1.7-1.8x
+  // on the GEMM mix). f32-window gives that up and there is no way to buy it
+  // back here — pairing --bwd mm with f32-window is refused for the LM because
+  // the transposed weight IS the F32 window, so the GEMM stays TF32 and you
+  // only pay an extra cont. This is a precision-over-speed choice.
+  weights: 'f32-window',
   batch: 1,
-  // MUL_MAT activation-gradient formulation. 'outprod' here, unlike train-dit's
-  // 'mm': `weights: 'bf16'` above ALREADY gives this base the mul_mat backward,
-  // by rewriting ggml's out_prod nodes in place (lm-bf16.h). The two cannot be
-  // combined — the rewrite asserts it found 7 out_prod nodes per segment and
-  // aborts when --bwd mm leaves it none — and the server refuses the pair with
-  // a 400. Choosing 'mm' here means also choosing weights 'f32-window'.
+  // 'outprod' here, unlike train-dit's 'mm', and it STAYS outprod now that
+  // weights is f32-window: on that path the transposed weight IS the F32
+  // window, so --bwd mm keeps the GEMM at TF32 and only adds a cont. It buys
+  // nothing on the LM. (It was also refused alongside weights bf16, because
+  // lm-bf16.h's rewrite asserts it found 7 out_prod nodes per segment and
+  // aborts when mm leaves it none.)
   bwd: 'outprod',
 };
 
@@ -275,7 +292,7 @@ export const TrainLmForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', 'Default 4.0 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 2.0 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -283,7 +300,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 4.0) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 2.0) })}
             className={FIELD}
           />
         </label>
@@ -294,7 +311,7 @@ export const TrainLmForm: React.FC<Props> = ({
       {/* ── Max epochs ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="flex flex-col gap-1.5">
-          {P('maxEpochs', 'Default 75 · 1–200')}
+          {P('maxEpochs', 'Default 150 · 1–200')}
           <input
             type="number"
             min={1}
@@ -302,7 +319,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={1}
             value={value.epochs}
             disabled={lock}
-            onChange={(e) => onChange({ epochs: num(e.target.value, 75) })}
+            onChange={(e) => onChange({ epochs: num(e.target.value, 150) })}
             className={FIELD}
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>
@@ -332,7 +349,7 @@ export const TrainLmForm: React.FC<Props> = ({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            {P('lm.optimizer', 'Default AdamW · Muon unproven on the LM')}
+            {P('lm.optimizer', 'Default Muon · AdamW remains fully supported')}
             <StyledSelect
               accent="amber"
               value={value.optimizer}
@@ -359,7 +376,7 @@ export const TrainLmForm: React.FC<Props> = ({
           )}
 
           <div className="flex flex-col gap-1.5">
-            {P('lm.adapterType', 'Default LoRA · LoKr is experimental on the LM')}
+            {P('lm.adapterType', 'Default LoKr · LoRA remains fully supported')}
             <StyledSelect
               accent="amber"
               value={value.adapterType}
@@ -375,11 +392,11 @@ export const TrainLmForm: React.FC<Props> = ({
 
           {value.adapterType === 'lokr' && (
             <label className="flex flex-col gap-1.5">
-              {P('lm.lokrDim', 'Default 512 · 4–4096')}
+              {P('lm.lokrDim', 'Default 128 · 4–4096 · keep alpha equal to it')}
               <input
                 type="number" min={4} max={4096} step={1}
                 value={value.lokrDim} disabled={lock}
-                onChange={(e) => onChange({ lokrDim: num(e.target.value, 512) })}
+                onChange={(e) => onChange({ lokrDim: num(e.target.value, 128) })}
                 className={FIELD}
               />
             </label>
@@ -552,11 +569,11 @@ export const TrainLmForm: React.FC<Props> = ({
           </div>
 
           <label className="flex flex-col gap-1.5">
-            {P('milestoneStep', 'Default 1.0 · 0 = off')}
+            {P('milestoneStep', 'Default 0 (off) · the best adapter is kept regardless')}
             <input
               type="number" min={0} max={5} step={0.05}
               value={value.milestoneStep} disabled={lock}
-              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0.1) })}
+              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0) })}
               className={FIELD}
             />
           </label>
