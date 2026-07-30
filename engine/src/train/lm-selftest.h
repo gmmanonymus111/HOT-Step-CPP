@@ -1918,6 +1918,123 @@ static int lm_self_test(const std::string & lm_path, const std::string & codes_p
         ggml_free(tctx);
     }
 
+    // ── LK1 / LK2: the LoKr parameterization ─────────────────────────────
+    //
+    // Mirrors the DiT's LK2/LK3 against qwen3_lokr_delta — the SHARED apply, so
+    // this covers the inference runtime too, not just the trainer.
+    //
+    //   LK1: a zero-initialized LoKr must perturb NOTHING. w2 is zeroed at init,
+    //        so kron(w1, w2) is exactly 0 and apply(x) has to equal W.x bit for
+    //        bit. Catches a delta wired in with the wrong sign, scale or shape.
+    //   LK2: matvec vs a MATERIALIZED kron. The whole point of the factor-by-
+    //        factor contraction is never building dW, so nothing else checks the
+    //        contraction is the kron it claims to be. Integer operands keep it
+    //        TF32-exact, the same trick the DiT's LK3 uses.
+    {
+        const int64_t KIN = 24, KOUT = 20, KS = 4;  // 24 = 4*6, 20 = 4*5 under factor 6
+        ggml_context * kc = nullptr;
+        {
+            ggml_init_params ip = { 64 * ggml_tensor_overhead(), nullptr, true };
+            kc                  = ggml_init(ip);
+        }
+        int64_t out_l, out_k, in_m, in_n;
+        lokr_factorization(KOUT, 6, &out_l, &out_k);
+        lokr_factorization(KIN, 6, &in_m, &in_n);
+
+        ggml_tensor * W  = ggml_new_tensor_2d(kc, GGML_TYPE_F32, KIN, KOUT);
+        ggml_tensor * X  = ggml_new_tensor_2d(kc, GGML_TYPE_F32, KIN, KS);
+        ggml_tensor * w1 = ggml_new_tensor_2d(kc, GGML_TYPE_F32, in_m, out_l);
+        ggml_tensor * w2 = ggml_new_tensor_2d(kc, GGML_TYPE_F32, in_n, out_k);
+        ggml_backend_buffer_t kbuf = ggml_backend_alloc_ctx_tensors(kc, lm.backend);
+
+        std::vector<float> hW((size_t) KIN * KOUT), hX((size_t) KIN * KS);
+        std::vector<float> h1((size_t) in_m * out_l), h2((size_t) in_n * out_k);
+        LmRng              krng;
+        lm_rng_seed(&krng, 0x10C5ull);
+        for (size_t i = 0; i < hW.size(); i++) { hW[i] = (float) ((i * 7919) % 11) - 5.0f; }
+        for (size_t i = 0; i < hX.size(); i++) { hX[i] = (float) ((i * 104729) % 7) - 3.0f; }
+        for (size_t i = 0; i < h1.size(); i++) { h1[i] = (float) ((i * 31) % 5) - 2.0f; }
+        ggml_backend_tensor_set(W, hW.data(), 0, hW.size() * sizeof(float));
+        ggml_backend_tensor_set(X, hX.data(), 0, hX.size() * sizeof(float));
+        ggml_backend_tensor_set(w1, h1.data(), 0, h1.size() * sizeof(float));
+
+        QwLoraPair kp;
+        kp.w1 = w1; kp.w2 = w2;
+        kp.in_m = in_m; kp.in_n = in_n; kp.out_l = out_l; kp.out_k = out_k;
+        kp.lokr_scale = 1.0f;  // LyCORIS forces alpha == dim when both are monolithic
+
+        auto run = [&](std::vector<float> * got) {
+            ggml_init_params gp = { (size_t) (8 << 20), nullptr, true };
+            ggml_context *   gc = ggml_init(gp);
+            ggml_cgraph *    gf = ggml_new_graph(gc);
+            ggml_tensor *    y  = ggml_mul_mat(gc, W, X);
+            y                   = qwen3_lokr_delta(gc, &kp, X, y);
+            ggml_build_forward_expand(gf, y);
+            ggml_backend_sched_reset(sched);
+            const bool ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+            got->assign((size_t) KOUT * KS, 0.0f);
+            if (ok) { ggml_backend_tensor_get(y, got->data(), 0, got->size() * sizeof(float)); }
+            ggml_free(gc);
+            return ok;
+        };
+
+        // LK1: w2 == 0 -> delta is exactly zero.
+        h2.assign(h2.size(), 0.0f);
+        ggml_backend_tensor_set(w2, h2.data(), 0, h2.size() * sizeof(float));
+        std::vector<float> y0;
+        const bool         ok0 = run(&y0);
+        double             worst0 = 0.0;
+        for (int64_t kc_i = 0; kc_i < KS; kc_i++) {
+            for (int64_t r = 0; r < KOUT; r++) {
+                double ref = 0.0;
+                for (int64_t k = 0; k < KIN; k++) { ref += (double) hW[(size_t) (r * KIN + k)] * hX[(size_t) (kc_i * KIN + k)]; }
+                worst0 = std::max(worst0, fabs((double) y0[(size_t) (kc_i * KOUT + r)] - ref));
+            }
+        }
+        char d1[224];
+        snprintf(d1, sizeof(d1), "zero-init LoKr on [in %lld, out %lld]: max |apply(x) - W.x| = %.3e (bar EXACTLY 0)",
+                 (long long) KIN, (long long) KOUT, worst0);
+        lm_st_report(rs, "LK1", ok0 && worst0 == 0.0, d1);
+
+        // LK2: integer w2 -> matvec vs materialized kron.
+        for (size_t i = 0; i < h2.size(); i++) { h2[i] = (float) ((i * 13) % 4) - 1.0f; }
+        ggml_backend_tensor_set(w2, h2.data(), 0, h2.size() * sizeof(float));
+        std::vector<float> y1;
+        const bool         ok1 = run(&y1);
+        // dW[l*out_k + k, m*in_n + n] = w1[l,m] * w2[k,n]; ggml stores the
+        // transpose, so h1[l*in_m + m] and h2[k*in_n + n].
+        double worst1 = 0.0, refmax = 0.0;
+        for (int64_t kc_i = 0; kc_i < KS; kc_i++) {
+            for (int64_t l = 0; l < out_l; l++) {
+                for (int64_t k = 0; k < out_k; k++) {
+                    const int64_t r = l * out_k + k;
+                    double        ref = 0.0;
+                    for (int64_t kk = 0; kk < KIN; kk++) {
+                        ref += (double) hW[(size_t) (r * KIN + kk)] * hX[(size_t) (kc_i * KIN + kk)];
+                    }
+                    for (int64_t m = 0; m < in_m; m++) {
+                        for (int64_t n = 0; n < in_n; n++) {
+                            ref += (double) h1[(size_t) (l * in_m + m)] * (double) h2[(size_t) (k * in_n + n)]
+                                   * (double) hX[(size_t) (kc_i * KIN + m * in_n + n)];
+                        }
+                    }
+                    refmax = std::max(refmax, fabs(ref));
+                    worst1 = std::max(worst1, fabs((double) y1[(size_t) (kc_i * KOUT + r)] - ref)
+                                                  / std::max(fabs(ref), 1.0));
+                }
+            }
+        }
+        char d2[288];
+        snprintf(d2, sizeof(d2),
+                 "w1[%lld,%lld] w2[%lld,%lld] monolithic, integer operands (TF32-exact): matvec vs materialized kron "
+                 "max rel err %.3e (bar 1e-5), reference max |y| %.1f",
+                 (long long) in_m, (long long) out_l, (long long) in_n, (long long) out_k, worst1, refmax);
+        lm_st_report(rs, "LK2", ok1 && worst1 < 1e-5, d2);
+
+        if (kbuf) { ggml_backend_buffer_free(kbuf); }
+        ggml_free(kc);
+    }
+
     // ── teardown ─────────────────────────────────────────────────────────
     ggml_backend_sched_free(sched);
     lm_optim_free(&opt);
