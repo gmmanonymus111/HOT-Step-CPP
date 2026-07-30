@@ -1824,7 +1824,21 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'adapterType must be "lora" or "lokr"' });
       return;
     }
-    const adapterType: DitAdapterType = body.adapterType === 'lokr' ? 'lokr' : 'lora';
+    // DEFAULT IS LoKR (2026-07-30), matching the form: TrainPanel seeds
+    // TRAIN_DIT_LOKR_DEFAULTS, not TRAIN_DIT_DEFAULTS — LoKR is the UI's default
+    // adapter type (K1/K2, Rob's validated Uber-LoKR preference), and the base
+    // constant only exists as the object the LoKR preset spreads.
+    //
+    // This handler is where the BATCH pipeline lands: it POSTs only the stored
+    // per-stage defaults (`{}` in practice) so every omitted field resolves
+    // here. Defaulting to 'lora' meant a batch run trained a LoRA where the
+    // identical manual run trained a LoKR.
+    //
+    // NOTE the sense: `!== 'lora'`, not `=== 'lokr'`. Everything downstream
+    // keys off isLokr — learningRate 0.002 vs 5e-4, weightDecay 0.001 vs 0.01,
+    // lossWeighting none vs flow_snr — so getting this branch wrong silently
+    // retunes four other parameters, not one.
+    const adapterType: DitAdapterType = body.adapterType === 'lora' ? 'lora' : 'lokr';
     const isLokr = adapterType === 'lokr';
 
     // ── 5. base model ────────────────────────────────────────────────────
