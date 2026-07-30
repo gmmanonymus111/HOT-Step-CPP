@@ -114,6 +114,7 @@ struct DitTrainArgs {
     int         muon_ns_steps   = 5;
     bool        muon_nesterov   = true;
     int         muon_min_dim    = 16;
+    int         muon_bucket     = 16;
 
     // Step-time profiling (docs/plans/2026-07-30-dit-trainer-step-profile.md §2).
     // 0 = OFF and nothing about the run changes. N > 0 = time every micro-step
@@ -195,6 +196,10 @@ struct DitStepProf {
     long long tot[DPB_N] = {};  // us over the whole run
     long long win_steps  = 0;
     long long tot_steps  = 0;
+    // The optimizer step, timed separately — it is per OPTIMIZER step, not per
+    // micro-step, so it is not one of the buckets above.
+    long long optim_us    = 0;
+    long long optim_steps = 0;
     // Graph shape, captured every timed micro-step (constant in practice — if it
     // is not, that is itself the finding).
     // No leaf count: this ggml exposes only ggml_graph_n_nodes publicly, and
@@ -250,7 +255,9 @@ static void dit_prof_report(DitStepProf & p) {
         snprintf(b, sizeof(b), "%s\"%s\":%.3f", i ? "," : "", DIT_PROF_NAMES[i], ms);
         js += b;
     }
-    fprintf(stderr, "%s; nodes %d splits %d copies %d\n", line.c_str(), p.nodes, p.splits, p.copies);
+    fprintf(stderr, "%s; nodes %d splits %d copies %d; optimizer %.1f ms x%lld\n", line.c_str(), p.nodes, p.splits,
+            p.copies, p.optim_steps ? (double) p.optim_us / (double) p.optim_steps / 1000.0 : 0.0,
+            (long long) p.optim_steps);
 
     snprintf(b, sizeof(b), "},\"steps\":%lld,\"msPerStep\":%.3f,", p.win_steps, (double) tot / n / 1000.0);
     js += b;
@@ -787,6 +794,7 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     opt.muon.ns_steps  = a.muon_ns_steps;
     opt.muon.nesterov  = a.muon_nesterov;
     opt.muon.min_dim   = a.muon_min_dim;
+    opt.muon.bucket    = a.muon_bucket;
     {
         std::string err;
         if (!lm_optim_init(&opt, adapter->params(), M.backend, &err)) {
@@ -1423,10 +1431,18 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 if (rc != 0) {
                     break;
                 }
+                // The optimizer step sits OUTSIDE micro_batch, so it is in none
+                // of the DPB buckets — and with Muon it is the thing under
+                // suspicion. Timed separately, reported with the step profile.
+                const long long p_o0 = prf.on ? ggml_time_us() : 0;
                 if (!lm_optim_step(&opt, M.sched, &last_stats)) {
                     lm_fatal("vram", "optimizer step failed");
                     rc = 1;
                     break;
+                }
+                if (prf.on) {
+                    prf.optim_us += ggml_time_us() - p_o0;
+                    prf.optim_steps++;
                 }
                 global_step++;
                 const size_t vram_mb = tracker.sample();

@@ -67,6 +67,26 @@ struct LmMuonCfg {
     int   min_dim = 16;
     // < 0 inherits LmOptim::weight_decay. Decoupled either way.
     float wd = -1.0f;
+    // Max parameters per shape bucket. 16 is MEASURED, not chosen: the optimizer
+    // step on a LoKR dim512+MLP run goes 298.6 ms (bucket 1, i.e. unbatched) ->
+    // 136.1 (8) -> 138.0 (16) -> 187.3 (64) -> 201.2 (128).
+    //
+    // It gets WORSE above ~16 because the gather is a left-folded ggml_concat,
+    // which re-copies everything accumulated so far at each step — quadratic in
+    // bucket size. So this knob trades launch overhead (small buckets) against
+    // concat traffic (large ones), and the optimum sits early. Removing the
+    // concat entirely — allocating the accumulators and momenta as slabs of one
+    // per-bucket tensor, so the bucket IS the storage — is what would push this
+    // toward the ~55 ms of irreducible Newton-Schulz FLOPs and make big buckets
+    // the right answer again.
+    int bucket = 16;
+};
+
+// A run of Muon parameters that share a shape exactly, so one batched
+// Newton-Schulz serves all of them.
+struct LmMuonBucket {
+    int64_t          ne0 = 0, ne1 = 0;
+    std::vector<int> idx;  // parameter slots
 };
 
 // Quintic Newton-Schulz coefficients (Jordan 2024). Tuned so the iteration
@@ -91,7 +111,8 @@ struct LmOptim {
     // AdamW carries two, which is worth ~900 MB at LoKR dim512 (228.6M params).
     std::string            optimizer = "adamw";
     LmMuonCfg              muon;
-    std::vector<uint8_t>   rule;
+    std::vector<uint8_t>      rule;
+    std::vector<LmMuonBucket> muon_buckets;
     int                    n_muon = 0;   // parameters actually on Muon
     int                    est_nodes = 0;  // sized in init, drives the graph cap
 
@@ -158,6 +179,38 @@ static ggml_tensor * lm_muon_newton_schulz(ggml_context * ctx, ggml_tensor * G, 
         ggml_tensor * A2 = ggml_mul_mat(ctx, A, A);                       // [R,R]
         ggml_tensor * B  = ggml_add(ctx, ggml_scale(ctx, A, LM_MUON_NS_B),
                                     ggml_scale(ctx, A2, LM_MUON_NS_C));   // [R,R]
+        ggml_tensor * BX = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, X)), B);
+        X                = ggml_add(ctx, ggml_scale(ctx, X, LM_MUON_NS_A), BX);
+    }
+    return tall ? ggml_cont(ctx, ggml_transpose(ctx, X)) : X;
+}
+
+// ─── batched Newton-Schulz over a shape bucket ──────────────────────────────
+//
+// Identical maths to lm_muon_newton_schulz, run on [C, R, N] instead of [C, R]:
+// every ggml op below already broadcasts over ne2, and mul_mat with equal ne2
+// on both operands is one strided-batched cuBLAS call. This is the whole point
+// of bucketing — a LoKR dim512+MLP run has 448 Muon parameters in THREE
+// distinct shapes, so the ~31k tiny kernels the per-parameter form emits become
+// a few hundred.
+//
+// The one thing that does NOT come free is the Frobenius normalization: a plain
+// ggml_sum would collapse the whole bucket to a single scalar and normalize
+// every parameter by its neighbours' magnitudes. It has to be PER SLAB, which
+// is what the two sum_rows do — [C,R,N] -> [1,R,N] -> (transpose) -> [1,1,N].
+static ggml_tensor * lm_muon_ns_batched(ggml_context * ctx, ggml_tensor * G, int steps, ggml_tensor * t_eps) {
+    const bool tall = G->ne[1] > G->ne[0];  // transpose keeps ne2, so this is still per-slab
+    ggml_tensor * X = tall ? ggml_cont(ctx, ggml_transpose(ctx, G)) : G;
+
+    ggml_tensor * s2 = ggml_sum_rows(ctx, ggml_sqr(ctx, X));                  // [1, R, N]
+    s2               = ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, s2)));  // [1, 1, N]
+    ggml_tensor * nrm = ggml_sqrt(ctx, s2);
+    X                 = ggml_div(ctx, X, ggml_add(ctx, nrm, t_eps));  // [1,1,N] repeats into [C,R,N]
+
+    for (int i = 0; i < steps; i++) {
+        ggml_tensor * A  = ggml_mul_mat(ctx, X, X);  // [R,R,N], one batched GEMM
+        ggml_tensor * A2 = ggml_mul_mat(ctx, A, A);
+        ggml_tensor * B  = ggml_add(ctx, ggml_scale(ctx, A, LM_MUON_NS_B), ggml_scale(ctx, A2, LM_MUON_NS_C));
         ggml_tensor * BX = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, X)), B);
         X                = ggml_add(ctx, ggml_scale(ctx, X, LM_MUON_NS_A), BX);
     }
@@ -258,9 +311,38 @@ static bool lm_optim_init(LmOptim * o, const std::vector<ggml_tensor *> & params
         GGML_ASSERT(ggml_are_same_shape(o->acc[j], pj));
         o->param_slot[pj] = (int) j;
     }
+    // Group the Muon parameters by EXACT shape, then chunk each group so only a
+    // bounded slice of a bucket is live at once. A LoKR dim512+MLP run collapses
+    // to three shapes (352 x [512,512], 64 x [512,2432], 32 x [2432,512]) — the
+    // difference between ~31k kernel launches per optimizer step and a few
+    // hundred.
+    o->muon_buckets.clear();
     if (want_muon) {
-        fprintf(stderr, "[optim] muon: %d of %zu parameters on Muon (min_dim %d), %zu on AdamW\n", o->n_muon, n,
-                o->muon.min_dim, n - (size_t) o->n_muon);
+        const int cap = o->muon.bucket > 0 ? o->muon.bucket : 1;
+        for (size_t j = 0; j < n; j++) {
+            if (o->rule[j] != LM_RULE_MUON) {
+                continue;
+            }
+            const ggml_tensor * pj = o->params[j];
+            LmMuonBucket *      b  = nullptr;
+            for (size_t k = 0; k < o->muon_buckets.size(); k++) {
+                LmMuonBucket & cand = o->muon_buckets[k];
+                if (cand.ne0 == pj->ne[0] && cand.ne1 == pj->ne[1] && (int) cand.idx.size() < cap) {
+                    b = &cand;
+                    break;
+                }
+            }
+            if (!b) {
+                LmMuonBucket nb;
+                nb.ne0 = pj->ne[0];
+                nb.ne1 = pj->ne[1];
+                o->muon_buckets.push_back(nb);
+                b = &o->muon_buckets.back();
+            }
+            b->idx.push_back((int) j);
+        }
+        fprintf(stderr, "[optim] muon: %d of %zu parameters on Muon (min_dim %d), %zu on AdamW; %zu shape buckets\n",
+                o->n_muon, n, o->muon.min_dim, n - (size_t) o->n_muon, o->muon_buckets.size());
     }
 
     o->buf_grad = ggml_backend_alloc_ctx_tensors(o->ctx_grad, backend);
@@ -279,7 +361,13 @@ static bool lm_optim_init(LmOptim * o, const std::vector<ggml_tensor *> & params
     // n*8 covers the global-norm reduction (sqr + sum per parameter plus the
     // balanced-tree adds) and the AdamW nodes; +25% because overflowing the cap
     // is a hard abort mid-run, and the headroom costs only address space.
-    o->est_nodes = (int) (((double) n * 8.0 + (double) o->n_muon * lm_muon_nodes_per_param(o->muon.ns_steps)) * 1.25) + 1024;
+    // Bucketed Muon pays ~(20 + 10*ns) per BUCKET, plus a small fixed cost per
+    // parameter for the concat in and the view/scale/add/cpy out.
+    o->est_nodes = (int) (((double) n * 8.0
+                           + (double) o->muon_buckets.size() * lm_muon_nodes_per_param(o->muon.ns_steps)
+                           + (double) o->n_muon * 10.0)
+                          * 1.25)
+                   + 1024;
     const size_t cap   = (size_t) o->est_nodes;
     const size_t bytes = ggml_graph_overhead_custom(cap, false) + cap * (ggml_tensor_overhead() + 64) + (4u << 20);
     o->arena.resize(bytes > (16u << 20) ? bytes : (16u << 20));
@@ -372,33 +460,59 @@ static bool lm_optim_step(LmOptim * o, ggml_backend_sched_t sched, LmStepStats *
         if (o->rule[j] != LM_RULE_MUON) {
             ggml_build_forward_expand(
                 go, ggml_opt_step_adamw(ctx, o->params[j], g, o->mom_m[j], o->mom_v[j], o->t_adamw));
+        }
+        // Muon parameters are handled below, a whole shape bucket at a time.
+    }
+
+    // ── Muon, bucketed ───────────────────────────────────────────────────────
+    //
+    // Per bucket: concat the accumulators and momenta into [ne0, ne1, N], run
+    // ONE batched Newton-Schulz, then scatter back. The concat is what makes the
+    // gather correct by construction — writing N slabs of a scratch tensor with
+    // N independent cpy nodes would have no dependency edges, and nothing would
+    // stop the scheduler running the Newton-Schulz before the last of them.
+    for (size_t b = 0; b < o->muon_buckets.size(); b++) {
+        const LmMuonBucket & bk = o->muon_buckets[b];
+        if (bk.idx.empty()) {
             continue;
         }
+        ggml_tensor * G = nullptr;
+        ggml_tensor * M = nullptr;
+        for (size_t i = 0; i < bk.idx.size(); i++) {
+            const int     j  = bk.idx[i];
+            ggml_tensor * gj = c ? ggml_mul(ctx, o->acc[(size_t) j], c) : o->acc[(size_t) j];
+            G                = G ? ggml_concat(ctx, G, gj, 2) : gj;
+            M                = M ? ggml_concat(ctx, M, o->mom_m[(size_t) j], 2) : o->mom_m[(size_t) j];
+        }
 
-        // Muon. WRITE-AFTER-READ ORDER IS LOAD-BEARING: `m_new` is computed from
-        // the OLD momentum and is an ancestor of both write-backs, so the cpy
-        // into `mom_m` can never be scheduled ahead of a node that still needs
-        // the old value. ggml_opt_step_adamw avoids this by fusing; we have no
-        // fused op, so the dependency has to be built deliberately.
-        ggml_tensor * m_new = ggml_add(ctx, ggml_scale(ctx, o->mom_m[j], o->muon.momentum), g);
-        ggml_tensor * u     = o->muon.nesterov ? ggml_add(ctx, g, ggml_scale(ctx, m_new, o->muon.momentum)) : m_new;
+        // WRITE-AFTER-READ ORDER IS LOAD-BEARING: `m_new` is computed from the
+        // OLD momenta and is an ancestor of every write-back below, so no cpy
+        // into mom_m can be scheduled ahead of a node that still needs the old
+        // value. ggml_opt_step_adamw sidesteps this by fusing; there is no fused
+        // op here, so the dependency is built deliberately.
+        ggml_tensor * m_new = ggml_add(ctx, ggml_scale(ctx, M, o->muon.momentum), G);
+        ggml_tensor * u     = o->muon.nesterov ? ggml_add(ctx, G, ggml_scale(ctx, m_new, o->muon.momentum)) : m_new;
+        ggml_tensor * ortho = lm_muon_ns_batched(ctx, u, o->muon.ns_steps, o->t_eps);
 
-        ggml_tensor * ortho = lm_muon_newton_schulz(ctx, u, o->muon.ns_steps, o->t_eps);
-
-        // Reference scale sqrt(max(1, rows/cols)); ne1 is rows, ne0 is cols.
-        const float rows  = (float) o->params[j]->ne[1];
-        const float cols  = (float) o->params[j]->ne[0];
+        // Reference scale sqrt(max(1, rows/cols)) — identical for every member of
+        // the bucket, since a bucket is one exact shape, so it folds into a
+        // single scale over the whole batch.
+        const float rows  = (float) bk.ne1;
+        const float cols  = (float) bk.ne0;
         const float shape = sqrtf(rows > cols ? rows / cols : 1.0f);
-        const float step  = -lr_now * o->muon.lr_scale * shape;
+        ortho             = ggml_scale(ctx, ortho, -lr_now * o->muon.lr_scale * shape);
 
-        // Decoupled weight decay, then the orthogonalized step, written back in
-        // one cpy so the parameter is read exactly once.
-        ggml_tensor * decayed = (mu_wd > 0.0f)
-                                    ? ggml_scale(ctx, o->params[j], 1.0f - lr_now * o->muon.lr_scale * mu_wd)
-                                    : o->params[j];
-        ggml_tensor * p_new   = ggml_add(ctx, decayed, ggml_scale(ctx, ortho, step));
-        ggml_build_forward_expand(go, ggml_cpy(ctx, p_new, o->params[j]));
-        ggml_build_forward_expand(go, ggml_cpy(ctx, m_new, o->mom_m[j]));
+        const size_t slab = (size_t) bk.ne0 * (size_t) bk.ne1 * sizeof(float);
+        for (size_t i = 0; i < bk.idx.size(); i++) {
+            const int     j  = bk.idx[i];
+            ggml_tensor * Ov = ggml_view_2d(ctx, ortho, bk.ne0, bk.ne1, (size_t) bk.ne0 * sizeof(float), i * slab);
+            ggml_tensor * Mv = ggml_view_2d(ctx, m_new, bk.ne0, bk.ne1, (size_t) bk.ne0 * sizeof(float), i * slab);
+            ggml_tensor * decayed =
+                (mu_wd > 0.0f) ? ggml_scale(ctx, o->params[(size_t) j], 1.0f - lr_now * o->muon.lr_scale * mu_wd)
+                               : o->params[(size_t) j];
+            ggml_build_forward_expand(go, ggml_cpy(ctx, ggml_add(ctx, decayed, Ov), o->params[(size_t) j]));
+            ggml_build_forward_expand(go, ggml_cpy(ctx, Mv, o->mom_m[(size_t) j]));
+        }
     }
 
     // host side, immediately BEFORE running `go`. `lr` is the same value the

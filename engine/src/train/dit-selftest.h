@@ -575,6 +575,117 @@ static void dit_st_muon(std::vector<DitSelfTestResult> & rs, ggml_backend_t back
         ggml_backend_free(cpu_be);
     }
 
+    // ── the bucket case ──────────────────────────────────────────────────────
+    //
+    // Three same-shape parameters in ONE bucket, with grads deliberately spread
+    // over two orders of magnitude (x8, x1, x1/8). Batched Newton-Schulz
+    // normalizes per slab; a global ggml_sum would normalize all three by the
+    // bucket's combined magnitude, which is invisible at bucket size 1 and
+    // glaring here — the x1/8 parameter would come out ~64x wrong.
+    double bucket_rel = 0.0;
+    int    n_buckets  = -1;
+    if (all_ok && cpu_be) {
+        const int    C = 48, R = 32, NP = 3;
+        const size_t n = (size_t) R * C;
+        const float  gs[NP] = { 8.0f, 1.0f, 0.125f };
+
+        ggml_context * tctx = nullptr;
+        {
+            ggml_init_params p = { 32 * ggml_tensor_overhead(), nullptr, true };
+            tctx               = ggml_init(p);
+        }
+        std::vector<ggml_tensor *> ws;
+        for (int i = 0; i < NP; i++) {
+            ggml_tensor * w = ggml_new_tensor_2d(tctx, GGML_TYPE_F32, C, R);
+            char          nm[32];
+            snprintf(nm, sizeof(nm), "toy.bucket.%d", i);
+            ggml_set_name(w, nm);
+            ggml_set_param(w);
+            ws.push_back(w);
+        }
+        ggml_tensor * s_adamw  = ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 7);
+        ggml_tensor * s_eps    = ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 1);
+        ggml_tensor * s_gnorm2 = ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 1);
+        ggml_backend_buffer_t tbuf = ggml_backend_alloc_ctx_tensors(tctx, cpu_be);
+
+        BackendPair bp;
+        bp.backend              = cpu_be;
+        bp.cpu_backend          = cpu_be;
+        bp.has_gpu              = false;
+        ggml_backend_sched_t sc = backend_sched_new(bp, 4096);
+
+        LmOptim topt;
+        topt.optimizer     = "muon";
+        topt.muon.momentum = (float) mu;
+        topt.muon.ns_steps = 5;
+        topt.muon.nesterov = true;
+        topt.muon.min_dim  = 16;
+        topt.muon.bucket   = 64;  // all three must land in ONE bucket
+        std::string berr;
+        if (!lm_optim_init(&topt, ws, cpu_be, &berr)) {
+            snprintf(why, sizeof(why), "bucket case: %s", berr.c_str());
+            all_ok = false;
+        } else {
+            n_buckets         = (int) topt.muon_buckets.size();
+            topt.t_adamw      = s_adamw;
+            topt.t_eps        = s_eps;
+            topt.t_gnorm2     = s_gnorm2;
+            topt.base_lr      = (float) lr;
+            topt.weight_decay = (float) wd;
+            topt.grad_clip    = 0.0f;
+            topt.total_steps  = 100;
+            topt.warmup_steps = 0;
+
+            std::vector<std::vector<float>> w0(NP), g(NP);
+            LmRng                           rng;
+            lm_rng_seed(&rng, 0xB0CCE7ull);
+            for (int i = 0; i < NP; i++) {
+                w0[i].resize(n);
+                g[i].resize(n);
+                lm_rng_fill_normal(&rng, w0[i], 0.1f);
+                lm_rng_fill_normal(&rng, g[i], 0.5f);
+                for (size_t k = 0; k < n; k++) {
+                    g[i][k] *= gs[i];
+                }
+                ggml_backend_tensor_set(ws[i], w0[i].data(), 0, n * sizeof(float));
+                ggml_backend_tensor_set(topt.acc[(size_t) i], g[i].data(), 0, n * sizeof(float));
+            }
+            const float epsf = (float) epsv;
+            ggml_backend_tensor_set(s_eps, &epsf, 0, sizeof(float));
+
+            LmStepStats stt;
+            lm_optim_step(&topt, sc, &stt);
+
+            for (int i = 0; i < NP; i++) {
+                std::vector<double> u(n);
+                for (size_t k = 0; k < n; k++) {
+                    u[k] = (1.0 + mu) * (double) g[i][k];
+                }
+                const std::vector<double> O = ns_ref(u, R, C, 5);  // R < C here, no transpose
+                std::vector<float>        got(n);
+                ggml_backend_tensor_get(ws[i], got.data(), 0, n * sizeof(float));
+                double num = 0.0, den = 0.0;
+                for (size_t k = 0; k < n; k++) {
+                    const double upd_ref = -lr * O[k];  // shape scale is 1 for R < C
+                    const double upd_got = (double) got[k] - (double) w0[i][k] * (1.0 - lr * wd);
+                    num                  = std::max(num, fabs(upd_got - upd_ref));
+                    den                  = std::max(den, fabs(upd_ref));
+                }
+                bucket_rel = std::max(bucket_rel, num / std::max(den, 1e-12));
+            }
+            lm_optim_free(&topt);
+        }
+        ggml_backend_sched_free(sc);
+        if (tbuf) {
+            ggml_backend_buffer_free(tbuf);
+        }
+        ggml_free(tctx);
+        if (n_buckets != 1) {
+            snprintf(why, sizeof(why), "3 same-shape params formed %d buckets, expected 1", n_buckets);
+            all_ok = false;
+        }
+    }
+
     // Classification: a LoKR w1 shape must NOT be picked up.
     {
         ggml_context * tctx = nullptr;
@@ -597,17 +708,20 @@ static void dit_st_muon(std::vector<DitSelfTestResult> & rs, ggml_backend_t back
     // ~0.7 is the iteration working as designed, not slop. Measured 0.40 here
     // (sigma in [0.77, 1.18]), and it is computed from the HOST reference, so
     // it characterizes Newton-Schulz itself, not the graph.
-    const bool ok = all_ok && cpu_ran && cpu_rel < 1e-4 && worst_orth < 0.75;
-    char       d[512];
+    const bool ok = all_ok && cpu_ran && cpu_rel < 1e-4 && bucket_rel < 1e-4 && worst_orth < 0.75;
+    char       d[720];
     snprintf(d, sizeof(d),
              "Muon on [48,32] and [32,48] (wide + tall), UPDATE vs a double-precision host reference: "
              "CPU max rel=%.4e at 5 Newton-Schulz steps vs %.4e at 1 step (bar 1e-4 — the residual does NOT grow with "
              "the iteration count, so it is the F32 Frobenius-norm reduction, not per-GEMM accumulation) [%s]; "
              "%s reports %.4e, NOT gated (cuBLAS runs these F32 GEMMs on TF32). Graph's own O: max|O*O^T - I|=%.4f "
              "(bar 0.75 — SQUARED singular values, and NS5 targets a band around 1 rather than converging). "
+             "BUCKETED (3 same-shape params, grads spread x8/x1/x1-8, %d bucket) max rel=%.4e (bar 1e-4 — a "
+             "GLOBAL rather than per-slab Frobenius norm would put the small one ~64x out). "
              "[4,5] correctly falls to AdamW%s%s",
              cpu_rel, cpu_rel_ns1, cpu_ran ? "cpu ok" : "cpu did not run",
-             backend ? ggml_backend_name(backend) : "gpu", gpu_rel, worst_orth, why[0] ? " | " : "", why);
+             backend ? ggml_backend_name(backend) : "gpu", gpu_rel, worst_orth, n_buckets, bucket_rel,
+             why[0] ? " | " : "", why);
     dit_st_report(rs, "MU1", ok, d);
 }
 

@@ -1239,6 +1239,7 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--muon-momentum") && i + 1 < argc) a.muon_momentum = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--muon-ns-steps") && i + 1 < argc) a.muon_ns_steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-bucket") && i + 1 < argc) a.muon_bucket = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
