@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight, Cloud, Loader2, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { StyledSelect } from '../shared/StyledSelect';
 import { useTrainingStore } from '../../stores/trainingStore';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
@@ -91,26 +92,27 @@ export const EnhancePanel: React.FC<EnhancePanelProps> = ({ selectedSampleIds, d
             {caps?.llm.configured && activeProvider ? (
               <>
                 <div className="flex items-end gap-2 flex-wrap">
-                  <label className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-1 min-w-40">
                     <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.enhance.provider')}</span>
-                    <select
+                    <StyledSelect
+                      accent="amber"
+                      size="sm"
                       value={activeProvider.id}
-                      onChange={(e) => { setProvider(e.target.value); setModel(''); }}
-                      className="rounded-lg px-2 py-1.5 text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
-                    >
-                      {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1">
+                      onChange={(v) => { setProvider(v); setModel(''); }}
+                      options={providers.map(p => ({ value: p.id, label: p.name }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1 min-w-48">
                     <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.enhance.model')}</span>
-                    <select
+                    <StyledSelect
+                      accent="amber"
+                      size="sm"
                       value={model || activeProvider.defaultModel}
-                      onChange={(e) => setModel(e.target.value)}
-                      className="rounded-lg px-2 py-1.5 text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
-                    >
-                      {activeProvider.models.map(m => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  </label>
+                      onChange={(v) => setModel(v)}
+                      options={activeProvider.models.map(m => ({ value: m, label: m }))}
+                      searchPlaceholder="Filter models…"
+                    />
+                  </div>
                   <button
                     onClick={() => void runCaption()}
                     disabled={disabled || busy !== null}

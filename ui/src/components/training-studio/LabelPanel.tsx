@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import { Loader2, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { MergePolicy } from '../../services/trainingApi';
+import { StyledSelect } from '../shared/StyledSelect';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { EnhancePanel } from './EnhancePanel';
 import { JobProgress } from './JobProgress';
@@ -146,16 +147,17 @@ export const LabelPanel: React.FC = () => {
         </div>
 
         {/* Merge policy */}
-        <label className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5">
           <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.label.mergePolicy')}</span>
-          <select
+          <StyledSelect
+            accent="amber"
+            size="sm"
+            className="max-w-64"
             value={mergePolicy}
-            onChange={(e) => setMergePolicy(e.target.value as MergePolicy)}
-            className="self-start rounded-lg px-2.5 py-1.5 text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
-          >
-            {MERGE_OPTIONS.map(o => <option key={o.id} value={o.id}>{t(o.labelKey)}</option>)}
-          </select>
-        </label>
+            onChange={(v) => setMergePolicy(v as MergePolicy)}
+            options={MERGE_OPTIONS.map(o => ({ value: o.id, label: t(o.labelKey) }))}
+          />
+        </div>
 
         {/* `error` is rendered once by DatasetDetail so every step sees it. */}
 

@@ -8,6 +8,7 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, FolderOpen, Info, Loader2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { scanPreview, type ScanPreview } from '../../services/trainingApi';
+import { StyledSelect } from '../shared/StyledSelect';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { FolderPicker } from './FolderPicker';
 
@@ -232,10 +233,15 @@ export const NewDatasetWizard: React.FC<NewDatasetWizardProps> = ({ open, onClos
             {/* Lyric language — declared, never guessed by the local AI */}
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.wizard.language')}</label>
-              <select value={language} onChange={(e) => setLanguage(e.target.value)} className={`${field} max-w-56`}>
-                {['english', 'german', 'spanish', 'french', 'italian', 'portuguese', 'russian', 'japanese', 'korean', 'chinese'].map(l =>
-                  <option key={l} value={l}>{l.charAt(0).toUpperCase() + l.slice(1)}</option>)}
-              </select>
+              <StyledSelect
+                accent="amber"
+                className="max-w-56"
+                value={language}
+                onChange={setLanguage}
+                options={['english', 'german', 'spanish', 'french', 'italian', 'portuguese', 'russian', 'japanese', 'korean', 'chinese']
+                  .map(l => ({ value: l, label: l.charAt(0).toUpperCase() + l.slice(1) }))}
+                searchPlaceholder="Filter languages…"
+              />
               <div className="text-[11px] text-zinc-500">{t('trainingStudio.wizard.languageHint')}</div>
             </div>
 

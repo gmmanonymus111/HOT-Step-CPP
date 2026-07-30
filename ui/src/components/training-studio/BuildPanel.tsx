@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Copy, Hammer, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { PatchDatasetInput, TagPosition } from '../../services/trainingApi';
+import { StyledSelect } from '../shared/StyledSelect';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
 import { SendToLyricStudio } from './SendToLyricStudio';
@@ -105,16 +106,15 @@ export const BuildPanel: React.FC = () => {
               className="rounded-lg px-3 py-2 text-sm bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
             />
           </label>
-          <label className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.build.tagPosition')}</span>
-            <select
+            <StyledSelect
+              accent="amber"
               value={detail.tagPosition}
-              onChange={(e) => void patchDataset({ tagPosition: e.target.value as TagPosition })}
-              className="rounded-lg px-3 py-2 text-sm bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-amber-500"
-            >
-              {TAG_POSITIONS.map(p => <option key={p.id} value={p.id}>{t(p.labelKey)}</option>)}
-            </select>
-          </label>
+              onChange={(v) => void patchDataset({ tagPosition: v as TagPosition })}
+              options={TAG_POSITIONS.map(p => ({ value: p.id, label: t(p.labelKey) }))}
+            />
+          </div>
         </div>
 
         {/* Genre ratio */}

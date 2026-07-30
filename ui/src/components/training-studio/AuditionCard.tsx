@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AuditionOptions, AuditionPreview, AuditionSideSpec } from '../../services/trainingApi';
+import { StyledSelect } from '../shared/StyledSelect';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useGlobalParamsStore } from '../../stores/globalParamsStore';
 import { useTrainingStore } from '../../stores/trainingStore';
@@ -369,16 +370,17 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
 
         {source === 'sample' && (
           <div className="flex flex-col gap-2">
-            <select
+            <StyledSelect
+              accent="amber"
               value={sampleId}
-              onChange={(e) => pickSample(e.target.value)}
-              className={FIELD}
-            >
-              <option value="">{t('trainingStudio.audition.pickSample')}</option>
-              {promptSamples.map(s => (
-                <option key={s.sampleId} value={s.sampleId}>{s.filename}</option>
-              ))}
-            </select>
+              onChange={(v) => pickSample(v)}
+              placeholder={t('trainingStudio.audition.pickSample')}
+              options={[
+                { value: '', label: t('trainingStudio.audition.pickSample') },
+                ...promptSamples.map(s => ({ value: s.sampleId, label: s.filename })),
+              ]}
+              searchPlaceholder="Filter songs…"
+            />
             {sampleId && (
               <label className="flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400">
                 <input

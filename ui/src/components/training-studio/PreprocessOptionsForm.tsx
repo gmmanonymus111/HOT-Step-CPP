@@ -8,6 +8,7 @@
 import React from 'react';
 import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { StyledSelect } from '../shared/StyledSelect';
 import type {
   PreprocessCompat,
   PreprocessDtype,
@@ -87,11 +88,15 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
     return Number.isFinite(n) ? n : fallback;
   };
 
-  const modelOption = (name: string) => (
-    <option key={name} value={name}>
-      {BF16_RE.test(name) ? `${name} — ${t('trainingStudio.preprocess.trainingReady')}` : name}
-    </option>
-  );
+  /** BF16 bases carry the "training ready" note; everything else is bare. */
+  const modelOptions = (names: string[], current: string) => [
+    ...(current === '' ? [{ value: '', label: '—' }] : []),
+    ...names.map(name => ({
+      value: name,
+      label: name,
+      hint: BF16_RE.test(name) ? t('trainingStudio.preprocess.trainingReady') : undefined,
+    })),
+  ];
 
   return (
     <div className="flex flex-col gap-4">
@@ -103,44 +108,41 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <label className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5">
           <span className={LABEL}>{t('trainingStudio.preprocess.baseModel')}</span>
-          <select
+          <StyledSelect
+            accent="amber"
             value={value.ditModel}
             disabled={lock}
-            onChange={(e) => onChange({ ditModel: e.target.value })}
-            className={FIELD}
-          >
-            {value.ditModel === '' && <option value="">—</option>}
-            {ditModels.map(modelOption)}
-          </select>
-        </label>
+            onChange={(v) => onChange({ ditModel: v })}
+            options={modelOptions(ditModels, value.ditModel)}
+            searchPlaceholder="Filter models…"
+          />
+        </div>
 
-        <label className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5">
           <span className={LABEL}>{t('trainingStudio.preprocess.vae')}</span>
-          <select
+          <StyledSelect
+            accent="amber"
             value={value.vaeModel}
             disabled={lock}
-            onChange={(e) => onChange({ vaeModel: e.target.value })}
-            className={FIELD}
-          >
-            {value.vaeModel === '' && <option value="">—</option>}
-            {vaeModels.map(modelOption)}
-          </select>
-        </label>
+            onChange={(v) => onChange({ vaeModel: v })}
+            options={modelOptions(vaeModels, value.vaeModel)}
+            searchPlaceholder="Filter models…"
+          />
+        </div>
 
-        <label className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5">
           <span className={LABEL}>{t('trainingStudio.preprocess.textEncoder')}</span>
-          <select
+          <StyledSelect
+            accent="amber"
             value={value.textEncoder}
             disabled={lock}
-            onChange={(e) => onChange({ textEncoder: e.target.value })}
-            className={FIELD}
-          >
-            {value.textEncoder === '' && <option value="">—</option>}
-            {textEncoders.map(n => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
+            onChange={(v) => onChange({ textEncoder: v })}
+            options={modelOptions(textEncoders, value.textEncoder)}
+            searchPlaceholder="Filter models…"
+          />
+        </div>
 
         <label className="flex flex-col gap-1.5">
           <span className={LABEL}>{t('trainingStudio.preprocess.maxDuration')}</span>
@@ -162,18 +164,19 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
         </summary>
 
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.preprocess.normalize')}</span>
-            <select
+            <StyledSelect
+              accent="amber"
               value={value.normalize}
               disabled={!!disabled}
-              onChange={(e) => onChange({ normalize: e.target.value as PreprocessNormalize })}
-              className={FIELD}
-            >
-              <option value="peak">peak</option>
-              <option value="none">none</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ normalize: v as PreprocessNormalize })}
+              options={[
+                { value: 'peak', label: 'peak' },
+                { value: 'none', label: 'none' },
+              ]}
+            />
+          </div>
 
           <label className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.preprocess.targetDb')}</span>
@@ -189,31 +192,33 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
             />
           </label>
 
-          <label className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.preprocess.dtype')}</span>
-            <select
+            <StyledSelect
+              accent="amber"
               value={value.dtype}
               disabled={!!disabled}
-              onChange={(e) => onChange({ dtype: e.target.value as PreprocessDtype })}
-              className={FIELD}
-            >
-              <option value="f32">f32</option>
-              <option value="bf16">bf16</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ dtype: v as PreprocessDtype })}
+              options={[
+                { value: 'f32', label: 'f32' },
+                { value: 'bf16', label: 'bf16' },
+              ]}
+            />
+          </div>
 
-          <label className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.preprocess.compat')}</span>
-            <select
+            <StyledSelect
+              accent="amber"
               value={value.compat}
               disabled={!!disabled}
-              onChange={(e) => onChange({ compat: e.target.value as PreprocessCompat })}
-              className={FIELD}
-            >
-              <option value="hotstep">HOT-Step</option>
-              <option value="sidestep">Side-Step parity (debug)</option>
-            </select>
-          </label>
+              onChange={(v) => onChange({ compat: v as PreprocessCompat })}
+              options={[
+                { value: 'hotstep', label: 'HOT-Step' },
+                { value: 'sidestep', label: 'Side-Step parity (debug)' },
+              ]}
+            />
+          </div>
 
           <label className="flex flex-col gap-1.5">
             <span className={LABEL}>{t('trainingStudio.preprocess.maxCaptionTokens')}</span>
