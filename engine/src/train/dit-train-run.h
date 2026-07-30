@@ -409,6 +409,21 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             genre_samples++;
         }
     }
+    // enc_S is the WHOLE DATASET's padded length, so ONE long-lyrics song sets it
+    // for every sample. That matters because attention K/V scale with (S + enc_S)
+    // and the VRAM auto-fit reduces CROP before depth — a long encoder sequence
+    // is therefore paid for in audio window, silently, unless it is said out loud.
+    // Threshold is the reference pipeline's own buffer (512 lyric + 1 + 256 text).
+    if (enc_S > 769) {
+        char eb[224];
+        snprintf(eb, sizeof(eb),
+                 "encoder sequence enc_S=%d exceeds the reference 769 (one song's lyrics/caption set this for the "
+                 "WHOLE dataset). Cross-attention and the crop the auto-fit can afford both pay for it — lower "
+                 "--max-lyric-tokens if the fitted crop came out shorter than you wanted",
+                 enc_S);
+        lm_log("warn", eb);
+        fprintf(stderr, "[train-dit] %s\n", eb);
+    }
     for (size_t i = 0; i < samples.size(); i++) {
         DitSample & s = samples[i];
         s.enc.resize((size_t) enc_S * (size_t) enc_H, 0.0f);

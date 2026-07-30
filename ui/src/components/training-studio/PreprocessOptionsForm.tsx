@@ -43,8 +43,12 @@ export const PREPROCESS_DEFAULTS: PreprocessFormState = {
   targetDb: -1.0,
   dtype: 'f32',
   compat: 'hotstep',
-  maxCaptionTokens: 256,
-  maxLyricTokens: 512,
+  // Raised from Side-Step's 256/512 (2026-07-30) — every caption in every
+  // dataset was being truncated. See the train-preprocess route for the
+  // reasoning and docs/plans/2026-07-30-conditioning-token-caps.md for the
+  // measurements and how to roll back.
+  maxCaptionTokens: 512,
+  maxLyricTokens: 2048,
   vaeChunk: 384,
   vaeOverlap: 48,
   overwrite: false,
@@ -229,7 +233,7 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
               step={16}
               value={value.maxCaptionTokens}
               disabled={!!disabled}
-              onChange={(e) => onChange({ maxCaptionTokens: num(e.target.value, 256) })}
+              onChange={(e) => onChange({ maxCaptionTokens: num(e.target.value, 512) })}
               className={FIELD}
             />
           </label>
@@ -243,7 +247,7 @@ export const PreprocessOptionsForm: React.FC<Props> = ({ capabilities, value, on
               step={16}
               value={value.maxLyricTokens}
               disabled={!!disabled}
-              onChange={(e) => onChange({ maxLyricTokens: num(e.target.value, 512) })}
+              onChange={(e) => onChange({ maxLyricTokens: num(e.target.value, 2048) })}
               className={FIELD}
             />
           </label>

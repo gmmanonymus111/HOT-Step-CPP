@@ -1260,8 +1260,18 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     const maxDuration = numOpt(body.maxDuration, 240);
     const vaeChunk = numOpt(body.vaeChunk, 384);
     const vaeOverlap = numOpt(body.vaeOverlap, 48);
-    const maxCaptionTokens = numOpt(body.maxCaptionTokens, 256);
-    const maxLyricTokens = numOpt(body.maxLyricTokens, 512);
+    // 512 / 2048, raised from Side-Step's 256 / 512 on 2026-07-30. Measured on
+    // 7 datasets: ALL 83 captions exceeded 256 (median ~352) and ~half the
+    // lyrics exceeded 512 (max ~1685), so every adapter trained so far never saw
+    // the tail of any caption. E4 pads encoder states to a dataset-wide enc_S,
+    // so the cap is a SAFETY VALVE, not a cost driver — enc_S is set by the
+    // longest actual song, not by this number. Ceiling is
+    // DIT_REPEAT_BACK_MAX/n_kv_heads/B = 4096; worst case here is
+    // 2048 + 1 + 512 = 2561. ace-train's own defaults stay 256/512 for
+    // reference parity. Full record + rollback:
+    // docs/plans/2026-07-30-conditioning-token-caps.md
+    const maxCaptionTokens = numOpt(body.maxCaptionTokens, 512);
+    const maxLyricTokens = numOpt(body.maxLyricTokens, 2048);
     const targetDb = numOpt(body.targetDb, -1.0);
 
     if (maxDuration < 0) {
