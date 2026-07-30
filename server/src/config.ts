@@ -181,6 +181,19 @@ export const config = {
     bin: process.env.ESSENTIA_BIN || path.join(PROJECT_ROOT, 'Essentia', `essentia_streaming_extractor_music${BIN_EXT}`),
   },
 
+  // Dataset Studio labeling throughput (training/rateLimit.ts).
+  // concurrency = calls in flight; minInterval = spacing between call STARTS.
+  // Defaults reproduce the old serial-with-courtesy-sleep behaviour for the two
+  // network services so raising the queue's parallelism cannot surprise anyone
+  // with a quota bill or a Genius block.
+  labeling: {
+    essentiaConcurrency: parseInt(process.env.LABEL_ESSENTIA_CONCURRENCY || '2', 10),
+    geniusConcurrency: parseInt(process.env.LABEL_GENIUS_CONCURRENCY || '1', 10),
+    geniusMinIntervalMs: parseInt(process.env.LABEL_GENIUS_MIN_INTERVAL_MS || '400', 10),
+    captionConcurrency: parseInt(process.env.LABEL_CAPTION_CONCURRENCY || '1', 10),
+    captionMinIntervalMs: parseInt(process.env.LABEL_CAPTION_MIN_INTERVAL_MS || '250', 10),
+  },
+
   // Node.js server
   server: {
     port: parseInt(process.env.SERVER_PORT || '3001', 10),
@@ -291,9 +304,23 @@ export const EXPOSED_ENV_KEYS = [
   'UNSLOTH_BASE_URL', 'UNSLOTH_USERNAME', 'UNSLOTH_PASSWORD',
   'LLAMACPP_BASE_URL', 'LLAMACPP_MODEL',
   'OPENAI_COMPAT_BASE_URL', 'OPENAI_COMPAT_API_KEY', 'OPENAI_COMPAT_MODEL', 'OPENAI_COMPAT_NAME',
+  // Dataset Studio labeling throughput
+  'LABEL_ESSENTIA_CONCURRENCY',
+  'LABEL_GENIUS_CONCURRENCY', 'LABEL_GENIUS_MIN_INTERVAL_MS',
+  'LABEL_CAPTION_CONCURRENCY', 'LABEL_CAPTION_MIN_INTERVAL_MS',
   // Paths
   'LYRICS_EXPORT_DIR',
 ] as const;
+
+/**
+ * Run after every successful reloadEnvConfig().
+ *
+ * Modules that hold state DERIVED from config (rather than reading it on each
+ * use) register here so a Settings save reaches them without a restart —
+ * rateLimit.ts's limiters being the first. A direct call from reloadEnvConfig()
+ * would be an import cycle, since those modules import config themselves.
+ */
+export const configReloadListeners: Array<() => void> = [];
 
 /** Keys that require an app restart to take effect */
 export const RESTART_REQUIRED_KEYS = new Set([
@@ -397,8 +424,40 @@ export function reloadEnvConfig(): string[] {
     config.lireek.exportDir = v || path.join(config.data.dir, 'lyrics');
   }, () => config.lireek.exportDir);
 
+  // ── Labeling throughput ──
+  // Numeric, so apply()'s string compare needs the current value stringified.
+  // An empty/garbage entry falls back to the shipped default rather than 0,
+  // which would deadlock a limiter.
+  const applyInt = (envKey: string, fallback: number, setter: (n: number) => void, getter: () => number) => {
+    const raw = parsed[envKey] ?? '';
+    const next = raw === '' ? fallback : parseInt(raw, 10);
+    const safe = Number.isFinite(next) && next >= 0 ? next : fallback;
+    if (safe !== getter()) {
+      setter(safe);
+      changed.push(envKey);
+    }
+  };
+  applyInt('LABEL_ESSENTIA_CONCURRENCY', 2, n => { config.labeling.essentiaConcurrency = n; },
+    () => config.labeling.essentiaConcurrency);
+  applyInt('LABEL_GENIUS_CONCURRENCY', 1, n => { config.labeling.geniusConcurrency = n; },
+    () => config.labeling.geniusConcurrency);
+  applyInt('LABEL_GENIUS_MIN_INTERVAL_MS', 400, n => { config.labeling.geniusMinIntervalMs = n; },
+    () => config.labeling.geniusMinIntervalMs);
+  applyInt('LABEL_CAPTION_CONCURRENCY', 1, n => { config.labeling.captionConcurrency = n; },
+    () => config.labeling.captionConcurrency);
+  applyInt('LABEL_CAPTION_MIN_INTERVAL_MS', 250, n => { config.labeling.captionMinIntervalMs = n; },
+    () => config.labeling.captionMinIntervalMs);
+
   if (changed.length > 0) {
     console.log(`[Config] Hot-reloaded ${changed.length} setting(s): ${changed.join(', ')}`);
+  }
+
+  for (const listener of configReloadListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error('[Config] Reload listener failed:', err);
+    }
   }
 
   return changed;

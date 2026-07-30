@@ -4,13 +4,15 @@
 // buffer, SSE listener set, _meta.json persistence) with three differences:
 //   * no child process — all work is in-process (HTTP to ace-server, execFile
 //     for Essentia, fetch for Genius/LLM), so cancellation is an AbortController
-//   * ONE global promise-chain queue shared by all four job kinds (D10)
+//   * TWO promise-chain queues — a GPU lane and a network/CPU lane (laneFor);
+//     originally one global chain for all kinds (D10), split 2026-07-30 when
+//     the trainers joined it and started blocking labeling for hours
 //   * one active job per dataset, enforced at the route layer with a 409
 //
-// The engine has a single FIFO GPU worker, so /understand calls are strictly
-// serial for the whole server. Essentia + tag reading never touch that worker,
-// so they run in their own lane at concurrency 2 and populate the review grid
-// within seconds while the LM work is still queueing.
+// Within a label job, Essentia + tag reading (Pass A) and the network steps
+// (Pass B) run as concurrent lanes, so the review grid populates within seconds
+// while Genius/LLM work is still going. Per-service throughput is governed by
+// the limiters in rateLimit.ts, not by hardcoded sleeps.
 //
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §4.7, §4.8, §7.1, §7.9
 
@@ -28,6 +30,7 @@ import {
   clearTransientStatus, clearTransientStatuses, patchLabel, readLabel, setTransientStatus,
 } from './labelStore.js';
 import { analyzeWithEssentia, essentiaAvailable, essentiaKeyString } from './essentiaClient.js';
+import { captionLimiter, essentiaLimiter, geniusLimiter } from './rateLimit.js';
 import { AbortError, runUnderstand } from './understandClient.js';
 import { enhanceCaption, enhanceGenius, resolveArtistTitle } from './enhanceService.js';
 import { buildDataset } from './datasetBuilder.js';
@@ -41,9 +44,38 @@ import type {
 } from './types.js';
 
 const MAX_EVENTS = 2000;
-const GENIUS_DELAY_MS = 400;    // the Genius service already waits 300 ms itself
-const LLM_DELAY_MS = 250;
 const ENGINE_FAILURE_LIMIT = 3; // consecutive connection failures before we give up
+
+/**
+ * Run `body` over every target with at most `pool` in flight, stopping the
+ * moment the job is cancelled.
+ *
+ * Replaces the `for (const sample of targets) { ...; await sleep(DELAY) }`
+ * shape the Genius and caption jobs both used. The per-call spacing that sleep
+ * provided now lives in the service limiter, which paces call STARTS instead of
+ * idling between completions — with concurrency 1 the two are equivalent, and
+ * above 1 only the limiter is correct.
+ *
+ * `body` is expected to handle its own per-sample errors (both callers mark the
+ * row and continue); anything that escapes stops that worker only.
+ */
+async function runPooled(
+  job: TrainingJob,
+  targets: TrainingSample[],
+  pool: number,
+  body: (sample: TrainingSample) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (isCancelled(job)) return;
+      const index = cursor++;
+      if (index >= targets.length) return;
+      await body(targets[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, pool) }, () => worker()));
+}
 
 export interface TrainingJob {
   id: string;
@@ -72,7 +104,10 @@ export interface TrainingJob {
 }
 
 const jobs = new Map<string, TrainingJob>();
-let queueTail: Promise<void> = Promise.resolve();
+// Two serial chains, not one — see laneFor(). GPU work (trainers, preprocess,
+// audition) must not block CPU/network work (labeling, Genius, captions).
+let gpuTail: Promise<void> = Promise.resolve();
+let netTail: Promise<void> = Promise.resolve();
 
 // ── Job model ────────────────────────────────────────────────────────────
 
@@ -296,9 +331,46 @@ recoverStaleJobs();
 
 // ── Queue + cancellation ─────────────────────────────────────────────────
 
-/** Append to the ONE global chain shared by every training job kind. */
+/**
+ * Which serial chain a job belongs to.
+ *
+ * Until 2026-07-30 there was ONE chain for every kind, so a multi-hour DiT
+ * training run blocked a label job that never touches the GPU. The original
+ * rationale ("the engine has a single FIFO GPU worker") only ever applied to
+ * the legacy /understand step, which has been default-off since the 2026-07-27
+ * pivot — a modern label job is Essentia (CPU) plus Genius/LLM (network).
+ *
+ * The GPU lane is still strictly serial: preprocess and both trainers spawn
+ * ace-train, which owns the whole card, and they default to stopEngine:true.
+ * That is exactly why a label job with useUnderstand belongs in the GPU lane
+ * too — /understand needs ace-server UP, and a trainer will have stopped it.
+ */
+function laneFor(job: TrainingJob): 'gpu' | 'net' {
+  switch (job.kind) {
+    case 'preprocess':
+    case 'train-lm':
+    case 'train-dit':
+    case 'audition':
+      return 'gpu';
+    case 'label':
+      return (job.opts as LabelOptions | undefined)?.useUnderstand === true ? 'gpu' : 'net';
+    default:
+      return 'net';   // enhance-genius, enhance-caption, build
+  }
+}
+
+/**
+ * Append to this job's lane. The two lanes run concurrently; each is serial
+ * internally. Per-dataset exclusivity is unaffected — the route layer still
+ * rejects a second active job for the same dataset with a 409.
+ */
 export function enqueue(job: TrainingJob, run: (j: TrainingJob) => Promise<void>): void {
-  queueTail = queueTail.then(() => run(job)).catch(() => { /* runners handle their own errors */ });
+  const swallow = () => { /* runners handle their own errors */ };
+  if (laneFor(job) === 'gpu') {
+    gpuTail = gpuTail.then(() => run(job)).catch(swallow);
+  } else {
+    netTail = netTail.then(() => run(job)).catch(swallow);
+  }
 }
 
 /**
@@ -663,13 +735,15 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
     emitLog(job, 'info', `Labeling ${job.total} file(s)`);
     emitProgress(job);
 
-    // ── Pass A: tags + Essentia (CPU lane, concurrency 2) ──
-    // ── Pass B: /understand (GPU lane, strictly serial) ──
-    // The two lanes run CONCURRENTLY — Essentia/ffmpeg never touch the engine's
-    // GPU worker, so understand starts on file 1 as soon as its Pass A is done
-    // instead of after the whole folder is analyzed. Per-sample ordering is
-    // preserved (B awaits A per file), which keeps the §4.8 merge precedence
-    // and makes the two lanes' sidecar writes race-free.
+    // ── Pass A: tags + Essentia (local CPU)  ──
+    // ── Pass B: Genius + LLM caption (network) ──
+    // The two lanes run CONCURRENTLY — Essentia/ffmpeg never touch the network,
+    // so Genius/caption start on file 1 as soon as its Pass A is done instead of
+    // after the whole folder is analyzed. Per-sample ordering is preserved (B
+    // awaits A per file), which keeps the §4.8 merge precedence and makes the
+    // two lanes' sidecar writes race-free.
+    // Both lanes are now worker pools sized from rateLimit.ts rather than the
+    // old fixed 2-and-1.
     const passA = new Map<string, PassAResult>();
     const passAResolvers = new Map<string, () => void>();
     const passADone = new Map<string, Promise<void>>();
@@ -695,7 +769,10 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         }
       }
     };
-    const passALane = Promise.all([worker(), worker()]).then(() => {
+    const passAPool = Math.max(1, essentiaLimiter.spec.concurrency);
+    const passALane = Promise.all(
+      Array.from({ length: passAPool }, () => worker()),
+    ).then(() => {
       // Release anything the workers never reached (cancellation) so the
       // understand lane observes cancellation instead of awaiting forever.
       for (const release of passAResolvers.values()) release();
@@ -711,8 +788,25 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
       if (!cloudLane) return;
       let engineFailures = 0;
 
-      for (const sample of targets) {
+      // Sample-level pool. Each worker drives ONE sample through the whole
+      // Genius -> caption chain (the caption prompt embeds the freshest lyrics,
+      // so those two stay ordered per sample); the per-service limiters cap how
+      // many of each call are actually in flight across all workers.
+      //
+      // useUnderstand pins the pool to 1: that path talks to the engine's single
+      // FIFO GPU worker and keeps a consecutive-failure counter that only means
+      // anything when nothing else is racing it.
+      const passBPool = opts.useUnderstand === true
+        ? 1
+        : Math.max(1, geniusLimiter.spec.concurrency, captionLimiter.spec.concurrency);
+      let passBCursor = 0;
+
+      const passBWorker = async (): Promise<void> => {
+       for (;;) {
         if (isCancelled(job)) return;
+        const passBIndex = passBCursor++;
+        if (passBIndex >= targets.length) return;
+        const sample = targets[passBIndex];
         await passADone.get(sample.sampleId);
         if (isCancelled(job)) return;
         job.currentSampleId = sample.sampleId;
@@ -798,7 +892,11 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
             job.phase = 'genius';
             emitProgress(job);
             try {
-              const hit = await enhanceGenius(enriched, ds, { sanitizeHeaders: true });
+              // The limiter supplies both the courtesy spacing and the in-flight
+              // cap, so there is no sleep after the call any more — pacing is on
+              // call STARTS, which is what a quota bucket actually counts.
+              const hit = await geniusLimiter.run(
+                () => enhanceGenius(enriched, ds, { sanitizeHeaders: true }));
               if (hit) {
                 incoming.lyrics = hit.lyrics;
                 sources.lyrics = 'genius';
@@ -807,8 +905,6 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
                 failures.push(`no Genius match ("${artist} — ${title}")`);
                 emitLog(job, 'warn', `${sample.filename}: no Genius match ("${artist} — ${title}")`);
               }
-              // Genius scrape courtesy delay (its own scraper waits 300 ms).
-              await new Promise(r => setTimeout(r, 400));
             } catch (err: any) {
               if (err instanceof AbortError || isCancelled(job)) return;
               failures.push(`genius: ${err?.message || 'failed'}`);
@@ -823,14 +919,14 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
             try {
               // Feed the freshest lyrics into the prompt excerpt.
               const promptSample = incoming.lyrics ? { ...enriched, lyrics: incoming.lyrics } : enriched;
-              const fields = await enhanceCaption(promptSample, ds, {
+              const fields = await captionLimiter.run(() => enhanceCaption(promptSample, ds, {
                 provider: opts.caption?.provider || config.lireek.defaultProvider,
                 model: opts.caption?.model,
                 includeLyricsExcerpt: true,
                 temperature: 0.45,
                 signal: job.controller.signal,
                 log: (level, message) => emitLog(job, level, `${sample.filename}: ${message}`),
-              });
+              }));
               if (fields.caption) { incoming.caption = fields.caption; sources.caption = 'llm'; }
               else failures.push('LLM returned no caption');
               if (fields.genre) { incoming.genre = fields.genre; sources.genre = 'llm'; }
@@ -862,7 +958,10 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
           markError(job, ds, sample, err?.message || 'Labeling failed');
         }
         emitProgress(job);
-      }
+       }
+      };
+
+      await Promise.all(Array.from({ length: passBPool }, () => passBWorker()));
     })();
 
     await Promise.all([passALane, passBLane]);
@@ -903,17 +1002,18 @@ async function runGeniusJob(job: TrainingJob): Promise<void> {
     pushLog(`[Training] Genius job ${job.id} started — ${job.total} files`);
     emitProgress(job);
 
-    for (const sample of targets) {
-      if (isCancelled(job)) return;
+    // Pooled over samples; geniusLimiter enforces both the in-flight cap and the
+    // spacing that used to be a fixed sleep at the end of each iteration.
+    await runPooled(job, targets, geniusLimiter.spec.concurrency, async (sample) => {
       job.currentSampleId = sample.sampleId;
       markProcessing(job, ds, sample);
 
       try {
-        const hit = await enhanceGenius(sample, ds, {
+        const hit = await geniusLimiter.run(() => enhanceGenius(sample, ds, {
           artist: opts.artist,
           album: opts.album,
           sanitizeHeaders: opts.sanitizeHeaders !== false,
-        });
+        }));
         if (!hit) {
           const { artist, title } = resolveArtistTitle(sample, ds, { artist: opts.artist });
           markError(job, ds, sample,
@@ -928,8 +1028,7 @@ async function runGeniusJob(job: TrainingJob): Promise<void> {
       }
 
       emitProgress(job);
-      await new Promise(r => setTimeout(r, GENIUS_DELAY_MS));
-    }
+    });
 
     if (isCancelled(job)) return;
     refreshCounters(ds, await buildSamples(ds, { withDuration: false }));
@@ -962,20 +1061,19 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
     pushLog(`[Training] Caption job ${job.id} started — ${job.total} files (${opts.provider})`);
     emitProgress(job);
 
-    for (const sample of targets) {
-      if (isCancelled(job)) return;
+    await runPooled(job, targets, captionLimiter.spec.concurrency, async (sample) => {
       job.currentSampleId = sample.sampleId;
       markProcessing(job, ds, sample);
 
       try {
-        const fields = await enhanceCaption(sample, ds, {
+        const fields = await captionLimiter.run(() => enhanceCaption(sample, ds, {
           provider: opts.provider,
           model: opts.model,
           includeLyricsExcerpt: opts.includeLyricsExcerpt !== false,
           temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.45,
           signal: job.controller.signal,
           log: (level, message) => emitLog(job, level, `${sample.filename}: ${message}`),
-        });
+        }));
         if (Object.keys(fields).length === 0) {
           markError(job, ds, sample, 'LLM returned nothing usable');
         } else {
@@ -990,8 +1088,7 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
       }
 
       emitProgress(job);
-      await new Promise(r => setTimeout(r, LLM_DELAY_MS));
-    }
+    });
 
     if (isCancelled(job)) return;
     refreshCounters(ds, await buildSamples(ds, { withDuration: false }));
