@@ -89,6 +89,19 @@ struct LmExportMeta {
     // change the quantity being computed — both arms compute the same gradient,
     // one via out_prod and one via mul_mat — so it is NOT a resume barrier.
     std::string bwd = "outprod";
+    // Adapter parameterization and optimizer (2026-07-30). Recorded because a
+    // finished run could not otherwise tell you whether it was a LoRA or a
+    // LoKr, or AdamW or Muon — the same blind spot the DiT's `runtime` block
+    // closed after a day of runs whose backend was unknowable after the fact.
+    std::string adapter_type = "lora";
+    int         lokr_dim     = 0;
+    float       lokr_alpha   = 0.0f;
+    int         lokr_factor  = 0;
+    std::string optimizer     = "adamw";
+    float       muon_lr_scale = 1.0f;
+    int         muon_ns_steps = 0;
+    int         muon_params   = 0;   // parameters actually on Muon
+    int         muon_buckets  = 0;
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -170,6 +183,21 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_strcpy(doc, cfg, "weights", m.weights.c_str());
     yyjson_mut_obj_add_int(doc, cfg, "batch", m.batch);
     yyjson_mut_obj_add_strcpy(doc, cfg, "bwd", m.bwd.c_str());
+    yyjson_mut_obj_add_strcpy(doc, cfg, "adapter_type", m.adapter_type.c_str());
+    if (m.adapter_type == "lokr") {
+        yyjson_mut_obj_add_int(doc, cfg, "lokr_dim", m.lokr_dim);
+        yyjson_mut_obj_add_real(doc, cfg, "lokr_alpha", (double) m.lokr_alpha);
+        yyjson_mut_obj_add_int(doc, cfg, "lokr_factor", m.lokr_factor);
+    }
+    yyjson_mut_obj_add_strcpy(doc, cfg, "optimizer", m.optimizer.c_str());
+    if (m.optimizer == "muon") {
+        yyjson_mut_obj_add_real(doc, cfg, "muon_lr_scale", (double) m.muon_lr_scale);
+        yyjson_mut_obj_add_int(doc, cfg, "muon_ns_steps", m.muon_ns_steps);
+        // What the rule split ACTUALLY came out as — the number that says
+        // whether Muon did anything. A rank-8 LoRA puts zero parameters on it.
+        yyjson_mut_obj_add_int(doc, cfg, "muon_params", m.muon_params);
+        yyjson_mut_obj_add_int(doc, cfg, "muon_buckets", m.muon_buckets);
+    }
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
 

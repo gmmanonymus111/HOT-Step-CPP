@@ -587,6 +587,13 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
             return 1;
         }
     }
+    // The rule split is only knowable AFTER lm_optim_init classifies, and it is
+    // the number that says whether Muon did anything at all: a rank-8 LoRA puts
+    // zero parameters on it and silently trains as AdamW.
+    if (meta) {
+        meta->muon_params  = opt.n_muon;
+        meta->muon_buckets = (int) opt.muon_buckets.size();
+    }
     opt.t_adamw      = t_adamw;
     opt.t_lossgrad   = t_lossgrad;
     opt.t_clip       = t_clip;
@@ -1091,6 +1098,13 @@ static int lm_train_main(const LmTrainArgs & a) {
     meta.seed           = a.seed;
     meta.loss_on_cot    = a.loss_on_cot;
     meta.bwd            = a.bwd;
+    meta.adapter_type   = a.adapter_type;
+    meta.lokr_dim       = a.lokr_dim;
+    meta.lokr_alpha     = a.lokr_alpha;
+    meta.lokr_factor    = a.lokr_factor;
+    meta.optimizer      = a.optimizer;
+    meta.muon_lr_scale  = a.muon_lr_scale;
+    meta.muon_ns_steps  = a.muon_ns_steps;
 
     // Trigger word (T5): CLI flags win, else the variant's preprocess_meta.json.
     // `--codes` always sits in the variant dir, so its parent is the fallback

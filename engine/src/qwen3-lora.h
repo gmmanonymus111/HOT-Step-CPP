@@ -80,11 +80,17 @@ static inline struct ggml_tensor * qwen3_lokr_delta(struct ggml_context * ctx,
     struct ggml_tensor * T13 = ggml_reshape_3d(ctx, T1, p->out_k, p->in_m, S);
     struct ggml_tensor * T1p = ggml_cont(ctx, ggml_permute(ctx, T13, 1, 0, 2, 3));
     struct ggml_tensor * T1f = ggml_reshape_2d(ctx, T1p, p->in_m, p->out_k * S);
-    struct ggml_tensor * w1s = ggml_scale(ctx, p->w1, p->lokr_scale);
-    struct ggml_tensor * T2  = ggml_mul_mat(ctx, w1s, T1f);
+    struct ggml_tensor * T2  = ggml_mul_mat(ctx, p->w1, T1f);
     struct ggml_tensor * T23 = ggml_reshape_3d(ctx, T2, p->out_l, p->out_k, S);
     struct ggml_tensor * T2p = ggml_cont(ctx, ggml_permute(ctx, T23, 1, 0, 2, 3));
-    return ggml_add(ctx, y, ggml_reshape_4d(ctx, T2p, y->ne[0], y->ne[1], y->ne[2], y->ne[3]));
+    // THE SCALE GOES ON THE OUTPUT, not on w1. It is a scalar on a product, so
+    // the two are identical maths (and identical gradients — d(s*w1*w2*x)/dw1 is
+    // s*w2*x either way), but scaling w1 would force it to be F32: ggml_scale is
+    // an F32 op, while mul_mat happily takes a BF16 src0. The inference loader
+    // keeps the factors in their file dtype, so this is what lets a BF16 LoKr
+    // load without a full F32 conversion of every factor.
+    struct ggml_tensor * d = ggml_scale(ctx, T2p, p->lokr_scale);
+    return ggml_add(ctx, y, ggml_reshape_4d(ctx, d, y->ne[0], y->ne[1], y->ne[2], y->ne[3]));
 }
 
 struct QwLoraLayer {

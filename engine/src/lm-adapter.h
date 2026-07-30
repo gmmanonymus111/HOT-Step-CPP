@@ -97,6 +97,83 @@ static void lm_adapter_free(LMLora * l) {
 }
 
 // Load a PEFT LoRA for the LM and stage its tensors on `backend`.
+// ─── LoKr support (2026-07-30) ──────────────────────────────────────────────
+//
+// Reads the LyCORIS layout the LM trainer writes (train/lm-export.h), which is
+// byte-layout identical to the DiT's:
+//
+//   lycoris_layers_<L>_<site>.alpha        [1]
+//   lycoris_layers_<L>_<site>.lokr_w1      [out_l, in_m]
+//   lycoris_layers_<L>_<site>.lokr_w2      [out_k, in_n]   monolithic
+//   lycoris_layers_<L>_<site>.lokr_w2_a    [out_k, dim]    factorized
+//   lycoris_layers_<L>_<site>.lokr_w2_b    [dim,   in_n]
+//
+// NO METADATA IS REQUIRED, deliberately: safetensors.h skips __metadata__, and
+// everything needed is derivable from the shapes plus one LyCORIS rule —
+// alpha is FORCED to dim when both factors are monolithic, so the scale is
+// exactly 1 there, and a factorized site gets dim from w2_a's own ne0.
+static bool lm_adapter_lokr_slot(const std::string & site, QwLoraSlot * out) {
+    if (site == "self_attn_q_proj") { *out = QW_LORA_Q;    return true; }
+    if (site == "self_attn_k_proj") { *out = QW_LORA_K;    return true; }
+    if (site == "self_attn_v_proj") { *out = QW_LORA_V;    return true; }
+    if (site == "self_attn_o_proj") { *out = QW_LORA_O;    return true; }
+    if (site == "mlp_gate_proj")    { *out = QW_LORA_GATE; return true; }
+    if (site == "mlp_up_proj")      { *out = QW_LORA_UP;   return true; }
+    if (site == "mlp_down_proj")    { *out = QW_LORA_DOWN; return true; }
+    return false;
+}
+
+// "lycoris_layers_12_self_attn_q_proj.lokr_w2" -> layer 12, slot Q, "lokr_w2".
+// Returns false for anything that is not a LoKr key at all. `site_out` is
+// filled even when the slot is unknown, so the caller can tell a DiT adapter
+// (which carries cross_attn sites) from a corrupt one.
+static bool lm_adapter_lokr_parse(const std::string & name, int * layer_out, QwLoraSlot * slot_out,
+                                  std::string * suffix_out, std::string * site_out) {
+    static const std::string PFX = "lycoris_layers_";
+    if (name.compare(0, PFX.size(), PFX) != 0) {
+        return false;
+    }
+    size_t i = PFX.size();
+    int    layer = 0;
+    if (i >= name.size() || !isdigit((unsigned char) name[i])) {
+        return false;
+    }
+    while (i < name.size() && isdigit((unsigned char) name[i])) {
+        layer = layer * 10 + (name[i] - '0');
+        i++;
+    }
+    if (i >= name.size() || name[i] != '_') {
+        return false;
+    }
+    const size_t dot = name.find('.', i);
+    if (dot == std::string::npos) {
+        return false;
+    }
+    *site_out   = name.substr(i + 1, dot - i - 1);
+    *suffix_out = name.substr(dot + 1);
+    *layer_out  = layer;
+    return lm_adapter_lokr_slot(*site_out, slot_out);
+}
+
+// Read a [1] alpha tensor, whatever dtype it was written in.
+static float lm_adapter_read_alpha(const STFile & st, const STEntry & e) {
+    const void * d = st_data(st, e);
+    if (e.dtype == "F32") {
+        float v = 0.0f;
+        memcpy(&v, d, sizeof(float));
+        return v;
+    }
+    if (e.dtype == "BF16") {
+        uint16_t b = 0;
+        memcpy(&b, d, sizeof(uint16_t));
+        const uint32_t u = (uint32_t) b << 16;
+        float          v = 0.0f;
+        memcpy(&v, &u, sizeof(float));
+        return v;
+    }
+    return 0.0f;
+}
+
 // Returns nullptr on failure (caller must treat this as a load failure —
 // never fall back silently to the base LM under an adapter-bearing key).
 static LMLora * lm_adapter_load(const char * path, float user_scale, ggml_backend_t backend) {
@@ -111,6 +188,15 @@ static LMLora * lm_adapter_load(const char * path, float user_scale, ggml_backen
     } else {
         dir = p;
         sf_path = p + "/adapter_model.safetensors";
+        // A LoKr adapter dir has no PEFT file at all — the weights live in
+        // lokr_weights.safetensors and there is deliberately no
+        // adapter_config.json (alpha rides the per-module tensors instead).
+        FILE * probe = fopen(sf_path.c_str(), "rb");
+        if (probe) {
+            fclose(probe);
+        } else {
+            sf_path = p + "/lokr_weights.safetensors";
+        }
     }
 
     STFile st = {};
@@ -126,8 +212,163 @@ static LMLora * lm_adapter_load(const char * path, float user_scale, ggml_backen
     l->path = p;
     l->user_scale = user_scale;
 
+    // ── LoKr? ────────────────────────────────────────────────────────────
+    int  skipped = 0;
+    bool has_lokr = false, has_cross_attn = false;
+    for (const STEntry & e : st.entries) {
+        if (e.name.find(".lokr_w1") != std::string::npos) {
+            has_lokr = true;
+        }
+        if (e.name.find("cross_attn") != std::string::npos) {
+            has_cross_attn = true;
+        }
+    }
+    if (has_lokr) {
+        // A DiT LoKr uses the SAME lycoris_layers_<L>_<site> stems and differs
+        // only in its site set, so without this a DiT adapter would load into
+        // the LM's slots and quietly compute nonsense. cross_attn exists only on
+        // the DiT.
+        if (has_cross_attn) {
+            fprintf(stderr, "[LM-Adapter] FATAL: %s carries cross_attn sites - that is a DiT LoKr, not an LM one\n",
+                    sf_path.c_str());
+            st_close(&st);
+            lm_adapter_free(l);
+            return nullptr;
+        }
+        struct LkPending { const STEntry * e; ggml_tensor ** dst; };
+        std::vector<LkPending> lkp;
+        std::vector<float>     alphas((size_t) QWEN3_LORA_MAX_LAYERS * QW_LORA_NSLOTS, -1.0f);
+        int                    n_ten = 0;
+        for (const STEntry & e : st.entries) {
+            int         layer = -1;
+            QwLoraSlot  slot;
+            std::string sfx, site;
+            if (lm_adapter_lokr_parse(e.name, &layer, &slot, &sfx, &site) && layer >= 0
+                && layer < QWEN3_LORA_MAX_LAYERS && sfx != "alpha") {
+                n_ten++;
+            }
+        }
+        struct ggml_init_params gp2 = { ggml_tensor_overhead() * (size_t) (n_ten + 8), NULL, true };
+        l->ctx                      = ggml_init(gp2);
+
+        for (const STEntry & e : st.entries) {
+            int         layer = -1;
+            QwLoraSlot  slot;
+            std::string sfx, site;
+            if (!lm_adapter_lokr_parse(e.name, &layer, &slot, &sfx, &site)) {
+                skipped++;
+                continue;
+            }
+            if (layer < 0 || layer >= QWEN3_LORA_MAX_LAYERS) {
+                skipped++;
+                continue;
+            }
+            QwLoraPair & pr = l->layers[layer].p[slot];
+            if (sfx == "alpha") {
+                alphas[(size_t) layer * QW_LORA_NSLOTS + (size_t) slot] = lm_adapter_read_alpha(st, e);
+                continue;
+            }
+            if (e.n_dims != 2) {
+                fprintf(stderr, "[LM-Adapter] FATAL: %s has %d dims (want 2)\n", e.name.c_str(), e.n_dims);
+                st_close(&st);
+                lm_adapter_free(l);
+                return nullptr;
+            }
+            const ggml_type ty = st_ggml_type(e);
+            if (ty == GGML_TYPE_COUNT) {
+                fprintf(stderr, "[LM-Adapter] FATAL: %s has unsupported dtype %s\n", e.name.c_str(),
+                        e.dtype.c_str());
+                st_close(&st);
+                lm_adapter_free(l);
+                return nullptr;
+            }
+            // torch [rows, cols] row-major -> ggml ne0=cols, ne1=rows
+            ggml_tensor *  t   = ggml_new_tensor_2d(l->ctx, ty, e.shape[1], e.shape[0]);
+            ggml_tensor ** dst = nullptr;
+            if (sfx == "lokr_w1") {
+                dst = &pr.w1;
+            } else if (sfx == "lokr_w2") {
+                dst = &pr.w2;
+            } else if (sfx == "lokr_w2_a") {
+                dst = &pr.w2_a;
+            } else if (sfx == "lokr_w2_b") {
+                dst = &pr.w2_b;
+            }
+            if (!dst) {
+                skipped++;
+                continue;
+            }
+            *dst = t;
+            if (layer > l->max_layer) {
+                l->max_layer = layer;
+            }
+            lkp.push_back({ &e, dst });
+        }
+
+        l->buf = ggml_backend_alloc_ctx_tensors(l->ctx, backend);
+        if (!l->buf) {
+            fprintf(stderr, "[LM-Adapter] FATAL: backend alloc failed for %d LoKr tensors\n", (int) lkp.size());
+            st_close(&st);
+            lm_adapter_free(l);
+            return nullptr;
+        }
+        for (auto & pd : lkp) {
+            ggml_backend_tensor_set(*pd.dst, st_data(st, *pd.e), 0, ggml_nbytes(*pd.dst));
+        }
+        l->n_tensors = (int) lkp.size();
+        st_close(&st);
+
+        int sites = 0, mono = 0, fact = 0;
+        for (int i = 0; i <= l->max_layer; i++) {
+            for (int sl = 0; sl < QW_LORA_NSLOTS; sl++) {
+                QwLoraPair & pr = l->layers[i].p[sl];
+                if (!pr.w1) {
+                    continue;
+                }
+                if (!pr.w2 && !(pr.w2_a && pr.w2_b)) {
+                    fprintf(stderr, "[LM-Adapter] FATAL: layer %d slot %d has lokr_w1 but no usable w2\n", i, sl);
+                    lm_adapter_free(l);
+                    return nullptr;
+                }
+                // Factor dims come straight from the tensors: w1 is ggml
+                // [in_m, out_l], w2 [in_n, out_k], w2_a [dim, out_k],
+                // w2_b [in_n, dim].
+                pr.in_m  = pr.w1->ne[0];
+                pr.out_l = pr.w1->ne[1];
+                if (pr.w2) {
+                    pr.in_n  = pr.w2->ne[0];
+                    pr.out_k = pr.w2->ne[1];
+                    // LyCORIS forces alpha == dim when both factors are
+                    // monolithic, so the scale is exactly 1 and no metadata is
+                    // needed to recover it.
+                    pr.lokr_scale = 1.0f * user_scale;
+                    mono++;
+                } else {
+                    pr.in_n  = pr.w2_b->ne[0];
+                    pr.out_k = pr.w2_a->ne[1];
+                    const float dim = (float) pr.w2_a->ne[0];
+                    const float a   = alphas[(size_t) i * QW_LORA_NSLOTS + (size_t) sl];
+                    pr.lokr_scale   = ((a > 0.0f && dim > 0.0f) ? (a / dim) : 1.0f) * user_scale;
+                    fact++;
+                }
+                sites++;
+            }
+        }
+        if (sites == 0) {
+            fprintf(stderr, "[LM-Adapter] FATAL: no usable LoKr sites in %s\n", sf_path.c_str());
+            lm_adapter_free(l);
+            return nullptr;
+        }
+        fprintf(stderr,
+                "[LM-Adapter] Loaded %s: LoKr, %d sites across %d layers (%d monolithic / %d factorized), "
+                "user scale=%.2f%s\n",
+                p.c_str(), sites, l->max_layer + 1, mono, fact, user_scale,
+                skipped ? " (some non-LoKr tensors skipped)" : "");
+        return l;
+    }
+
     // Pass 1: count usable tensors
-    int usable = 0, skipped = 0;
+    int usable = 0;
     for (const STEntry & e : st.entries) {
         QwLoraSlot slot;
         int        layer = lm_adapter_layer_for(e.name);
