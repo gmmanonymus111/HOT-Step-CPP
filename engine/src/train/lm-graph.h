@@ -398,6 +398,10 @@ static ggml_tensor * lm_linear(ggml_context * ctx, ggml_tensor * w, const QwLora
         ggml_tensor * t = ggml_mul_mat(ctx, pr->A, x);  // [r, S]
         t               = ggml_scale(ctx, t, pr->scale);
         y               = ggml_add(ctx, y, ggml_mul_mat(ctx, pr->B, t));
+    } else if (pr && pr->has_lokr()) {
+        // Shared with the inference runtime (qwen3-lora.h) on purpose: one kron
+        // implementation, so the ne2 lesson cannot be learned twice.
+        y = qwen3_lokr_delta(ctx, pr, x, y);
     }
     return y;
 }
