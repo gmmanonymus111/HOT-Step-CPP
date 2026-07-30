@@ -45,8 +45,9 @@ export interface TrainLmFormState {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
-  /** Projection GEMM dtype (speed lever A). 'bf16' is the default — on the LM
-   *  it is also the only route to the mul_mat backward. */
+  /** Projection GEMM dtype (speed lever A). 'f32-window' is the default; note
+   *  that on the LM 'bf16' is also the only route to the mul_mat backward, so
+   *  this is a precision/speed trade, not a free dial. */
   weights: 'f32-window' | 'bf16';
   /** Micro-batch size (speed lever B). 1 is the shipped path. */
   batch: number | 'auto';
@@ -106,17 +107,17 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   stopEngine: true,
   // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
   //
-  // bf16, NOT f32-window. Briefly flipped to f32-window on 2026-07-30 to match
-  // the DiT's F32 mirror and reverted the same day: on the LM, `weights: bf16`
-  // is also what reaches the mul_mat backward, by rewriting ggml's out_prod
-  // nodes in place (lm-bf16.h Lever A, ~1.7-1.8x on the GEMM mix). f32-window
-  // gives that up and NOTHING buys it back — pairing --bwd mm with f32-window
-  // is refused for the LM, because there the transposed weight IS the F32
-  // window, so the GEMM stays TF32 and you only pay an extra cont.
+  // f32-window (Rob, 2026-07-30, final) — matching the DiT's F32 mirror.
   //
-  // The DiT's mirror setting is a genuinely independent choice; this one is
-  // not, and that asymmetry is the whole reason the flip was a mistake.
-  weights: 'bf16',
+  // KNOWN AND ACCEPTED COST: on the LM this is NOT a free precision dial the way
+  // the DiT's mirror is. `weights: 'bf16'` is also what reaches the mul_mat
+  // backward, by rewriting ggml's out_prod nodes in place (lm-bf16.h Lever A,
+  // ~1.7-1.8x on the GEMM mix), and NOTHING buys that back here — pairing
+  // --bwd mm with f32-window is refused for the LM, because there the
+  // transposed weight IS the F32 window, so the GEMM stays TF32 and you only
+  // pay an extra cont. Expect LM training to be meaningfully slower than it was
+  // under bf16; that is the trade being made, not a regression.
+  weights: 'f32-window',
   batch: 1,
   // MUL_MAT activation-gradient formulation. 'outprod' here, unlike train-dit's
   // 'mm': `weights: 'bf16'` above ALREADY gives this base the mul_mat backward,

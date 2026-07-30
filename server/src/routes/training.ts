@@ -1440,8 +1440,20 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // path (per-layer checkpointing + chunked CE). An unaffordable 4B request
     // is now refused by ace-train's own VRAM solve with real numbers, not by a
     // blanket 400 here.
+    // DEFAULT IS 4B, matching TRAIN_LM_DEFAULTS (2026-07-30). It was '0.6B' —
+    // the safe-for-any-GPU seed — while the form seeded 4B, and those are two
+    // different sets of numbers reached by two different callers. The batch
+    // pipeline POSTs only the STORED per-stage defaults (`{}` unless someone
+    // has PUT /defaults, and no UI does), so every field it omits falls through
+    // to this handler. A batch run was therefore silently training 0.6B
+    // adapters while the identical manual run trained 4B — the one field where
+    // the two disagreed.
+    //
+    // An unaffordable 4B is refused by ace-train's own VRAM solve with real
+    // numbers, so a small card now gets a loud, specific failure instead of a
+    // quietly wrong-sized adapter. That is the better of the two failure modes.
     const lmSize: LmSize =
-      body.lmSize === '1.7B' ? '1.7B' : body.lmSize === '4B' ? '4B' : '0.6B';
+      body.lmSize === '1.7B' ? '1.7B' : body.lmSize === '0.6B' ? '0.6B' : '4B';
 
     // ── models ───────────────────────────────────────────────────────────
     // Same never-probed race fix as preprocess: a fresh boot would otherwise
@@ -1586,20 +1598,19 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
-    // The 'weights' default flipped to 'bf16' (2026-07-29) and is no longer the
-    // CLI default ('f32-window'), so an omitted field now DOES emit an explicit
-    // --weights bf16 flag (buildTrainLmArgs).
+    // 'weights' went bf16 (2026-07-29) and back to 'f32-window' (Rob,
+    // 2026-07-30, final) to match the DiT's F32 mirror. That is once again the
+    // CLI's own default, so an omitted field emits no --weights flag at all.
     //
-    // It was briefly moved to 'f32-window' on 2026-07-30, to mirror the DiT's
-    // F32 mirror, and reverted the same day: on the LM, bf16 is ALSO the only
-    // route to the mul_mat backward (lm-bf16.h rewrites out_prod in place,
-    // ~1.7-1.8x on the GEMM mix) and --bwd mm cannot substitute — see below.
-    // Unlike the DiT's mirror, this is not a free precision/speed dial.
+    // KNOWN AND ACCEPTED COST: unlike the DiT's mirror this is not a free
+    // precision dial — bf16 is ALSO the only route to the mul_mat backward on
+    // the LM (lm-bf16.h rewrites out_prod in place, ~1.7-1.8x on the GEMM mix)
+    // and --bwd mm cannot substitute; see the bwd comment below.
     //
     // The engine owns the semantic rules (bf16 needs a BF16 base; batch>1
     // implies low-VRAM) — this is a value whitelist only, so a stale UI can
     // never make the runner stop ace-server for an argument ace-train rejects.
-    const weights = body.weights === undefined ? 'bf16' : body.weights;
+    const weights = body.weights === undefined ? 'f32-window' : body.weights;
     if (weights !== 'f32-window' && weights !== 'bf16') {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
