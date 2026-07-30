@@ -102,6 +102,19 @@ struct DitTrainArgs {
     // backward graph is built (ace-train.cpp).
     std::string bwd = "outprod";
 
+    // Optimizer (2026-07-30). "adamw" is the shipped path and the default;
+    // "muon" puts every 2-D parameter whose short side is >= muon_min_dim on
+    // orthogonalized-momentum updates and leaves the rest (LoKR w1 at [4,5], and
+    // anything 1-D) on AdamW — the hybrid every published Muon uses. Muon's LR
+    // does NOT mean AdamW's, hence a multiplier on the shared schedule rather
+    // than a second absolute rate.
+    std::string optimizer       = "adamw";
+    float       muon_lr_scale   = 1.0f;
+    float       muon_momentum   = 0.95f;
+    int         muon_ns_steps   = 5;
+    bool        muon_nesterov   = true;
+    int         muon_min_dim    = 16;
+
     // Step-time profiling (docs/plans/2026-07-30-dit-trainer-step-profile.md §2).
     // 0 = OFF and nothing about the run changes. N > 0 = time every micro-step
     // into the DitStepProf buckets and print a breakdown every N micro-steps.
@@ -766,6 +779,14 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
     const DitAdapter * ad = adapter;
 
     LmOptim opt;
+    // BEFORE init: the per-parameter rule split and the optimizer-state
+    // allocation are both decided there (a Muon parameter gets no v buffer).
+    opt.optimizer      = a.optimizer;
+    opt.muon.lr_scale  = a.muon_lr_scale;
+    opt.muon.momentum  = a.muon_momentum;
+    opt.muon.ns_steps  = a.muon_ns_steps;
+    opt.muon.nesterov  = a.muon_nesterov;
+    opt.muon.min_dim   = a.muon_min_dim;
     {
         std::string err;
         if (!lm_optim_init(&opt, adapter->params(), M.backend, &err)) {

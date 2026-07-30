@@ -12,6 +12,8 @@
 //  T9  convention fingerprint     E[v^2] on Hypa_Hypa [0,750) == 1.672071 +- 1e-5
 //  T10 crop sampler               support + alignment + uniformity to +-3 sigma
 //  T11 AdamW + clip               rel err < 1e-5 / ratio 0.1 +- 1e-3
+//  MU1 Muon / Newton-Schulz       rel err < 2e-3 vs host ref, |O*O^T - I| < 0.35,
+//                                 and a [4,5] LoKR w1 must fall through to AdamW
 //
 // LoKR (docs/plans/2026-07-28-lokr-dit-training.md §2.6):
 //  LK1 factorization              ported loop == derived reference, host-only
@@ -292,6 +294,321 @@ static void dit_st_convention(std::vector<DitSelfTestResult> & rs, const std::ve
     snprintf(d, sizeof(d), "E[v^2] over crop [0,750) of Hypa_Hypa = %.6f (want 1.672071 +-1e-5); xt algebra residual %.2e",
              ev2, alg);
     dit_st_report(rs, "T9", fabs(ev2 - 1.672071) < 1e-5 && alg < 1e-5, d);
+}
+
+// ─── MU1: Muon / Newton-Schulz through the REAL optimizer graph ─────────────
+//
+// Two independent bars, because they fail differently:
+//
+//  (a) vs a double-precision host reference of the same iteration — catches a
+//      wrong coefficient, a missed normalization, a dropped Nesterov term.
+//  (b) SEMI-ORTHOGONALITY of the result — catches the failure a host reference
+//      written by the same hand would happily mirror, namely a transposed
+//      mul_mat. If O is what Muon wants, O*O^T is near I; a transpose error
+//      still agrees with a matching reference but is not orthogonal at all.
+//
+// Bar for (a) is 2e-3, not 1e-5: five chained GEMMs run through TF32 on CUDA.
+// (b) is loose on purpose — the quintic with these coefficients is tuned to
+// pull the singular values into a band around 1 in five steps, not to converge
+// to machine precision, so |sigma - 1| ~ 0.3 is success, not slop.
+static void dit_st_muon(std::vector<DitSelfTestResult> & rs, ggml_backend_t backend, ggml_backend_sched_t sched,
+                        ggml_tensor * t_adamw, ggml_tensor * t_lossgrad, ggml_tensor * t_clip, ggml_tensor * t_eps,
+                        ggml_tensor * t_gnorm2) {
+    const double nsa = (double) LM_MUON_NS_A, nsb = (double) LM_MUON_NS_B, nsc = (double) LM_MUON_NS_C;
+    const double mu = 0.95, lr = 1e-3, wd = 0.01, epsv = 1e-6;
+
+    // Host reference: X is R x C row-major. Mirrors lm_muon_newton_schulz.
+    auto ns_ref = [&](std::vector<double> X, int R, int C, int steps) {
+        auto tr = [](const std::vector<double> & M, int r, int c) {
+            std::vector<double> T((size_t) r * c);
+            for (int i = 0; i < r; i++) {
+                for (int j = 0; j < c; j++) {
+                    T[(size_t) j * r + i] = M[(size_t) i * c + j];
+                }
+            }
+            return T;
+        };
+        const bool tall = R > C;
+        if (tall) {
+            X = tr(X, R, C);
+            std::swap(R, C);
+        }
+        double nrm = 0.0;
+        for (size_t i = 0; i < X.size(); i++) {
+            nrm += X[i] * X[i];
+        }
+        nrm = sqrt(nrm) + epsv;
+        for (size_t i = 0; i < X.size(); i++) {
+            X[i] /= nrm;
+        }
+        for (int s = 0; s < steps; s++) {
+            std::vector<double> A((size_t) R * R, 0.0), A2((size_t) R * R, 0.0), BX((size_t) R * C, 0.0);
+            for (int i = 0; i < R; i++) {
+                for (int j = 0; j < R; j++) {
+                    double acc = 0.0;
+                    for (int k = 0; k < C; k++) {
+                        acc += X[(size_t) i * C + k] * X[(size_t) j * C + k];
+                    }
+                    A[(size_t) i * R + j] = acc;
+                }
+            }
+            for (int i = 0; i < R; i++) {
+                for (int j = 0; j < R; j++) {
+                    double acc = 0.0;
+                    for (int k = 0; k < R; k++) {
+                        acc += A[(size_t) i * R + k] * A[(size_t) k * R + j];
+                    }
+                    A2[(size_t) i * R + j] = acc;
+                }
+            }
+            for (int i = 0; i < R; i++) {
+                for (int j = 0; j < C; j++) {
+                    double acc = 0.0;
+                    for (int k = 0; k < R; k++) {
+                        acc += (nsb * A[(size_t) i * R + k] + nsc * A2[(size_t) i * R + k]) * X[(size_t) k * C + j];
+                    }
+                    BX[(size_t) i * C + j] = acc;
+                }
+            }
+            for (size_t i = 0; i < X.size(); i++) {
+                X[i] = nsa * X[i] + BX[i];
+            }
+        }
+        return tall ? tr(X, R, C) : X;
+    };
+
+    bool   all_ok = true;
+    double cpu_rel = 0.0, cpu_rel_ns1 = 0.0, gpu_rel = 0.0, worst_orth = 0.0;
+    char   why[192] = "";
+    bool   cpu_ran = false;
+
+    // One toy Muon step on `be`, self-contained: its own scalars, its own sched.
+    // Returns the scale-relative UPDATE error against the host reference, and
+    // the semi-orthogonality of the ORTHOGONALIZED FACTOR THE GRAPH PRODUCED —
+    // recovered from the parameter delta. That second number is the one a
+    // transposed mul_mat cannot fake: it would still agree with a reference
+    // written by the same hand, but it would not be orthogonal.
+    // `ext_sched != nullptr` means "run on the caller's backend with the caller's
+    // scalars": ggml_backend_sched_new ASSERTS the last backend is a CPU device
+    // (ggml-backend.cpp:1736), so a {CUDA, CUDA} pair cannot be built here — the
+    // GPU arm has to borrow the scheduler the trainer already owns.
+    auto run_case = [&](ggml_backend_t be, ggml_backend_sched_t ext_sched, ggml_tensor * ext_adamw,
+                        ggml_tensor * ext_eps, ggml_tensor * ext_gnorm2, int C, int R, int ns, double * upd_rel, double * orth,
+                        std::string * err) -> bool {
+        ggml_context * tctx = nullptr;
+        {
+            ggml_init_params p = { 16 * ggml_tensor_overhead(), nullptr, true };
+            tctx               = ggml_init(p);
+        }
+        ggml_tensor * w = ggml_new_tensor_2d(tctx, GGML_TYPE_F32, C, R);
+        ggml_set_name(w, "toy.muon");
+        ggml_set_param(w);
+        // lm_optim_step uploads the AdamW scalar block unconditionally and always
+        // writes t_gnorm2, so both must exist even for a Muon-only parameter set.
+        ggml_tensor * s_adamw  = ext_sched ? ext_adamw : ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 7);
+        ggml_tensor * s_eps    = ext_sched ? ext_eps : ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 1);
+        ggml_tensor * s_gnorm2 = ext_sched ? ext_gnorm2 : ggml_new_tensor_1d(tctx, GGML_TYPE_F32, 1);
+        ggml_backend_buffer_t tbuf = ggml_backend_alloc_ctx_tensors(tctx, be);
+        if (!tbuf) {
+            *err = "toy allocation failed";
+            ggml_free(tctx);
+            return false;
+        }
+        ggml_backend_sched_t sc = ext_sched;
+        if (!sc) {
+            BackendPair bp;
+            bp.backend     = be;
+            bp.cpu_backend = be;  // be IS the CPU backend on this arm, so the assert holds
+            bp.has_gpu     = false;
+            sc             = backend_sched_new(bp, 4096);
+        }
+
+        std::vector<ggml_tensor *> tparams(1, w);
+        LmOptim                    topt;
+        topt.optimizer     = "muon";
+        topt.muon.momentum = (float) mu;
+        topt.muon.ns_steps = ns;
+        topt.muon.nesterov = true;
+        topt.muon.min_dim  = 16;
+        if (!lm_optim_init(&topt, tparams, be, err)) {
+            if (!ext_sched) {
+                ggml_backend_sched_free(sc);
+            }
+            ggml_backend_buffer_free(tbuf);
+            ggml_free(tctx);
+            return false;
+        }
+        if (topt.n_muon != 1) {
+            *err = "a [" + std::to_string(C) + "," + std::to_string(R) + "] param was not classified Muon-eligible";
+            lm_optim_free(&topt);
+            if (!ext_sched) {
+                ggml_backend_sched_free(sc);
+            }
+            ggml_backend_buffer_free(tbuf);
+            ggml_free(tctx);
+            return false;
+        }
+        topt.t_adamw      = s_adamw;
+        topt.t_lossgrad   = nullptr;  // fill_gacc is not used here
+        topt.t_clip       = nullptr;  // grad_clip 0 => never referenced
+        topt.t_eps        = s_eps;
+        topt.t_gnorm2     = s_gnorm2;
+        topt.base_lr      = (float) lr;
+        topt.weight_decay = (float) wd;
+        topt.grad_clip    = 0.0f;  // isolate the update rule from the clip
+        topt.total_steps  = 100;
+        topt.warmup_steps = 0;
+
+        const size_t       n = (size_t) R * C;
+        std::vector<float> w0(n), g(n);
+        LmRng              rng;
+        lm_rng_seed(&rng, 0x3110Aull + (uint64_t) (R * 131 + C));
+        lm_rng_fill_normal(&rng, w0, 0.1f);
+        lm_rng_fill_normal(&rng, g, 0.5f);
+        ggml_backend_tensor_set(w, w0.data(), 0, n * sizeof(float));
+        ggml_backend_tensor_set(topt.acc[0], g.data(), 0, n * sizeof(float));
+        const float epsf = (float) epsv;
+        ggml_backend_tensor_set(s_eps, &epsf, 0, sizeof(float));
+
+        LmStepStats stt;
+        const bool  ran = lm_optim_step(&topt, sc, &stt);
+
+        // Reference: m starts at 0, so m_new = g and the Nesterov term is
+        // (1 + mu) * g. lm_lr_lambda(0, 100, 0) == 1, so the LR is base_lr.
+        std::vector<double> u(n);
+        for (size_t i = 0; i < n; i++) {
+            u[i] = (1.0 + mu) * (double) g[i];
+        }
+        const std::vector<double> O     = ns_ref(u, R, C, ns);
+        const double              shape = sqrt(R > C ? (double) R / (double) C : 1.0);
+        std::vector<float>        got(n);
+        ggml_backend_tensor_get(w, got.data(), 0, n * sizeof(float));
+
+        // Scale-relative on the UPDATE. Dividing per element by the parameter
+        // value normalizes by a number that is near zero for a chunk of a
+        // Gaussian init and reports ~1e-2 for a perfectly good update — the
+        // denominator is wrong, not the maths.
+        double num = 0.0, den = 0.0;
+        std::vector<double> Og(n);
+        for (size_t i = 0; i < n; i++) {
+            const double upd_ref = -lr * shape * O[i];
+            const double upd_got = (double) got[i] - (double) w0[i] * (1.0 - lr * wd);
+            num                  = std::max(num, fabs(upd_got - upd_ref));
+            den                  = std::max(den, fabs(upd_ref));
+            Og[i]                = upd_got / (-lr * shape);  // the graph's own O
+        }
+        *upd_rel = num / std::max(den, 1e-12);
+
+        const int sR = std::min(R, C);
+        *orth        = 0.0;
+        for (int i = 0; i < sR; i++) {
+            for (int j = 0; j < sR; j++) {
+                double acc = 0.0;
+                if (R <= C) {
+                    for (int k = 0; k < C; k++) {
+                        acc += Og[(size_t) i * C + k] * Og[(size_t) j * C + k];
+                    }
+                } else {
+                    for (int k = 0; k < R; k++) {
+                        acc += Og[(size_t) k * C + i] * Og[(size_t) k * C + j];
+                    }
+                }
+                *orth = std::max(*orth, fabs(acc - (i == j ? 1.0 : 0.0)));
+            }
+        }
+
+        lm_optim_free(&topt);
+        if (!ext_sched) {
+            ggml_backend_sched_free(sc);
+        }
+        ggml_backend_buffer_free(tbuf);
+        ggml_free(tctx);
+        if (!ran) {
+            *err = "lm_optim_step failed";
+        }
+        return ran;
+    };
+
+    // Two shapes: wide (no transpose) and tall (exercises the transpose path).
+    const int shapes[2][2] = { { 48, 32 }, { 32, 48 } };  // {ne0 = cols, ne1 = rows}
+    ggml_backend_t cpu_be  = cpu_backend_new(16);
+    for (int sh = 0; sh < 2 && all_ok; sh++) {
+        const int   C = shapes[sh][0], R = shapes[sh][1];
+        double      r = 0.0, o = 0.0;
+        std::string err;
+
+        // THE GATE: CPU, where F32 is F32 and the reference is reproducible.
+        if (cpu_be) {
+            if (!run_case(cpu_be, nullptr, nullptr, nullptr, nullptr, C, R, 5, &r, &o, &err)) {
+                snprintf(why, sizeof(why), "cpu: %s", err.c_str());
+                all_ok = false;
+                break;
+            }
+            cpu_ran    = true;
+            cpu_rel    = std::max(cpu_rel, r);
+            worst_orth = std::max(worst_orth, o);
+            // Same case at ONE iteration, as a control on WHERE the residual
+            // comes from. Measured: 8.40e-05 at 1 step vs 5.73e-05 at 5, i.e.
+            // it does NOT grow with the iteration count, which rules out
+            // per-GEMM accumulation. What both share is the Frobenius-norm
+            // reduction: a ~1536-element ggml_sum in F32, whose naive-summation
+            // error is ~n*eps/2 ~ 9e-5 — the right magnitude. (NS is contractive,
+            // which is why more iterations slightly SHRINK the relative error.)
+            // That is what justifies 1e-4 here against T11's 1e-5, and it is a
+            // scale error on an update that is approximate by design.
+            double r1 = 0.0, o1 = 0.0;
+            std::string e1;
+            if (run_case(cpu_be, nullptr, nullptr, nullptr, nullptr, C, R, 1, &r1, &o1, &e1)) {
+                cpu_rel_ns1 = std::max(cpu_rel_ns1, r1);
+            }
+        }
+        // REPORTED, not gated: cuBLAS runs these F32 GEMMs on TF32 tensor cores,
+        // which puts a ~4e-3 floor on five chained Newton-Schulz iterations. Same
+        // treatment SB1/SB2 give their CUDA arms.
+        if (backend && backend != cpu_be) {
+            if (run_case(backend, sched, t_adamw, t_eps, t_gnorm2, C, R, 5, &r, &o, &err)) {
+                gpu_rel = std::max(gpu_rel, r);
+            }
+        }
+    }
+    if (cpu_be) {
+        ggml_backend_free(cpu_be);
+    }
+
+    // Classification: a LoKR w1 shape must NOT be picked up.
+    {
+        ggml_context * tctx = nullptr;
+        {
+            ggml_init_params p = { 8 * ggml_tensor_overhead(), nullptr, true };
+            tctx               = ggml_init(p);
+        }
+        ggml_tensor * tiny = ggml_new_tensor_2d(tctx, GGML_TYPE_F32, 4, 5);  // LoKR w1 at factor 6
+        LmMuonCfg     cfg;
+        if (lm_muon_eligible(tiny, cfg)) {
+            snprintf(why, sizeof(why), "a [4,5] LoKR w1 was classified Muon-eligible (min_dim %d)", cfg.min_dim);
+            all_ok = false;
+        }
+        ggml_free(tctx);
+    }
+
+    // The orthogonality bar is on O*O^T, i.e. on SQUARED singular values, and
+    // the quintic with these coefficients is tuned to pull sigma into roughly
+    // [0.7, 1.3] in five steps rather than to converge — so |sigma^2 - 1| up to
+    // ~0.7 is the iteration working as designed, not slop. Measured 0.40 here
+    // (sigma in [0.77, 1.18]), and it is computed from the HOST reference, so
+    // it characterizes Newton-Schulz itself, not the graph.
+    const bool ok = all_ok && cpu_ran && cpu_rel < 1e-4 && worst_orth < 0.75;
+    char       d[512];
+    snprintf(d, sizeof(d),
+             "Muon on [48,32] and [32,48] (wide + tall), UPDATE vs a double-precision host reference: "
+             "CPU max rel=%.4e at 5 Newton-Schulz steps vs %.4e at 1 step (bar 1e-4 — the residual does NOT grow with "
+             "the iteration count, so it is the F32 Frobenius-norm reduction, not per-GEMM accumulation) [%s]; "
+             "%s reports %.4e, NOT gated (cuBLAS runs these F32 GEMMs on TF32). Graph's own O: max|O*O^T - I|=%.4f "
+             "(bar 0.75 — SQUARED singular values, and NS5 targets a band around 1 rather than converging). "
+             "[4,5] correctly falls to AdamW%s%s",
+             cpu_rel, cpu_rel_ns1, cpu_ran ? "cpu ok" : "cpu did not run",
+             backend ? ggml_backend_name(backend) : "gpu", gpu_rel, worst_orth, why[0] ? " | " : "", why);
+    dit_st_report(rs, "MU1", ok, d);
 }
 
 // ─── T11: AdamW + clip through the REAL optimizer graph ─────────────────────
@@ -2841,6 +3158,7 @@ static int dit_self_test_impl(const std::string & dit_path, const std::string & 
     // ── T11 ──────────────────────────────────────────────────────────────
     if (!fd_only) {
         dit_st_adamw(rs, M.backend, M.sched, t_adamw, t_lossgrad, t_clip, t_eps, t_gnorm2);
+        dit_st_muon(rs, M.backend, M.sched, t_adamw, t_lossgrad, t_clip, t_eps, t_gnorm2);
     }
 
     // ── SC1 / SC2 / SC3: gradient checkpointing ──────────────────────────

@@ -321,6 +321,22 @@ static void print_usage(void) {
             "                                                      RTX 5090. Needs the vendored patch\n"
             "                                                      engine/patches/mm-backward.patch.\n"
             "\n"
+            "  Optimizer:\n"
+            "    --optimizer <adamw|muon>    adamw       muon puts every 2-D parameter whose SHORT side is\n"
+            "                                            >= --muon-min-dim on orthogonalized-momentum\n"
+            "                                            (Newton-Schulz) updates, and leaves the rest on\n"
+            "                                            AdamW — a LoKR w1 is [4,5], where orthogonalizing\n"
+            "                                            means nothing. Muon needs only ONE momentum\n"
+            "                                            buffer where AdamW needs two (~900 MB at dim512).\n"
+            "    --muon-lr-scale <f>         1.0         multiplies the shared LR schedule, for Muon\n"
+            "                                            parameters only. Muon's update is normalized by\n"
+            "                                            construction, so its LR does NOT mean AdamW's —\n"
+            "                                            expect to retune before comparing.\n"
+            "    --muon-momentum <f>         0.95\n"
+            "    --muon-ns-steps <n>         5           Newton-Schulz iterations\n"
+            "    --muon-min-dim <n>          16          short-side floor for Muon eligibility\n"
+            "    --no-muon-nesterov                      use the plain momentum buffer instead of g + mu*m\n"
+            "\n"
             "  Diagnostics:\n"
             "    --profile-step <n>          0           0 = off. n > 0 times every micro-step into\n"
             "                                            assemble / upload / build / backward / alloc /\n"
@@ -1218,6 +1234,12 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--profile-step") && i + 1 < argc) a.profile_step = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--profile-ops")) a.profile_ops = true;
+        else if (!strcmp(argv[i], "--optimizer") && i + 1 < argc) a.optimizer = argv[++i];
+        else if (!strcmp(argv[i], "--muon-lr-scale") && i + 1 < argc) a.muon_lr_scale = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-momentum") && i + 1 < argc) a.muon_momentum = (float) atof(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-ns-steps") && i + 1 < argc) a.muon_ns_steps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
         else if (!strcmp(argv[i], "--trigger") && i + 1 < argc) a.trigger = argv[++i];
         else if (!strcmp(argv[i], "--trigger-position") && i + 1 < argc) a.trigger_position = argv[++i];
         else if (!strcmp(argv[i], "--milestone-step") && i + 1 < argc) a.milestone_step = (float) atof(argv[++i]);
