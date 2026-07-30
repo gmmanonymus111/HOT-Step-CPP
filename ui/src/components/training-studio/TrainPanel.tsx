@@ -281,6 +281,13 @@ export const TrainPanel: React.FC = () => {
       vramReserveMb: ditForm.vramReserveMb,
       mirror: ditForm.mirror,
       bwd: ditForm.bwd,
+      // Muon knobs go over the wire only when Muon is selected; the route
+      // defaults them anyway, and this keeps an AdamW request byte-identical
+      // to what it was before the optimizer field existed.
+      optimizer: ditForm.optimizer,
+      ...(ditForm.optimizer === 'muon'
+        ? { muonLrScale: ditForm.muonLrScale, muonNsSteps: ditForm.muonNsSteps }
+        : {}),
       batch: ditForm.batch,
       ckptSegments: ditForm.ckptSegments,
       stages: ditForm.stages,

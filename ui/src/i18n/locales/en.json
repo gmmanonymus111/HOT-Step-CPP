@@ -15,9 +15,7 @@
     "sidebar.storm": "STORM",
     "sidebar.midiStudio": "MIDI Studio",
     "sidebar.settings": "Settings",
-
     "sidebar.trainingStudio": "Training",
-
     "trainingStudio.title": "Training",
     "trainingStudio.subtitle": "Build datasets and train your own adapters — fully local",
     "trainingStudio.phase.dataset": "Dataset",
@@ -25,11 +23,9 @@
     "trainingStudio.phase.train": "Train",
     "trainingStudio.phase.monitor": "Monitor",
     "trainingStudio.phase.comingSoon": "Coming in a later update",
-
     "trainingStudio.empty.title": "No datasets yet",
     "trainingStudio.empty.body": "Point HOT-Step at a folder of songs and it will listen to each one, write captions, lyrics, BPM and key, then build a training dataset.",
     "trainingStudio.empty.cta": "New dataset",
-
     "trainingStudio.list.title": "Datasets",
     "trainingStudio.list.new": "New dataset",
     "trainingStudio.list.samples": "{{count}} files",
@@ -38,7 +34,6 @@
     "trainingStudio.list.notBuilt": "Not built yet",
     "trainingStudio.list.delete": "Delete dataset",
     "trainingStudio.list.deleteConfirm": "Remove \"{{name}}\" from the Training studio? Your audio files, sidecars and dataset.json stay on disk.",
-
     "trainingStudio.wizard.title": "New dataset",
     "trainingStudio.wizard.folder": "Audio folder",
     "trainingStudio.wizard.browse": "Browse…",
@@ -60,7 +55,6 @@
     "trainingStudio.wizard.create": "Create dataset",
     "trainingStudio.wizard.cancel": "Cancel",
     "trainingStudio.wizard.go": "Go",
-
     "trainingStudio.batch.cta": "Import multiple…",
     "trainingStudio.batch.title": "Import multiple folders",
     "trainingStudio.batch.rootFolder": "Root folder",
@@ -77,7 +71,6 @@
     "trainingStudio.batch.stageTrainLm": "Train LM",
     "trainingStudio.batch.defaultsHint": "Each stage runs with its configured defaults. A defaults page to edit them is coming later.",
     "trainingStudio.batch.start": "Start batch",
-
     "trainingStudio.monitor.empty": "No pipelines yet",
     "trainingStudio.monitor.emptyHint": "Import multiple folders from the Dataset phase to run a batch through Label → Build → Preprocess → Train, unattended.",
     "trainingStudio.monitor.noActive": "No pipeline is running right now.",
@@ -87,11 +80,9 @@
     "trainingStudio.monitor.cancel": "Cancel pipeline",
     "trainingStudio.monitor.cancelConfirm": "Stop this pipeline? The current stage finishes or cancels, and every folder not yet done is marked cancelled.",
     "trainingStudio.monitor.recent": "Recent pipelines ({{count}})",
-
     "trainingStudio.step.label": "Label",
     "trainingStudio.step.review": "Review",
     "trainingStudio.step.build": "Build",
-
     "trainingStudio.label.title": "Label your audio",
     "trainingStudio.label.subtitle": "One pass per track: BPM and key detected locally, real lyrics from Genius, caption and genre from an AI that hears the audio.",
     "trainingStudio.label.scope": "What to label",
@@ -110,7 +101,6 @@
     "trainingStudio.label.useGenius": "Fetch lyrics from Genius",
     "trainingStudio.label.useCaption": "Caption & genre with AI",
     "trainingStudio.label.useCaptionHint": "Sends each track as a small MP3 so the AI describes what it actually hears (Gemini; other providers work from title, artist and lyrics).",
-
     "trainingStudio.enhance.title": "Enhance labels",
     "trainingStudio.enhance.subtitle": "Optional cloud steps. Nothing leaves your machine unless you press these.",
     "trainingStudio.enhance.genius": "Fetch lyrics from Genius",
@@ -122,7 +112,6 @@
     "trainingStudio.enhance.provider": "Provider",
     "trainingStudio.enhance.model": "Model",
     "trainingStudio.enhance.run": "Run",
-
     "trainingStudio.job.queued": "Queued…",
     "trainingStudio.job.running": "{{done}} of {{total}} — {{phase}}",
     "trainingStudio.job.waitingEngine": "Waiting for the engine — {{count}} job(s) ahead",
@@ -158,7 +147,6 @@
     "trainingStudio.job.phaseAuditionDecode": "decoding codes",
     "trainingStudio.job.phaseAuditionRender": "rendering through DiT",
     "trainingStudio.job.phaseAuditionWriting": "writing preview",
-
     "trainingStudio.audition.title": "Codes audition",
     "trainingStudio.audition.subtitle": "Decoded straight from the LM's audio codes through the detokenizer and the VAE. No DiT, no sound adapter, no sampler — this is exactly what the planner heard in its head.",
     "trainingStudio.audition.hint": "5 Hz plan sketch — judge structure and style, not fidelity.",
@@ -226,7 +214,6 @@
     "trainingStudio.audition.sampleButton": "Audition codes",
     "trainingStudio.audition.milestoneButton": "Audition this milestone",
     "trainingStudio.audition.milestoneNeedsPrompt": "Milestone loaded into the right-hand side — write a caption, then press Run audition.",
-
     "trainingStudio.grid.status": "Status",
     "trainingStudio.grid.file": "File",
     "trainingStudio.grid.duration": "Len",
@@ -265,7 +252,6 @@
     "trainingStudio.grid.clearSelection": "Clear",
     "trainingStudio.grid.showing": "showing {{visible}} of {{total}}",
     "trainingStudio.grid.filterAll": "All",
-
     "trainingStudio.drawer.caption": "Caption",
     "trainingStudio.drawer.lyrics": "Lyrics",
     "trainingStudio.drawer.captionPlaceholder": "Describe the groove, instruments, production…",
@@ -275,7 +261,6 @@
     "trainingStudio.drawer.prev": "Previous",
     "trainingStudio.drawer.next": "Next",
     "trainingStudio.drawer.saved": "Saved",
-
     "trainingStudio.build.title": "Build dataset",
     "trainingStudio.build.subtitle": "Writes dataset.json next to your audio. Side-Step and HOT-Step both read it.",
     "trainingStudio.build.trigger": "Trigger word",
@@ -297,7 +282,6 @@
     "trainingStudio.build.donePath": "Written to {{path}}",
     "trainingStudio.build.copyPath": "Copy path",
     "trainingStudio.build.rebuild": "Rebuild",
-
     "trainingStudio.lyricStudio.title": "Send to Lyric Studio",
     "trainingStudio.lyricStudio.subtitle": "Turn this dataset into a Lyric Studio artist & album — lyrics, captions, BPM, key and genre included.",
     "trainingStudio.lyricStudio.open": "Send to Lyric Studio…",
@@ -326,7 +310,6 @@
     "trainingStudio.lyricStudio.doneUpdated": "Updated {{artist}} — {{album}} in place ({{count}} songs).",
     "trainingStudio.lyricStudio.donePreset": "The album preset now points at the trained adapters.",
     "trainingStudio.lyricStudio.close": "Close",
-
     "trainingStudio.preprocess.title": "Preprocess",
     "trainingStudio.preprocess.subtitle": "Encode your dataset into training tensors against a base model.",
     "trainingStudio.preprocess.pickDataset": "Choose a dataset to preprocess.",
@@ -361,7 +344,6 @@
     "trainingStudio.preprocess.delete": "Delete cache",
     "trainingStudio.preprocess.deleteConfirm": "Delete the tensor cache for {{variant}}? The audio and dataset.json are untouched.",
     "trainingStudio.preprocess.trainingReady": "training-ready",
-
     "trainingStudio.train.title": "Train",
     "trainingStudio.train.subtitle": "Turn your preprocessed tensors into an adapter this app can use straight away.",
     "trainingStudio.train.pickDataset": "Choose a dataset to train from.",
@@ -532,7 +514,6 @@
     "trainingStudio.train.dit.partialDepth": "part-depth",
     "trainingStudio.train.dit.milestones": "Milestones",
     "trainingStudio.train.dit.visibleNow": "This adapter is already available in the Adapters dropdown — no restart needed.",
-
     "trainingStudio.train.baseSizeInfo": "Which Qwen3 planner the LoRA is trained against. The adapter is bound to that base — a 4B adapter will not load on a 0.6B planner — so this is the one choice you cannot revise later. 0.6B and 1.7B train on the standard path; 4B switches to low-VRAM mode (per-layer gradient checkpointing plus a chunked loss head), needs around 12 GB, and is slower per step. 4B is what gets used here in practice; 0.6B is the safe-on-any-card option.",
     "trainingStudio.train.adapterNameInfo": "Folder name for the finished adapter. Letters, numbers, dots, dashes and underscores, up to 64 characters, not starting with a dot. It lands in lm-<size>/<name>/<timestamp>/, so training the same name twice never overwrites the earlier run — you get a second timestamped folder beside it.",
     "trainingStudio.train.targetLossInfo": "The real stopping condition: the run ends the moment an epoch's average loss reaches this, and Max epochs is only the backstop. LM loss is cross-entropy over 5 Hz code tokens and sits on a completely different scale from DiT loss — 4.0 is the validated figure here, not 0.4. Lower fits your dataset harder and eventually memorises it; higher stops early and leaves the adapter weak. 0 disables the auto-stop and always runs to the epoch cap.",
@@ -557,7 +538,6 @@
     "trainingStudio.train.lossOnCotInfo": "Whether the reasoning block the planner emits before its codes contributes to the loss. On, the adapter learns your dataset's planning style as well as its output. Off, only the final codes are trained on and the reasoning stays purely the base model's.",
     "trainingStudio.train.reextractInfo": "Re-encodes every song's 5 Hz codes from scratch instead of reusing the cache. Only needed when the audio or captions changed underneath an existing cache — it adds the full extraction pass to the front of the job.",
     "trainingStudio.train.stopEngineInfo": "Shuts ace-server down for the duration of the job and restarts it afterwards, so the trainer gets the whole GPU. Leave it on: training and a loaded inference engine compete for the same VRAM, and the run's whole memory fit is calculated from what is free when it starts. Turning it off keeps music generation available but risks an OOM, or a much smaller configuration than the card could really carry.",
-
     "trainingStudio.train.dit.adapterTypeInfo": "LoKR factors the update as a Kronecker product instead of a plain low-rank product, reaching comparable quality with far fewer trained parameters — smaller files, faster steps. It is the recommended default. LoRA is the classic form and the one every external tool understands first. Switching type resets the whole form to that type's defaults, because the two genuinely need different learning rates and loss settings; only the adapter name is carried over.",
     "trainingStudio.train.dit.baseModelInfo": "The DiT this adapter attaches to. It is fixed rather than chosen: the cached latents, context latents and encoder states in this preprocess variant are this exact model's own output, so training them against a different base would be meaningless. To train another base, preprocess the dataset again against it.",
     "trainingStudio.train.dit.qualityInfo": "A preset dial over four fields at once — epoch cap, window maximum, milestone step and target loss. Fast is a quick shape check (100 epochs, shorter windows), Balanced is the normal run (400), Thorough runs 800 epochs to a lower target for a dataset you are committed to. Every field stays individually editable afterwards; clicking a preset again resets those four.",
@@ -600,7 +580,6 @@
     "trainingStudio.train.dit.stagesInfo": "Which parts of the job run. train runs the optimisation; export writes the PEFT adapter directory the app can load. Unticking one is for debugging or resuming — a normal run wants both.",
     "trainingStudio.train.dit.targetMlpInfo": "Adds the gate/up/down projections to the eight attention sites the adapter already covers. On by default — most of a record's timbre lives in the MLP, and this is usually the difference between an adapter that changes the mix and one that changes the sound. It costs VRAM, so the auto-fit will shorten the audio window to pay for it.",
     "trainingStudio.train.dit.stopEngineInfo": "Shuts ace-server down for the duration of the job and restarts it afterwards, so the trainer gets the whole GPU. Leave it on: training and a loaded inference engine compete for the same VRAM, and the run's whole memory fit is calculated from what is free when it starts. Turning it off keeps music generation available but risks an OOM, or a far smaller configuration than the card could really carry.",
-
     "trainingStudio.chart.aria": "Training loss chart",
     "trainingStudio.chart.current": "now {{loss}}",
     "trainingStudio.chart.epochAxis": "epoch {{epoch}} / {{total}}",
@@ -610,14 +589,12 @@
     "trainingStudio.chart.legendMa5": "5-epoch avg",
     "trainingStudio.chart.legendTarget": "target",
     "trainingStudio.chart.legendMilestone": "milestone",
-
     "trainingStudio.caps.engineDown": "Engine offline — local labeling is unavailable. BPM and key analysis still works.",
     "trainingStudio.caps.modelsMissing": "The engine is missing models ({{models}}). Install them in the Model Manager to enable local labeling.",
     "trainingStudio.caps.essentiaMissing": "Essentia binary not found — BPM and key detection is unavailable.",
     "trainingStudio.caps.queueDepth": "Engine busy — {{count}} job(s) ahead of yours.",
     "trainingStudio.error.load": "Couldn't load the Training studio: {{message}}",
     "trainingStudio.error.retry": "Retry",
-
     "midiStudio.title": "MIDI Studio",
     "midiStudio.subtitle": "Transcribe any track to multi-instrument MIDI — powered by MuScriptor",
     "midiStudio.engineMissingTitle": "Transcription engine not found",
@@ -1419,11 +1396,19 @@
     "instaGen.preview.editCaption": "Edit Caption",
     "instaGen.preview.refine": "Refine in Custom-Gen",
     "instaGen.clearAll": "Clear All",
-
     "coverArt.subjectTitle": "Cover Art",
     "coverArt.subjectLabel": "Image Subject",
     "coverArt.subjectPlaceholder": "Auto — generated from song lyrics and style",
     "coverArt.subjectHelp": "Override the visual scene description for cover art. Leave empty to auto-generate from song metadata.",
-    "coverArt.subjectReset": "Reset"
+    "coverArt.subjectReset": "Reset",
+    "trainingStudio.train.dit.optimizer": "Optimizer",
+    "trainingStudio.train.dit.optimizerInfo": "Which update rule the trainable parameters use. AdamW is the shipped path and the default. Muon is per-parameter: every 2-D parameter whose short side is at least 16 gets an orthogonalised-momentum (Newton-Schulz) update, and everything else — including a LoKR w1, which is 4x5 and where orthogonalising means nothing — stays on AdamW. Muon also needs only one momentum buffer instead of two, freeing about 870 MB at LoKR dim 512. Measured on a 200-epoch run it reached the target in a comparable number of epochs while costing more per epoch, so it is an experiment to opt into rather than a faster default.",
+    "trainingStudio.train.dit.optimizerAdamw": "AdamW",
+    "trainingStudio.train.dit.optimizerMuon": "Muon (experimental)",
+    "trainingStudio.train.dit.optimizerHint": "AdamW unless you are deliberately testing Muon.",
+    "trainingStudio.train.dit.muonLrScale": "Muon LR scale",
+    "trainingStudio.train.dit.muonLrScaleInfo": "Multiplies the learning-rate schedule for Muon parameters ONLY. Muon's update is normalised by construction, so its learning rate does not mean what AdamW's does — per element an orthogonalised update is roughly 20x smaller, which is why the default is 20. Measured on a LoKR dim-512 run: 5 undershoots, 20 matches AdamW, 50 overshoots. Non-Muon parameters keep the plain learning rate.",
+    "trainingStudio.train.dit.muonNsSteps": "Newton-Schulz steps",
+    "trainingStudio.train.dit.muonNsStepsInfo": "How many Newton-Schulz iterations orthogonalise each update. Five is the reference value and pulls the singular values into a band around 1; the iteration targets that band rather than converging, so more steps buy little. Fewer steps make each optimizer step cheaper but only slightly — most of the cost is the number of separate operations, not the iteration count."
   }
 }

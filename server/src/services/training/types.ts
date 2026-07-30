@@ -551,6 +551,25 @@ export interface TrainDitOptions {
    *  per layer per step on an RTX 5090. ace-train's own default is 'outprod';
    *  the SERVER default is 'mm' (training.ts train-dit handler). */
   bwd?: 'outprod' | 'mm';          // default 'mm'
+  /** Optimizer for the trainable parameters (2026-07-30). 'adamw' is the
+   *  shipped path and the default; 'muon' puts every 2-D parameter whose SHORT
+   *  side is >= muonMinDim on orthogonalized-momentum (Newton-Schulz) updates
+   *  and leaves the rest on AdamW — orthogonalizing a LoKR w1 of [4,5] is
+   *  vacuous, so the hybrid is the design, not a compromise. Muon also carries
+   *  ONE momentum buffer where AdamW carries two (~870 MB less at LoKR
+   *  dim512). NOTE: dit-vram.h still charges for both, so the auto-fit is
+   *  conservative rather than wrong. */
+  optimizer?: 'adamw' | 'muon';    // default 'adamw'
+  /** Multiplies the shared LR schedule, for MUON PARAMETERS ONLY. Muon's update
+   *  is normalized by construction, so its LR does not mean AdamW's: measured
+   *  parity with AdamW around 20 on a LoKR dim512 run (5 undershoots, 50
+   *  overshoots). Inert unless optimizer === 'muon'. */
+  muonLrScale?: number;            // default 1.0
+  muonMomentum?: number;           // default 0.95
+  muonNsSteps?: number;            // default 5, Newton-Schulz iterations
+  /** Short-side floor for Muon eligibility; below it a parameter falls to
+   *  AdamW. 16 keeps LoKR w1 ([4,5] at factor 6) on AdamW. */
+  muonMinDim?: number;             // default 16
   /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2 /
    *  C5). Effective samples/optimizer-step is batch x gradAccum.
    *  Default 1 = OFF (2026-07-29, measured): batching is ~2.5x SLOWER at full

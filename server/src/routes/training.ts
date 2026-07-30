@@ -1855,6 +1855,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // land on the same behaviour.
     const batch = numOpt(body.batch, 1);
     const ckptSegments = numOpt(body.ckptSegments, 1);
+    // Optimizer (2026-07-30). Default 'adamw' — the shipped path — so an
+    // omitted field can never move an existing caller onto Muon.
+    const muonLrScale = numOpt(body.muonLrScale, 1.0);
+    const muonMomentum = numOpt(body.muonMomentum, 0.95);
+    const muonNsSteps = numOpt(body.muonNsSteps, 5);
+    const muonMinDim = numOpt(body.muonMinDim, 16);
 
     const rangeFailure =
       outOfRange('epochs', epochs, 1, 2000)
@@ -1885,6 +1891,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       ?? outOfRange('milestoneKeep', milestoneKeep, 0, 64)
       ?? outOfRange('vramReserveMb', vramReserveMb, 0, 16384)
       ?? outOfRange('batch', batch, 1, 16)
+      ?? outOfRange('muonLrScale', muonLrScale, 0.001, 1000)
+      ?? outOfRange('muonMomentum', muonMomentum, 0, 0.999)
+      ?? outOfRange('muonNsSteps', muonNsSteps, 1, 20)
+      ?? outOfRange('muonMinDim', muonMinDim, 1, 4096)
       // ckptSegments: 0=off, 1=auto, 2-32=fixed segment count (design §2.2).
       ?? (ckptSegments !== 0 && ckptSegments !== 1 && (ckptSegments < 2 || ckptSegments > 32)
         ? 'ckptSegments must be 0, 1, or between 2 and 32' : null);
@@ -1912,6 +1922,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // Same rule for the MUL_MAT activation-gradient formulation: refused, not
     // coerced. Default is 'mm' (engine/patches/mm-backward.patch), not
     // ace-train's own 'outprod'.
+    if (body.optimizer !== undefined && body.optimizer !== 'adamw' && body.optimizer !== 'muon') {
+      res.status(400).json({ error: 'optimizer must be adamw or muon' });
+      return;
+    }
     if (body.bwd !== undefined && body.bwd !== 'outprod' && body.bwd !== 'mm') {
       res.status(400).json({ error: 'bwd must be outprod or mm' });
       return;
@@ -1998,6 +2012,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // only the exact string 'outprod' opts back out to upstream ggml's
       // F32-only out_prod backward.
       bwd: body.bwd === 'outprod' ? 'outprod' : 'mm',
+      // Only the exact string 'muon' opts in; anything else is AdamW.
+      optimizer: body.optimizer === 'muon' ? 'muon' : 'adamw',
+      muonLrScale,
+      muonMomentum,
+      muonNsSteps: Math.trunc(muonNsSteps),
+      muonMinDim: Math.trunc(muonMinDim),
       batch: Math.trunc(batch),
       ckptSegments: Math.trunc(ckptSegments),
       stages: resolvedStages,

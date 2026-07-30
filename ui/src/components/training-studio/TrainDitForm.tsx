@@ -78,6 +78,9 @@ export interface TrainDitFormState {
   /** MUL_MAT activation-gradient formulation (engine/patches/mm-backward.patch).
    *  'mm' is the fast tensor-core backward and the server default. */
   bwd: 'outprod' | 'mm';
+  optimizer: 'adamw' | 'muon';
+  muonLrScale: number;
+  muonNsSteps: number;
   /** Crops per micro-batch, from that many DIFFERENT songs (design §2.2). */
   batch: number;
   /** Gradient-checkpointing segments: 0 = off, 1 = auto, 2-32 = fixed. */
@@ -138,6 +141,13 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   // (2026-07-29): identical maths to out_prod but dtype-agnostic, so the BF16
   // mirror above rides BF16 tensor cores instead of being promoted to F32.
   bwd: 'mm',
+  // Optimizer (2026-07-30). AdamW is the shipped path and stays the default:
+  // Muon measured at PARITY on epochs-to-target while costing ~46% more per
+  // epoch, so it is an experiment to opt into, not a better default. See
+  // docs/TRAINING.md. muonMomentum/muonMinDim are left to the engine.
+  optimizer: 'adamw',
+  muonLrScale: 20,
+  muonNsSteps: 5,
   // Micro-batching + checkpointing defaults (design §2.2 / C3/C5) — the engine's
   // own train-dit defaults. batch 1 = OFF (2026-07-29, measured): batching is
   // ~2.5x SLOWER at full depth on a 32 GB card and ~2.4x faster on shallow /
@@ -926,6 +936,47 @@ export const TrainDitForm: React.FC<Props> = ({
             />
             <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.bwdHint')}</span>
           </div>
+
+          <div className="flex flex-col gap-1.5">
+            {P('optimizer', 'Default AdamW · Muon is experimental')}
+            <StyledSelect
+              accent="amber"
+              value={value.optimizer}
+              disabled={lock}
+              onChange={(v) => onChange({ optimizer: v })}
+              options={[
+                { value: 'adamw' as const, label: t('trainingStudio.train.dit.optimizerAdamw') },
+                { value: 'muon' as const, label: t('trainingStudio.train.dit.optimizerMuon') },
+              ]}
+            />
+            <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.dit.optimizerHint')}</span>
+          </div>
+
+          {/* Muon-only knobs. Hidden rather than disabled on the AdamW path —
+              they are genuinely inert there, and a greyed-out row invites the
+              question of what it would do. */}
+          {value.optimizer === 'muon' && (
+            <label className="flex flex-col gap-1.5">
+              {P('muonLrScale', 'Default 20 · multiplies the LR for Muon params only')}
+              <input
+                type="number" min={0.001} max={1000} step={1}
+                value={value.muonLrScale} disabled={lock}
+                onChange={(e) => onChange({ muonLrScale: num(e.target.value, 20) })}
+                className={FIELD}
+              />
+            </label>
+          )}
+          {value.optimizer === 'muon' && (
+            <label className="flex flex-col gap-1.5">
+              {P('muonNsSteps', 'Default 5 · Newton-Schulz iterations')}
+              <input
+                type="number" min={1} max={20} step={1}
+                value={value.muonNsSteps} disabled={lock}
+                onChange={(e) => onChange({ muonNsSteps: num(e.target.value, 5) })}
+                className={FIELD}
+              />
+            </label>
+          )}
 
           <label className="flex flex-col gap-1.5">
             {P('batch', 'Default 1 (off) · 1–16')}

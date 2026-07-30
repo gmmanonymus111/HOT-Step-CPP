@@ -324,6 +324,14 @@ export interface ResolvedTrainDitOptions {
   /** MUL_MAT activation-gradient formulation — see ResolvedTrainLmOptions.bwd.
    *  ace-train defaults to 'outprod'; the SERVER default is 'mm'. */
   bwd: 'outprod' | 'mm';
+  /** Optimizer rule set (2026-07-30). 'adamw' is the shipped path; 'muon' is
+   *  per-parameter — 2-D parameters with a short side >= muonMinDim get
+   *  orthogonalized-momentum updates, the rest stay on AdamW. */
+  optimizer: 'adamw' | 'muon';
+  muonLrScale: number;
+  muonMomentum: number;
+  muonNsSteps: number;
+  muonMinDim: number;
   batch: number; ckptSegments: number;
   stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
 }
@@ -438,6 +446,9 @@ export function buildTrainDitArgs(input: {
     // Ditto: always emitted, so an ace-train that predates --bwd rejects it
     // loudly rather than silently running the slow out_prod backward.
     '--bwd', o.bwd,
+    // Always emitted so an ace-train that predates --optimizer rejects it
+    // loudly rather than silently training on AdamW when Muon was asked for.
+    '--optimizer', o.optimizer,
     // Batching/checkpointing (design §2.2): always emitted on both sides —
     // an ace-train that predates the flags rejects them loudly rather than
     // silently training at batch 1 / no checkpointing.
@@ -453,6 +464,15 @@ export function buildTrainDitArgs(input: {
   // knows --no-target-mlp (added alongside the default flip); an older binary
   // rejects the unknown option loudly rather than doing the wrong thing.
   args.push(o.targetMlp ? '--target-mlp' : '--no-target-mlp');
+  // Muon knobs only when Muon is actually selected — they are inert on the
+  // AdamW path, and emitting them there would put noise in the recorded argv
+  // of every run that never used them.
+  if (o.optimizer === 'muon') {
+    args.push('--muon-lr-scale', String(o.muonLrScale));
+    args.push('--muon-momentum', String(o.muonMomentum));
+    args.push('--muon-ns-steps', String(o.muonNsSteps));
+    args.push('--muon-min-dim', String(o.muonMinDim));
+  }
   if (!o.channelBalance) args.push('--no-channel-balance');
   if (o.overwrite) args.push('--overwrite');
   args.push('--jsonl');
