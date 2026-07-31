@@ -600,6 +600,11 @@ struct ServerFields {
     std::vector<std::string> concept_neg;
     std::string concept_target_class;
     int         concept_pairs = 24;
+    // Path to a previously extracted null-control concept. Without it the
+    // suggested-layer ranking is dominated by the early-layer architectural
+    // prior and is not usable as a default.
+    std::string concept_null_ref;
+    int         concept_top_k = 4;
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
@@ -814,6 +819,8 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
         if ((f = yyjson_obj_get(cx, "target_class")) && yyjson_is_str(f))
             sf->concept_target_class = yyjson_get_str(f);
         if ((f = yyjson_obj_get(cx, "pairs")) && yyjson_is_int(f)) sf->concept_pairs = (int) yyjson_get_int(f);
+        if ((f = yyjson_obj_get(cx, "null_ref")) && yyjson_is_str(f)) sf->concept_null_ref = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "top_k")) && yyjson_is_int(f)) sf->concept_top_k = (int) yyjson_get_int(f);
         sf->concept_extract = !sf->concept_out_path.empty() && !sf->concept_pos.empty() &&
                               !sf->concept_neg.empty();
         if (!sf->concept_extract) {
@@ -1635,6 +1642,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
         for (size_t k = 0; k < n_pos; k++) meta.pos_prompt += (k ? " | " : "") + sf.concept_pos[k];
         for (size_t k = 0; k < n_neg; k++) meta.neg_prompt += (k ? " | " : "") + sf.concept_neg[k];
         meta.target_class = sf.concept_target_class;
+        meta.null_ref     = sf.concept_null_ref;
+        meta.top_k        = sf.concept_top_k;
 
         const bool wrote = concept_write_gguf(sf.concept_out_path.c_str(), meta, acc);
 

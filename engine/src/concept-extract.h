@@ -18,6 +18,7 @@
 // The (step -> t) axis comes from the recorded evaluation times, NOT from step
 // indices — see docs/plans/caa-activation-steering.md.
 //
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +41,9 @@ struct ConceptAccum {
     std::vector<double> sum_diff;  // [n_layers * n_steps * hidden]
     std::vector<double> sum_sign;  // same shape
     std::vector<float>  t_values;  // [n_steps], from the first accepted pair
+    // Mean ||mean_frames(h)|| per (step, layer), averaged over both sides of
+    // every pair. Lets alpha be expressed relative to what is already there.
+    std::vector<double> sum_act;   // [n_steps * n_layers]
 
     // Layout helper: the on-disk tensor is [hidden, n_steps, n_layers], i.e.
     // index = (l * n_steps + s) * hidden + d. The tap sink hands us one
@@ -55,6 +59,7 @@ struct ConceptAccum {
         n_pairs  = 0;
         sum_diff.assign((size_t) L * S * H, 0.0);
         sum_sign.assign((size_t) L * S * H, 0.0);
+        sum_act.assign((size_t) S * L, 0.0);
         t_values = ts;
     }
 
@@ -80,6 +85,16 @@ struct ConceptAccum {
                     const size_t o    = idx(l, s, d);
                     sum_diff[o] += diff;
                     sum_sign[o] += (diff > 0.0) ? 1.0 : (diff < 0.0 ? -1.0 : 0.0);
+                }
+            }
+        }
+        // Activation magnitude: average both sides, so the reference is "typical
+        // magnitude at this layer/step" rather than either prompt's.
+        if ((int) pos.act_norms.size() == n_steps && (int) neg.act_norms.size() == n_steps) {
+            for (int s = 0; s < n_steps; s++) {
+                for (int l = 0; l < n_layers; l++) {
+                    sum_act[(size_t) s * n_layers + l] +=
+                        0.5 * ((double) pos.act_norms[s][l] + (double) neg.act_norms[s][l]);
                 }
             }
         }
@@ -116,6 +131,13 @@ struct ConceptMeta {
     std::string pos_prompt;
     std::string neg_prompt;
     std::string target_class;
+    // Optional path to a previously extracted NULL CONTROL concept (lexically
+    // varied but conceptually unpaired prompts). Its beta is the architectural
+    // sign-agreement prior; subtracting it is what turns the raw beta profile
+    // into a usable layer ranking. Validated 2026-07-31: the ear-approved layer
+    // set for aggressive/gentle on the XL DiT was exactly excess ranks 1,3,5,6.
+    std::string null_ref;
+    int         top_k = 4;  // how many layers to record as the suggested set
 };
 
 // Write a concept GGUF. Layout and keys are documented in concept-steer.h /
@@ -175,6 +197,75 @@ static bool concept_write_gguf(const char * path, const ConceptMeta & meta, cons
     memcpy(tb->data, beta.data(), n_el * sizeof(float));
     gguf_add_tensor(gf, tb);
 
+    // Activation magnitudes [n_layers, n_steps] — the denominator that makes
+    // alpha portable across layers, concepts and DiT scales.
+    std::vector<float> actn((size_t) acc.n_steps * acc.n_layers, 0.0f);
+    {
+        const double inv = 1.0 / (double) acc.n_pairs;
+        for (size_t i = 0; i < actn.size(); i++) actn[i] = (float) (acc.sum_act[i] * inv);
+    }
+    struct ggml_tensor * ta = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, acc.n_layers, acc.n_steps);
+    ggml_set_name(ta, "act_norm");
+    memcpy(ta->data, actn.data(), actn.size() * sizeof(float));
+    gguf_add_tensor(gf, ta);
+
+    // Per-layer mean|beta|, and the excess over a null control when one is given.
+    std::vector<double> mb((size_t) acc.n_layers, 0.0);
+    for (int l = 0; l < acc.n_layers; l++) {
+        double tot = 0.0;
+        for (int s = 0; s < acc.n_steps; s++)
+            for (int d = 0; d < acc.hidden; d++) tot += std::fabs((double) beta[acc.idx(l, s, d)]);
+        mb[(size_t) l] = tot / ((double) acc.n_steps * acc.hidden);
+    }
+
+    std::vector<double> excess = mb;
+    bool                have_null = false;
+    if (!meta.null_ref.empty()) {
+        GGUFModel nf;
+        if (gf_load(&nf, meta.null_ref.c_str())) {
+            struct ggml_tensor * nb = ggml_get_tensor(nf.meta, "beta");
+            int64_t              ni = gguf_find_tensor(nf.gguf, "beta");
+            if (nb && ni >= 0 && nb->type == GGML_TYPE_F32 && (int) nb->ne[2] == acc.n_layers &&
+                (int) nb->ne[0] == acc.hidden) {
+                const int     nS = (int) nb->ne[1];
+                const float * nd =
+                    (const float *) (nf.mapping + nf.data_offset + gguf_get_tensor_offset(nf.gguf, ni));
+                for (int l = 0; l < acc.n_layers; l++) {
+                    double tot = 0.0;
+                    for (int s = 0; s < nS; s++)
+                        for (int d = 0; d < acc.hidden; d++)
+                            tot += std::fabs((double) nd[((size_t) l * nS + s) * acc.hidden + d]);
+                    excess[(size_t) l] = mb[(size_t) l] - tot / ((double) nS * acc.hidden);
+                }
+                have_null = true;
+                fprintf(stderr, "[Concept] Null control applied: %s\n", meta.null_ref.c_str());
+            } else {
+                fprintf(stderr, "[Concept] WARNING: null control %s has incompatible beta — ignoring\n",
+                        meta.null_ref.c_str());
+            }
+            gf_close(&nf);
+        } else {
+            fprintf(stderr, "[Concept] WARNING: cannot open null control %s — ignoring\n",
+                    meta.null_ref.c_str());
+        }
+    }
+
+    // Suggested layer set = top-k by excess. Without a null control this ranks
+    // raw beta, which is dominated by the early-layer architectural prior and
+    // is NOT a usable default — say so rather than shipping a bad suggestion.
+    std::vector<int> order((size_t) acc.n_layers);
+    for (int l = 0; l < acc.n_layers; l++) order[(size_t) l] = l;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return excess[a] > excess[b]; });
+    const int          k = meta.top_k > 0 && meta.top_k <= acc.n_layers ? meta.top_k : 4;
+    std::vector<int32_t> top(order.begin(), order.begin() + k);
+    std::sort(top.begin(), top.end());
+    gguf_set_arr_data(gf, "concept.top_layers", GGUF_TYPE_INT32, top.data(), top.size());
+    gguf_set_val_bool(gf, "concept.top_layers_null_corrected", have_null);
+
+    std::vector<float> exf((size_t) acc.n_layers);
+    for (int l = 0; l < acc.n_layers; l++) exf[(size_t) l] = (float) excess[(size_t) l];
+    gguf_set_arr_data(gf, "concept.layer_excess", GGUF_TYPE_FLOAT32, exf.data(), exf.size());
+
     const bool ok = gguf_write_to_file(gf, path, /*only_meta=*/false);
     ggml_free(ctx);
     gguf_free(gf);
@@ -199,35 +290,65 @@ static bool concept_write_gguf(const char * path, const ConceptMeta & meta, cons
 
     fprintf(stderr, "[Concept] Wrote %s (%d pairs, %dL x %d steps x %dH)\n", path, acc.n_pairs, acc.n_layers,
             acc.n_steps, acc.hidden);
-    fprintf(stderr, "[Concept] Per-layer localization (sign-agreement noise floor = %.3f at N=%d):\n",
-            noise_floor, acc.n_pairs);
-    fprintf(stderr, "[Concept]   layer      |v|   mean|B|   excess\n");
+    fprintf(stderr, "[Concept] Per-layer localization (sign-agreement noise floor = %.3f at N=%d)%s:\n",
+            noise_floor, acc.n_pairs, have_null ? ", null-corrected" : ", NO null control");
+    fprintf(stderr, "[Concept]   layer      |v|     ||h||   |v|/||h||   mean|B|    excess\n");
 
-    int    best_l = 0;
-    double best_b = -1.0;
     for (int l = 0; l < acc.n_layers; l++) {
         double tot_v = 0.0;
-        double tot_b = 0.0;
+        double tot_a = 0.0;
         for (int s = 0; s < acc.n_steps; s++) {
             double n2 = 0.0;
             for (int d = 0; d < acc.hidden; d++) {
-                const size_t o = acc.idx(l, s, d);
-                const float  x = vec[o];
+                const float x = vec[acc.idx(l, s, d)];
                 n2 += (double) x * x;
-                tot_b += std::fabs((double) beta[o]);
             }
             tot_v += std::sqrt(n2);
+            tot_a += actn[(size_t) s * acc.n_layers + l];
         }
         const double mv = tot_v / (double) acc.n_steps;
-        const double mb = tot_b / ((double) acc.n_steps * acc.hidden);
-        if (mb > best_b) {
-            best_b = mb;
-            best_l = l;
-        }
-        fprintf(stderr, "[Concept]   L%02d %9.3f   %7.4f   %+.4f\n", l, mv, mb, mb - noise_floor);
+        const double ma = tot_a / (double) acc.n_steps;
+        fprintf(stderr, "[Concept]   L%02d %9.3f %9.1f   %9.5f   %7.4f   %+.4f\n", l, mv, ma,
+                ma > 0.0 ? mv / ma : 0.0, mb[(size_t) l], excess[(size_t) l]);
     }
-    fprintf(stderr, "[Concept] Most discriminative layer: L%02d (mean|B|=%.4f)\n", best_l, best_b);
-    if (best_b < noise_floor * 1.5) {
+
+    // Suggested layer set + the alpha that reproduces a reference relative
+    // perturbation on it. alpha is meaningless in absolute terms — it must be
+    // read against ||h||, or a concept whose |v| happens to be small will need a
+    // wildly different slider position for the same audible effect.
+    std::string tl;
+    double      sum_ratio = 0.0;
+    for (size_t i = 0; i < top.size(); i++) {
+        const int l = top[i];
+        tl += (i ? "," : "") + std::to_string(l);
+        double tot_v = 0.0, tot_a = 0.0;
+        for (int s = 0; s < acc.n_steps; s++) {
+            double n2 = 0.0;
+            for (int d = 0; d < acc.hidden; d++) {
+                const float x = vec[acc.idx(l, s, d)];
+                n2 += (double) x * x;
+            }
+            tot_v += std::sqrt(n2);
+            tot_a += actn[(size_t) s * acc.n_layers + l];
+        }
+        sum_ratio += (tot_a > 0.0) ? (tot_v / tot_a) : 0.0;
+    }
+    const double mean_ratio = top.empty() ? 0.0 : sum_ratio / (double) top.size();
+
+    // NOTE: alpha_suggested is deliberately NOT written here — this report runs
+    // after gguf_write_to_file/gguf_free, so any gguf_set_* here would be a
+    // use-after-free. The reference relative strength (the |alpha*v|/||h|| that
+    // was ear-validated at alpha 20 on layers 25/26/30/31, Rob 2026-07-31) is
+    // logged below; once calibrated it belongs in the KV block above the write,
+    // or in the server's concept loader.
+    fprintf(stderr, "[Concept] Suggested layers: [%s] (%s)\n", tl.c_str(),
+            have_null ? "null-corrected excess" : "raw beta — PASS A NULL CONTROL, this ranking is "
+                                                  "dominated by the early-layer prior");
+    fprintf(stderr, "[Concept] Mean |v|/||h|| over suggested layers: %.6f\n", mean_ratio);
+    fprintf(stderr, "[Concept]   -> alpha 20 == relative strength %.5f\n", mean_ratio * 20.0);
+
+    double best_x = excess.empty() ? 0.0 : *std::max_element(excess.begin(), excess.end());
+    if (!have_null && best_x < noise_floor * 1.5) {
         fprintf(stderr,
                 "[Concept] WARNING: no layer clears 1.5x the noise floor — this concept did not "
                 "separate. Try more pairs, or more sharply opposed prompts.\n");

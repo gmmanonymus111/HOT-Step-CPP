@@ -196,8 +196,16 @@ struct ConceptTapSink {
         hidden    = 0;
         steps.clear();
         t_values.clear();
+        act_norms.clear();
     }
     void disarm() { recording = false; }
+
+    // Per-layer L2 norm of mean_frames(h) for each recorded evaluation, i.e. the
+    // magnitude of what is already there. Used to express alpha as a FRACTION of
+    // local activation magnitude rather than an absolute number: |v| spans 4.85
+    // (L01) to 132 (L31) on the XL DiT, so a raw alpha means something different
+    // at every layer and for every concept.
+    std::vector<std::vector<float>> act_norms;  // [eval][n_layers]
 
     // Only the conditional (positive-prompt) pass is meaningful for CAA; the
     // sampler records exactly one evaluation per computed diffusion step.
@@ -206,6 +214,17 @@ struct ConceptTapSink {
         hidden   = H;
         t_values.push_back(t);
         steps.emplace_back(data, data + (size_t) L * H);
+
+        std::vector<float> norms((size_t) L, 0.0f);
+        for (int l = 0; l < L; l++) {
+            double n2 = 0.0;
+            for (int h = 0; h < H; h++) {
+                const double x = data[(size_t) l * H + h];
+                n2 += x * x;
+            }
+            norms[(size_t) l] = (float) std::sqrt(n2);
+        }
+        act_norms.push_back(std::move(norms));
     }
 };
 
