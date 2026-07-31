@@ -92,6 +92,7 @@ import {
   adapterDitRoot, ditRunDirFor, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
 import { hasWeights, lmAdapterRoots } from '../services/training/adapterLayout.js';
+import { adoptExistingDatasetJson } from '../services/training/datasetBuilder.js';
 import {
   getActiveModels, resolveTrainingDit, setActiveModels,
 } from '../services/training/activeModels.js';
@@ -1272,7 +1273,7 @@ function numOpt(value: unknown, fallback: number): number {
 
 router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1283,6 +1284,10 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     }
     // The Build step is what produces dataset.json — and with it the stable
     // sample ids the tensor cache filenames are keyed on.
+    // A folder that already carries a dataset.json is built — the DB just may
+    // never have been told (a fresh row for a previously-built folder, or a run
+    // that skipped the Build stage). Believe the file before refusing.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Preprocess' });
       return;
@@ -1480,7 +1485,7 @@ function outOfRange(name: string, n: number, min: number, max: number): string |
 
 router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1493,6 +1498,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
       return;
     }
+    // Same adoption as preprocess: an existing dataset.json IS the build.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
       return;
@@ -1852,7 +1859,7 @@ const TRAIN_DIT_STAGES: readonly TrainDitStage[] = ['train', 'export'];
 router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
   try {
     // ── 1. dataset / job / binary ────────────────────────────────────────
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1866,6 +1873,8 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       return;
     }
     // ── 2. built ─────────────────────────────────────────────────────────
+    // Same adoption as preprocess: an existing dataset.json IS the build.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
       return;

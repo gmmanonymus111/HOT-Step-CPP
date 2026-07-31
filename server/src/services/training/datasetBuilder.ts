@@ -203,3 +203,57 @@ export async function buildDataset(
 
   return { path: outputPath, total: rows.length, withMetadata };
 }
+
+/**
+ * Adopt a dataset.json that already exists on disk but that the DB has no
+ * record of.
+ *
+ * `builtAt` is written by exactly one thing — the Build job — so a dataset row
+ * created for a folder that ALREADY contains a dataset.json (imported earlier,
+ * built by a previous install, or produced outside the app) reads as unbuilt.
+ * Preprocess and both trainers then refuse it with "Dataset must be built
+ * first", which is untrue and unfixable from the UI without re-running a Build
+ * the user deliberately skipped. A 19-folder bulk run failed every item this
+ * way (2026-07-31).
+ *
+ * The file IS the build product, so the honest fix is to believe it. Adoption
+ * is conservative: the shape must be the {metadata, samples[]} object
+ * buildDataset writes, with at least one sample. Anything else is left alone
+ * and the caller's existing refusal stands.
+ *
+ * Returns the row to carry on with — updated in place when adoption happened.
+ */
+export function adoptExistingDatasetJson(
+  ds: TrainingDatasetRow,
+  updateDataset: (id: string, patch: Partial<TrainingDatasetRow>) => unknown,
+): TrainingDatasetRow {
+  if (ds.builtAt && ds.datasetJsonPath && fs.existsSync(ds.datasetJsonPath)) {
+    return ds;   // already known-built; nothing to do
+  }
+  const candidate = ds.datasetJsonPath || path.join(ds.sourceDir, 'dataset.json');
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(candidate);
+    if (!stat.isFile()) return ds;
+  } catch {
+    return ds;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8')) as {
+      metadata?: unknown; samples?: unknown;
+    };
+    const samples = Array.isArray(parsed?.samples) ? parsed.samples : null;
+    if (!samples || samples.length === 0) return ds;
+    if (!parsed.metadata || typeof parsed.metadata !== 'object') return ds;
+  } catch {
+    return ds;   // unreadable or not JSON — not a build product
+  }
+
+  // mtime, not now(): the honest answer to "when was this built" is when the
+  // file was written, and a Monitor row showing today for a month-old build
+  // would be its own small lie.
+  const builtAt = new Date(stat.mtimeMs).toISOString();
+  updateDataset(ds.id, { builtAt, datasetJsonPath: candidate, status: 'built' });
+  console.log(`[Training] Adopted existing dataset.json for ${ds.slug}: ${candidate}`);
+  return { ...ds, builtAt, datasetJsonPath: candidate, status: 'built' };
+}
