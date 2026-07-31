@@ -93,6 +93,9 @@ import {
 } from '../services/training/trainDitStatus.js';
 import { hasWeights, lmAdapterRoots } from '../services/training/adapterLayout.js';
 import {
+  getActiveModels, resolveTrainingDit, setActiveModels,
+} from '../services/training/activeModels.js';
+import {
   deleteDatasetPreviews, isPreviewFileKey, isPreviewId, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
 } from '../services/training/auditionStore.js';
@@ -542,6 +545,32 @@ router.get('/defaults', (_req: Request, res: Response) => {
     res.json(getTrainingDefaults());
   } catch (err: any) {
     console.error(`[Training] Defaults read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Server-side mirror of the Models tab selection.
+ *
+ * The UI owns this state in localStorage; training needs it on the server,
+ * because a bulk run has no UI in the loop and the engine (which knows its own
+ * loaded DiT) is deliberately stopped while a training job runs.
+ */
+router.get('/active-models', (_req: Request, res: Response) => {
+  res.json(getActiveModels());
+});
+
+router.put('/active-models', (req: Request, res: Response) => {
+  try {
+    const body = (req.body || {}) as Record<string, unknown>;
+    res.json(setActiveModels({
+      ditModel: typeof body.ditModel === 'string' ? body.ditModel : undefined,
+      lmModel: typeof body.lmModel === 'string' ? body.lmModel : undefined,
+      vaeModel: typeof body.vaeModel === 'string' ? body.vaeModel : undefined,
+      textEncoder: typeof body.textEncoder === 'string' ? body.textEncoder : undefined,
+    }));
+  } catch (err: any) {
+    console.error(`[Training] Active-models write failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1010,6 +1039,16 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
     const scope = body.scope === 'all' ? 'all' : 'unlabeled';
     const targets = pickTargets(samples, body.sampleIds, scope);
     if (targets.length === 0) {
+      // A dataset that is ALREADY fully labelled is not an error — it is the
+      // desired end state. Answering 400 made the bulk pipeline treat it as a
+      // stage failure and abandon the whole item, so a folder that arrived with
+      // sidecars already written got no preprocess, no LM train and no DiT
+      // train (2026-07-31). `allowEmpty` lets a caller that can act on "nothing
+      // to do" say so; the UI keeps the 400, where it is a useful toast.
+      if (body.allowEmpty === true) {
+        res.status(200).json({ jobId: null, skipped: 'nothing-to-label' });
+        return;
+      }
       res.status(400).json({ error: 'Nothing to label' });
       return;
     }
@@ -1276,7 +1315,16 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     // even though the engine is reachable — probe once instead of rejecting.
     let snap = getModelSnapshot();
     if (!snap.cachedAt && !isEngineSuspended()) snap = await refreshModelSnapshot();
-    const dit = (typeof body.ditModel === 'string' ? body.ditModel.trim() : '') || pickBf16(snap.dit);
+    // The DiT chosen HERE is the one the adapter ends up bound to: train-dit
+    // reads --dit back out of preprocess_meta.json. Falling back to
+    // pickBf16(snap.dit) — the first BF16 in the catalogue, i.e. the stock base
+    // — is what made an 18-dataset overnight bulk run train against the base
+    // instead of the user's fine-tune (2026-07-31). Prefer what they actually
+    // have selected in the Models tab, mirrored server-side by
+    // PUT /api/training/active-models, and fall back to the old behaviour only
+    // when nothing is recorded.
+    const dit = (typeof body.ditModel === 'string' ? body.ditModel.trim() : '')
+      || resolveTrainingDit(getActiveModels().ditModel, snap.dit, pickBf16(snap.dit));
     if (!dit) {
       res.status(400).json({ error: 'No DiT base model available' });
       return;

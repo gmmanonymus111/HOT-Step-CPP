@@ -709,7 +709,8 @@ export interface LyricStudioExportResult {
 // Verbatim copy of docs/plans/2026-07-28-training-batch-pipeline.md §2.1 /
 // server/src/services/training/types.ts — keep both sides in sync by hand.
 
-export type PipelineStage = 'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm';
+export type PipelineStage =
+  'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
 export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -766,7 +767,8 @@ export interface TrainingDefaults {
 /** Canonical stage order, mirrors server pipelineRunner.ts's PIPELINE_STAGES —
  *  not itself part of the frozen contract, but keeping one copy avoids the UI
  *  re-deriving order from whatever sequence a checkbox row happens to render. */
-export const PIPELINE_STAGES: readonly PipelineStage[] = ['label', 'build', 'preprocess', 'train-dit', 'train-lm'];
+export const PIPELINE_STAGES: readonly PipelineStage[] =
+  ['label', 'build', 'preprocess', 'train-dit', 'train-lm', 'lyric-studio'];
 
 // ── fetch helpers ────────────────────────────────────────────────────────
 

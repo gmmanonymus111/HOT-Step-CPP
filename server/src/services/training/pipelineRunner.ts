@@ -33,8 +33,13 @@ import type {
 } from './types.js';
 
 /** Canonical stage order. Any subset a caller asks for is filtered through it. */
+// 'lyric-studio' runs LAST, after both trainers, because that is what makes it
+// useful: the export links the run's freshly trained adapters onto the album
+// preset (linkAdapters defaults true), so running it earlier would publish an
+// artist/album page pointing at nothing. Added 2026-07-31 — a bulk run used to
+// finish with trained adapters that no album preset referenced.
 export const PIPELINE_STAGES: readonly PipelineStage[] =
-  ['label', 'build', 'preprocess', 'train-dit', 'train-lm'];
+  ['label', 'build', 'preprocess', 'train-dit', 'train-lm', 'lyric-studio'];
 
 const STAGE_PATH: Record<PipelineStage, string> = {
   'label': 'label',
@@ -42,7 +47,12 @@ const STAGE_PATH: Record<PipelineStage, string> = {
   'preprocess': 'preprocess',
   'train-dit': 'train-dit',
   'train-lm': 'train-lm',
+  'lyric-studio': 'lyric-studio',
 };
+
+/** Stages that complete SYNCHRONOUSLY — they return their result, not a jobId,
+ *  so there is no queue job to poll. */
+const SYNC_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>(['lyric-studio']);
 
 /** Which stored-defaults section feeds each stage's POST body. Build takes no
  *  options beyond outputPath, which must stay the route's own default. */
@@ -52,6 +62,9 @@ const STAGE_DEFAULTS_KEY: Record<PipelineStage, keyof TrainingDefaults | ''> = {
   'preprocess': 'preprocess',
   'train-dit': 'trainDit',
   'train-lm': 'trainLm',
+  // No stored section: artist/album are derived from the dataset's own tags and
+  // linkAdapters already defaults true on the route.
+  'lyric-studio': '',
 };
 
 const POLL_MS = 1500;
@@ -387,7 +400,11 @@ async function runStage(
   }
 
   const section = STAGE_DEFAULTS_KEY[result.stage];
-  const body = section ? { ...getTrainingDefaults()[section] } : {};
+  const body: Record<string, unknown> = section ? { ...getTrainingDefaults()[section] } : {};
+  // A dataset that arrives already labelled is a DONE label stage, not a failed
+  // one. Without this the route answers 400 "Nothing to label" and the item is
+  // abandoned before preprocess/train ever run (2026-07-31).
+  if (result.stage === 'label') body.allowEmpty = true;
   const url = `http://127.0.0.1:${config.server.port}`
     + `/api/training/datasets/${encodeURIComponent(item.datasetId)}/${STAGE_PATH[result.stage]}`;
 
@@ -410,10 +427,23 @@ async function runStage(
   }
 
   let jobId = '';
+  let skipped = '';
   try {
-    const payload = await response.json() as { jobId?: unknown };
+    const payload = await response.json() as { jobId?: unknown; skipped?: unknown };
     if (typeof payload?.jobId === 'string') jobId = payload.jobId;
+    if (typeof payload?.skipped === 'string') skipped = payload.skipped;
   } catch { /* handled by the empty check below */ }
+  // A 200 with no jobId and an explicit `skipped` is a stage that had nothing to
+  // do — complete, not failed, and the item carries on to the next stage.
+  if (!jobId && skipped) {
+    finishStage(state, result, 'done', null);
+    return;
+  }
+  // Synchronous stages have already finished by the time they answer 200.
+  if (SYNC_STAGES.has(result.stage)) {
+    finishStage(state, result, 'done', null);
+    return;
+  }
   if (!jobId) {
     finishStage(state, result, 'failed', 'Stage returned no jobId');
     return;

@@ -37,6 +37,27 @@ function writeKey<T>(key: string, value: T): void {
 // -- Store --
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Mirror the Models-tab selection to the server.
+ *
+ * This state lives in localStorage, which the server cannot see — and the
+ * Training Studio needs it: a BULK run has no UI in the loop, and the engine
+ * that knows its own loaded DiT is deliberately stopped while training runs. A
+ * stale mirror is what made an overnight run train 18 datasets against the
+ * stock base instead of the selected fine-tune (2026-07-31).
+ *
+ * Fire-and-forget on purpose: this must never block or fail a model change.
+ */
+function mirrorActiveModels(patch: Record<string, string>): void {
+  try {
+    void fetch('/api/training/active-models', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).catch(() => { /* offline / server down — retried on the next change and at boot */ });
+  } catch { /* never let a model change throw */ }
+}
+
 export const useGlobalParamsStore = create<any>()((set, get) => ({
   // -- State (initialised from localStorage) --
   ditModel: readKey("hs-ditModel", ''),
@@ -202,8 +223,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lufsTarget: readKey('hs-lufsTarget', -14),
 
   // -- Actions --
-  setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
-  setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
+  setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); mirrorActiveModels({ ditModel: v }); },
+  setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); mirrorActiveModels({ lmModel: v }); },
   setLmAdapter: (v: any) => { set({ lmAdapter: v }); writeKey("hs-lmAdapter", v); },
   setLmAdapterScale: (v: any) => { set({ lmAdapterScale: v }); writeKey("hs-lmAdapterScale", v); },
   setVaeModel: (v: any) => {
@@ -599,3 +620,13 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     };
   },
 }));
+
+// One-shot boot sync. An existing install already has a DiT chosen in
+// localStorage that the server has never been told about, and a user who never
+// touches the dropdown again would otherwise never mirror it — leaving the
+// Training Studio on its old "first BF16 in the catalogue" fallback.
+mirrorActiveModels({
+  ditModel: useGlobalParamsStore.getState().ditModel || '',
+  lmModel: useGlobalParamsStore.getState().lmModel || '',
+  vaeModel: useGlobalParamsStore.getState().vaeModel || '',
+});

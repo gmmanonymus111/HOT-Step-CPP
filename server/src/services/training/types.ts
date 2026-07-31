@@ -296,6 +296,10 @@ export interface LabelOptions {
   mergePolicy?: MergePolicy;
   understand?: UnderstandOverrides;
   caption?: { provider?: string; model?: string };
+  /** Answer 200 {jobId:null, skipped} instead of 400 when nothing needs
+   *  labelling. Set by the bulk pipeline, for which an already-labelled dataset
+   *  is a completed stage rather than a failure. */
+  allowEmpty?: boolean;
 }
 
 export interface GeniusOptions {
@@ -809,7 +813,8 @@ export interface LyricStudioExportResult {
 //
 // Spec: docs/plans/2026-07-28-training-batch-pipeline.md §2.1
 
-export type PipelineStage = 'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm';
+export type PipelineStage =
+  'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
 export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 

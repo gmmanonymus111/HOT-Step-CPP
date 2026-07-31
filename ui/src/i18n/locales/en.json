@@ -70,6 +70,7 @@
     "trainingStudio.batch.stageBuild": "Build",
     "trainingStudio.batch.stagePreprocess": "Preprocess",
     "trainingStudio.batch.stageTrainDit": "Train DiT",
+    "trainingStudio.batch.stageLyricStudio": "Send to Lyric Studio",
     "trainingStudio.batch.stageTrainLm": "Train LM",
     "trainingStudio.batch.defaultsHint": "Each stage runs with its configured defaults. A defaults page to edit them is coming later.",
     "trainingStudio.batch.start": "Start batch",
