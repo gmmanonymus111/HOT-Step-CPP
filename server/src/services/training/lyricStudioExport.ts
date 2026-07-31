@@ -23,6 +23,7 @@ import {
 } from '../../db/lireekDb.js';
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
 import { resolveArtistTitle } from './enhanceService.js';
+import * as audioMeta from './audioMeta.js';
 import { latestRunDir, lmSizeFromSlug } from './adapterLayout.js';
 import { readTrainDitStatus } from './trainDitStatus.js';
 import { adapterLmRoot, lmArtistDirFor, safeAdapterName } from './trainLmStatus.js';
@@ -71,6 +72,40 @@ function detectAlbum(
   const folder = path.basename(ds.sourceDir).trim();
   if (folder) return { value: folder, source: 'folder' };
   return { value: ds.name, source: 'dataset-name' };
+}
+
+/**
+ * Fill in tagArtist/tagAlbum from the AUDIO FILES when the label store has none.
+ *
+ * buildSamples reads those two off the label record (datasetScan.ts:250) and
+ * only the Label job ever writes it. A pipeline run that skips Label therefore
+ * arrives here with every tag blank, and detectAlbum — which has no filename
+ * fallback, unlike detectArtist — drops all the way through to the SOURCE
+ * FOLDER NAME. That is how a bulk run published "4yearstrong_someway" as a new
+ * album alongside the existing "In Some Way, Shape Or Form" instead of merging
+ * into it (2026-07-31): the existing-album lookup was working fine, it was just
+ * being handed a name no album could ever match.
+ *
+ * The tags are sitting in the files either way, so read them. Only the fields
+ * that are actually empty are filled, so a labelled dataset is untouched and
+ * the label store stays authoritative where it has an opinion.
+ *
+ * Bounded and best-effort: a dataset only needs enough of a majority to name an
+ * artist and an album, and an unreadable file must never fail an export.
+ */
+const TAG_PROBE_LIMIT = 24;
+
+async function fillTagsFromFiles(included: TrainingSample[]): Promise<void> {
+  const needs = included.filter(s => !s.tagArtist.trim() || !s.tagAlbum.trim());
+  if (needs.length === 0) return;
+  for (const s of needs.slice(0, TAG_PROBE_LIMIT)) {
+    try {
+      const md = await audioMeta.read(s.audioPath);
+      if (!s.tagArtist.trim() && md.artist) s.tagArtist = md.artist;
+      if (!s.tagAlbum.trim() && md.album) s.tagAlbum = md.album;
+      if (!s.tagTitle.trim() && md.title) s.tagTitle = md.title;
+    } catch { /* unreadable file — the existing fallbacks still apply */ }
+  }
 }
 
 // ── Trained-adapter lookup ───────────────────────────────────────────────
@@ -163,10 +198,13 @@ function toStoredSong(s: TrainingSample, ds: TrainingDatasetRow, setAlbum: strin
 
 // ── Public API ───────────────────────────────────────────────────────────
 
-export function previewLyricStudioExport(
+export async function previewLyricStudioExport(
   ds: TrainingDatasetRow, samples: TrainingSample[],
-): LyricStudioExportPreview {
+): Promise<LyricStudioExportPreview> {
   const split = splitSamples(samples);
+  // Before detection, not after: detectAlbum's folder-name fallback is
+  // indistinguishable from a real answer once it has been taken.
+  await fillTagsFromFiles(split.included);
   const artist = detectArtist(ds, split.included);
   const album = detectAlbum(ds, split.included);
 
@@ -291,6 +329,12 @@ export async function commitLyricStudioExport(
     throw new LyricStudioExportError('No exportable songs — every sample is excluded, instrumental, or has no lyrics.');
   }
 
+  // Only when the caller did NOT name both: the manual path posts explicit
+  // artist/album from the preview the user confirmed, and probing files behind
+  // an explicit choice would be pure latency.
+  if (!(input.artist ?? '').trim() || !(input.album ?? '').trim()) {
+    await fillTagsFromFiles(split.included);
+  }
   const artistName = (input.artist ?? '').trim() || detectArtist(ds, split.included).value;
   const albumName = (input.album ?? '').trim() || detectAlbum(ds, split.included).value;
 

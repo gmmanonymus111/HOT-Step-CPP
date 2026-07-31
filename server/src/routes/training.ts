@@ -1226,7 +1226,7 @@ router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => 
       return;
     }
     const samples = await buildSamples(ds, { warnings: [] });
-    res.json(previewLyricStudioExport(ds, samples));
+    res.json(await previewLyricStudioExport(ds, samples));
   } catch (err: any) {
     if (err instanceof ScanLimitError) {
       res.status(400).json({ error: err.message });
