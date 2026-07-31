@@ -30,6 +30,7 @@ interface DbRow {
   status: string;
   built_at: string;
   dataset_json_path: string;
+  album_name: string;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +62,7 @@ function toRow(r: DbRow): TrainingDatasetRow {
       : 'draft',
     builtAt: r.built_at,
     datasetJsonPath: r.dataset_json_path,
+    albumName: r.album_name ?? '',
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -83,6 +85,7 @@ const COLUMN_OF: Record<string, string> = {
   status: 'status',
   builtAt: 'built_at',
   datasetJsonPath: 'dataset_json_path',
+  albumName: 'album_name',
 };
 
 export function listDatasets(): TrainingDatasetRow[] {
@@ -120,11 +123,11 @@ export function insertDataset(row: TrainingDatasetRow): void {
     INSERT INTO training_datasets (
       id, slug, name, source_dir, recursive, custom_tag, tag_position, genre_ratio,
       default_artist, default_album, default_genre, default_language, sample_count, labeled_count,
-      excluded_count, status, built_at, dataset_json_path, created_at, updated_at
+      excluded_count, status, built_at, dataset_json_path, album_name, created_at, updated_at
     ) VALUES (
       @id, @slug, @name, @source_dir, @recursive, @custom_tag, @tag_position, @genre_ratio,
       @default_artist, @default_album, @default_genre, @default_language, @sample_count, @labeled_count,
-      @excluded_count, @status, @built_at, @dataset_json_path, @created_at, @updated_at
+      @excluded_count, @status, @built_at, @dataset_json_path, @album_name, @created_at, @updated_at
     )
   `).run({
     id: row.id,
@@ -145,6 +148,7 @@ export function insertDataset(row: TrainingDatasetRow): void {
     status: row.status,
     built_at: row.builtAt,
     dataset_json_path: row.datasetJsonPath,
+    album_name: row.albumName ?? '',
     created_at: row.createdAt,
     updated_at: row.updatedAt,
   });

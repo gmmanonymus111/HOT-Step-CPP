@@ -51,8 +51,38 @@ export interface TrainingDatasetSummary {
   status: 'draft' | 'labeling' | 'labeled' | 'built' | 'error';
   builtAt: string;            // ISO or ''
   datasetJsonPath: string;    // absolute path or ''
+  /** Friendly album name from the tracks' embedded tags — '' when unknown.
+   *  Cached in the row; detected by datasetAssets.ts (majority vote). */
+  albumName: string;
   createdAt: string;          // ISO
   updatedAt: string;          // ISO
+  /** What the dataset has on DISK beyond its row — attached by the list and
+   *  detail endpoints, absent on the bare row a PATCH echoes back. */
+  assets?: DatasetAssets;
+}
+
+/** One trained adapter directory found on disk. */
+export interface TrainingAdapterHit {
+  path: string;               // absolute adapter run dir
+  kind: 'dit' | 'lm';
+  detail: string;             // dit-<base> shorthand / LM size — display only
+  trainedAt: string;          // ISO or ''
+}
+
+/**
+ * Per-dataset pipeline progress, read fresh off disk on every request: which
+ * stages have actually left an artefact behind. Never cached — deleting a
+ * tensors folder or an adapter has to show up immediately.
+ */
+export interface DatasetAssets {
+  labeled: boolean;           // at least one caption
+  built: boolean;             // dataset.json written
+  tensorVariants: number;     // preprocessed variant dirs
+  tensorVariantKey: string;   // newest variant, '' when none
+  tensorSamples: number;      // .safetensors files in that variant
+  ditBase: string;            // base the newest variant was preprocessed against
+  lm: TrainingAdapterHit | null;
+  dit: TrainingAdapterHit | null;
 }
 
 export interface TrainingSample {
@@ -770,12 +800,9 @@ export interface LyricStudioExportSong {
   hasCaption: boolean;
 }
 
-export interface LyricStudioAdapterHit {
-  path: string;               // absolute adapter run dir (folder-only presets)
-  kind: 'dit' | 'lm';
-  detail: string;             // dit-<base> shorthand / LM size — display only
-  trainedAt: string;          // ISO or ''
-}
+/** Legacy name for TrainingAdapterHit — same shape, kept so the Lyric Studio
+ *  export contract reads the way its consumers already expect. */
+export type LyricStudioAdapterHit = TrainingAdapterHit;
 
 export interface LyricStudioExportPreview {
   artist: string;             // detected, pre-fills the override field

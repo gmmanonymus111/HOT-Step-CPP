@@ -12,8 +12,12 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, FolderOpen, FolderPlus, Loader2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { adapterApi } from '../../services/api';
-import { PIPELINE_STAGES, scanPreview, type PipelineStage } from '../../services/trainingApi';
+import {
+  PIPELINE_STAGES, scanPreview,
+  type PipelineStage, type TrainingDatasetSummary,
+} from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
+import { DatasetAssetChips } from './DatasetAssetChips';
 import { FolderPicker } from './FolderPicker';
 
 interface FolderRow {
@@ -22,7 +26,6 @@ interface FolderRow {
   audioFiles: number | null;   // null = not scanned yet
   scanning: boolean;
   scanError: string | null;
-  alreadyImported: boolean;
   checked: boolean;
 }
 
@@ -77,9 +80,16 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
     setRootDir(''); setRows([]); setRootError(null); setSubmitError(null); setStages(defaultStages());
   }, [open]);
 
-  const alreadyImported = useCallback((dir: string) => {
-    const lower = dir.toLowerCase();
-    return datasets.some(d => d.sourceDir.toLowerCase() === lower);
+  /**
+   * Folder → the dataset already importing it, looked up at RENDER time rather
+   * than stored on the row: the store's dataset list refreshes while this modal
+   * is open (a finished pipeline calls loadDatasets), and a flag frozen at scan
+   * time would keep showing a stale "nothing trained yet".
+   */
+  const datasetByDir = React.useMemo(() => {
+    const map = new Map<string, TrainingDatasetSummary>();
+    for (const d of datasets) map.set(d.sourceDir.toLowerCase(), d);
+    return map;
   }, [datasets]);
 
   const scanRow = useCallback(async (gen: number, path: string) => {
@@ -127,7 +137,6 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
         audioFiles: null,
         scanning: false,
         scanError: null,
-        alreadyImported: alreadyImported(e.path),
         checked: true,
       }));
       setRows(initial);
@@ -138,7 +147,7 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
       setRootError(err instanceof Error ? err.message : 'Failed to list directory');
       setLoadingRoot(false);
     }
-  }, [alreadyImported, scanSequentially]);
+  }, [scanSequentially]);
 
   const addFolder = useCallback((path: string) => {
     setRows(prev => {
@@ -149,12 +158,11 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
         audioFiles: null,
         scanning: false,
         scanError: null,
-        alreadyImported: alreadyImported(path),
         checked: true,
       }];
     });
     void scanRow(genRef.current, path);
-  }, [alreadyImported, scanRow]);
+  }, [scanRow]);
 
   if (!open) return null;
 
@@ -303,36 +311,59 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
                 <div className="rounded-xl border border-zinc-200 dark:border-white/5 divide-y divide-zinc-200 dark:divide-white/5 max-h-64 overflow-y-auto">
                   {rows.map(row => {
                     const disabled = row.audioFiles === 0;
+                    const ds = datasetByDir.get(row.path.toLowerCase());
                     return (
                       <label
                         key={row.path}
-                        className={`flex items-center gap-2.5 px-3 py-2 text-xs select-none ${disabled ? 'opacity-50' : 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5'}`}
+                        className={`flex flex-col gap-1 px-3 py-2 text-xs select-none ${disabled ? 'opacity-50' : 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5'}`}
                       >
-                        {/* onClick rather than onChange: only the mouse event
-                            carries shiftKey, and a click forwarded by the
-                            wrapping <label> preserves it. */}
-                        <input
-                          type="checkbox"
-                          checked={row.checked && !disabled}
-                          disabled={disabled}
-                          onClick={(e) => toggleRow(row.path, e.shiftKey)}
-                          onChange={() => { /* handled in onClick */ }}
-                          className="accent-amber-500 flex-shrink-0"
-                        />
-                        <span className="flex-1 min-w-0 truncate text-zinc-700 dark:text-zinc-300 font-medium" title={row.path}>{row.name}</span>
-                        {row.scanning ? (
-                          <Loader2 size={12} className="animate-spin text-zinc-400 flex-shrink-0" />
-                        ) : row.scanError ? (
-                          <span className="text-red-500 flex-shrink-0 truncate max-w-[160px]" title={row.scanError}>{row.scanError}</span>
-                        ) : (
-                          <span className="text-zinc-500 flex-shrink-0 tabular-nums">
-                            {t('trainingStudio.batch.audioCount', { count: row.audioFiles ?? 0 })}
-                          </span>
-                        )}
-                        {row.alreadyImported && (
-                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-sky-500 bg-sky-500/10 border-sky-500/20 flex-shrink-0">
-                            {t('trainingStudio.batch.alreadyImported')}
-                          </span>
+                        <div className="flex items-center gap-2.5">
+                          {/* onClick rather than onChange: only the mouse event
+                              carries shiftKey, and a click forwarded by the
+                              wrapping <label> preserves it. */}
+                          <input
+                            type="checkbox"
+                            checked={row.checked && !disabled}
+                            disabled={disabled}
+                            onClick={(e) => toggleRow(row.path, e.shiftKey)}
+                            onChange={() => { /* handled in onClick */ }}
+                            className="accent-amber-500 flex-shrink-0"
+                          />
+                          <span className="flex-1 min-w-0 truncate text-zinc-700 dark:text-zinc-300 font-medium" title={row.path}>{row.name}</span>
+                          {row.scanning ? (
+                            <Loader2 size={12} className="animate-spin text-zinc-400 flex-shrink-0" />
+                          ) : row.scanError ? (
+                            <span className="text-red-500 flex-shrink-0 truncate max-w-[160px]" title={row.scanError}>{row.scanError}</span>
+                          ) : (
+                            <span className="text-zinc-500 flex-shrink-0 tabular-nums">
+                              {t('trainingStudio.batch.audioCount', { count: row.audioFiles ?? 0 })}
+                            </span>
+                          )}
+                          {ds && (
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border text-sky-500 bg-sky-500/10 border-sky-500/20 flex-shrink-0">
+                              {t('trainingStudio.batch.alreadyImported')}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* An imported folder already has a pipeline history —
+                            show how far it got so a re-run is an informed one. */}
+                        {ds && (
+                          <div className="flex items-center gap-2 flex-wrap pl-[26px]">
+                            {ds.albumName && (
+                              <span
+                                className="text-[11px] text-zinc-500 truncate max-w-[220px]"
+                                title={t('trainingStudio.list.albumTitle')}
+                              >
+                                {ds.albumName}
+                              </span>
+                            )}
+                            <DatasetAssetChips
+                              assets={ds.assets}
+                              labeledCount={ds.labeledCount}
+                              sampleCount={ds.sampleCount}
+                            />
+                          </div>
                         )}
                       </label>
                     );

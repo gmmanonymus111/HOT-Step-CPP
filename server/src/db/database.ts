@@ -230,6 +230,7 @@ export function initDb(): void {
       status            TEXT NOT NULL DEFAULT 'draft',
       built_at          TEXT NOT NULL DEFAULT '',
       dataset_json_path TEXT NOT NULL DEFAULT '',
+      album_name        TEXT NOT NULL DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now')),
       updated_at        TEXT DEFAULT (datetime('now'))
     );
@@ -242,6 +243,14 @@ export function initDb(): void {
     {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='default_language'`,
       alter: `ALTER TABLE training_datasets ADD COLUMN default_language TEXT NOT NULL DEFAULT 'english'`,
+    },
+    // Friendly album name detected from the tracks' embedded tags. Cached here
+    // because the dataset LIST must not parse audio files on every request —
+    // datasetAssets.ts fills it once, then refreshes it whenever a scan has the
+    // samples in hand.
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='album_name'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN album_name TEXT NOT NULL DEFAULT ''`,
     },
   ];
   for (const m of trainingMigrations) {

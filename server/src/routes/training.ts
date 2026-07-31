@@ -67,6 +67,7 @@ import {
 } from '../services/training/datasetScan.js';
 import { isInside, trainingBaseDir } from '../services/training/paths.js';
 import { deleteLabel, deleteLabels, patchLabel, readLabel } from '../services/training/labelStore.js';
+import { listDatasetsWithAssets } from '../services/training/datasetAssets.js';
 import { createDatasetFromFolder, DatasetCreateError } from '../services/training/datasetCreate.js';
 import { detailFor, syncCounters } from '../services/training/datasetDetail.js';
 import {
@@ -296,9 +297,12 @@ router.get('/scan-preview', (req: Request, res: Response) => {
 
 // ── Dataset list / create (§2.3) ─────────────────────────────────────────
 
-router.get('/datasets', (_req: Request, res: Response) => {
+router.get('/datasets', async (_req: Request, res: Response) => {
   try {
-    res.json({ datasets: repo.listDatasets() });
+    // Every row carries what it has ON DISK (built / tensors / LM / DiT adapter)
+    // plus its detected album name, so the list and the batch wizard can show
+    // pipeline progress without opening each dataset — datasetAssets.ts.
+    res.json({ datasets: await listDatasetsWithAssets() });
   } catch (err: any) {
     console.error(`[Training] List datasets failed: ${err.message}`);
     res.status(500).json({ error: err.message });

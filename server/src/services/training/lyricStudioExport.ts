@@ -24,11 +24,9 @@ import {
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
 import { resolveArtistTitle } from './enhanceService.js';
 import * as audioMeta from './audioMeta.js';
-import { latestRunDir, lmSizeFromSlug } from './adapterLayout.js';
-import { readTrainDitStatus } from './trainDitStatus.js';
-import { adapterLmRoot, lmArtistDirFor, safeAdapterName } from './trainLmStatus.js';
+import { findDitAdapter, findLmAdapter } from './datasetAssets.js';
 import type {
-  LmSize, LyricStudioAdapterHit, LyricStudioExportInput, LyricStudioExportPreview,
+  LyricStudioExportInput, LyricStudioExportPreview,
   LyricStudioExportResult, LyricStudioExportSong, LyricStudioFieldSource,
   TrainingDatasetRow, TrainingSample,
 } from './types.js';
@@ -106,56 +104,6 @@ async function fillTagsFromFiles(included: TrainingSample[]): Promise<void> {
       if (!s.tagTitle.trim() && md.title) s.tagTitle = md.title;
     } catch { /* unreadable file — the existing fallbacks still apply */ }
   }
-}
-
-// ── Trained-adapter lookup ───────────────────────────────────────────────
-
-const LM_SIZES: LmSize[] = ['4B', '1.7B', '0.6B'];
-
-function weightsMtime(dir: string): number {
-  for (const f of ['adapter_model.safetensors', 'lokr_weights.safetensors']) {
-    try { return fs.statSync(path.join(dir, f)).mtimeMs; } catch { /* next */ }
-  }
-  return 0;
-}
-
-/** Newest trained planner-LM adapter for this dataset across every size root
- *  (plus the legacy flat `lm/<name>-<size>` dir). null when none trained. */
-function findLmAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
-  let best: { hit: LyricStudioAdapterHit; mtime: number } | null = null;
-  for (const size of LM_SIZES) {
-    const candidates = [
-      latestRunDir(lmArtistDirFor(ds.slug, size)),
-      path.join(adapterLmRoot(), `${safeAdapterName(ds.slug)}-${size}`),
-    ];
-    for (const dir of candidates) {
-      if (!dir) continue;
-      const mtime = weightsMtime(dir);
-      if (!mtime || (best && mtime <= best.mtime)) continue;
-      // A legacy flat dir's parent is `lm/`, whose slug lookup fails → keep the
-      // loop's size; a per-size run dir confirms it from the folder itself.
-      const sizeOfDir = lmSizeFromSlug(path.basename(path.dirname(path.dirname(dir)))) || size;
-      best = {
-        mtime,
-        hit: { path: dir, kind: 'lm', detail: sizeOfDir, trainedAt: new Date(mtime).toISOString() },
-      };
-    }
-  }
-  return best ? best.hit : null;
-}
-
-/** The dataset's newest trained DiT adapter, resolved exactly the way the
- *  Train panel resolves it (newest preprocess variant → base → latest run). */
-function findDitAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
-  const status = readTrainDitStatus(ds, {});
-  if (!status.adapterExists) return null;
-  return {
-    path: status.adapterDir,
-    kind: 'dit',
-    // The per-base folder the run lives in (…/dit-<base>/<artist>/<stamp>).
-    detail: path.basename(path.dirname(path.dirname(status.adapterDir))),
-    trainedAt: status.trainedAt || new Date(weightsMtime(status.adapterDir) || Date.now()).toISOString(),
-  };
 }
 
 // ── Song assembly ────────────────────────────────────────────────────────

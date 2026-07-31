@@ -112,6 +112,9 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
     status: 'draft',
     builtAt: '',
     datasetJsonPath: '',
+    // Detected from the tracks' tags on the first scan below (syncCounters →
+    // syncAlbumName), or lazily by the list endpoint — never guessed here.
+    albumName: '',
     createdAt: now,
     updatedAt: now,
   };

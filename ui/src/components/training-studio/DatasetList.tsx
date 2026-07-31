@@ -4,11 +4,12 @@
 // centred card explaining what the Dataset phase does.
 
 import React, { useState } from 'react';
-import { Database, FolderOpen, FolderPlus, GraduationCap, Loader2, Plus, Trash2 } from 'lucide-react';
+import { Database, Disc3, FolderOpen, FolderPlus, GraduationCap, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import { BatchImportWizard } from './BatchImportWizard';
+import { DatasetAssetChips } from './DatasetAssetChips';
 import { NewDatasetWizard } from './NewDatasetWizard';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
@@ -118,6 +119,16 @@ export const DatasetList: React.FC = () => {
               </button>
             </div>
 
+            {ds.albumName && (
+              <div
+                className="flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400 min-w-0"
+                title={t('trainingStudio.list.albumTitle')}
+              >
+                <Disc3 size={11} className="flex-shrink-0 text-zinc-400 dark:text-zinc-500" />
+                <span className="truncate">{ds.albumName}</span>
+              </div>
+            )}
+
             <div className="flex items-center gap-2 flex-wrap text-[11px] text-zinc-600 dark:text-zinc-400">
               <span>{t('trainingStudio.list.samples', { count: ds.sampleCount })}</span>
               <span className="text-zinc-400 dark:text-zinc-600">·</span>
@@ -132,6 +143,13 @@ export const DatasetList: React.FC = () => {
                 {ds.builtAt ? t('trainingStudio.list.built', { when: formatWhen(ds.builtAt) }) : t('trainingStudio.list.notBuilt')}
               </span>
             </div>
+
+            {/* What the pipeline has actually produced for this dataset. */}
+            <DatasetAssetChips
+              assets={ds.assets}
+              labeledCount={ds.labeledCount}
+              sampleCount={ds.sampleCount}
+            />
 
             {ds.customTag && (
               <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
