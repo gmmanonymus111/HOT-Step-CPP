@@ -1300,6 +1300,17 @@ int ace_lm_generate(AceLm *            ctx,
     if (ctx->use_trtllm) skip_ggml = true;
 #endif
 
+    // Concept steering is a ggml-graph hook; the TRT/TRT-LLM engines are
+    // prebuilt and have no equivalent injection point. Warn loudly rather than
+    // silently generating unsteered audio — a silent no-op here is the exact
+    // failure mode that made the adapter VRAM knob look dead for weeks.
+    if (skip_ggml && g_hotstep_params.has_concepts("lm")) {
+        fprintf(stderr,
+                "[Concept] WARNING: LM concept steering requested but the LM is running on "
+                "TensorRT — steering has no hook there and will NOT be applied. "
+                "Disable the TRT LM path to use LM steering.\n");
+    }
+
     if (!skip_ggml) {
         model = store_require_lm(ctx->store, ctx->lm_key);
         if (!model) {
@@ -1323,6 +1334,13 @@ int ace_lm_generate(AceLm *            ctx,
         if (!model->lm_head_buf) {
             qw3lm_build_partial_head(model, TOKEN_IM_END);
         }
+
+        // Concept activation steering (CAA / TADA): stage this request's
+        // "lm"-target vectors before any forward. Called on EVERY generate, not
+        // just fresh loads — the model is cached across requests but steering is
+        // per-request, so skipping this on a cache hit would leak the previous
+        // request's concepts into an unsteered generation.
+        qw3lm_steer_prepare(model);
     }
 
     // Vocab size: from GGML model or TRT/TRT-LLM constant

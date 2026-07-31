@@ -581,6 +581,9 @@ struct ServerFields {
     // Basin re-base: nudge adapted weights toward the adapter's training base S.
     std::string rebase_source = "";   // absolute path to S (resolved by Node server)
     float       rebase_beta   = 0.0f; // 0 = off
+    // Concept activation steering (CAA / TADA). Per-request only — never part of
+    // the ModelKey, so alpha changes cost no reload.
+    std::vector<HotStepConcept> concepts;
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
@@ -734,6 +737,41 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
         fprintf(stderr, "[DIAG] adapter_group_scales: gs_obj=%p is_obj=%d\n",
                 (void*)gs_obj, gs_obj ? yyjson_is_obj(gs_obj) : -1);
     }
+    // Concept activation steering (CAA / TADA arXiv 2602.11910):
+    //   "concepts": [{"name":"aggressive","path":"...","target":"dit",
+    //                 "alpha":1.0,"layers":[9,10]}]
+    // Sideband-only — see the LM-echo gotcha note where these are consumed.
+    yyjson_val * cps = yyjson_obj_get(obj, "concepts");
+    if (cps && yyjson_is_arr(cps)) {
+        size_t       ci, cmax;
+        yyjson_val * cv;
+        yyjson_arr_foreach(cps, ci, cmax, cv) {
+            if (!yyjson_is_obj(cv)) continue;
+            HotStepConcept hc;
+            yyjson_val *   f;
+            if ((f = yyjson_obj_get(cv, "path")) && yyjson_is_str(f)) hc.path = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "name")) && yyjson_is_str(f)) hc.name = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "target")) && yyjson_is_str(f)) hc.target = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "alpha")) && yyjson_is_num(f)) hc.alpha = get_num(f);
+            if ((f = yyjson_obj_get(cv, "layers")) && yyjson_is_arr(f)) {
+                size_t       li, lmax;
+                yyjson_val * lv;
+                yyjson_arr_foreach(f, li, lmax, lv) {
+                    if (yyjson_is_int(lv)) hc.layers.push_back((int) yyjson_get_int(lv));
+                }
+            }
+            if (hc.path.empty()) {
+                fprintf(stderr, "[Concept] WARNING: concept entry with no path — skipping\n");
+                continue;
+            }
+            if (hc.target != "dit" && hc.target != "lm") {
+                fprintf(stderr, "[Concept] WARNING: unknown target '%s' — skipping\n", hc.target.c_str());
+                continue;
+            }
+            sf->concepts.push_back(std::move(hc));
+        }
+    }
+
     // DCW fields
     if ((v = yyjson_obj_get(obj, "dcw_enabled"))) {
         if (yyjson_is_bool(v)) {
@@ -1294,6 +1332,14 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.seed_latents          = sf.seed_latents;
     g_hotstep_params.vae_chunk_override    = sf.vae_chunk;
     g_hotstep_params.batch_cfg_override    = sf.batch_cfg;
+    // Concept steering vectors are activations, not weights: they are set here
+    // like any sideband field and deliberately do NOT participate in the DiT
+    // ModelKey, so changing alpha reuses the loaded model with no reload.
+    g_hotstep_params.concepts              = sf.concepts;
+    for (const auto & c : g_hotstep_params.concepts) {
+        fprintf(stderr, "[Server]   concept: %s (%s) alpha=%+.2f -> %s\n",
+                c.name.empty() ? "(unnamed)" : c.name.c_str(), c.target.c_str(), c.alpha, c.path.c_str());
+    }
     fprintf(stderr, "[Server] HOT-Step params: solver=%s, guidance=%s, scheduler=%s\n",
             sf.solver_name.c_str(), sf.guidance_mode.c_str(),
             sf.scheduler.empty() ? "(default)" : sf.scheduler.c_str());

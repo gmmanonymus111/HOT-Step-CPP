@@ -75,6 +75,21 @@ struct AdapterSection {
     float              size = 1.0f;
 };
 
+// One concept steering vector requested for this generation (CAA / TADA).
+// `path` is the resolved concept GGUF; `target` selects which network is hooked
+// ("dit" = cross-attn output, "lm" = decoder layer output). `layers` optionally
+// restricts steering to a subset; empty = every layer in the file.
+//
+// Deliberately ggml-free so hot-step-params.h stays light enough for
+// model-store.h and the server (mirrors the adapter-cancel.h split).
+struct HotStepConcept {
+    std::string      path;
+    std::string      name;
+    std::string      target = "dit";
+    float            alpha  = 1.0f;
+    std::vector<int> layers;
+};
+
 // Classify a GGUF tensor name into its adapter group.
 // Returns "self_attn", "cross_attn", "mlp", "cond_embed", "time_embed",
 // "proj_in", or "" for truly unclassified.
@@ -235,6 +250,19 @@ struct HotStepParams {
     int vae_chunk_override = 0;   // >0: VAE tile size (smaller = less VAE peak)
     int batch_cfg_override = -1;  // 0: split CFG into 2 forwards (half DiT mem,
                                   //    ~2x DiT time); 1: batch; -1: default
+
+    // Concept activation steering (CAA / TADA arXiv 2602.11910). Purely a
+    // per-request sideband: steering vectors are NOT weights, so unlike every
+    // adapter field these must NOT enter the ModelKey — alpha changes cost no
+    // reload. See concept-steer.h and docs/plans/caa-activation-steering.md.
+    std::vector<HotStepConcept> concepts;
+
+    bool has_concepts(const char * target) const {
+        for (const auto & c : concepts) {
+            if (c.target == target) return true;
+        }
+        return false;
+    }
 };
 
 // Single-worker-thread global. Set in hot-step-server.cpp before
