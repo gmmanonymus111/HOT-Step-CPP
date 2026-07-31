@@ -15,7 +15,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useTrainingStore } from '../../stores/trainingStore';
+import { blankTrainSeries, useTrainingStore } from '../../stores/trainingStore';
 import { getJob, type PipelineItem, type PipelineStage } from '../../services/trainingApi';
 import { JobProgress } from './JobProgress';
 import { TrainingChart } from './TrainingChart';
@@ -63,9 +63,23 @@ export const PipelineStageProgress: React.FC<Props> = ({ item }) => {
     void getJob(jobId).then(
       (job) => {
         if (cancelled) return;
-        // setState rather than a store action: activeJob has no public setter,
-        // and adding one would invite other callers to hijack it.
-        useTrainingStore.setState({ activeJob: job });
+        // BLANK THE CHART BEFORE ADOPTING. trainStepSeries is shared by both
+        // training kinds and the epoch arrays are per-kind but not per-run, so
+        // carrying them across a stage change drew the new run into the old
+        // one's axis — an LM at epoch 15 rendered in the left 3% of a scale
+        // still set to the DiT's 500 epochs. blankTrainSeries is also the only
+        // thing allowed to reset the step-dedup high-water mark, which would
+        // otherwise swallow the new run's early steps.
+        //
+        // Safe against the SSE replay: the stream is subscribed only after
+        // `adopted` is set, and it replays the whole buffer on connect.
+        useTrainingStore.setState({
+          ...blankTrainSeries(),
+          trainLmEpochs: [], trainLmLast: null,
+          trainDitEpochs: [], trainDitLast: null,
+          jobLog: [],
+          activeJob: job,
+        });
         setAdopted(jobId);
       },
       () => { /* job may have finished between poll and fetch — chips still show it */ },

@@ -90,8 +90,14 @@ let ditVram = { crop: 0, layers: 0 };
 let lastStepSeen = -1;
 
 /** The chart slice, blanked. Every place that starts or swaps a job spreads
- *  this, and it is the only thing that may reset `lastStepSeen`. */
-function blankTrainSeries(): {
+ *  this, and it is the only thing that may reset `lastStepSeen`.
+ *
+ *  Exported because the bulk Monitor page swaps jobs too (PipelineStageProgress
+ *  adopts whichever stage is running). Skipping it there left the previous
+ *  stage's step points — trainStepSeries is SHARED by both training kinds — in
+ *  the series, so an LM run at epoch 15 drew into an axis still scaled to the
+ *  DiT's 500 (2026-07-31). */
+export function blankTrainSeries(): {
   trainStepSeries: TrainStepPoint[];
   trainMilestones: TrainMilestonePoint[];
   trainTargetLoss: number;
