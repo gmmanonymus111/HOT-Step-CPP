@@ -37,7 +37,9 @@ LAUNCH.bat → Node server (Express :3001)
 - **C++ engine changes → `dev-rebuild.bat`, NEVER `engine/build.cmd` directly.** The Node server auto-respawns ace-server on crash; killing it without clean shutdown causes an infinite respawn + file-lock loop. `dev-rebuild.bat` handles clean shutdown + rebuild — it does **not** relaunch; start the app again yourself with `dev.bat`/`LAUNCH.bat`.
   - Recompile **immediately** after editing any `engine/src/` or `engine/tools/` file — don't wait to be asked.
 - **NEVER `cmake --build . --clean-first`** unless the GGML/CUDA layer itself changed — CUDA kernel recompilation is **20+ min**. For stale `.obj` issues, delete only `engine/build/acestep-core.dir/` and `engine/build/Release/acestep-core.lib`.
-- **Don't `npm run build` during dev.** Type-check with `npx tsc --noEmit`. Only build before user testing.
+- **Don't `npm run build` during dev.** Only build before user testing. Type-check with:
+  - `server/` → `npx tsc --noEmit`
+  - `ui/` → **`npx tsc --noEmit -p tsconfig.app.json`** (or `npx tsc -b`). A bare `npx tsc --noEmit` in `ui/` **silently checks nothing and exits 0** — `ui/tsconfig.json` is `{"files": [], "references": [...]}`, so the root project has no inputs. It is not a passing check, it is no check.
 - **`dev.bat`** = dev mode (Vite :3000 HMR + Node :3001, tsx watch auto-restart). **`LAUNCH.bat`** = prod. Use `dev.bat` for development.
 
 ## Git rules

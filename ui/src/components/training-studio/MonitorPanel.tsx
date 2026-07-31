@@ -1,9 +1,17 @@
 // MonitorPanel.tsx — batch pipeline queue view (PhaseStepper's "monitor" tab)
 //
-// Polling only (plan §5.2 explicitly forbids wiring useTrainingStream here —
-// that SSE hook stays per-dataset job progress). While a pipeline is running
-// this re-fetches the list every 2s; on completion it also refreshes the
-// dataset list so newly-created datasets show up without a manual reload.
+// The LIST is polling-only: while a pipeline is running this re-fetches every
+// 2s, and on completion it also refreshes the dataset list so newly-created
+// datasets appear without a manual reload.
+//
+// DEVIATION from plan §5.2, which forbade wiring useTrainingStream here to keep
+// that SSE hook per-dataset. The stage CHIPS say which stage an item is on and
+// nothing about how far through it is, so a multi-hour train-dit inside a bulk
+// run had no visible progress anywhere in the app (Rob, 2026-07-31). The
+// subscription is delegated to PipelineStageProgress, which owns exactly one
+// stream — the single running stage's — and unsubscribes when it changes. The
+// per-dataset invariant §5.2 was protecting still holds; what changed is that
+// the bulk runner is now also a legitimate owner of a job worth watching.
 
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, XCircle } from 'lucide-react';
@@ -11,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { PIPELINE_STAGES, type PipelineItem, type PipelineStage, type PipelineSummary } from '../../services/trainingApi';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
+import { PipelineStageProgress } from './PipelineStageProgress';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
 const POLL_MS = 2000;
@@ -123,6 +132,10 @@ const PipelineCard: React.FC<{ pipeline: PipelineSummary; active: boolean }> = (
           </button>
         )}
       </div>
+
+      {/* The stage actually executing. The chips below say WHICH stage each item
+          is on; this is the only place that shows how far through it is. */}
+      <PipelineStageProgress item={pipeline.items.find(i => i.status === 'running') ?? null} />
 
       <div className="divide-y divide-zinc-200 dark:divide-white/5">
         {pipeline.items.map(item => (

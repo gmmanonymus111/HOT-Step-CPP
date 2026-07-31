@@ -79,6 +79,7 @@
     "trainingStudio.monitor.noActive": "No pipeline is running right now.",
     "trainingStudio.monitor.progress": "{{done}} of {{total}} datasets done",
     "trainingStudio.monitor.failedCount": "{{count}} failed",
+    "trainingStudio.monitor.nowRunning": "Now running",
     "trainingStudio.monitor.reused": "existing dataset",
     "trainingStudio.monitor.cancel": "Cancel pipeline",
     "trainingStudio.monitor.cancelConfirm": "Stop this pipeline? The current stage finishes or cancels, and every folder not yet done is marked cancelled.",
