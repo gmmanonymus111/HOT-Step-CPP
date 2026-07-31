@@ -68,6 +68,8 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
   // (and any in-flight browse/scan) stops touching state after the user moves
   // on to a different root or closes and reopens the wizard.
   const genRef = useRef(0);
+  /** Index of the last row clicked — the anchor a shift-click extends from. */
+  const anchorRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -156,14 +158,47 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
 
   if (!open) return null;
 
-  const toggleRow = (path: string) => {
-    setRows(prev => prev.map(r => (r.path === path && r.audioFiles !== 0 ? { ...r, checked: !r.checked } : r)));
+  /**
+   * Toggle one row, or — with shift held — every selectable row between the
+   * previously clicked row and this one, all set to the value THIS row is
+   * taking. Standard file-list behaviour, and the reason the anchor updates on
+   * a shift-click too: repeated shift-clicks should walk the selection rather
+   * than always measuring back to the first row ever clicked.
+   *
+   * Rows with zero audio files are never touched — they are disabled, and a
+   * range drag over them must not quietly enable one.
+   */
+  const toggleRow = (path: string, shift = false) => {
+    const idx = rows.findIndex(r => r.path === path);
+    if (idx < 0 || rows[idx].audioFiles === 0) return;
+    const next = !rows[idx].checked;
+    const anchor = anchorRef.current;
+    const range = shift
+      && anchor !== null && anchor !== idx
+      && anchor >= 0 && anchor < rows.length
+      && rows[anchor].audioFiles !== 0;
+    const lo = range ? Math.min(anchor as number, idx) : idx;
+    const hi = range ? Math.max(anchor as number, idx) : idx;
+    setRows(prev => prev.map((r, i) => (
+      i >= lo && i <= hi && r.audioFiles !== 0 ? { ...r, checked: next } : r
+    )));
+    anchorRef.current = idx;
+  };
+
+  /** Select-all / none over the SELECTABLE rows only. */
+  const setAllRows = (checked: boolean) => {
+    setRows(prev => prev.map(r => (r.audioFiles === 0 ? r : { ...r, checked })));
+    // A bulk set is not a meaningful shift-click anchor.
+    anchorRef.current = null;
   };
 
   const toggleStage = (stage: PipelineStage) => {
     setStages(prev => ({ ...prev, [stage]: !prev[stage] }));
   };
 
+  const selectableRows = rows.filter(r => r.audioFiles !== 0);
+  const allSelected = selectableRows.length > 0 && selectableRows.every(r => r.checked);
+  const someSelected = selectableRows.some(r => r.checked);
   const selectedRows = rows.filter(r => r.checked && r.audioFiles !== 0);
   const selectedStages = PIPELINE_STAGES.filter(s => stages[s]);
   const canSubmit = selectedRows.length > 0 && selectedStages.length > 0 && !submitting;
@@ -238,16 +273,32 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
             {/* Folder rows */}
             {rows.length > 0 && (
               <div className="flex flex-col gap-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                      onChange={() => setAllRows(!allSelected)}
+                      disabled={selectableRows.length === 0}
+                      className="accent-amber-500"
+                    />
                     {t('trainingStudio.batch.folders', { count: rows.length })}
+                    <span className="font-normal text-zinc-500">
+                      ({t('trainingStudio.batch.selectedCount', { count: selectedRows.length })})
+                    </span>
                   </label>
-                  <button
-                    onClick={() => setAddPickerOpen(true)}
-                    className="flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline"
-                  >
-                    <FolderPlus size={12} /> {t('trainingStudio.batch.addFolder')}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[11px] text-zinc-500 hidden sm:inline">
+                      {t('trainingStudio.batch.shiftHint')}
+                    </span>
+                    <button
+                      onClick={() => setAddPickerOpen(true)}
+                      className="flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline"
+                    >
+                      <FolderPlus size={12} /> {t('trainingStudio.batch.addFolder')}
+                    </button>
+                  </div>
                 </div>
                 <div className="rounded-xl border border-zinc-200 dark:border-white/5 divide-y divide-zinc-200 dark:divide-white/5 max-h-64 overflow-y-auto">
                   {rows.map(row => {
@@ -255,13 +306,17 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
                     return (
                       <label
                         key={row.path}
-                        className={`flex items-center gap-2.5 px-3 py-2 text-xs ${disabled ? 'opacity-50' : 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5'}`}
+                        className={`flex items-center gap-2.5 px-3 py-2 text-xs select-none ${disabled ? 'opacity-50' : 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5'}`}
                       >
+                        {/* onClick rather than onChange: only the mouse event
+                            carries shiftKey, and a click forwarded by the
+                            wrapping <label> preserves it. */}
                         <input
                           type="checkbox"
                           checked={row.checked && !disabled}
                           disabled={disabled}
-                          onChange={() => toggleRow(row.path)}
+                          onClick={(e) => toggleRow(row.path, e.shiftKey)}
+                          onChange={() => { /* handled in onClick */ }}
                           className="accent-amber-500 flex-shrink-0"
                         />
                         <span className="flex-1 min-w-0 truncate text-zinc-700 dark:text-zinc-300 font-medium" title={row.path}>{row.name}</span>

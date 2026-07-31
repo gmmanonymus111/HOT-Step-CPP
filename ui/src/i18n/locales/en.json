@@ -62,6 +62,8 @@
     "trainingStudio.batch.rootFolder": "Root folder",
     "trainingStudio.batch.rootHint": "Each immediate sub-folder becomes its own dataset, run through the whole chain automatically.",
     "trainingStudio.batch.folders": "{{count}} folders",
+    "trainingStudio.batch.selectedCount": "{{count}} selected",
+    "trainingStudio.batch.shiftHint": "Shift-click to select a range",
     "trainingStudio.batch.addFolder": "Add folder…",
     "trainingStudio.batch.audioCount": "{{count}} files",
     "trainingStudio.batch.alreadyImported": "already imported",
