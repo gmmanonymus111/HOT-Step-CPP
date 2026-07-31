@@ -169,6 +169,54 @@ static inline size_t concept_steer_graph_nodes(const ConceptSteerRuntime & s) {
 }
 
 // ---------------------------------------------------------------------------
+// Activation tap — the extraction (Phase B) side.
+//
+// CAA needs mean_frames(h_l) at every (layer, diffusion step). Reading the raw
+// [H, S, N] cross-attn output back to the host would be ~10 MB per layer per
+// step (XL, S~1000) — around 10 GB per run — so the mean is taken ON THE GPU
+// and only [H] floats per (layer, step) come back.
+//
+// Single-worker-thread global, exactly like g_hotstep_params.
+// ---------------------------------------------------------------------------
+struct ConceptTapSink {
+    bool recording = false;  // set by the extraction driver around a run
+    int  n_layers  = 0;
+    int  hidden    = 0;
+
+    // Captured frame-means, appended in evaluation order:
+    //   steps[k] holds [n_layers * hidden] for the k-th recorded evaluation
+    std::vector<std::vector<float>> steps;
+    std::vector<float>              t_values;  // flow-matching t per recorded evaluation
+
+    // Arm before a run. Dimensions are filled in by the sampler on the first
+    // push, so the extraction driver never needs to reach into the model.
+    void arm() {
+        recording = true;
+        n_layers  = 0;
+        hidden    = 0;
+        steps.clear();
+        t_values.clear();
+    }
+    void disarm() { recording = false; }
+
+    // Only the conditional (positive-prompt) pass is meaningful for CAA; the
+    // sampler records exactly one evaluation per computed diffusion step.
+    void push(int L, int H, float t, const float * data) {
+        n_layers = L;
+        hidden   = H;
+        t_values.push_back(t);
+        steps.emplace_back(data, data + (size_t) L * H);
+    }
+};
+
+inline ConceptTapSink g_concept_tap;
+
+// transpose + cont + mean = 3 nodes per layer.
+static inline size_t concept_tap_graph_nodes(int n_layers) {
+    return g_concept_tap.recording ? (size_t) n_layers * 3 : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
 

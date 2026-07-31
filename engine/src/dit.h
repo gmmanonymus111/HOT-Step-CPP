@@ -170,6 +170,11 @@ struct DiTGGML {
     ConceptSteerRuntime               steer;
     std::vector<struct ggml_tensor *> steer_vecs;
 
+    // Extraction tap: when set, the graph gains a GPU-side frame-mean of every
+    // layer's cross-attn output, read back by the sampler each step. Driven by
+    // g_concept_tap.recording at graph-build time.
+    std::vector<struct ggml_tensor *> tap_vecs;
+
     // ─── HOT-Step ConvRot (group-wise Hadamard-rotated int8 weights) ───
     // GGUF KV "acestep.convrot_map" ("name:group;name:group;...") marks weights
     // stored PRE-ROTATED offline (W' = W·H per input-dim group of size G, as

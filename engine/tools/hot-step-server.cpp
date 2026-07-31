@@ -35,6 +35,7 @@
 //   /understand LM + DiT + VAE
 
 #include "adapter-cancel.h"   // g_adapter_cancel — set by worker around ace_synth_load
+#include "concept-extract.h"  // CAA extraction: tap accumulator + concept GGUF writer
 #include "audio-io.h"
 #include "audio-resample.h"
 #include "denoiser.h"
@@ -584,6 +585,15 @@ struct ServerFields {
     // Concept activation steering (CAA / TADA). Per-request only — never part of
     // the ModelKey, so alpha changes cost no reload.
     std::vector<HotStepConcept> concepts;
+    // Concept EXTRACTION (Phase B): turns this job into a paired-run harvest that
+    // writes a concept GGUF instead of returning audio.
+    bool        concept_extract = false;
+    std::string concept_out_path;
+    std::string concept_name;
+    std::string concept_pos;
+    std::string concept_neg;
+    std::string concept_target_class;
+    int         concept_pairs = 24;
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
@@ -769,6 +779,26 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
                 continue;
             }
             sf->concepts.push_back(std::move(hc));
+        }
+    }
+
+    // Concept extraction config:
+    //   "concept_extract": {"out":"...","name":"aggressive","positive":"...",
+    //                       "negative":"...","target_class":"","pairs":24}
+    yyjson_val * cx = yyjson_obj_get(obj, "concept_extract");
+    if (cx && yyjson_is_obj(cx)) {
+        yyjson_val * f;
+        if ((f = yyjson_obj_get(cx, "out")) && yyjson_is_str(f)) sf->concept_out_path = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "name")) && yyjson_is_str(f)) sf->concept_name = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "positive")) && yyjson_is_str(f)) sf->concept_pos = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "negative")) && yyjson_is_str(f)) sf->concept_neg = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "target_class")) && yyjson_is_str(f))
+            sf->concept_target_class = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "pairs")) && yyjson_is_int(f)) sf->concept_pairs = (int) yyjson_get_int(f);
+        sf->concept_extract = !sf->concept_out_path.empty() && !sf->concept_pos.empty() &&
+                              !sf->concept_neg.empty();
+        if (!sf->concept_extract) {
+            fprintf(stderr, "[Concept] WARNING: concept_extract needs out + positive + negative — ignoring\n");
         }
     }
 
@@ -1441,6 +1471,143 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     if (total_alloc > 1) {
         fprintf(stderr, "[Server] Batch: %d track(s) from %d request(s)\n", total_alloc, batch_n);
+    }
+
+    // ── Concept extraction (CAA / AUSteer, TADA arXiv 2602.11910) ─────────────
+    // Hijacks this job: run `pairs` positive/negative generations with everything
+    // else held identical, tap the frame-averaged cross-attn output at every
+    // (layer, step), and write a concept GGUF. Produces no audio.
+    if (sf.concept_extract) {
+        auto compose = [&](const std::string & side) {
+            return sf.concept_target_class.empty() ? side : (sf.concept_target_class + ", " + side);
+        };
+
+        // Both runs of a pair must record the SAME number of evaluations, else
+        // step s of the positive run is contrasted against a different diffusion
+        // time in the negative run. Step caching and CFG cutoff both skip
+        // forwards, so force them off for the duration and say so in the log.
+        const float saved_cache  = g_hotstep_params.cache_ratio;
+        const float saved_cutoff = g_hotstep_params.cfg_cutoff_ratio;
+        if (saved_cache != 0.0f || saved_cutoff != 1.0f) {
+            fprintf(stderr,
+                    "[Concept] Extraction: forcing cache_ratio 0 (was %.2f) and cfg_cutoff_ratio 1 "
+                    "(was %.2f) so paired runs stay step-aligned\n",
+                    saved_cache, saved_cutoff);
+        }
+        g_hotstep_params.cache_ratio      = 0.0f;
+        g_hotstep_params.cfg_cutoff_ratio = 1.0f;
+
+        // Never steer while extracting — a concept must be measured against the
+        // unsteered model, or it encodes whatever was already applied.
+        std::vector<HotStepConcept> saved_concepts;
+        saved_concepts.swap(g_hotstep_params.concepts);
+        if (!saved_concepts.empty()) {
+            fprintf(stderr, "[Concept] Extraction: %zu active concept(s) suspended for the harvest\n",
+                    saved_concepts.size());
+        }
+
+        const int n_pairs = sf.concept_pairs > 0 ? sf.concept_pairs : 24;
+        fprintf(stderr, "[Concept] Extracting '%s': %d pairs\n", sf.concept_name.c_str(), n_pairs);
+        fprintf(stderr, "[Concept]   +: %s\n", compose(sf.concept_pos).c_str());
+        fprintf(stderr, "[Concept]   -: %s\n", compose(sf.concept_neg).c_str());
+
+        ConceptAccum acc;
+        AceRequest   base = groups[0][0];
+        request_resolve_seed(&base);
+        const long long base_seed = base.seed;
+
+        int accepted = 0;
+        job_set_phase(*job, JobPhase::DIT_INFERENCE, 0, n_pairs * 2);
+
+        for (int i = 0; i < n_pairs; i++) {
+            if (job->cancel.load()) {
+                fprintf(stderr, "[Concept] Extraction cancelled at pair %d/%d\n", i, n_pairs);
+                break;
+            }
+
+            ConceptTapSink sink[2];
+            bool           run_ok = true;
+
+            for (int side = 0; side < 2 && run_ok; side++) {
+                AceRequest r = base;
+                r.caption    = compose(side == 0 ? sf.concept_pos : sf.concept_neg);
+                // Same seed for both sides: the contrast must isolate the prompt,
+                // not the noise. Seed still walks per pair for sample diversity.
+                r.seed = base_seed + i;
+
+                groups[0].clear();
+                groups[0].push_back(r);
+
+                g_concept_tap.arm();
+                std::vector<std::string>        lrc_tmp(1);
+                std::vector<std::vector<float>> lat_tmp;
+                const int rc = synth_batch_run(ctx, groups,
+                                               src_interleaved, src_len,
+                                               src_latents, src_T_latent,
+                                               ref_interleaved, ref_len,
+                                               ref_latents, ref_T_latent,
+                                               audio.data(),
+                                               lrc_tmp.data(),
+                                               &lat_tmp,
+                                               server_cancel_job, (void *) &job->cancel);
+                g_concept_tap.disarm();
+
+                // Extraction discards the audio, but synth_batch_run allocates a
+                // fresh buffer every call — without this the harvest leaks one
+                // full render per run (~50 buffers over a 24-pair extraction).
+                for (int b = 0; b < total_alloc; b++) {
+                    ace_audio_free(&audio[b]);
+                }
+
+                if (rc != 0 || g_concept_tap.steps.empty()) {
+                    fprintf(stderr, "[Concept] Pair %d side %s failed (rc=%d, %zu evals) — skipping pair\n",
+                            i, side == 0 ? "+" : "-", rc, g_concept_tap.steps.size());
+                    run_ok = false;
+                    break;
+                }
+                sink[side] = g_concept_tap;  // copy out before the next arm()
+
+                job_set_phase(*job, JobPhase::DIT_INFERENCE, i * 2 + side + 1, n_pairs * 2);
+            }
+
+            if (!run_ok) continue;
+
+            if (acc.n_steps == 0) {
+                acc.init(sink[0].n_layers, sink[0].hidden, (int) sink[0].steps.size(), sink[0].t_values);
+                fprintf(stderr, "[Concept] Accumulator: %dL x %d evals x %dH\n", acc.n_layers, acc.n_steps,
+                        acc.hidden);
+            }
+            if (acc.add_pair(sink[0], sink[1])) {
+                accepted++;
+            }
+            fprintf(stderr, "[Concept] Pair %d/%d done (%d accepted)\n", i + 1, n_pairs, accepted);
+        }
+
+        g_hotstep_params.cache_ratio      = saved_cache;
+        g_hotstep_params.cfg_cutoff_ratio = saved_cutoff;
+        g_hotstep_params.concepts         = saved_concepts;
+
+        ConceptMeta meta;
+        meta.name         = sf.concept_name;
+        meta.target       = "dit";
+        meta.method       = "caa";
+        meta.base_name    = dit_name;
+        meta.pos_prompt   = sf.concept_pos;
+        meta.neg_prompt   = sf.concept_neg;
+        meta.target_class = sf.concept_target_class;
+
+        const bool wrote = concept_write_gguf(sf.concept_out_path.c_str(), meta, acc);
+
+        ace_synth_free(ctx);
+        free(src_interleaved);
+        free(src_latents);
+        free(ref_interleaved);
+        free(ref_latents);
+
+        const bool cancelled = job->cancel.load();
+        job_set_phase(*job, cancelled ? JobPhase::CANCELLED : (wrote ? JobPhase::DONE : JobPhase::FAILED));
+        job->status.store(cancelled ? 3 : (wrote ? 1 : 2));
+        return;
     }
 
     // Two-phase run (+ optional Phase 3 LRC).

@@ -662,6 +662,20 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
             ca_out = ggml_add(ctx, ca_out, m->steer_vecs[layer_idx]);
         }
 
+        // Extraction tap: mean over frames of the (unsteered-or-steered) cross-attn
+        // output. ggml_mean reduces along ne0, so transpose [H,S,N] -> [S,H,N]
+        // first; the result [1,H,N] is read back as H floats for batch slot 0.
+        // Reducing here rather than on the host keeps readback at ~10 KB per
+        // layer-step instead of ~10 MB.
+        if (!m->tap_vecs.empty() && layer_idx < (int) m->tap_vecs.size()) {
+            struct ggml_tensor * tp = ggml_mean(ctx, ggml_cont(ctx, ggml_transpose(ctx, ca_out)));
+            char                 nm[32];
+            snprintf(nm, sizeof(nm), "tap_L%02d", layer_idx);
+            ggml_set_name(tp, nm);
+            ggml_set_output(tp);
+            m->tap_vecs[layer_idx] = tp;
+        }
+
         hidden = ggml_add(ctx, hidden, ca_out);
     }
 
@@ -711,7 +725,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     // Node budget scales with the separate per-adapter delta sets (per-section
     // masking); must match the ctx sizing in the sampler.
     size_t graph_cap = 8192 + m->loras.size() * 4096 + dit_lora_unit_nodes(&m->lora) +
-                       concept_steer_graph_nodes(m->steer);
+                       concept_steer_graph_nodes(m->steer) + concept_tap_graph_nodes(c.n_layers);
     struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, graph_cap, false);
 
     // Inputs
@@ -811,6 +825,13 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     // active for this generation (an unconsumed input tensor gets no backend
     // buffer and the sampler's upload would then hit GGML_ASSERT(buf != NULL) —
     // the same trap the NOMASK debug path documents above).
+    // Extraction taps: sized before the layer loop so dit_ggml_build_layer can
+    // index into them. Only during a concept-extraction run.
+    m->tap_vecs.clear();
+    if (g_concept_tap.recording) {
+        m->tap_vecs.resize(c.n_layers, nullptr);
+    }
+
     m->steer_vecs.clear();
     if (m->steer.active()) {
         m->steer_vecs.resize(c.n_layers, nullptr);
@@ -900,6 +921,13 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
             ggml_set_name(hidden, lname);
             ggml_set_output(hidden);
         }
+    }
+
+    // Extraction taps are a side branch off each layer's cross-attn output —
+    // nothing downstream consumes them, so they must be expanded into the graph
+    // explicitly or they would never be computed.
+    for (struct ggml_tensor * tp : m->tap_vecs) {
+        if (tp) ggml_build_forward_expand(gf, tp);
     }
 
     // 5) Output: AdaLN + proj_out

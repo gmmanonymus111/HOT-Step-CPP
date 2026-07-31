@@ -137,7 +137,7 @@ static int dit_ggml_generate(DiTGGML *           model,
     // Per-section masking multiplies the per-adapter LoRA nodes, so scale the node
     // budget with the separate-adapter count (m->loras) to avoid graph overflow.
     size_t               graph_cap = 8192 + model->loras.size() * 4096 + dit_lora_unit_nodes(&model->lora) +
-                       concept_steer_graph_nodes(model->steer);
+                       concept_steer_graph_nodes(model->steer) + concept_tap_graph_nodes(model->cfg.n_layers);
     size_t               ctx_size = ggml_tensor_overhead() * graph_cap + ggml_graph_overhead_custom(graph_cap, false);
     std::vector<uint8_t> ctx_buf(ctx_size);
 
@@ -493,6 +493,27 @@ static int dit_ggml_generate(DiTGGML *           model,
         fprintf(stderr, "[Concept] DiT steering active: vectors re-uploaded per evaluation\n");
     }
 
+    // ── Concept extraction tap: per-step readback ─────────────────────────────
+    // Pulls the GPU-computed frame-means for all layers into g_concept_tap. Only
+    // batch slot 0 is read: extraction runs N=1, and under batched CFG slot 0 is
+    // the CONDITIONAL pass, which is the one CAA contrasts.
+    std::vector<float> tap_host;
+    auto               capture_taps = [&](float t_val) {
+        if (!g_concept_tap.recording || model->tap_vecs.empty()) return;
+        const int H = model->cfg.hidden_size;
+        const int L = (int) model->tap_vecs.size();
+        tap_host.assign((size_t) L * H, 0.0f);
+        for (int l = 0; l < L; l++) {
+            if (!model->tap_vecs[l]) continue;
+            ggml_backend_tensor_get(model->tap_vecs[l], tap_host.data() + (size_t) l * H, 0, (size_t) H * sizeof(float));
+        }
+        g_concept_tap.push(L, H, t_val, tap_host.data());
+    };
+    if (g_concept_tap.recording) {
+        fprintf(stderr, "[Concept] Extraction tap armed: %d layers x %d dims\n", model->cfg.n_layers,
+                model->cfg.hidden_size);
+    }
+
     // ── P2: alignment-driven section boundaries ───────────────────────────────
     // Run the cross-attention alignment once at ~align_at, derive frame→section
     // from the model's real lyric→audio alignment, and rebuild the masks. Keeps
@@ -796,6 +817,14 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // Forward pass
         static_graph_compute(&dit_graph, model->backend, model->sched, gf);
+
+        // Concept extraction: record this evaluation's per-layer frame-means.
+        // ONLY here — this is the conditional pass (batch slot 0 under batched
+        // CFG, the cond forward under 2-pass CFG). The uncond forward below and
+        // the generic helper used for x0 estimates / post_step plugin passes are
+        // deliberately not tapped: CAA contrasts prompt pairs, not CFG branches,
+        // and extra evaluations would desynchronise the (step -> t) record.
+        capture_taps(t_val);
 
         // Read output and apply CFG/APG
         if (batch_cfg) {
