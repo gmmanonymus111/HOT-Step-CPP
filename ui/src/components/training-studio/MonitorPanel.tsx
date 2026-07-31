@@ -21,6 +21,7 @@ const STAGE_LABEL_KEYS: Record<PipelineStage, string> = {
   preprocess: 'trainingStudio.batch.stagePreprocess',
   'train-dit': 'trainingStudio.batch.stageTrainDit',
   'train-lm': 'trainingStudio.batch.stageTrainLm',
+  'lyric-studio': 'trainingStudio.batch.stageLyricStudio',
 };
 
 const CHIP_STYLE: Record<string, string> = {
