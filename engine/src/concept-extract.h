@@ -184,23 +184,53 @@ static bool concept_write_gguf(const char * path, const ConceptMeta & meta, cons
         return false;
     }
 
-    // Per-layer L2 of the mean vector, averaged over steps — the quickest read
-    // on "did this concept actually separate?" and which layers carry it.
-    // A concept whose norms are flat across layers has probably not converged.
+    // Per-layer localization report.
+    //
+    // |v| (raw L2 of the mean-difference) is reported for reference but is NOT a
+    // localization signal: activation magnitude grows with depth in transformers,
+    // so a raw norm largely re-measures depth. Measured on the first real run
+    // (2026-07-31), |v| and mean|beta| ranked almost oppositely — L02 was near
+    // the bottom on |v| and 2nd from top on mean|beta|.
+    //
+    // mean|beta| is the honest signal: sign agreement is scale-free, in [0,1],
+    // with a noise floor of sqrt(2/(pi*N)) for N pairs. Layers meaningfully above
+    // that floor are the ones carrying the concept.
+    const double noise_floor = acc.n_pairs > 0 ? std::sqrt(2.0 / (3.14159265358979 * acc.n_pairs)) : 0.0;
+
     fprintf(stderr, "[Concept] Wrote %s (%d pairs, %dL x %d steps x %dH)\n", path, acc.n_pairs, acc.n_layers,
             acc.n_steps, acc.hidden);
-    fprintf(stderr, "[Concept] Per-layer |v| (mean over steps):\n");
+    fprintf(stderr, "[Concept] Per-layer localization (sign-agreement noise floor = %.3f at N=%d):\n",
+            noise_floor, acc.n_pairs);
+    fprintf(stderr, "[Concept]   layer      |v|   mean|B|   excess\n");
+
+    int    best_l = 0;
+    double best_b = -1.0;
     for (int l = 0; l < acc.n_layers; l++) {
-        double tot = 0.0;
+        double tot_v = 0.0;
+        double tot_b = 0.0;
         for (int s = 0; s < acc.n_steps; s++) {
             double n2 = 0.0;
             for (int d = 0; d < acc.hidden; d++) {
-                const float x = vec[acc.idx(l, s, d)];
+                const size_t o = acc.idx(l, s, d);
+                const float  x = vec[o];
                 n2 += (double) x * x;
+                tot_b += std::fabs((double) beta[o]);
             }
-            tot += std::sqrt(n2);
+            tot_v += std::sqrt(n2);
         }
-        fprintf(stderr, "[Concept]   L%02d  %.4f\n", l, tot / (double) acc.n_steps);
+        const double mv = tot_v / (double) acc.n_steps;
+        const double mb = tot_b / ((double) acc.n_steps * acc.hidden);
+        if (mb > best_b) {
+            best_b = mb;
+            best_l = l;
+        }
+        fprintf(stderr, "[Concept]   L%02d %9.3f   %7.4f   %+.4f\n", l, mv, mb, mb - noise_floor);
+    }
+    fprintf(stderr, "[Concept] Most discriminative layer: L%02d (mean|B|=%.4f)\n", best_l, best_b);
+    if (best_b < noise_floor * 1.5) {
+        fprintf(stderr,
+                "[Concept] WARNING: no layer clears 1.5x the noise floor — this concept did not "
+                "separate. Try more pairs, or more sharply opposed prompts.\n");
     }
     return true;
 }

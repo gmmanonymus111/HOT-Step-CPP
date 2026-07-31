@@ -590,8 +590,14 @@ struct ServerFields {
     bool        concept_extract = false;
     std::string concept_out_path;
     std::string concept_name;
-    std::string concept_pos;
-    std::string concept_neg;
+    // Prompt LISTS, cycled per pair. A single string is accepted and becomes a
+    // one-entry list, but that degenerate case is a measurement error, not a
+    // convenience: with one caption pair the text conditioning is identical in
+    // every pair, so the constant caption component never averages out of the
+    // mean difference and beta is inflated across every layer. The paper
+    // computes over N *different* prompt pairs.
+    std::vector<std::string> concept_pos;
+    std::vector<std::string> concept_neg;
     std::string concept_target_class;
     int         concept_pairs = 24;
     // DCW (Differential Correction in Wavelet domain)
@@ -788,10 +794,23 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     yyjson_val * cx = yyjson_obj_get(obj, "concept_extract");
     if (cx && yyjson_is_obj(cx)) {
         yyjson_val * f;
+        // "positive"/"negative" accept a string or an array of strings.
+        auto read_prompts = [](yyjson_val * v, std::vector<std::string> * out) {
+            if (!v) return;
+            if (yyjson_is_str(v)) {
+                out->push_back(yyjson_get_str(v));
+            } else if (yyjson_is_arr(v)) {
+                size_t       pi, pmax;
+                yyjson_val * pv;
+                yyjson_arr_foreach(v, pi, pmax, pv) {
+                    if (yyjson_is_str(pv) && *yyjson_get_str(pv)) out->push_back(yyjson_get_str(pv));
+                }
+            }
+        };
         if ((f = yyjson_obj_get(cx, "out")) && yyjson_is_str(f)) sf->concept_out_path = yyjson_get_str(f);
         if ((f = yyjson_obj_get(cx, "name")) && yyjson_is_str(f)) sf->concept_name = yyjson_get_str(f);
-        if ((f = yyjson_obj_get(cx, "positive")) && yyjson_is_str(f)) sf->concept_pos = yyjson_get_str(f);
-        if ((f = yyjson_obj_get(cx, "negative")) && yyjson_is_str(f)) sf->concept_neg = yyjson_get_str(f);
+        read_prompts(yyjson_obj_get(cx, "positive"), &sf->concept_pos);
+        read_prompts(yyjson_obj_get(cx, "negative"), &sf->concept_neg);
         if ((f = yyjson_obj_get(cx, "target_class")) && yyjson_is_str(f))
             sf->concept_target_class = yyjson_get_str(f);
         if ((f = yyjson_obj_get(cx, "pairs")) && yyjson_is_int(f)) sf->concept_pairs = (int) yyjson_get_int(f);
@@ -1482,6 +1501,22 @@ static void synth_worker(std::shared_ptr<Job>    job,
             return sf.concept_target_class.empty() ? side : (sf.concept_target_class + ", " + side);
         };
 
+        // Both the PROMPT and the seed must vary across pairs. Averaging over
+        // seeds alone leaves the text conditioning byte-identical in every pair,
+        // so the constant caption component survives the mean difference intact
+        // and every layer scores high on sign agreement — measured on the first
+        // real run, 2026-07-31. The prompt lists are cycled independently of the
+        // seed walk so a short list still pairs with fresh noise each time.
+        const size_t n_pos = sf.concept_pos.size();
+        const size_t n_neg = sf.concept_neg.size();
+        if (n_pos < 2 || n_neg < 2) {
+            fprintf(stderr,
+                    "[Concept] WARNING: only %zu positive / %zu negative prompt(s). Concept directions "
+                    "extracted from a single caption pair encode that caption, not the concept — "
+                    "pass arrays of varied prompts for a trustworthy result.\n",
+                    n_pos, n_neg);
+        }
+
         // Both runs of a pair must record the SAME number of evaluations, else
         // step s of the positive run is contrasted against a different diffusion
         // time in the negative run. Step caching and CFG cutoff both skip
@@ -1507,9 +1542,12 @@ static void synth_worker(std::shared_ptr<Job>    job,
         }
 
         const int n_pairs = sf.concept_pairs > 0 ? sf.concept_pairs : 24;
-        fprintf(stderr, "[Concept] Extracting '%s': %d pairs\n", sf.concept_name.c_str(), n_pairs);
-        fprintf(stderr, "[Concept]   +: %s\n", compose(sf.concept_pos).c_str());
-        fprintf(stderr, "[Concept]   -: %s\n", compose(sf.concept_neg).c_str());
+        fprintf(stderr, "[Concept] Extracting '%s': %d pairs over %zu+ / %zu- prompt(s)\n",
+                sf.concept_name.c_str(), n_pairs, n_pos, n_neg);
+        for (size_t k = 0; k < n_pos; k++)
+            fprintf(stderr, "[Concept]   +[%zu]: %s\n", k, compose(sf.concept_pos[k]).c_str());
+        for (size_t k = 0; k < n_neg; k++)
+            fprintf(stderr, "[Concept]   -[%zu]: %s\n", k, compose(sf.concept_neg[k]).c_str());
 
         ConceptAccum acc;
         AceRequest   base = groups[0][0];
@@ -1530,10 +1568,11 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
             for (int side = 0; side < 2 && run_ok; side++) {
                 AceRequest r = base;
-                r.caption    = compose(side == 0 ? sf.concept_pos : sf.concept_neg);
-                // Same seed for both sides: the contrast must isolate the prompt,
-                // not the noise. Seed still walks per pair for sample diversity.
-                r.seed = base_seed + i;
+                // Prompt cycles per pair; both sides of a pair share the same
+                // seed so the contrast isolates the prompt, not the noise.
+                r.caption = compose(side == 0 ? sf.concept_pos[(size_t) i % n_pos]
+                                              : sf.concept_neg[(size_t) i % n_neg]);
+                r.seed    = base_seed + i;
 
                 groups[0].clear();
                 groups[0].push_back(r);
@@ -1592,8 +1631,9 @@ static void synth_worker(std::shared_ptr<Job>    job,
         meta.target       = "dit";
         meta.method       = "caa";
         meta.base_name    = dit_name;
-        meta.pos_prompt   = sf.concept_pos;
-        meta.neg_prompt   = sf.concept_neg;
+        // Provenance: record the whole prompt list, not just the first entry.
+        for (size_t k = 0; k < n_pos; k++) meta.pos_prompt += (k ? " | " : "") + sf.concept_pos[k];
+        for (size_t k = 0; k < n_neg; k++) meta.neg_prompt += (k ? " | " : "") + sf.concept_neg[k];
         meta.target_class = sf.concept_target_class;
 
         const bool wrote = concept_write_gguf(sf.concept_out_path.c_str(), meta, acc);
