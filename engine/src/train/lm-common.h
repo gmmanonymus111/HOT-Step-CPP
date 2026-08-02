@@ -291,7 +291,7 @@ static std::string lm_tok_identity(const std::string & dit_path) {
 // and we do not edit it. This reads just the header object.
 static bool stmd_read(const char * path, std::map<std::string, std::string> * out) {
     out->clear();
-    FILE * f = fopen(path, "rb");
+    FILE * f = hs_fopen(path, "rb");
     if (!f) {
         return false;
     }

@@ -117,7 +117,7 @@ static bool lm_codes_parse_line(const char * data, size_t len, LmCodeRow * out) 
 // Read a whole lm_codes.jsonl. Missing file -> true with an empty vector.
 static bool lm_codes_read_file(const char * path, std::vector<LmCodeRow> * out, std::string * err) {
     out->clear();
-    FILE * f = fopen(path, "rb");
+    FILE * f = hs_fopen(path, "rb");
     if (!f) {
         return true;
     }

@@ -431,7 +431,7 @@ static void purge_suffix(const std::string & dir, const char * suffix) {
     const size_t slen = strlen(suffix);
     for (size_t i = 0; i < names.size(); i++) {
         if (names[i].size() >= slen && names[i].compare(names[i].size() - slen, slen, suffix) == 0) {
-            remove((dir + "/" + names[i]).c_str());
+            hs_remove(dir + "/" + names[i]);
         }
     }
 }
@@ -440,7 +440,7 @@ static void purge_all(const std::string & dir) {
     std::vector<std::string> names;
     registry_list_dir(dir.c_str(), &names);
     for (size_t i = 0; i < names.size(); i++) {
-        remove((dir + "/" + names[i]).c_str());
+        hs_remove(dir + "/" + names[i]);
     }
 }
 

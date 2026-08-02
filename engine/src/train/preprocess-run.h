@@ -250,6 +250,43 @@ static bool pp_truncate_ids(std::vector<int> & ids, int cap, int eos_id) {
 // ─── ffmpeg transcode ───────────────────────────────────────────────────────
 
 // Transcode any container ffmpeg understands into a 48 kHz stereo f32 WAV.
+// Decode an audio file to 48 kHz planar stereo, UTF-8 path and all.
+//
+// NOT audio_read_48k(): that opens the path with the CRT's narrow fopen, which
+// on Windows decodes it in the ANSI codepage and cannot see a non-ASCII
+// filename (hot-step-fsutf8.h). Load the bytes ourselves through hs_fopen and
+// hand the buffer to the buffer-based decoder, which sniffs RIFF-vs-MP3 from
+// the content rather than the extension. Keeping the fix here — rather than in
+// the upstream audio-io.h — also keeps it out of the way of an upstream sync.
+static float * pp_audio_read_48k(const std::string & path, int * T_out) {
+    *T_out = 0;
+    FILE * f = hs_fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    const long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    uint8_t * buf = (uint8_t *) malloc((size_t) fsize);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    const size_t nr = fread(buf, 1, (size_t) fsize, f);
+    fclose(f);
+    if (nr != (size_t) fsize) {
+        free(buf);
+        return NULL;
+    }
+    float * planar = audio_read_48k_buf(buf, (size_t) fsize, T_out);
+    free(buf);
+    return planar;
+}
+
 static bool pp_ffmpeg_transcode(const PreprocessOpts & o, const std::string & src, const std::string & tmp_wav,
                                 std::string & err) {
     char cmd[4096];
@@ -262,9 +299,9 @@ static bool pp_ffmpeg_transcode(const PreprocessOpts & o, const std::string & sr
     }
 #ifdef _WIN32
     std::string wrapped = "\"" + std::string(cmd) + "\"";  // cmd.exe strips the outer pair
-    int         rc      = system(wrapped.c_str());
+    int         rc      = hs_system(wrapped);              // UTF-16 — src may be non-ASCII
 #else
-    int rc = system(cmd);
+    int rc = hs_system(cmd);
 #endif
     if (rc != 0) {
         char b[64];
@@ -308,7 +345,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
         r.ok    = false;
         r.error = msg;
         if (!tmp_wav.empty()) {
-            remove(tmp_wav.c_str());
+            hs_remove(tmp_wav);
         }
         return r;
     };
@@ -344,7 +381,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
     //    therefore addresses channel 1 through T_orig and only bounds the loops
     //    by T_audio. Plan §3.4.3 steps 2/4 carry the original defect.
     int     T_orig = 0;
-    float * planar = audio_read_48k(src.c_str(), &T_orig);
+    float * planar = pp_audio_read_48k(src, &T_orig);
     if (!planar || T_orig <= 0) {
         if (planar) {
             free(planar);
@@ -618,7 +655,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
 
     // 12. Cleanup + result.
     if (!tmp_wav.empty()) {
-        remove(tmp_wav.c_str());
+        hs_remove(tmp_wav);
     }
     long long bytes = 0;
     pm_stat_file(out_path, &bytes, NULL);

@@ -122,6 +122,43 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, sampleIdByCacheId:
   }
 }
 
+/**
+ * Fail a preprocess that cached NOTHING, at the point it happens.
+ *
+ * ace-train exits 0 when every song was *skipped* — skips are per-song and
+ * deliberately non-fatal (an all-FLAC dataset with no ffmpeg must not kill the
+ * run). But a dataset where nothing at all landed in the cache is not a partial
+ * success, it is a failed preprocess, and saying so here is the difference
+ * between one clear message and a confusing one a whole stage later: a bulk run
+ * lost britneyspears_oops to 14/14 "audio file not found" skips (mojibake in the
+ * filenames) and the only error the user ever saw was train-dit's "no cached
+ * songs in …\tensors\…" (2026-08-02).
+ *
+ * The test is `ok`, not `processed`: a resumed run that finds every song already
+ * cached reports processed=0 / skipped=N with ok=true on each, and that is a
+ * perfectly good cache. Only `ok === false` on every sample means empty.
+ */
+function assertCachedSomething(metaPath: string): void {
+  let meta: any;
+  try {
+    meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  } catch {
+    return;   // unreadable meta is the existing failure mode; don't invent a new one
+  }
+  const samples: any[] = Array.isArray(meta?.samples) ? meta.samples : [];
+  if (!samples.length) return;
+  const cached = samples.filter(s => s?.ok === true).length;
+  if (cached > 0) return;
+
+  // Every sample carries the same class of error in practice, so the first one
+  // is the diagnosis — quote it rather than making the user open the meta file.
+  const reason = samples.find(s => typeof s?.error === 'string' && s.error)?.error;
+  throw new Error(
+    `preprocess cached 0 of ${samples.length} songs — nothing to train on`
+    + (reason ? `. First error: ${reason}` : ''),
+  );
+}
+
 export async function runPreprocessJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
 
@@ -278,9 +315,11 @@ export async function runPreprocessJob(job: TrainingJob): Promise<void> {
       if (code !== 0) {
         throw new Error(`ace-train exited with code ${code === null ? 'null (killed)' : code}: ${stderrTail.slice(-5).join(' | ')}`);
       }
-      if (!fs.existsSync(path.join(outDir, 'preprocess_meta.json'))) {
+      const metaPath = path.join(outDir, 'preprocess_meta.json');
+      if (!fs.existsSync(metaPath)) {
         throw new Error('ace-train finished but wrote no preprocess_meta.json');
       }
+      assertCachedSomething(metaPath);
     } finally {
       // ── 4. ALWAYS restore the engine — success, failure, cancel, timeout ─
       if (stopped) {
