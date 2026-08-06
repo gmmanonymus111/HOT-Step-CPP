@@ -574,8 +574,12 @@ server.tool(
   {
     lyrics_set_id: z.number().describe('Lyrics set ID the profile was built from'),
     profile_data: z.string().describe('JSON string of the merged profile data object'),
+    model: z.string().describe(MODEL_PARAM_DESC),
+    provider: z.string().optional().describe(
+      "Where the model ran (e.g. 'anthropic', 'mcp'). Defaults to 'mcp'.",
+    ),
   },
-  async ({ lyrics_set_id, profile_data }) => {
+  async ({ lyrics_set_id, profile_data, model, provider }) => {
     const lyricsSet = db.getLyricsSet(lyrics_set_id);
     if (!lyricsSet) {
       return { content: [{ type: 'text', text: `Lyrics set ${lyrics_set_id} not found.` }] };
@@ -594,7 +598,11 @@ server.tool(
     // Deterministic, never agent-derived — measured facts from the source audio.
     parsed.audio_enrichment = prompts.computeAlbumEnrichment(lyricsSet.songs);
 
-    const saved = db.saveProfile(lyrics_set_id, 'antigravity', 'claude-opus-4', parsed);
+    // The provider/model were hardcoded to 'antigravity'/'claude-opus-4' here, so
+    // EVERY profile built through MCP was stamped claude-opus-4 whatever actually
+    // wrote it — 36 of them, unattributable after the fact. save_generation has
+    // taken a real `model` since it was written; this now matches it (2026-08-06).
+    const saved = db.saveProfile(lyrics_set_id, provider || 'mcp', model, parsed);
 
     return {
       content: [{
