@@ -42,6 +42,14 @@ export interface SampleLabelRecord {
   /** Epoch ms of the first scan that could not find this sample's audio file.
    *  Orphans are only pruned after two consecutive misses (§7.4). */
   missingSince?: number | null;
+  /** Why this sample ended up with no lyrics, or null when it has them.
+   *
+   *  Per-sample Genius outcomes only ever went to the job's SSE stream, which
+   *  nobody is listening to during a bulk run and which is never persisted —
+   *  the job _meta.json keeps counts alone. So 166 blank-lyric tracks across 36
+   *  albums had to be diagnosed by re-querying the API by hand afterwards
+   *  (2026-08-05). Keep the reason with the sample it belongs to. */
+  lyricsError?: string | null;
 }
 
 /** A blank record — every field explicit so partial writes stay predictable. */
@@ -61,6 +69,7 @@ export function emptyLabel(sampleId: string, relPath: string): SampleLabelRecord
     durationCache: null,
     tags: null,
     missingSince: null,
+    lyricsError: null,
   };
 }
 

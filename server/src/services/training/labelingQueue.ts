@@ -32,7 +32,9 @@ import {
 import { analyzeWithEssentia, essentiaAvailable, essentiaKeyString } from './essentiaClient.js';
 import { captionLimiter, essentiaLimiter, geniusLimiter } from './rateLimit.js';
 import { AbortError, runUnderstand } from './understandClient.js';
-import { enhanceCaption, enhanceGenius, resolveArtistTitle } from './enhanceService.js';
+import {
+  enhanceCaption, enhanceGenius, GeniusNoArtistError, resolveArtistTitle,
+} from './enhanceService.js';
 import { buildDataset } from './datasetBuilder.js';
 import * as audioMeta from './audioMeta.js';
 import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
@@ -575,7 +577,11 @@ function markError(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSam
   emitLog(job, 'error', `${sample.filename}: ${message}`);
 }
 
-function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample, sources: Record<string, FieldSource>): void {
+function markLabeled(
+  job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample,
+  sources: Record<string, FieldSource>,
+  lyricsError: string | null = null,
+): void {
   clearTransientStatus(job.datasetId, sample.sampleId);
   patchLabel(ds.slug, sample.sampleId, {
     relPath: sample.relPath,
@@ -583,6 +589,7 @@ function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingS
     error: null,
     labeledAt: new Date().toISOString(),
     sources,
+    lyricsError,
   });
   const fresh = refreshSample(ds, sample);
   pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: fresh.labelStatus, sample: fresh });
@@ -826,6 +833,8 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
         const incoming: Record<string, string> = {};
         const sources: Record<string, FieldSource> = {};
         const failures: string[] = [];
+        // Persisted onto the label record below — see SampleLabelRecord.lyricsError.
+        let lyricsError: string | null = null;
 
         // Local results first — Essentia wins bpm/key (§4.8), tags win genre.
         if (a?.essentiaBpm != null) { incoming.bpm = String(a.essentiaBpm); sources.bpm = 'essentia'; }
@@ -900,14 +909,19 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
               if (hit) {
                 incoming.lyrics = hit.lyrics;
                 sources.lyrics = 'genius';
+                lyricsError = null;
               } else {
                 const { artist, title } = resolveArtistTitle(enriched, ds, {});
-                failures.push(`no Genius match ("${artist} — ${title}")`);
-                emitLog(job, 'warn', `${sample.filename}: no Genius match ("${artist} — ${title}")`);
+                lyricsError = `no Genius match ("${artist} — ${title}")`;
+                failures.push(lyricsError);
+                emitLog(job, 'warn', `${sample.filename}: ${lyricsError}`);
               }
             } catch (err: any) {
               if (err instanceof AbortError || isCancelled(job)) return;
-              failures.push(`genius: ${err?.message || 'failed'}`);
+              lyricsError = err instanceof GeniusNoArtistError
+                ? `genius skipped: ${err.message}`
+                : `genius: ${err?.message || 'failed'}`;
+              failures.push(lyricsError);
               emitLog(job, 'warn', `${sample.filename}: Genius failed — ${err?.message || err}`);
             }
           }
@@ -950,7 +964,7 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
           if (failures.length > 0 && !incoming.caption && !incoming.lyrics) {
             markError(job, ds, sample, failures.join('; '));
           } else {
-            markLabeled(job, ds, sample, sources);
+            markLabeled(job, ds, sample, sources, incoming.lyrics ? null : lyricsError);
             job.done++;
           }
         } catch (err: any) {
