@@ -16,6 +16,7 @@
 import { useSyncExternalStore, useEffect, useRef, useCallback } from 'react';
 import { lireekApi } from '../services/lireekApi';
 import { generateApi, songApi, healthApi } from '../services/api';
+import { useGlobalParamsStore } from './globalParamsStore';
 import { writePersistedState } from '../hooks/usePersistedState';
 import type { Generation, AlbumPreset } from '../services/lireekApi';
 import { addToPlaylist } from '../components/lyric-studio/playlistStore';
@@ -108,17 +109,20 @@ async function _idbSet(key: string, value: unknown): Promise<void> {
   });
 }
 
-/** Prepare queue data for persistence. Strips globalParams (only needed at
- *  submit time) to reduce storage churn — not for quota reasons anymore. */
+/** Prepare queue data for persistence.
+ *
+ *  globalParams MUST be persisted with the item. It carries the engine settings
+ *  the song was queued with — including which LM and DiT model to load. Stripping
+ *  it meant a restored item submitted with server defaults while still carrying
+ *  its album preset's adapter, so e.g. an lm-4b adapter arrived against the
+ *  default 0.6B LM and the engine refused it outright ("LM adapter has 36 layers
+ *  but model has 28"). Every item failed that way after a reload or restart.
+ *
+ *  Stripping was originally to stay under the 5MB localStorage cap, which no
+ *  longer applies now the queue lives in IndexedDB. */
 function _dataForStorage(): { items: AudioQueueItem[]; completionCounter: number } {
   return {
-    items: _state.items.map(item => {
-      if (item.globalParams && Object.keys(item.globalParams).length > 0) {
-        const { globalParams, ...rest } = item;
-        return rest as AudioQueueItem;
-      }
-      return item;
-    }),
+    items: _state.items,
     completionCounter: _state.completionCounter,
   };
 }
@@ -876,7 +880,14 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
   // 1) Start with globalParams snapshot — identical to Create page's getGlobalParams().
   //    This includes ALL engine params: inference, guidance, solver, DCW, latent,
   //    LM, adapter (global), mastering, trigger word, etc.
-  const params: Record<string, any> = { ...item.globalParams };
+  //    Items persisted before globalParams was included in storage come back
+  //    without one; fall back to the live settings rather than submitting an
+  //    empty param set, which would pick server defaults and mismatch the
+  //    preset's adapter.
+  const snapshot = item.globalParams && Object.keys(item.globalParams).length > 0
+    ? item.globalParams
+    : useGlobalParamsStore.getState().getGlobalParams();
+  const params: Record<string, any> = { ...snapshot };
 
   // 2) Overlay content fields from the written song
   params.lyrics = gen.lyrics || '';
