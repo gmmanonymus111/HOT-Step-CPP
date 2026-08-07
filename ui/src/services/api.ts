@@ -266,6 +266,7 @@ export const healthApi = {
     status: string;
     aceServer: { status: string; url: string; version: string };
     server: { port: number; uptime: number };
+    engine?: { ready: boolean; bootStatus: string };
   }>('/health'),
 };
 

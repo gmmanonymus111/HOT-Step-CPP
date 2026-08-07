@@ -15,7 +15,7 @@
 
 import { useSyncExternalStore, useEffect, useRef, useCallback } from 'react';
 import { lireekApi } from '../services/lireekApi';
-import { generateApi, songApi } from '../services/api';
+import { generateApi, songApi, healthApi } from '../services/api';
 import { writePersistedState } from '../hooks/usePersistedState';
 import type { Generation, AlbumPreset } from '../services/lireekApi';
 import { addToPlaylist } from '../components/lyric-studio/playlistStore';
@@ -617,9 +617,25 @@ export async function resumeQueue(token: string): Promise<void> {
   _pruneDeletedSongs(token);
 
   const hasPending = _state.items.some(i => i.status === 'pending');
-  if (hasPending) {
-    _processQueue(token);
+  if (!hasPending) return;
+
+  // Resuming with work outstanding usually means a restart, and the engine needs
+  // time to reload models. Wait for it up front so the first item doesn't have to
+  // fail-and-park to discover the engine isn't up yet.
+  let ready = false;
+  try {
+    ready = (await healthApi.check()).engine?.ready ?? false;
+  } catch { /* server still down — treat as not ready */ }
+
+  if (!ready) {
+    for (const item of _state.items) {
+      if (item.status === 'pending') item.stage = 'Waiting for engine…';
+    }
+    _emit(true);
+    await _waitForEngine();
   }
+
+  _processQueue(token);
 }
 
 /**
@@ -649,6 +665,49 @@ async function _pruneDeletedSongs(token: string): Promise<void> {
   } catch {
     // Non-fatal — server unreachable, keep entries as-is
   }
+}
+
+// ── Engine availability ──────────────────────────────────────────────────────
+// The server's job queue is in-memory, so a Node restart drops it and ace-server
+// then cold-boots for a minute or more reloading models. Throughout that window
+// /api/generate answers 503 "Engine not ready". A 503 is not the song's fault,
+// so the runner parks the item and waits instead of failing it — otherwise the
+// while-loop marks every remaining item failed at network speed and the whole
+// queue is gone seconds after a restart.
+
+const ENGINE_POLL_MS = 3000;
+/** Longest a single park may last before the item is failed for real. */
+const ENGINE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+/** Parks allowed per item before we treat the engine as genuinely dead. */
+const MAX_ENGINE_WAITS = 3;
+
+/** Per-item park count. Module-level rather than persisted — a page reload is
+ *  a fresh start, and these should not survive one. */
+const _engineWaits = new Map<string, number>();
+
+/** True when the failure means "the engine can't take work right now" rather
+ *  than "this song is bad": engine booting, engine suspended for training, or
+ *  the server process unreachable mid-restart. */
+function _isEngineUnavailable(msg: string): boolean {
+  return /Engine not ready|Engine is paused|Failed to fetch|NetworkError|Load failed|API error: 50[023]/i.test(msg);
+}
+
+/** Poll /api/health until the engine reports ready. Resolves true once it is,
+ *  false if it never came back inside ENGINE_WAIT_TIMEOUT_MS. */
+async function _waitForEngine(onTick?: (status: string) => void): Promise<boolean> {
+  const deadline = Date.now() + ENGINE_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, ENGINE_POLL_MS));
+    try {
+      const health = await healthApi.check();
+      if (health.engine?.ready) return true;
+      onTick?.(health.engine?.bootStatus || 'Starting engine…');
+    } catch {
+      // Server itself is still down mid-restart — keep waiting for it.
+      onTick?.('Waiting for server…');
+    }
+  }
+  return false;
 }
 
 // ── Queue runner ─────────────────────────────────────────────────────────────
@@ -693,14 +752,39 @@ async function _processQueue(token: string): Promise<void> {
 
         await _executeItem(next, token);
         next.status = 'succeeded';
+        _engineWaits.delete(next.id);
         _state.completionCounter++;
         // Notify App.tsx so Library updates in real-time
         if (next.songId) _notifySongCreated(next.songId);
         _maybeAutoAddToPlaylist(next);
       } catch (err) {
-        next.status = 'failed';
-        next.error = (err as Error).message;
-        console.error(`[AudioQueue] Item ${next.id} failed:`, (err as Error).message);
+        const msg = (err as Error).message || '';
+        const waits = _engineWaits.get(next.id) ?? 0;
+
+        if (_isEngineUnavailable(msg) && waits < MAX_ENGINE_WAITS) {
+          // Park this item and hold the whole queue until the engine is back.
+          // Keep any jobId: on retry _tryReconnect re-attaches if the server
+          // still knows the job, and re-submits if it doesn't.
+          _engineWaits.set(next.id, waits + 1);
+          next.status = 'pending';
+          next.progress = undefined;
+          next.stage = 'Waiting for engine…';
+          _emit(true);
+          console.warn(`[AudioQueue] Engine unavailable (${msg}) — holding queue`);
+
+          if (await _waitForEngine(s => { next.stage = s; _emit(); })) {
+            next.stage = 'Retrying…';
+            _emit(true);
+            continue;
+          }
+          next.status = 'failed';
+          next.error = `Engine did not come back: ${msg}`;
+        } else {
+          next.status = 'failed';
+          next.error = msg;
+        }
+        _engineWaits.delete(next.id);
+        console.error(`[AudioQueue] Item ${next.id} failed:`, next.error);
       }
       _emit(true);
     }
@@ -943,6 +1027,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
   const timer = createGenerationTimer({ resumeElapsedSec: item.elapsed });
   _emit(true);
 
+  let notFound = 0;
   while (true) {
     await new Promise(r => setTimeout(r, 2500));
     try {
@@ -987,6 +1072,15 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
       const msg = (e as Error).message;
       if ((msg.includes('failed') || msg.includes('Cancelled') || msg.includes('timed out')) && !msg.includes('fetch')) {
         throw e;
+      }
+      // A job the server has never heard of died with the process that owned it.
+      // Allow a few ticks in case the server is mid-restart, then surface it as
+      // an engine outage so the runner parks and re-submits, rather than polling
+      // a dead id forever behind a spinner that never resolves.
+      if (msg.includes('Job not found')) {
+        if (++notFound >= 4) throw new Error('Engine not ready: job was lost when the server restarted');
+      } else {
+        notFound = 0;
       }
       // Transient network error — keep polling
     }
