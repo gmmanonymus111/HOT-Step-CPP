@@ -619,22 +619,11 @@ export async function resumeQueue(token: string): Promise<void> {
   const hasPending = _state.items.some(i => i.status === 'pending');
   if (!hasPending) return;
 
-  // Resuming with work outstanding usually means a restart, and the engine needs
-  // time to reload models. Wait for it up front so the first item doesn't have to
-  // fail-and-park to discover the engine isn't up yet.
-  let ready = false;
-  try {
-    ready = (await healthApi.check()).engine?.ready ?? false;
-  } catch { /* server still down — treat as not ready */ }
-
-  if (!ready) {
-    for (const item of _state.items) {
-      if (item.status === 'pending') item.stage = 'Waiting for engine…';
-    }
-    _emit(true);
-    await _waitForEngine();
-  }
-
+  // Start the runner unconditionally. If the engine is still booting it answers
+  // 503 and the runner parks the item and waits for it — deliberately NOT gated
+  // on a health check here, because a slow or hanging /api/health would then be
+  // able to stop the queue from ever starting.
+  console.log(`[AudioQueue] Resuming — ${_state.items.filter(i => i.status === 'pending').length} pending`);
   _processQueue(token);
 }
 
@@ -676,6 +665,8 @@ async function _pruneDeletedSongs(token: string): Promise<void> {
 // queue is gone seconds after a restart.
 
 const ENGINE_POLL_MS = 3000;
+/** Cap on a single health probe — see _probeEngine. */
+const ENGINE_PROBE_TIMEOUT_MS = 5000;
 /** Longest a single park may last before the item is failed for real. */
 const ENGINE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 /** Parks allowed per item before we treat the engine as genuinely dead. */
@@ -692,20 +683,32 @@ function _isEngineUnavailable(msg: string): boolean {
   return /Engine not ready|Engine is paused|Failed to fetch|NetworkError|Load failed|API error: 50[023]/i.test(msg);
 }
 
+/** One health probe, bounded. /api/health reaches through to ace-server, which
+ *  can be slow to answer while it is busy, and fetch has no default timeout —
+ *  an unbounded probe here would wedge the wait loop. */
+async function _probeEngine(): Promise<{ ready: boolean; status: string }> {
+  try {
+    const health = await Promise.race([
+      healthApi.check(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('health probe timed out')), ENGINE_PROBE_TIMEOUT_MS)),
+    ]);
+    return { ready: health.engine?.ready === true, status: health.engine?.bootStatus || 'Starting engine…' };
+  } catch {
+    // Server still down mid-restart, or too busy to answer in time.
+    return { ready: false, status: 'Waiting for server…' };
+  }
+}
+
 /** Poll /api/health until the engine reports ready. Resolves true once it is,
  *  false if it never came back inside ENGINE_WAIT_TIMEOUT_MS. */
 async function _waitForEngine(onTick?: (status: string) => void): Promise<boolean> {
   const deadline = Date.now() + ENGINE_WAIT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, ENGINE_POLL_MS));
-    try {
-      const health = await healthApi.check();
-      if (health.engine?.ready) return true;
-      onTick?.(health.engine?.bootStatus || 'Starting engine…');
-    } catch {
-      // Server itself is still down mid-restart — keep waiting for it.
-      onTick?.('Waiting for server…');
-    }
+    const { ready, status } = await _probeEngine();
+    if (ready) return true;
+    onTick?.(status);
   }
   return false;
 }
