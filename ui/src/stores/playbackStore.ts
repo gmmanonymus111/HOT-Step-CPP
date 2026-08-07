@@ -422,6 +422,7 @@ function loadTrack(track: PlaybackTrack): void {
   }
 
   _loadingTrackId = track.id;
+  _lastFinishedTrackId = null;
   _retryCount = 0;
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
 
@@ -448,7 +449,14 @@ function loadTrack(track: PlaybackTrack): void {
 
   // Load into WaveSurfer
   _wsOriginalRef.current?.loadUrl(track.audioUrl);
-  if (_wsAltRef.current && hasMastered) _wsAltRef.current.loadUrl(track.masteredAudioUrl!);
+  if (_wsAltRef.current && hasMastered) {
+    _wsAltRef.current.loadUrl(track.masteredAudioUrl!);
+  } else {
+    // This track has no mastered version, so nothing overwrites the alt player —
+    // it would otherwise keep running the PREVIOUS track's audio, silent because
+    // its volume is zeroed, until that audio ended and fired its own finish.
+    _wsAltRef.current?.pause();
+  }
 
   applyVolumes();
   applyPlaybackRate();
@@ -755,12 +763,22 @@ export function setIsPlaying(playing: boolean): void {
   }
 }
 
-/** Called by WaveSurfer onFinish — debounced because both original and mastered fire */
-let _finishGuardUntil = 0;
-export function handleFinish(): void {
-  const now = Date.now();
-  if (now < _finishGuardUntil) return;  // Ignore duplicate from other WaveSurfer
-  _finishGuardUntil = now + 100;        // 100ms debounce
+/** Called by WaveSurfer onFinish.
+ *
+ *  Both players are mounted for the whole life of the app and each fires its own
+ *  finish event, so a single song ending produces up to two calls here. This used
+ *  to be de-duplicated with a 100ms wall-clock debounce, which is only a guess:
+ *  an original and its master are separately encoded and their ends can land
+ *  further apart than that, and a player still holding the PREVIOUS track can
+ *  finish at an arbitrary moment. Either case advanced the playlist twice.
+ *
+ *  Instead: only the audible player may drive the playlist, and a given track may
+ *  advance the playlist at most once. */
+let _lastFinishedTrackId: string | null = null;
+export function handleFinish(which: 'original' | 'alt' = 'original'): void {
+  const audible: 'original' | 'alt' = _state.playMastered ? 'alt' : 'original';
+  if (which !== audible) return;
+
   if (_state.repeat === 'one') {
     // Repeat current track
     _wsOriginalRef.current?.seekTo(0);
@@ -771,6 +789,12 @@ export function handleFinish(): void {
     }
     return;
   }
+
+  // Advance at most once per track, so a duplicate or late finish can never
+  // jump two songs ahead. Reset in loadTrack, so replaying the same track works.
+  const finishedId = _state.currentTrack?.id ?? null;
+  if (finishedId !== null && finishedId === _lastFinishedTrackId) return;
+  _lastFinishedTrackId = finishedId;
 
   // Only auto-advance when playing from a playlist, or when repeat-all is active.
   // Individual tracks (library, recent, direct, etc.) just stop at the end.

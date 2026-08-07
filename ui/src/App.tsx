@@ -1350,7 +1350,7 @@ const AppContent: React.FC = () => {
                 onTimeUpdate={pbSetCurrentTime}
                 onDurationChange={() => {}}
                 onPlayChange={pbSetIsPlaying}
-                onFinish={pbHandleFinish}
+                onFinish={() => pbHandleFinish('original')}
                 onWaveformClick={handleWaveformClick}
                 onReady={(dur) => {
                   handleOriginalReady(dur);
@@ -1373,7 +1373,7 @@ const AppContent: React.FC = () => {
                 onTimeUpdate={pbSetCurrentTime}
                 onDurationChange={() => {}}
                 onPlayChange={pbSetIsPlaying}
-                onFinish={pbHandleFinish}
+                onFinish={() => pbHandleFinish('alt')}
                 onWaveformClick={handleWaveformClick}
                 onReady={(dur) => {
                   handleAltReady(dur);
