@@ -226,6 +226,10 @@ function _genId(): string { return `aq-${Date.now()}-${_nextId++}`; }
 
 let _resumeCalled = false;
 
+/** Last auth token the queue was handed. Lets actions that aren't wired to the
+ *  auth context — the Retry button — restart the runner. */
+let _lastToken: string | null = null;
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export async function enqueueAudioGen(
@@ -255,6 +259,7 @@ export async function enqueueAudioGen(
 
   _state.items.push(item);
   _emit(true);
+  _lastToken = token;
   _processQueue(token);
 }
 
@@ -283,6 +288,29 @@ export function forceFailQueueItem(id: string): void {
 export function clearFinishedFromAudioQueue(): void {
   _state.items = _state.items.filter(i => i.status !== 'succeeded' && i.status !== 'failed');
   _emit(true);
+}
+
+/** Put every failed item back in the queue and restart the runner. The jobId is
+ *  cleared so each one is submitted fresh — the old server job either failed or
+ *  no longer exists, so there is nothing worth reconnecting to. */
+export function retryFailedInAudioQueue(): number {
+  let retried = 0;
+  for (const item of _state.items) {
+    if (item.status !== 'failed') continue;
+    item.status = 'pending';
+    item.error = undefined;
+    item.jobId = undefined;
+    item.progress = undefined;
+    item.stage = 'Queued…';
+    _engineWaits.delete(item.id);
+    retried++;
+  }
+  if (retried > 0) {
+    _emit(true);
+    if (_lastToken) _processQueue(_lastToken);
+    else console.warn('[AudioQueue] Retry requested before any token was seen — items are pending but idle');
+  }
+  return retried;
 }
 
 // ── Manual queue API (for Cover Studio and other non-Lyric-Studio modules) ───
@@ -614,6 +642,7 @@ export async function enqueueSimpleGen(
 export async function resumeQueue(token: string): Promise<void> {
   if (_resumeCalled) return;
   _resumeCalled = true;
+  _lastToken = token;
 
   // Wait for IndexedDB restore to complete before processing
   await _idbReady;

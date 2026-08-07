@@ -13,6 +13,7 @@ import {
   useAudioGenQueue,
   removeFromAudioQueue,
   clearFinishedFromAudioQueue,
+  retryFailedInAudioQueue,
   forceFailQueueItem,
   resetServerQueue,
   getSendToPlaylist,
@@ -65,6 +66,7 @@ export const InlineAudioQueue: React.FC = () => {
 
   const pendingCount = queued.length;
   const finishedCount = finished.length;
+  const failedCount = items.filter(i => i.status === 'failed').length;
 
   const handlePlay = useCallback((item: AudioQueueItem) => {
     if (!item.audioUrl) return;
@@ -132,6 +134,14 @@ export const InlineAudioQueue: React.FC = () => {
               title="Force-reset the generation queue">
               <RotateCcw className="w-2.5 h-2.5" />
               Reset
+            </button>
+          )}
+          {failedCount > 0 && (
+            <button onClick={() => retryFailedInAudioQueue()}
+              className="text-[10px] text-zinc-500 hover:text-emerald-400 transition-colors flex items-center gap-0.5"
+              title="Put failed items back in the queue and run them again">
+              <RotateCcw className="w-2.5 h-2.5" />
+              Retry {failedCount}
             </button>
           )}
           {finishedCount > 0 && (
