@@ -329,6 +329,31 @@ export function initDb(): void {
     try { db.exec(sql); } catch { /* column already exists */ }
   }
 
+  // ── "These lyrics have been generated" marker ─────────────────────────────
+  // Stored on the generations row rather than derived from audio_generations,
+  // because the whole point is that it survives the audio being deleted — from
+  // disk or from the DB. Backfilled once from the audio_generations rows that
+  // already exist so the "never generated" filter is accurate on day one.
+  const genCols = db.prepare("SELECT name FROM pragma_table_info('generations')").all() as { name: string }[];
+  const hasGenCol = (n: string) => genCols.some(c => c.name === n);
+  const needsGeneratedBackfill = !hasGenCol('audio_generated_count');
+
+  if (!hasGenCol('audio_generated_count')) {
+    db.exec('ALTER TABLE generations ADD COLUMN audio_generated_count INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasGenCol('first_generated_at')) {
+    db.exec('ALTER TABLE generations ADD COLUMN first_generated_at TEXT');
+  }
+  if (needsGeneratedBackfill) {
+    const filled = db.prepare(`
+      UPDATE generations SET
+        audio_generated_count = (SELECT COUNT(*) FROM audio_generations ag WHERE ag.generation_id = generations.id),
+        first_generated_at    = (SELECT MIN(ag.created_at) FROM audio_generations ag WHERE ag.generation_id = generations.id)
+      WHERE EXISTS (SELECT 1 FROM audio_generations ag WHERE ag.generation_id = generations.id)
+    `).run();
+    console.log(`[DB] Backfilled generated-marker for ${filled.changes} lyric generations`);
+  }
+
   // ── One-time migration: import data from lireek.db if it exists ───────────
   migrateLireekData();
 

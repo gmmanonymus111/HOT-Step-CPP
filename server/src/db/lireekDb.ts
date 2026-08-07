@@ -442,9 +442,29 @@ export function getAudioGenerations(generationId: number): Record<string, any>[]
 }
 
 export function resolveAudioGeneration(jobId: string, audioUrl: string, coverUrl?: string): void {
-  getDb().prepare(
+  const db = getDb();
+
+  // Read before the update so we can tell a first resolve from a repeat — the
+  // client calls this from more than one place and must not double-count.
+  const row = db.prepare(
+    'SELECT generation_id, audio_url FROM audio_generations WHERE hotstep_job_id = ?'
+  ).get(jobId) as { generation_id: number; audio_url: string | null } | undefined;
+
+  db.prepare(
     'UPDATE audio_generations SET audio_url = ?, cover_url = ? WHERE hotstep_job_id = ?'
   ).run(audioUrl, coverUrl ?? null, jobId);
+
+  // Permanently mark the lyrics as generated. Counted on resolve rather than at
+  // link time so a job that failed or was cancelled doesn't burn the lyrics, and
+  // held on the generations row so deleting the audio never clears it.
+  if (row && !row.audio_url) {
+    db.prepare(`
+      UPDATE generations SET
+        audio_generated_count = audio_generated_count + 1,
+        first_generated_at    = COALESCE(first_generated_at, ?)
+      WHERE id = ?
+    `).run(new Date().toISOString(), row.generation_id);
+  }
 }
 
 export function deleteAudioGeneration(id: number): boolean {
