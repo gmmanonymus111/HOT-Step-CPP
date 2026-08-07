@@ -288,6 +288,36 @@ const RETRY_INTERVAL = 150;
  */
 let _suppressPlayFalse = false;
 
+/**
+ * Auto-advance past a track that could not be played.
+ *
+ * These used to be bare setTimeout(() => next(), n) calls that nothing held a
+ * handle to, so one scheduled against a track you had already moved on from
+ * still fired and skipped a track for no visible reason — and several could be
+ * in flight at once. Now: only one is ever pending, it is cancelled when a new
+ * track loads, and it checks it is still sitting on the track that failed
+ * before doing anything.
+ */
+let _autoAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelAutoAdvance(): void {
+  if (_autoAdvanceTimer) { clearTimeout(_autoAdvanceTimer); _autoAdvanceTimer = null; }
+}
+
+function scheduleAutoAdvance(reason: string, delayMs: number): void {
+  cancelAutoAdvance();
+  const forTrackId = _state.currentTrack?.id ?? null;
+  _autoAdvanceTimer = setTimeout(() => {
+    _autoAdvanceTimer = null;
+    const nowId = _state.currentTrack?.id ?? null;
+    if (nowId !== forTrackId) {
+      console.log(`[Playback] auto-advance (${reason}) dropped — track changed since it was scheduled`);
+      return;
+    }
+    next(`auto:${reason}`);
+  }, delayMs);
+}
+
 /** Attempt to start both players. Retries if the AUDIBLE track isn't ready. */
 function startBothPlayers(): void {
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
@@ -350,7 +380,10 @@ function startBothPlayers(): void {
     // Total failure — auto-advance if we're in a multi-track context
     _retryCount = 0;
     _suppressPlayFalse = false;
-    console.error('[Playback] Failed to load track:', _state.currentTrack?.title);
+    console.error(
+      `[Playback] gave up waiting for "${_state.currentTrack?.title}" after ${MAX_RETRIES * RETRY_INTERVAL}ms`
+      + ` (playMastered=${_state.playMastered} origReady=${origReady} altReady=${altReady})`
+    );
     setState({
       isPlaying: false,
       isLoading: false,
@@ -359,10 +392,7 @@ function startBothPlayers(): void {
 
     // Auto-advance to next track after a short delay (like a skip)
     if (_state.trackList.length > 1) {
-      setTimeout(() => {
-        console.log('[Playback] Auto-advancing past failed track');
-        next();
-      }, 500);
+      scheduleAutoAdvance('load-timeout', 500);
     }
   }
 }
@@ -416,13 +446,14 @@ function loadTrack(track: PlaybackTrack): void {
     });
     // Auto-advance if in a multi-track context
     if (_state.trackList.length > 1) {
-      setTimeout(() => next(), 300);
+      scheduleAutoAdvance('no-audio-url', 300);
     }
     return;
   }
 
   _loadingTrackId = track.id;
   _lastFinishedTrackId = null;
+  cancelAutoAdvance();
   _retryCount = 0;
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
 
@@ -559,8 +590,11 @@ export function seek(time: number): void {
   }
 }
 
-/** Advance to next track in trackList */
-export function next(): void {
+/** Advance to next track in trackList.
+ *  `reason` is diagnostic only. This is also wired directly to the skip button,
+ *  so a non-string argument (a click event) just means the user pressed it. */
+export function next(reason?: unknown): void {
+  const why = typeof reason === 'string' ? reason : 'user';
   const { trackList, trackIndex, shuffle, repeat } = _state;
   if (trackList.length === 0) return;
 
@@ -588,6 +622,7 @@ export function next(): void {
 
   const nextTrack = trackList[nextIdx];
   if (!nextTrack) return;
+  console.log(`[Playback] next(${why}) ${trackIndex}→${nextIdx} of ${trackList.length}: "${nextTrack.title}"`);
   setState({ trackIndex: nextIdx });
   persistTrackList();
   loadTrack(nextTrack);
@@ -777,6 +812,10 @@ export function setIsPlaying(playing: boolean): void {
 let _lastFinishedTrackId: string | null = null;
 export function handleFinish(which: 'original' | 'alt' = 'original'): void {
   const audible: 'original' | 'alt' = _state.playMastered ? 'alt' : 'original';
+  console.log(
+    `[Playback] finish from ${which} (audible=${audible}) "${_state.currentTrack?.title}"`
+    + ` at ${_state.currentTime.toFixed(1)}s/${_state.duration.toFixed(1)}s`
+  );
   if (which !== audible) return;
 
   if (_state.repeat === 'one') {
@@ -793,7 +832,10 @@ export function handleFinish(which: 'original' | 'alt' = 'original'): void {
   // Advance at most once per track, so a duplicate or late finish can never
   // jump two songs ahead. Reset in loadTrack, so replaying the same track works.
   const finishedId = _state.currentTrack?.id ?? null;
-  if (finishedId !== null && finishedId === _lastFinishedTrackId) return;
+  if (finishedId !== null && finishedId === _lastFinishedTrackId) {
+    console.log('[Playback] finish ignored — this track already advanced the playlist');
+    return;
+  }
   _lastFinishedTrackId = finishedId;
 
   // Only auto-advance when playing from a playlist, or when repeat-all is active.
@@ -802,7 +844,7 @@ export function handleFinish(which: 'original' | 'alt' = 'original'): void {
     || (_state.source === 'playlist' && _state.trackList.length > 1);
 
   if (shouldAdvance) {
-    next();
+    next('finish');
   } else {
     setState({ isPlaying: false });
   }
