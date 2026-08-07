@@ -344,6 +344,21 @@ export function initDb(): void {
   if (!hasGenCol('first_generated_at')) {
     db.exec('ALTER TABLE generations ADD COLUMN first_generated_at TEXT');
   }
+
+  // Downloads: "I liked this one enough to keep it". Same reasoning as above —
+  // stored on the generations row so deleting the audio afterwards, which is
+  // exactly what happens once a track has been downloaded, doesn't lose it.
+  // downloaded_at on audio_generations makes the count per-track rather than
+  // per-click, so grabbing both the original and the master, or downloading the
+  // same file twice, still counts as one kept version.
+  // No backfill is possible: nothing recorded downloads before now.
+  if (!hasGenCol('download_count')) {
+    db.exec('ALTER TABLE generations ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasGenCol('first_downloaded_at')) {
+    db.exec('ALTER TABLE generations ADD COLUMN first_downloaded_at TEXT');
+  }
+  try { db.exec('ALTER TABLE audio_generations ADD COLUMN downloaded_at TEXT'); } catch { /* exists */ }
   if (needsGeneratedBackfill) {
     const filled = db.prepare(`
       UPDATE generations SET

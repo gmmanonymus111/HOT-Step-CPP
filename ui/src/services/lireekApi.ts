@@ -103,6 +103,10 @@ export interface Generation {
    *  deleting the audio does not clear it. 0 / undefined = never generated. */
   audio_generated_count?: number;
   first_generated_at?: string;
+  /** How many rendered versions of these lyrics have been downloaded. Permanent,
+   *  and counted per track rather than per click. 0 / undefined = none kept. */
+  download_count?: number;
+  first_downloaded_at?: string;
   // Context fields (from /generations/all)
   artist_id?: number;
   artist_name?: string;

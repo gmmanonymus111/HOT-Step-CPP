@@ -467,6 +467,37 @@ export function resolveAudioGeneration(jobId: string, audioUrl: string, coverUrl
   }
 }
 
+/**
+ * Record that a track was downloaded, against the lyrics it came from.
+ *
+ * Keyed on the ORIGINAL audio_url, because that is what audio_generations
+ * stores and it is the same whether the user took the original or the master.
+ * Marks the audio_generations row so each rendered track counts once: taking
+ * both versions, or the same file twice, is still one kept version.
+ *
+ * Returns true if this was the first download of that track.
+ */
+export function markDownloadedByAudioUrl(audioUrl: string): boolean {
+  if (!audioUrl) return false;
+  const db = getDb();
+
+  const row = db.prepare(
+    'SELECT id, generation_id, downloaded_at FROM audio_generations WHERE audio_url = ?'
+  ).get(audioUrl) as { id: number; generation_id: number; downloaded_at: string | null } | undefined;
+
+  if (!row || row.downloaded_at) return false;
+
+  const now = new Date().toISOString();
+  db.prepare('UPDATE audio_generations SET downloaded_at = ? WHERE id = ?').run(now, row.id);
+  db.prepare(`
+    UPDATE generations SET
+      download_count      = download_count + 1,
+      first_downloaded_at = COALESCE(first_downloaded_at, ?)
+    WHERE id = ?
+  `).run(now, row.generation_id);
+  return true;
+}
+
 export function deleteAudioGeneration(id: number): boolean {
   return getDb().prepare('DELETE FROM audio_generations WHERE id = ?').run(id).changes > 0;
 }

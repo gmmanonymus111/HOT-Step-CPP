@@ -59,6 +59,12 @@ type QueueMode = 'profile' | 'generate' | 'audio' | 'presets' | 'fetch-lyrics';
 /** Which end of an album's written songs to take when queueing a fixed number. */
 type AudioOrder = 'newest' | 'oldest';
 
+/** Which already-done songs to leave out of a bulk audio run.
+ *  'generated'  — anything that has ever been rendered
+ *  'downloaded' — only ones you kept a copy of, so unloved renders can be re-rolled
+ *  'none'       — queue everything */
+type AudioSkipMode = 'generated' | 'downloaded' | 'none';
+
 /** One album's worth of written songs, ready to queue for audio. */
 interface AudioAlbumRow {
   lyricsSetId: number;
@@ -122,8 +128,10 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const [audioCount, setAudioCount] = useState(1);
   const [audioOrder, setAudioOrder] = useState<AudioOrder>('newest');
   const [audioFilter, setAudioFilter] = useState('');
-  // On by default: the point of a bulk run is fresh songs, not repeats.
-  const [audioOnlyUngenerated, setAudioOnlyUngenerated] = useState(true);
+  // What counts as "already done" and should be left out of a bulk run.
+  // Defaults to 'generated' — the previous behaviour. 'downloaded' is the looser
+  // one: it lets you re-roll songs you generated but never thought worth keeping.
+  const [audioSkip, setAudioSkip] = useState<AudioSkipMode>('generated');
   const [audioEnqueuing, setAudioEnqueuing] = useState(false);
   const [audioProgress, setAudioProgress] = useState({ current: 0, total: 0 });
 
@@ -215,9 +223,11 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
     const profileToSet = new Map(profiles.map(p => [p.id, p.lyrics_set_id]));
     const rows = new Map<number, AudioAlbumRow>();
     for (const g of audioGens) {
-      // Skip lyrics that have already had audio made from them. The marker is
-      // permanent, so this holds even for songs whose audio was later deleted.
-      if (audioOnlyUngenerated && (g.audio_generated_count ?? 0) > 0) continue;
+      // Leave out lyrics that are already "done". Both markers are permanent, so
+      // this holds for songs whose audio was downloaded and then deleted — which
+      // is the normal end state for a track that turned out well.
+      if (audioSkip === 'generated' && (g.audio_generated_count ?? 0) > 0) continue;
+      if (audioSkip === 'downloaded' && (g.download_count ?? 0) > 0) continue;
       const lsId = profileToSet.get(g.profile_id);
       if (lsId == null) continue;                       // orphan generation, nothing to queue against
       let row = rows.get(lsId);
@@ -240,7 +250,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
     return Array.from(rows.values()).sort((a, b) =>
       a.artistName.localeCompare(b.artistName, undefined, { sensitivity: 'base' })
       || a.album.localeCompare(b.album, undefined, { sensitivity: 'base' }));
-  }, [audioGens, profiles, lyricsSets, audioOnlyUngenerated]);
+  }, [audioGens, profiles, lyricsSets, audioSkip]);
 
   const audioVisible = useMemo<AudioAlbumRow[]>(() => {
     const needle = audioFilter.toLowerCase().trim();
@@ -580,12 +590,19 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                 </div>
               )}
 
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" checked={audioOnlyUngenerated}
-                  onChange={e => { setAudioOnlyUngenerated(e.target.checked); setSelected(new Set()); }}
-                  className="accent-purple-500" />
-                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.onlyUngenerated')}</span>
-              </label>
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.skipSongs')}</span>
+                <div className="flex items-center gap-1 p-0.5 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10">
+                  {(['generated', 'downloaded', 'none'] as AudioSkipMode[]).map(m => (
+                    <button key={m}
+                      onClick={() => { setAudioSkip(m); setSelected(new Set()); }}
+                      title={t(`lyric.skip.${m}.hint`)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${audioSkip === m ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                      {t(`lyric.skip.${m}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <div className="text-[10px] text-zinc-500">
                 {audioLoading
