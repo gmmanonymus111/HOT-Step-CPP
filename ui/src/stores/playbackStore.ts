@@ -352,6 +352,10 @@ function startBothPlayers(): void {
   if (audibleReady) {
     _retryCount = 0;
     _suppressPlayFalse = false;
+    // Arm the once-per-track finish guard here rather than in loadTrack. Doing
+    // it at load time cleared it before the outgoing player's trailing finish
+    // arrived, so that event looked like a fresh track ending and skipped one.
+    _lastFinishedTrackId = null;
     setState({ isPlaying: true, isLoading: false, loadError: null });
     return;
   }
@@ -452,7 +456,6 @@ function loadTrack(track: PlaybackTrack): void {
   }
 
   _loadingTrackId = track.id;
-  _lastFinishedTrackId = null;
   cancelAutoAdvance();
   _retryCount = 0;
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
@@ -817,6 +820,16 @@ export function handleFinish(which: 'original' | 'alt' = 'original'): void {
     + ` at ${_state.currentTime.toFixed(1)}s/${_state.duration.toFixed(1)}s`
   );
   if (which !== audible) return;
+
+  // Re-pointing a player at a new URL makes it emit one last finish for the
+  // audio it is dropping. That arrives synchronously inside the load we just
+  // triggered, so it carries the OUTGOING track's position against the incoming
+  // track's not-yet-known duration — 237.2s/0.0s. A real end-of-track finish
+  // only happens on a track that has loaded and reached its end.
+  if (_state.isLoading || _state.duration <= 0) {
+    console.log('[Playback] finish ignored — fired while the next track was still loading');
+    return;
+  }
 
   if (_state.repeat === 'one') {
     // Repeat current track

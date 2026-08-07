@@ -197,7 +197,14 @@ export const WaveformPlayer = forwardRef<WaveformPlayerHandle, WaveformPlayerPro
     const loadUrl = useCallback((url: string) => {
       if (wsRef.current) {
         regionsRef.current?.clearRegions();
-        wsRef.current.load(url);
+        // Loading over a track that is still playing aborts its pending play()
+        // promise. That rejection is expected and means nothing — but unhandled
+        // it fills the console with AbortError and buries real failures.
+        Promise.resolve(wsRef.current.load(url)).catch((err: unknown) => {
+          if ((err as Error)?.name !== 'AbortError') {
+            console.error('[WaveformPlayer] load failed:', err);
+          }
+        });
       } else {
         pendingUrlRef.current = url;
       }
