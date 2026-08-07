@@ -99,7 +99,12 @@ export interface Generation {
   user_prompt?: string;
   extra_instructions?: string;
   created_at: string;
+  /** How many times audio has been generated from these lyrics. Permanent —
+   *  deleting the audio does not clear it. 0 / undefined = never generated. */
+  audio_generated_count?: number;
+  first_generated_at?: string;
   // Context fields (from /generations/all)
+  artist_id?: number;
   artist_name?: string;
   album?: string;
 }
