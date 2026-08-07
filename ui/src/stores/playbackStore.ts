@@ -815,10 +815,6 @@ export function setIsPlaying(playing: boolean): void {
 let _lastFinishedTrackId: string | null = null;
 export function handleFinish(which: 'original' | 'alt' = 'original'): void {
   const audible: 'original' | 'alt' = _state.playMastered ? 'alt' : 'original';
-  console.log(
-    `[Playback] finish from ${which} (audible=${audible}) "${_state.currentTrack?.title}"`
-    + ` at ${_state.currentTime.toFixed(1)}s/${_state.duration.toFixed(1)}s`
-  );
   if (which !== audible) return;
 
   // Re-pointing a player at a new URL makes it emit one last finish for the
@@ -826,10 +822,7 @@ export function handleFinish(which: 'original' | 'alt' = 'original'): void {
   // triggered, so it carries the OUTGOING track's position against the incoming
   // track's not-yet-known duration — 237.2s/0.0s. A real end-of-track finish
   // only happens on a track that has loaded and reached its end.
-  if (_state.isLoading || _state.duration <= 0) {
-    console.log('[Playback] finish ignored — fired while the next track was still loading');
-    return;
-  }
+  if (_state.isLoading || _state.duration <= 0) return;
 
   if (_state.repeat === 'one') {
     // Repeat current track
