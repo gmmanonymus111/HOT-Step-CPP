@@ -1091,10 +1091,12 @@ export function buildGenerationPrompt(
     //
     // The old formula charged every line the same time and scaled that time
     // with BPM (7.5s/line at 80 BPM down to 5.3s at 180). Both halves were
-    // wrong. It under-budgeted lyric content — 35 lines for a 239s song whose
-    // real-world allowance is ~42 — and because average line length varies
-    // 1.89x between songs (6.1 to 11.4 words), a line count cannot express the
-    // budget anyway.
+    // wrong, but the damage is VARIANCE, not bias: generated songs already
+    // averaged 1.16 words/sec against the corpus 1.20, i.e. the median song
+    // was fine. The spread is the problem — p5 0.74 to p95 1.63 w/s, a 2.19x
+    // range — because average line length varies 1.89x between songs (6.1 to
+    // 11.4 words) and a line count cannot express a time budget. Short-lined
+    // songs got far too much time, wordy ones far too little.
     //
     // Why it matters: the LM stops at EXACTLY the requested duration (98.4% of
     // 1248 logged runs, within +/-1s) — it is not truncated, it is obeying the
@@ -1128,6 +1130,7 @@ export function buildGenerationPrompt(
     lines.push(`- Well OVER ${targetWords} words: the song runs out of time and stops mid-section.`);
     lines.push(`- Count your words before finalising. Within about 10% of ${targetWords} is right.`);
     lines.push('- Repeated chorus lines DO count — a repeat takes just as long to sing as a new line.');
+    lines.push(`- If this song genuinely wants fewer words than ${targetWords} — a sparse, atmospheric or riff-led track — then DECLARE the instrumental time instead of leaving it implicit: add [Instrumental], [Guitar Solo], [Build] or [Breakdown] sections where that space belongs. Real records fill their gaps deliberately; an undeclared gap gets filled with aimless repetition.`);
   }
 
   lines.push(
