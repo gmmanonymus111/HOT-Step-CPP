@@ -73,6 +73,15 @@ interface PostProcessParams {
   /** StableStep DoRA adapters (models/sa3-adapters/<name>.gguf) merged into
    *  the SA3 DiT at load with per-adapter strength. Forces the GGUF backend. */
   stableStepAdapters?: Array<{ name: string; scale: number }>;
+  /** Re-encode the isolated vocal stem through the PP-VAE before recombining.
+   *  Default OFF — the PP-VAE is a lossy 60:1 autoencoder round trip: measured
+   *  against a resample-only control it costs ~2 dB across the midrange rising
+   *  to ~6 dB above 16 kHz, halves the energy above 10 kHz, and drops
+   *  input/output coherence below 0.1 above 4 kHz (i.e. the top octaves are
+   *  resynthesised, not reproduced). It does smooth AS1.5 vocal fizz, so it
+   *  stays available — but opt-in. Off = the original AS1.5 vocal stem is
+   *  recombined with the SA3-refined instrumental untouched. */
+  stableStepVocalPpVae?: boolean;
   /** Preserve source dynamics: engine-side windowed envelope match of the
    *  refined audio to the pre-refine source (counters mastered-density
    *  "loudness war" character from adapters trained on commercial masters). */
@@ -254,8 +263,8 @@ export async function runPostProcessingChain(
 
     // ── Shared vocal separation (StableStep stem workflow + Whisper isolation) ──
     // 2-stem vocal/instrumental split, run at most ONCE per track. Consumers:
-    //   - StableStep (vocal gens): SA3-refines the instrumental stem, cleans
-    //     the vocal stem, recombines.
+    //   - StableStep (vocal gens): SA3-refines the instrumental stem and
+    //     recombines it with the vocal stem.
     //   - Whisper isolation (onVocalStem): the vocal stem is written to a temp
     //     WAV and handed to the caller BEFORE the SA3 refine so CPU
     //     transcription overlaps the GPU work.
@@ -312,7 +321,8 @@ export async function runPostProcessingChain(
     // ── StableStep: SA3 SDEdit refine (before PP-VAE) ──
     // Instrumental gens: refine the whole mix through the SA3 model.
     // Vocal gens: consume the shared split above — SA3-refine the
-    // instrumental, PP-VAE the vocals, then recombine sample-wise in Node.
+    // instrumental, optionally PP-VAE the vocals (off by default, see
+    // stableStepVocalPpVae), then recombine sample-wise in Node.
     if (stableStepOn) {
       const ssStart = performance.now();
       try {
@@ -367,8 +377,8 @@ export async function runPostProcessingChain(
             fs.writeFileSync(processedPath, refined);
           } else {
             // Stems from the shared split above (44.1 kHz). The refined
-            // instrumental is requested at 48 kHz (out_sr) to match PP-VAE's
-            // fixed 48 kHz output so the final mix rates agree.
+            // instrumental is requested at 48 kHz (out_sr) to match the vocal
+            // path's fixed 48 kHz output so the final mix rates agree.
             const vs = vocalSep;
 
             setStage(`StableStep: refining instrumental${suffix}...`);
@@ -377,16 +387,40 @@ export async function runPostProcessingChain(
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);
+
+            // The raw stem is 44.1 kHz and has to reach 48 kHz to mix with the
+            // refined instrumental. /pp-vae-reencode?blend=1.0 returns straight
+            // after the engine's 48 kHz decode, before any VAE work (see
+            // hot-step-server.cpp), so it is a pure resample that preserves
+            // level to within 0.01 dB — measured, not assumed.
+            const rawVocalsAt48k = async (): Promise<Buffer> => {
+              try {
+                return await aceClient.submitPpVaeReencode(vs.vocalBuf, 1.0);
+              } catch (rErr: any) {
+                // That endpoint 501s when no PP-VAE model is installed, even at
+                // blend=1.0. Fall back to a solo-stem recombine — it resamples,
+                // but ALSO peak-normalises to -1 dBFS (supersep_recombine in
+                // supersep.cpp), which would push the vocal several dB above
+                // the instrumental. Undo that by matching the source RMS.
+                log('WARNING', `[StableStep] 48 kHz resample via PP-VAE passthrough failed `
+                  + `(${rErr.message}) — falling back to stem recombine`);
+                const recombined = await aceClient.superSepRecombine(vs.sepId,
+                  vs.stems.map(s => ({ index: s.index, volume: 1.0, muted: s.index !== vs.vocalIndex })));
+                return matchRms(recombined, vs.vocalBuf);
+              }
+            };
+
             let cleanVocals: Buffer;
-            try {
-              cleanVocals = await aceClient.submitPpVaeReencode(vs.vocalBuf, 0.0); // 48 kHz out
-            } catch (vErr: any) {
-              log('WARNING', `[StableStep] Vocal PP-VAE failed, using raw vocal stem: ${vErr.message}`);
-              // Raw stem is 44.1 kHz — round-trip through /sa3-refine at
-              // strength 0 is wasteful, so upsample via the engine's
-              // recombine of the solo vocal stem (48 kHz out) instead.
-              cleanVocals = await aceClient.superSepRecombine(vs.sepId,
-                vs.stems.map(s => ({ index: s.index, volume: 1.0, muted: s.index !== vs.vocalIndex })));
+            if (params.stableStepVocalPpVae) {
+              try {
+                cleanVocals = await aceClient.submitPpVaeReencode(vs.vocalBuf, 0.0); // 48 kHz out
+              } catch (vErr: any) {
+                log('WARNING', `[StableStep] Vocal PP-VAE failed, using raw vocal stem: ${vErr.message}`);
+                cleanVocals = await rawVocalsAt48k();
+              }
+            } else {
+              log('INFO', '[StableStep] Vocal PP-VAE off — remixing the original AS1.5 vocal stem (48 kHz resample only)');
+              cleanVocals = await rawVocalsAt48k();
             }
 
             setStage(`StableStep: recombining${suffix}...`);
@@ -687,6 +721,33 @@ function encodeWav16(samples: Float32Array, sampleRate: number, numChannels: num
     out.writeInt16LE(v, 44 + s * 2);
   }
   return out;
+}
+
+/** Rescale `wav` so its RMS matches `reference`'s, capped so the result never
+ *  exceeds the reference peak. Used to undo the -1 dBFS peak normalisation that
+ *  supersep_recombine applies, which would otherwise change the vocal level
+ *  relative to the instrumental. Sample rates may differ. */
+function matchRms(wav: Buffer, reference: Buffer): Buffer {
+  const w = parseWavToFloat(wav);
+  const r = parseWavToFloat(reference);
+  const rms = (s: Float32Array) => {
+    let acc = 0;
+    for (let i = 0; i < s.length; i++) acc += s[i] * s[i];
+    return s.length ? Math.sqrt(acc / s.length) : 0;
+  };
+  const wRms = rms(w.samples);
+  const rRms = rms(r.samples);
+  if (wRms < 1e-8 || rRms < 1e-8) return wav;
+
+  let gain = rRms / wRms;
+  let wPeak = 0, rPeak = 0;
+  for (let i = 0; i < w.samples.length; i++) wPeak = Math.max(wPeak, Math.abs(w.samples[i]));
+  for (let i = 0; i < r.samples.length; i++) rPeak = Math.max(rPeak, Math.abs(r.samples[i]));
+  if (wPeak * gain > rPeak + 0.01) gain = rPeak / (wPeak + 1e-8);
+
+  const out = new Float32Array(w.samples.length);
+  for (let i = 0; i < w.samples.length; i++) out[i] = w.samples[i] * gain;
+  return encodeWav16(out, w.sampleRate, w.numChannels);
 }
 
 /** Sum two WAV buffers sample-wise (missing tail treated as silence) with a

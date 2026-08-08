@@ -1154,6 +1154,9 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         : [],
       // Preserve source dynamics (envelope match) — default ON
       stableStepPreserveDynamics: job.params.stableStepPreserveDynamics !== false,
+      // PP-VAE re-encode of the vocal stem — default OFF (lossy round trip;
+      // omitted = the original AS1.5 vocals are recombined untouched)
+      stableStepVocalPpVae: job.params.stableStepVocalPpVae === true,
       // Source blending: 'off' | 'crossover' | 'mix'
       stableStepBlendMode: (job.params.stableStepBlendMode === 'crossover' || job.params.stableStepBlendMode === 'mix')
         ? job.params.stableStepBlendMode as 'crossover' | 'mix' : 'off' as const,

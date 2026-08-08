@@ -701,6 +701,26 @@ export const PostProcessingDropdown: React.FC = () => {
                 </span>
               </label>
 
+              {/* Vocal stem handling: leave the AS1.5 vocals alone, or smooth
+                  them through the PP-VAE at the cost of high-end detail */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={gp.stableStepVocalPpVae === true}
+                  onChange={e => gp.setStableStepVocalPpVae(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span className="flex-1">
+                  <span className="block text-xs text-zinc-700 dark:text-zinc-300">Re-encode vocals through PP-VAE</span>
+                  <span className="block text-[10px] text-zinc-500 leading-relaxed">
+                    Smooths fizzy or mechanical AS1.5 vocals, but the round trip is
+                    lossy — it costs about 5 dB of air above 10 kHz and resynthesises
+                    the top octaves rather than reproducing them. Off: the original
+                    vocal stem is recombined with the SA3 instrumental untouched.
+                  </span>
+                </span>
+              </label>
+
               {/* Source blend: crossover splice or full-band mix with the AS1.5 source */}
               <div>
                 <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Source blend</label>

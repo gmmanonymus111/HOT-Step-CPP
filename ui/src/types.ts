@@ -269,6 +269,7 @@ export interface GenerationParams {
   stableStepBackend?: 'auto' | 'onnx' | 'gguf'; // engine backend (default 'auto')
   stableStepAdapters?: Array<{ name: string; scale: number }>; // DoRA adapters (GGML backend only)
   stableStepPreserveDynamics?: boolean; // envelope-match refined audio to source dynamics
+  stableStepVocalPpVae?: boolean; // re-encode the vocal stem through PP-VAE (default off — lossy)
   stableStepBlendMode?: 'off' | 'crossover' | 'mix'; // source blending mode
   stableStepCrossoverHz?: number;      // crossover center (crossover mode)
   stableStepCrossoverWidthHz?: number; // transition width (crossover mode)
