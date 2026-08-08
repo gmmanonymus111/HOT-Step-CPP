@@ -149,6 +149,18 @@ const CAPTION_EXAMPLE_MAX_CHARS = 2000;
 // median only when no measured rate exists.
 export const GLOBAL_WORDS_PER_SECOND = 1.20;
 
+// The vocal-idle floor. An artist's measured words/TOTAL-duration bakes their
+// INSTRUMENTAL share into the rate — and the model cannot render instrumental
+// time it is not told about. Deriving duration = words / 0.71 for Funeral For
+// A Friend stretched 235 words over 331s and the extra ~2 minutes rendered as
+// aimless looping riffs (Rob, 2026-08-08 — the first real listen after the
+// per-artist retime). Real FFAF fills that time with COMPOSED instrumental
+// passages; a generation's only channel for those is declared section tags.
+// So for DURATION DERIVATION the effective rate is floored here: undeclared
+// time beyond ~1/0.95 s-per-word is filler risk, not artistry. Declared
+// instrumental sections still add real time on top via the allowance.
+export const VOCAL_FLOOR_WORDS_PER_SECOND = 0.95;
+
 const SECTION_TAG_LINE = /^[ \t]*\[[^\]]{1,60}\][ \t]*$/;
 
 /** Words of singable lyric in a lyrics text — section-tag lines excluded. */
@@ -195,7 +207,10 @@ export function reconcileDurationToLyrics(
  *  (a derived 430s that the clamp would hide is a "regenerate the lyrics"
  *  signal, not a retiming). */
 export function lyricsDurationSeconds(lyrics: string, bpm: number, wordsPerSec?: number): number {
-  const rate = wordsPerSec && wordsPerSec > 0 ? wordsPerSec : GLOBAL_WORDS_PER_SECOND;
+  // Floored: a low artist rate (instrumental-heavy artist) must NOT stretch
+  // the duration beyond what the words can carry — see VOCAL_FLOOR note.
+  const raw = wordsPerSec && wordsPerSec > 0 ? wordsPerSec : GLOBAL_WORDS_PER_SECOND;
+  const rate = Math.max(raw, VOCAL_FLOOR_WORDS_PER_SECOND);
   const words = countLyricWords(lyrics);
   if (!words) return 0;
 
@@ -1306,7 +1321,15 @@ export function buildGenerationPrompt(
     // it to a transitions-deducted figure, that discounts the same time twice.
     const paceEnrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
     const artistRate = paceEnrich && paceEnrich.wordsPerSec > 0 ? paceEnrich.wordsPerSec : 0;
-    const wordsPerSecond = artistRate || GLOBAL_WORDS_PER_SECOND;
+    // FLOORED for the word target: a low measured rate means the artist's
+    // records are instrumental-heavy, and the model cannot render instrumental
+    // time it is not told about — a word target of duration x 0.51 (Muse)
+    // leaves half the track unconditioned and it renders as looping filler.
+    // The word budget assumes the floor; the artist's real instrumental share
+    // is asked for EXPLICITLY as declared sections below.
+    const wordsPerSecond = Math.max(artistRate || GLOBAL_WORDS_PER_SECOND, VOCAL_FLOOR_WORDS_PER_SECOND);
+    const instrumentalShare = artistRate > 0 && artistRate < VOCAL_FLOOR_WORDS_PER_SECOND
+      ? Math.round(100 * (1 - artistRate / VOCAL_FLOOR_WORDS_PER_SECOND)) : 0;
     const WORDS_PER_LINE_LO = 5.5;   // sparse phrasing -> more lines needed
     const WORDS_PER_LINE_HI = 8.0;   // wordy phrasing  -> fewer lines needed
     const singableBars = totalBars - transitionBars;
@@ -1322,6 +1345,9 @@ export function buildGenerationPrompt(
     lines.push(artistRate
       ? `This artist sings a measured ~${artistRate.toFixed(2)} words per second (median of ${paceEnrich!.pacedSongs} of their real recordings).`
       : `Assuming a typical ~${GLOBAL_WORDS_PER_SECOND.toFixed(2)} words per second of vocal pacing (no measured rate for this artist).`);
+    if (instrumentalShare > 0) {
+      lines.push(`That low rate means roughly ${instrumentalShare}% of this artist's song time is INSTRUMENTAL, not sung. Do not thin the lyrics to imitate that — instead DECLARE the instrumental time as sections: give the song ${instrumentalShare >= 30 ? 'several' : 'one or two'} explicit [Instrumental], [Guitar Solo], [Build] or [Breakdown] sections (empty, no lyric lines) where this artist would put them. Undeclared empty time renders as aimless looping filler.`);
+    }
     lines.push(`*** WRITE APPROXIMATELY ${targetWords} WORDS of lyrics in total, across ALL sections. ***`);
     lines.push(`That is roughly ${minLyricLines}-${maxLyricLines} lines depending on how long your lines are — count WORDS, not lines, because a wordy line takes far longer to sing than a short one.`);
     lines.push('');
