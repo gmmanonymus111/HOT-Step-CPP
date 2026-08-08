@@ -45,8 +45,17 @@ if (!WORK || !fs.existsSync(WORK)) { console.error('usage: caption-replan-apply.
 const MIN_CHARS = 1100, MAX_CHARS = 1700;
 const KEY_IN_PROSE = /\b[A-G][#b]?\s+(Major|Minor)\b/;          // case-sensitive: "a minor-key riff" is fine
 const BPM_IN_PROSE = /\b\d+\s*bpm\b|\b\d+\/\d\b/i;
-const SECTION_TAG_LEAK = /\[|\b(intro|verse|pre-chorus|chorus|bridge|outro|breakdown)-[a-z]+(-[a-z]+)*\b/i;
-const SLOP = /\b(captivating|emotionally resonant|nice vibe|good energy|keeps you moving|hard to resist|a journey|the listener)\b/i;
+// Tag leakage means a SECTION TAG pasted in as prose ("the bridge-sparse-and-quiet"),
+// which is what the Haiku arm did. It does NOT mean any hyphenated compound
+// containing a section word: "chorus-pedal shimmer" and "chorus-treated tone"
+// are the guitar effect, and "verse-chorus cycles" / "pre-chorus-into-chorus
+// lift" are exactly the arrangement prose sentences 7-9 are supposed to use.
+// So: a literal bracket, or a section word hyphenated to a TAG DESCRIPTOR.
+const SECTION_TAG_LEAK =
+  /\[|\b(intro|verse|pre-?chorus|chorus|bridge|outro|breakdown)-(sparse|heavy|high|quiet|screamed|whispered|menacing|building|final|instrumental|spoken)\b/i;
+// "listeners feel" is the banned vagueness; "drums sitting close to the
+// listener" is a normal mix descriptor, so the bare noun must not trip this.
+const SLOP = /\b(captivating|emotionally resonant|nice vibe|good energy|keeps you moving|hard to resist|a captivating journey|listeners? (?:feel|will feel|are left))\b/i;
 
 const sentenceCount = (s: string) => s.split(/(?<=[.!?])\s+/).filter(x => x.trim()).length;
 
@@ -66,8 +75,12 @@ export function validateCaption(c: unknown, artist: string, title: string): stri
   if (/["“”]/.test(s)) f.push('quotes-lyrics');
   const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (artist && new RegExp(`\\b${esc(artist)}\\b`, 'i').test(s)) f.push('artist-named');
-  const bare = title.replace(/ - (Fable|Opus|Sonnet|Haiku|Claude)[^-]*$/i, '').trim();
-  if (bare.length > 3 && new RegExp(`\\b${esc(bare)}\\b`, 'i').test(s)) f.push('title-named');
+  // Only multi-word titles are checked. A one-word title is usually a common
+  // noun the caption may legitimately need — "hymn-like, almost chorale motion"
+  // for a song called Hymn, "the lead vocal delivered dry" for one called
+  // Delivered — and flagging those rejects good captions for no reason.
+  const bare = title.replace(/ - (Fable|Opus|Sonnet|Haiku|Claude|Nemotron)[^-]*$/i, '').trim();
+  if (bare.includes(' ') && new RegExp(`\\b${esc(bare)}\\b`, 'i').test(s)) f.push('title-named');
   return f;
 }
 
