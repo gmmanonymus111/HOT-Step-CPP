@@ -23,6 +23,41 @@ export type PromptProfile = Record<string, any>;
 
 // ── Blueprint helpers ───────────────────────────────────────────────────────
 
+// ── Section-tag vocabulary ──────────────────────────────────────────────────
+//
+// Taken from the BASE MODEL's own documentation — ACE-Step-1.5 docs/en
+// Tutorial.md and ace_step_musicians_guide.md — not invented here. Those docs
+// list the tags below and state that "structure tags can be combined with `-`
+// for finer control" ([Chorus - anthemic], [Bridge - whispered]), with one
+// caution: "Don't stack too many tags."
+//
+// Two corrections this encodes (2026-08-08), both measured over the 1487
+// existing generations:
+//
+//   * [Build], [Drop] and [Breakdown] are DOCUMENTED base tags, but the prompts
+//     used to ban them as "invented labels". Result: zero uses of Build, Drop,
+//     Breakdown, Instrumental, Guitar Solo, Piano Interlude, Fade Out and
+//     Silence across all 1487 songs — the entire dynamic and instrumental half
+//     of the vocabulary was suppressed. Those are exactly the markers an
+//     electronic/metal arrangement needs.
+//   * [Instrumental Break: Guitar Solo] was given as an EXAMPLE, so it was
+//     copied 54 times. Neither the head nor the colon is documented; the docs
+//     specify a dash and the head [Instrumental] or [Guitar Solo].
+//
+// [Post-Chorus] and [Interlude] are not in the docs but appear 408 and 251
+// times in the real-song training lyrics, so they are demonstrably understood
+// and stay permitted.
+export const SECTION_LABEL_RULE: string =
+  '- SECTION HEADERS use square brackets. Recognised labels: [Intro], [Verse 1], [Verse 2], [Verse 3], ' +
+  '[Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Outro], ' +
+  '[Build], [Drop], [Breakdown], [Instrumental], [Guitar Solo], [Piano Interlude], [Fade Out], [Silence].\n' +
+  '  [Build], [Drop] and [Breakdown] are first-class labels — use them where the arrangement calls for them, ' +
+  'especially in electronic, dance and metal styles.\n' +
+  '  You may append ONE short performance annotation after a DASH: [Chorus - High Energy], ' +
+  '[Bridge - Sparse and Quiet], [Instrumental - Saxophone Solo]. Never use a colon ([Instrumental Break: Guitar Solo] is wrong), ' +
+  'and do not stack several annotations on one tag.\n' +
+  '  Do NOT invent labels like [X], [Hook] or [Solo] — for a solo use [Guitar Solo] or [Instrumental - <instrument> Solo].';
+
 export const BLUEPRINT_LABEL_NAMES: Record<string, string> = {
   V: 'Verse', C: 'Chorus', B: 'Bridge', PC: 'Pre-Chorus',
   POC: 'Post-Chorus', I: 'Intro', O: 'Outro', IL: 'Interlude',
@@ -300,9 +335,7 @@ The rules below come in two tiers. TIER 1 rules are mechanical requirements of t
 === TIER 1: PIPELINE REQUIREMENTS (HARD — the music model breaks if violated) ===
 
 - NO TITLE: Write ONLY the lyrics — no "Title:" line, no heading. Start directly with the first section header.
-- SECTION HEADERS use square brackets. Recognised labels: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro].
-  You may append a short performance annotation where it helps the music: [Chorus - High Energy], [Bridge - Sparse and Quiet], [Instrumental Break: Guitar Solo].
-  Do NOT use bare invented labels like [X], [Drop], [Breakdown], [Solo], [Hook] — the pipeline does not understand them.
+${SECTION_LABEL_RULE}
 - PUNCTUATION: Every lyric line MUST end with punctuation (period, comma, exclamation mark, question mark, dash, or ellipsis). The vocal model uses it for phrasing.
 - CHORUS: Every song needs at least one [Chorus]. If a section repeats throughout the song, it is a chorus — label it [Chorus], not [Bridge]. A bridge is a one-time contrasting section, typically appearing once before the final chorus.
 - LINE BUDGET: If the user prompt gives a duration budget with a maximum total line count, treat it as a hard ceiling — the music model skips lines beyond it and the song comes out truncated.
@@ -584,8 +617,7 @@ REFINEMENT RULES
 
 FORMATTING RULES
 - The FIRST LINE must be: Title: <song title> (keep the original title unless it's clearly weak or uses banned title words)
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID SECTION LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro]. A short performance annotation after the label is fine ([Chorus - High Energy], [Instrumental Break: Guitar Solo]). Do NOT use bare invented labels like [X], [Breakdown], [Drop], [Solo], [Hook].
+${SECTION_LABEL_RULE}
 - Every lyric line must end with proper punctuation
 - Do NOT include any commentary, notes, explanations, or annotations
 - Output ONLY the title and refined lyrics
@@ -731,8 +763,7 @@ export const INSTAGEN_LYRIC_SYSTEM_PROMPT = `You are a talented songwriter. You 
 
 FORMATTING RULES (MANDATORY):
 - Start with the first section header (e.g. [Intro] or [Verse 1]). No title line.
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro]. No other bare labels.
+${SECTION_LABEL_RULE}
 - Every lyric line must end with punctuation (period, comma, exclamation, question mark, dash, or ellipsis).
 - Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse.
 
@@ -810,9 +841,8 @@ CRITICAL TAG RULES:
 === LYRICS (the "lyrics" field) ===
 
 FORMATTING:
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Outro], [Instrumental Break]
-- Section annotations with context are encouraged: [Verse 1: Female Vocal], [Chorus - High Energy with Layered Vocals], [Bridge - Atmospheric and Sparse], [Instrumental Break: Saxophone Solo]
+${SECTION_LABEL_RULE}
+- Section annotations are encouraged where they help the arrangement: [Verse 1 - Female Vocal], [Chorus - High Energy], [Bridge - Atmospheric and Sparse], [Instrumental - Saxophone Solo]
 - Every lyric line must end with punctuation
 - Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse
 
