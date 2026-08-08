@@ -413,6 +413,85 @@ export function buildCaptionReplanPrompt(
   return lines.join('\n');
 }
 
+// ── Lyric density rewrite ───────────────────────────────────────────────────
+//
+// Fixes songs whose lyrics are the wrong WORD DENSITY for their artist: written
+// before per-artist pacing existed, a sparse lyric on a fast artist (needs
+// EXPANSION) or a wordy lyric on a slow artist (needs CONDENSING) cannot be
+// fixed by retiming — the derived duration lands outside anything the artist
+// actually records. The song's identity (title, subject, hooks, section
+// sequence) is kept; only the quantity of lyric per section changes. The
+// section SEQUENCE must survive because each song's caption describes that
+// arc (sentences 7-9) and was written against it.
+
+export const LYRIC_DENSITY_REWRITE_SYSTEM_PROMPT = `You are a professional songwriter performing a surgical rewrite. Each song below already has its identity — title, subject, hook, section structure — but the WRONG AMOUNT of lyric for how this artist actually sings. Your job is to expand or condense each lyric to a target word count while keeping the song recognisably the same song, in the artist's voice.
+
+Rules, all mandatory and machine-validated:
+- Hit each song's TARGET WORD COUNT within ±10%. Count words in lyric lines only (section tags don't count).
+- KEEP the song's title concept, subject, narrative and main hook lines. Keep the SAME SECTION SEQUENCE in the same order — you may change how many lines each section holds, but not reorder, add or remove sections (exception: when EXPANDING you may add [Pre-Chorus] before an existing [Chorus], or repeat the final [Chorus], if the target is otherwise unreachable).
+- EXPANDING means adding CONTENT — concrete images, narrative detail, call-and-response, ad-libs, hook repetitions — never filler words stretched thin. Study the reference lyric for how densely this artist packs a line.
+- CONDENSING means cutting to the strongest material — keep the hook and the sharpest images, drop whole lines rather than thinning every line.
+- Match the reference lyric's line lengths and phrasing density. It is a real song by this artist.
+- Every lyric line must end with punctuation (period, comma, exclamation, question mark, dash, or ellipsis).
+- No "Title:" line, no commentary. Lyrics start at the first section tag.
+- Avoid AI-cliché words: neon, ethereal, embers, silhouette, static, void, shimmering, tapestry, gasoline, halogen.
+
+Return ONLY a JSON object mapping each song id to its complete rewritten lyrics string (with \\n newlines):
+{"123": "[Intro]\\n\\n[Verse 1]\\n...", ...}
+No markdown fences, no commentary.`;
+
+export interface DensityRewriteSong {
+  id: number;
+  title: string;
+  subject?: string | null;
+  bpm?: number | null;
+  key?: string | null;
+  targetDuration: number;
+  targetWords: number;
+  currentWords: number;
+  lyrics: string;
+}
+
+export interface DensityRewriteRef {
+  title: string;
+  duration: number;
+  words: number;
+  lyrics: string;
+}
+
+/** Per-set batch prompt: artist pacing context + one real reference lyric sent
+ *  once, then every song needing a rewrite in that set. */
+export function buildDensityRewritePrompt(
+  artist: string, rate: number, albumMedianSec: number,
+  ref: DensityRewriteRef | null, songs: DensityRewriteSong[],
+): string {
+  const lines: string[] = [
+    `Artist: ${artist}`,
+    `Measured vocal pacing: ${rate.toFixed(2)} words per second of song time (from their real recordings). A typical song by this artist runs ~${albumMedianSec}s.`,
+    '',
+    ...SECTION_LABEL_RULE.split('\n'),
+  ];
+  if (ref) {
+    lines.push('', `=== REFERENCE — a real lyric by this artist ("${ref.title}", ${ref.duration}s, ${ref.words} words). Match its density and voice, do NOT copy its content: ===`, '', ref.lyrics);
+  }
+  lines.push('', `=== SONGS TO REWRITE (${songs.length}) ===`);
+  for (const s of songs) {
+    const dir = s.targetWords > s.currentWords ? 'EXPAND' : 'CONDENSE';
+    lines.push(
+      '',
+      `--- id ${s.id} ---`,
+      `Title: ${s.title}`,
+      ...(s.subject ? [`Subject: ${s.subject}`] : []),
+      `Tempo: ${s.bpm ?? 'unknown'} BPM | Key: ${s.key ?? 'unknown'} | Target duration: ${s.targetDuration}s`,
+      `${dir}: currently ${s.currentWords} words -> TARGET ${s.targetWords} words (±10%).`,
+      'Current lyrics:',
+      s.lyrics,
+    );
+  }
+  lines.push('', `Return the JSON object now, with exactly ${songs.length} entries.`);
+  return lines.join('\n');
+}
+
 /** The shared "=== AUDIO ANALYSIS ===" prompt block (facts only, no guidance). */
 export function formatAlbumEnrichment(e: AlbumEnrichment): string[] {
   const lines = ["=== AUDIO ANALYSIS (measured from this album's source recordings) ==="];
