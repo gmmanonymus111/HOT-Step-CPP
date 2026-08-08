@@ -1082,34 +1082,52 @@ export function buildGenerationPrompt(
     const sectionCount = bpParts.length;
     const transitionBars = (sectionCount - 1) * 2;
 
-    // BPM-aware bars-per-line: fast tempos need more bars per line because
-    // each bar is shorter in real time and the music model needs breathing room.
-    // Scale from 2.5 bars/line at ≤80 BPM to 4.0 bars/line at ≥180 BPM.
-    const barsPerLine = Math.min(4.0, Math.max(2.5, 2.5 + 1.5 * ((bpm - 80) / 100)));
+    // Budget in WORDS, not lines, and do not scale with tempo.
+    //
+    // Measured over 2361 real vocal songs in the training datasets (duration +
+    // lyrics from their sidecars): vocal pacing is ~1.20 words/second and is
+    // essentially FLAT across tempo — 1.28 w/s at 90-110 BPM, 1.12 at 110-150,
+    // 1.36 at 170+. Seconds-per-line is likewise flat at ~5.3s.
+    //
+    // The old formula charged every line the same time and scaled that time
+    // with BPM (7.5s/line at 80 BPM down to 5.3s at 180). Both halves were
+    // wrong. It under-budgeted lyric content — 35 lines for a 239s song whose
+    // real-world allowance is ~42 — and because average line length varies
+    // 1.89x between songs (6.1 to 11.4 words), a line count cannot express the
+    // budget anyway.
+    //
+    // Why it matters: the LM stops at EXACTLY the requested duration (98.4% of
+    // 1248 logged runs, within +/-1s) — it is not truncated, it is obeying the
+    // duration it was given. Under-budget the words and the vocal ends early,
+    // so the model improvises an instrumental tail and the duration wall cuts
+    // whatever it invented mid-phrase. That is the "enters a guitar solo then
+    // cuts off" failure, and the "all sections crammed into the first half"
+    // failure — one cause, two appearances.
+    const WORDS_PER_SECOND = 1.20;   // corpus median, 2361 songs
+    const WORDS_PER_LINE_LO = 5.5;   // sparse phrasing -> more lines needed
+    const WORDS_PER_LINE_HI = 8.0;   // wordy phrasing  -> fewer lines needed
+    // 1.20 w/s is total words over TOTAL duration, so it already prices in
+    // intros, instrumental breaks and outros. Applying it to a
+    // transitions-deducted figure would discount that time twice and
+    // reintroduce the very under-budgeting this replaces.
     const singableBars = totalBars - transitionBars;
-    const maxLyricLines = Math.max(8, Math.floor(singableBars / barsPerLine));
+    const targetWords = Math.round(targetDuration * WORDS_PER_SECOND);
+    const minLyricLines = Math.max(8, Math.floor(targetWords / WORDS_PER_LINE_HI));
+    const maxLyricLines = Math.max(minLyricLines + 4, Math.ceil(targetWords / WORDS_PER_LINE_LO));
     const minutes = Math.floor(targetDuration / 60);
     const seconds = Math.round(targetDuration % 60);
 
-    lines.push('', '=== DURATION BUDGET (HARD LIMIT — DO NOT EXCEED) ===');
-    lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')})`);
-    lines.push(`BPM: ${bpm} — one bar of 4/4 = ${barSeconds.toFixed(1)} seconds`);
-    lines.push(`Total bars available: ~${totalBars} bars for the entire song`);
-    lines.push(`At this tempo, each lyric line needs ~${barsPerLine.toFixed(1)} bars (vocal delivery + melodic phrasing).`);
-    lines.push(`After accounting for ~${transitionBars} bars of transitions, you have ~${singableBars} singable bars.`);
-    lines.push(`*** MAXIMUM LYRIC LINES: ${maxLyricLines} total lines across ALL sections. ***`);
-    lines.push(`This is a HARD LIMIT. The music model WILL skip lines if you write more than ${maxLyricLines}.`);
+    lines.push('', '=== DURATION BUDGET ===');
+    lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')}) at ${bpm} BPM.`);
+    lines.push(`That is ~${totalBars} bars, of which ~${singableBars} carry vocals once transitions are allowed for.`);
+    lines.push(`*** WRITE APPROXIMATELY ${targetWords} WORDS of lyrics in total, across ALL sections. ***`);
+    lines.push(`That is roughly ${minLyricLines}-${maxLyricLines} lines depending on how long your lines are — count WORDS, not lines, because a wordy line takes far longer to sing than a short one.`);
     lines.push('');
-    lines.push('USE THIS TO DECIDE LINE COUNTS:');
-    if (maxLyricLines <= 16) {
-      lines.push('- This is a SHORT/FAST song. Use 4-line verses and 4-line choruses ONLY. Minimal sections.');
-      lines.push('- Consider dropping one verse or chorus from the suggested structure if needed to stay under the line limit.');
-    } else if (maxLyricLines <= 28) {
-      lines.push('- This is a STANDARD-length song. Use 4-line verses and 4-line choruses. One verse can be 6 or 8 lines if budget allows.');
-    } else {
-      lines.push('- This is a LONGER song. You can use 6-8 line verses and choruses if the structure calls for it.');
-    }
-    lines.push(`- Count your total lyric lines before finalising. If you exceed ${maxLyricLines} lines, the music model WILL skip content.`);
+    lines.push('THIS IS A TARGET TO HIT, NOT A CEILING TO STAY UNDER — missing it in either direction damages the song:');
+    lines.push(`- Well UNDER ${targetWords} words: the vocal finishes long before the track does, and the music model fills the remainder with aimless repetition or an instrumental passage that gets cut off mid-phrase.`);
+    lines.push(`- Well OVER ${targetWords} words: the song runs out of time and stops mid-section.`);
+    lines.push(`- Count your words before finalising. Within about 10% of ${targetWords} is right.`);
+    lines.push('- Repeated chorus lines DO count — a repeat takes just as long to sing as a new line.');
   }
 
   lines.push(
