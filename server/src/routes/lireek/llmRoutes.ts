@@ -177,10 +177,14 @@ export function registerLlmRoutes(router: Router): void {
       const artistId = lyricsSet?.artist_id;
       const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
 
-      // Profiles built before audio enrichment existed: derive it live from the
-      // lyrics set (Training Studio exports carry bpm/key/genre/caption per
-      // song). Sets without enrichment yield null and the prompts skip it.
-      if (!profile.profile_data.audio_enrichment && lyricsSet) {
+      // Enrichment is PURE derived data — recompute it from the lyrics set on
+      // every request rather than trusting the copy frozen into profile_data at
+      // build time. A stored copy goes stale two ways: the set gains per-song
+      // captions after the profile was built, or the distillation itself
+      // changes (the caption-example cap was 500 chars until 2026-08-08, which
+      // silently kept truncated examples alive in every profile built before
+      // then). Sets without enrichment yield null and the prompts skip it.
+      if (lyricsSet) {
         profile.profile_data.audio_enrichment = computeAlbumEnrichment(lyricsSet.songs);
       }
 
@@ -230,10 +234,14 @@ export function registerLlmRoutes(router: Router): void {
       const artistId = lyricsSet?.artist_id;
       const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
 
-      // Profiles built before audio enrichment existed: derive it live from the
-      // lyrics set (Training Studio exports carry bpm/key/genre/caption per
-      // song). Sets without enrichment yield null and the prompts skip it.
-      if (!profile.profile_data.audio_enrichment && lyricsSet) {
+      // Enrichment is PURE derived data — recompute it from the lyrics set on
+      // every request rather than trusting the copy frozen into profile_data at
+      // build time. A stored copy goes stale two ways: the set gains per-song
+      // captions after the profile was built, or the distillation itself
+      // changes (the caption-example cap was 500 chars until 2026-08-08, which
+      // silently kept truncated examples alive in every profile built before
+      // then). Sets without enrichment yield null and the prompts skip it.
+      if (lyricsSet) {
         profile.profile_data.audio_enrichment = computeAlbumEnrichment(lyricsSet.songs);
       }
 

@@ -154,9 +154,11 @@ server.tool(
     const pd = profile.profile_data;
     const history = db.getGenerationHistory(profile.artist_id);
 
-    // Profiles built before audio enrichment existed: derive it live from the
-    // lyrics set (Training Studio exports carry bpm/key/genre/caption per song).
-    if (!pd.audio_enrichment) {
+    // Enrichment is PURE derived data — recompute from the lyrics set every
+    // time rather than trusting the copy frozen into profile_data at build
+    // time, which goes stale when the set gains captions or the distillation
+    // changes (see the same note in server/src/routes/lireek/llmRoutes.ts).
+    {
       const set = db.getLyricsSet(profile.lyrics_set_id);
       if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
     }
@@ -217,8 +219,8 @@ server.tool(
     }
     const pd = profile.profile_data;
 
-    // Same live-derivation fallback as prepare_generation (old profiles).
-    if (!pd.audio_enrichment) {
+    // Same live re-derivation as prepare_generation.
+    {
       const set = db.getLyricsSet(profile.lyrics_set_id);
       if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
     }

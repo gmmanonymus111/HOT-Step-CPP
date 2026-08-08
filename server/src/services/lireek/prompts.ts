@@ -14,6 +14,9 @@
 
 import { BLACKLISTED_WORDS, BLACKLISTED_PHRASES, OVERUSED_WORDS } from './slopDetector.js';
 import { stripLyricQuotes } from './llm/postprocess.js';
+// The nine-sentence plan the dataset captions were written to. Imported rather
+// than restated so a planned caption and a training caption stay one format.
+import { CAPTION_SENTENCE_PLAN } from '../training/captionPrompt.js';
 
 /** Loose profile shape — accepts both the app's LyricsProfile and the MCP's raw profile_data JSON. */
 export type PromptProfile = Record<string, any>;
@@ -94,6 +97,9 @@ export function blueprintToSections(bp: string): string[] {
 // sound adapter trained on the same album accurate. Sets without enrichment
 // (plain Genius fetches) get null here and every consumer skips silently.
 
+/** Per-example ceiling for the verbatim training captions shown to the planner. */
+const CAPTION_EXAMPLE_MAX_CHARS = 2000;
+
 export interface AlbumEnrichment {
   bpmMin: number;               // 0 when no track had a BPM
   bpmMax: number;
@@ -162,7 +168,13 @@ export function computeAlbumEnrichment(
     keys: freqRank(keys),
     genres: freqRank(genres),
     signatures: freqRank(signatures),
-    captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, 500)),
+    // Cap generously, not tightly: a Side-Step caption is nine sentences and
+    // runs ~1100-1600 chars, and the LAST three sentences are the only
+    // description of arrangement over time (opening/buildup, drop/break,
+    // climax/outro) anywhere in the conditioning. Truncating to 500 amputated
+    // every example mid-caption, and the planner faithfully copied the
+    // amputation — captions came back at ~520 chars with no structure at all.
+    captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, CAPTION_EXAMPLE_MAX_CHARS)),
     enrichedSongs: enriched,
     totalSongs: songs.length,
   };
@@ -308,6 +320,7 @@ CAPTION:
 - Match the artist's known sound and production aesthetic
 - Keep it to 1-3 sentences of comma-separated descriptors
 - Example: "indie rock, driving electric guitars, male vocal, raw and energetic, garage production, anthemic chorus, 2010s alternative"
+- OVERRIDE: if the user prompt supplies "Captions describing this album's actual recordings", ignore the two rules above (comma-separated list, 1-3 sentences) and follow the caption format given there instead — matching the training captions matters more than brevity
 
 DURATION:
 - Estimate the total track duration in seconds (any integer value is fine — do NOT round to multiples of 5)
@@ -794,7 +807,16 @@ export function buildMetadataPrompt(
     if (enrich.captionExamples.length) {
       lines.push('', 'Captions describing this album\'s actual recordings:');
       enrich.captionExamples.forEach((c, i) => lines.push(`  ${i + 1}. "${c}"`));
-      lines.push('Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.');
+      // "Same format as these examples" is not enough on its own: the planner
+      // reads the examples as a style hint and still obeys the system prompt's
+      // "1-3 sentences" rule, so it emits a third of a caption and drops the
+      // arrangement sentences entirely. Spell the nine slots out instead.
+      lines.push(
+        'Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.',
+        'This OVERRIDES the caption length and comma-separated-list rules in the system prompt. Specifically, the caption must be ONE line of EXACTLY 9 complete prose sentences, each covering one topic in this order:',
+        ...CAPTION_SENTENCE_PLAN.map(s => `  - ${s}`),
+        'Do not name the artist or the song. Keep BPM, key and time signature out of the caption prose — they are separate fields.',
+      );
     }
   }
 

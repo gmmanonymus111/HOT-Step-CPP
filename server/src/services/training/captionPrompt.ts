@@ -12,6 +12,26 @@
 
 import { parseLooseObject } from './sidecarIO.js';
 
+/**
+ * The nine caption sentences, in order, without their leading `- `.
+ *
+ * Lyric Studio's metadata planner reuses this so the captions it invents for a
+ * new song describe the same nine things, in the same order, as the captions a
+ * sound adapter was trained on (see `lireek/prompts.ts`). Keep the wording here
+ * byte-identical to Side-Step — `CAPTION_INSTRUCTIONS` is rebuilt from it.
+ */
+export const CAPTION_SENTENCE_PLAN: readonly string[] = [
+  'Sentence 1: identify the core genre/subgenre, tempo feel, groove character, and overall intensity without restating exact metadata fields.',
+  'Sentence 2: describe drum design and groove, including kick, snare/clap, hats, percussion, swing, syncopation, and pulse.',
+  'Sentence 3: describe the bass design and low-end behavior, including weight, tone, movement, rhythm, sustain, and kick interaction.',
+  'Sentence 4: describe harmony and melody, including chords, tonal center, motifs, riffs, leads, pads, stabs, arps, or vocal hooks.',
+  'Sentence 5: describe sound design and timbre, including synth character, source type, texture, brightness, distortion, saturation, envelopes, layering, and spectral character.',
+  'Sentence 6: describe mix treatment and space, including reverb, delay, compression, transient shape, filtering, automation, density, and only clearly audible spatial placement if confidence is high.',
+  'Sentence 7: describe the opening section and buildup in detail, including which elements are introduced first and how tension is created.',
+  'Sentence 8: describe the drop and any break section in detail, including what the drop contains, what hits hardest, and which elements are removed or exposed during the break.',
+  'Sentence 9: describe the late-song payoff, climax, or outro in detail, including how the track escalates, peaks, resolves, strips back, or closes.',
+];
+
 export const CAPTION_INSTRUCTIONS: string =
   "Write high-quality structured music dataset metadata grounded in the song's " +
   'audible content. If audio is attached, analyze the actual audio first and use ' +
@@ -37,15 +57,7 @@ export const CAPTION_INSTRUCTIONS: string =
   '- Keep explicit metadata in the dedicated fields, not in the caption: do not state exact BPM numbers, key names, or time signatures in the caption unless absolutely necessary for a rare musically specific point.\n' +
   '- Mention stereo width, panning, depth, or imaging only when those traits are clearly audible with high confidence; if uncertain, prefer safer mix descriptors such as dry, wet, dense, open, compressed, bright, dark, upfront, distant, or saturated.\n' +
   '- If you mention a buildup, drop, break, climax, or outro, specify what changes musically: which layers enter, which layers drop out, which filters open, how percussion changes, how the bass changes, or how the energy is reshaped.\n' +
-  '- Sentence 1: identify the core genre/subgenre, tempo feel, groove character, and overall intensity without restating exact metadata fields.\n' +
-  '- Sentence 2: describe drum design and groove, including kick, snare/clap, hats, percussion, swing, syncopation, and pulse.\n' +
-  '- Sentence 3: describe the bass design and low-end behavior, including weight, tone, movement, rhythm, sustain, and kick interaction.\n' +
-  '- Sentence 4: describe harmony and melody, including chords, tonal center, motifs, riffs, leads, pads, stabs, arps, or vocal hooks.\n' +
-  '- Sentence 5: describe sound design and timbre, including synth character, source type, texture, brightness, distortion, saturation, envelopes, layering, and spectral character.\n' +
-  '- Sentence 6: describe mix treatment and space, including reverb, delay, compression, transient shape, filtering, automation, density, and only clearly audible spatial placement if confidence is high.\n' +
-  '- Sentence 7: describe the opening section and buildup in detail, including which elements are introduced first and how tension is created.\n' +
-  '- Sentence 8: describe the drop and any break section in detail, including what the drop contains, what hits hardest, and which elements are removed or exposed during the break.\n' +
-  '- Sentence 9: describe the late-song payoff, climax, or outro in detail, including how the track escalates, peaks, resolves, strips back, or closes.\n' +
+  CAPTION_SENTENCE_PLAN.map(s => `- ${s}\n`).join('') +
   '- Do not mention the artist name or song title in the caption.\n' +
   '- If audio is not attached or a field cannot be determined from available evidence, write N/A for that field instead of guessing.';
 
