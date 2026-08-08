@@ -157,9 +157,19 @@ export const GLOBAL_WORDS_PER_SECOND = 1.20;
 // per-artist retime). Real FFAF fills that time with COMPOSED instrumental
 // passages; a generation's only channel for those is declared section tags.
 // So for DURATION DERIVATION the effective rate is floored here: undeclared
-// time beyond ~1/0.95 s-per-word is filler risk, not artistry. Declared
-// instrumental sections still add real time on top via the allowance.
-export const VOCAL_FLOOR_WORDS_PER_SECOND = 0.95;
+// time is filler risk, not artistry. Declared instrumental sections still add
+// real time on top via the allowance.
+//
+// 1.25 is EAR-MEASURED, not assumed (2026-08-08 evening, n=2 but tight): with
+// the empty [Intro] stripped, the model sang 235 words in ~187s (1.26 w/s) and
+// 252 in ~205s (1.23 w/s), parking ALL remaining duration in the declared
+// instrumental outro — a 60s and a 30s tail respectively. The first floor of
+// 0.95 was still 25% below the model's real singing rate, and that 25% is
+// exactly the aimless tail Rob heard. The model sings at ~1.25 regardless of
+// the artist's TOTAL-duration rate; artists measured faster than 1.25
+// (rap: Eminem 3.29) carry their density in the lyrics themselves, which is
+// why the floor is max(), not a constant.
+export const VOCAL_FLOOR_WORDS_PER_SECOND = 1.25;
 
 const SECTION_TAG_LINE = /^[ \t]*\[[^\]]{1,60}\][ \t]*$/;
 
@@ -174,10 +184,15 @@ export function countLyricWords(lyrics: string): number {
   return words;
 }
 
-/** Section heads that occupy time without carrying lyrics. [Intro]/[Outro] are
- *  deliberately absent: near-universal in the real corpus, so the measured
- *  words-per-second rate already prices them in. */
+/** Section heads that occupy time without carrying lyrics. Bare [Intro]/[Outro]
+ *  are deliberately absent — an EMPTY bare boundary tag is an open invitation
+ *  the model fills from its adapter prior (a bare [Intro] on a Funeral For A
+ *  Friend song rendered 105s of riffing). But a boundary tag with an
+ *  explicitly instrumental descriptor ([Outro - Instrumental], [Intro - Guitar
+ *  Feedback]) is a DECLARED section and earns allowance time like any other. */
 const INSTRUMENTAL_HEADS = /^(instrumental|guitar solo|piano interlude|build|drop|breakdown|interlude)$/i;
+const INSTRUMENTAL_BOUNDARY = /^(intro|outro)$/i;
+const INSTRUMENTAL_DESC = /instrumental|solo|breakdown|build|riff|feedback|jam|ambient|drum/i;
 
 /**
  * The duration the written lyrics actually need, at this artist's pacing.
@@ -221,8 +236,10 @@ export function lyricsDurationSeconds(lyrics: string, bpm: number, wordsPerSec?:
   for (let i = 0; i < rawLines.length; i++) {
     const t = rawLines[i].trim();
     if (!SECTION_TAG_LINE.test(t)) continue;
-    const head = t.slice(1, -1).split(/\s+[-–—]\s+/)[0].trim();
-    if (!INSTRUMENTAL_HEADS.test(head)) continue;
+    const [head, ...descParts] = t.slice(1, -1).split(/\s+[-–—]\s+/).map(s => s.trim());
+    const declared = INSTRUMENTAL_HEADS.test(head) ||
+      (INSTRUMENTAL_BOUNDARY.test(head) && descParts.length > 0 && INSTRUMENTAL_DESC.test(descParts.join(' ')));
+    if (!declared) continue;
     let hasLyric = false;
     for (let j = i + 1; j < rawLines.length; j++) {
       const u = rawLines[j].trim();
