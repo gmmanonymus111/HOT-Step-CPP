@@ -56,7 +56,8 @@ export const SECTION_LABEL_RULE: string =
   '  You may append ONE short performance annotation after a DASH: [Chorus - High Energy], ' +
   '[Bridge - Sparse and Quiet], [Instrumental - Saxophone Solo]. Never use a colon ([Instrumental Break: Guitar Solo] is wrong), ' +
   'and do not stack several annotations on one tag.\n' +
-  '  Do NOT invent labels like [X], [Hook] or [Solo] — for a solo use [Guitar Solo] or [Instrumental - <instrument> Solo].';
+  '  Do NOT invent labels like [X], [Hook] or [Solo] — for a solo use [Guitar Solo] or [Instrumental - <instrument> Solo].\n' +
+  '  NEVER write an [Intro] or [Outro] tag with no lyric lines beneath it. Real lyric transcriptions almost never do (5% and 1% of the time respectively, against 85% in our old output), and an empty boundary tag is an open invitation the music model fills with an arbitrarily long instrumental of its own choosing. If the song opens or closes with singing, tag it and write the words; if it opens or closes instrumentally, OMIT the tag entirely — the music model shapes natural intros and outros itself — or, only when you deliberately want an extended instrumental bookend, declare it with a descriptor ([Outro - Instrumental]).';
 
 export const BLUEPRINT_LABEL_NAMES: Record<string, string> = {
   V: 'Verse', C: 'Chorus', B: 'Bridge', PC: 'Pre-Chorus',
@@ -990,7 +991,7 @@ FORMATTING RULES (MANDATORY):
 - Start with the first section header (e.g. [Intro] or [Verse 1]). No title line.
 ${SECTION_LABEL_RULE}
 - Every lyric line must end with punctuation (period, comma, exclamation, question mark, dash, or ellipsis).
-- Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse.
+- Start directly with the first sung section (usually [Verse 1]). Do NOT write an empty [Intro] header — the music model shapes its own intro, and an empty tag invites an arbitrarily long instrumental.
 
 STRUCTURE RULES:
 - VERSES: keep line counts even — typically 4 or 8 lines each.
@@ -1069,7 +1070,7 @@ FORMATTING:
 ${SECTION_LABEL_RULE}
 - Section annotations are encouraged where they help the arrangement: [Verse 1 - Female Vocal], [Chorus - High Energy], [Bridge - Atmospheric and Sparse], [Instrumental - Saxophone Solo]
 - Every lyric line must end with punctuation
-- Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse
+- Start directly with the first sung section (usually [Verse 1]). Do NOT write an empty [Intro] header — the music model shapes its own intro, and an empty tag invites an arbitrarily long instrumental.
 
 STRUCTURE:
 - VERSES: keep line counts even — typically 4 or 8 lines each
