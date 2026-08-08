@@ -72,6 +72,14 @@ interface AudioAlbumRow {
   artistName: string;
   album: string;
   gens: Generation[];   // newest first
+  /** Songs the skip filter removed BEFORE the newest/oldest slice. Surfaced on
+   *  the row because the removal is otherwise invisible: with the default
+   *  "skip generated", an already-rendered newest song silently slides the
+   *  "Newest first" window down onto older lyrics. */
+  skipped: number;
+  /** True when a skipped song is newer than every included one — the exact
+   *  case where "Newest first" will not queue the newest lyric. */
+  skippedNewer: boolean;
 }
 
 interface FetchEntry { artist: string; album: string; }
@@ -216,20 +224,38 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
     }
   }, [showToast]);
 
+  // Refetch whenever the panel is OPEN on the audio tab — not just on tab click.
+  // The panel stays mounted across closes (state persists), and lyrics written
+  // by the MCP bypass the UI stores entirely, so a reopen straight onto this
+  // tab used to show the previous open's list: "Newest first" then honestly
+  // picked the newest of a STALE list, i.e. older songs. (Rob, 2026-08-08)
+  useEffect(() => {
+    if (open && mode === 'audio') loadAudioGenerations();
+  }, [open, mode, loadAudioGenerations]);
+
   // Written songs folded into one row per album. /generations/all returns artist_id and
   // artist_name but NOT lyrics_set_id, so the album is recovered via the profile — which
   // is also what enqueueAudioGen needs in order to look the album preset up.
   const audioAlbums = useMemo<AudioAlbumRow[]>(() => {
     const profileToSet = new Map(profiles.map(p => [p.id, p.lyrics_set_id]));
     const rows = new Map<number, AudioAlbumRow>();
+    const skippedBySet = new Map<number, { n: number; newest: string }>();
     for (const g of audioGens) {
+      const lsId = profileToSet.get(g.profile_id);
+      if (lsId == null) continue;                       // orphan generation, nothing to queue against
       // Leave out lyrics that are already "done". Both markers are permanent, so
       // this holds for songs whose audio was downloaded and then deleted — which
       // is the normal end state for a track that turned out well.
-      if (audioSkip === 'generated' && (g.audio_generated_count ?? 0) > 0) continue;
-      if (audioSkip === 'downloaded' && (g.download_count ?? 0) > 0) continue;
-      const lsId = profileToSet.get(g.profile_id);
-      if (lsId == null) continue;                       // orphan generation, nothing to queue against
+      const skippedOut =
+        (audioSkip === 'generated' && (g.audio_generated_count ?? 0) > 0) ||
+        (audioSkip === 'downloaded' && (g.download_count ?? 0) > 0);
+      if (skippedOut) {
+        const s = skippedBySet.get(lsId) ?? { n: 0, newest: '' };
+        s.n++;
+        if ((g.created_at || '') > s.newest) s.newest = g.created_at || '';
+        skippedBySet.set(lsId, s);
+        continue;
+      }
       let row = rows.get(lsId);
       if (!row) {
         const ls = lyricsSets.find(l => l.id === lsId);
@@ -239,6 +265,8 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           artistName: g.artist_name || ls?.artist_name || 'Unknown',
           album: g.album || ls?.album || '',
           gens: [],
+          skipped: 0,
+          skippedNewer: false,
         };
         rows.set(lsId, row);
       }
@@ -246,6 +274,11 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
     }
     for (const row of rows.values()) {
       row.gens.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '') || b.id - a.id);
+      const s = skippedBySet.get(row.lyricsSetId);
+      if (s) {
+        row.skipped = s.n;
+        row.skippedNewer = s.newest > (row.gens[0]?.created_at || '');
+      }
     }
     return Array.from(rows.values()).sort((a, b) =>
       a.artistName.localeCompare(b.artistName, undefined, { sensitivity: 'base' })
@@ -524,7 +557,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'generate' ? 'bg-green-500/20 text-green-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Wand2 className="w-3.5 h-3.5" /> Generate Lyrics
             </button>
-            <button onClick={() => { setMode('audio'); setSelected(new Set()); loadAudioGenerations(); }}
+            <button onClick={() => { setMode('audio'); setSelected(new Set()); }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'audio' ? 'bg-purple-500/20 text-purple-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Music className="w-3.5 h-3.5" /> {t('lyric.generateAudio')}
             </button>
@@ -838,6 +871,15 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                         <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 bg-zinc-100 dark:bg-zinc-800 text-zinc-500">
                           {row.gens.length} written
                         </span>
+                        {row.skipped > 0 && (
+                          <span
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${row.skippedNewer ? 'bg-amber-900/30 text-amber-400' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600'}`}
+                            title={row.skippedNewer
+                              ? `${row.skipped} song(s) hidden by the skip filter — including this album's NEWEST song, so "Newest first" will start from an older one. Set skip to "none" to re-roll them.`
+                              : `${row.skipped} song(s) hidden by the skip filter (already ${audioSkip === 'downloaded' ? 'downloaded' : 'rendered'}).`}>
+                            {row.skippedNewer ? '⚠ ' : ''}{row.skipped} skipped
+                          </span>
+                        )}
                         {selected.has(row.lyricsSetId) && (
                           <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 bg-purple-900/30 text-purple-300">
                             +{take}
