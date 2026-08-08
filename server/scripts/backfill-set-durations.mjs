@@ -97,7 +97,15 @@ function datasetDurations(stem) {
         if (!byTitle.has(norm(t))) byTitle.set(norm(t), dur);
         if (!byTitleNoFeat.has(normNoFeat(t))) byTitleNoFeat.set(normNoFeat(t), dur);
       }
-      const rawStem = path.basename(f).replace(/\.txt$/i, '');
+      let rawStem = path.basename(f).replace(/\.txt$/i, '');
+      // Scene-release trailing junk: "-proper", "-repack", "-<hexhash>", and
+      // combinations ("…-a7cd122a-repack"). Strip repeatedly from the end so
+      // the true title is the suffix again.
+      for (;;) {
+        const next = rawStem.replace(/-(?:proper|repack|retail|web|flac|cdrip|remaster(?:ed)?|[0-9a-f]{6,12})$/i, '');
+        if (next === rawStem) break;
+        rawStem = next;
+      }
       stems.push({ normStem: norm(rawStem), normStemNoFeat: normNoFeat(rawStem), dur });
     }
     if (byTitle.size) entry = { byTitle, byTitleNoFeat, stems };

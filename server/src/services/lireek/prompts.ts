@@ -183,9 +183,21 @@ const INSTRUMENTAL_HEADS = /^(instrumental|guitar solo|piano interlude|build|dro
 export function reconcileDurationToLyrics(
   lyrics: string, bpm: number, plannedDuration: number, wordsPerSec?: number,
 ): number {
+  const derived = lyricsDurationSeconds(lyrics, bpm, wordsPerSec);
+  if (!derived) return plannedDuration;
+  if (plannedDuration > 0 && Math.abs(derived - plannedDuration) <= 15) return plannedDuration;
+  return Math.max(60, Math.min(400, derived));
+}
+
+/** The UNCLAMPED seconds the written lyrics need at the given pacing —
+ *  reconcileDurationToLyrics without the stability window or bounds. 0 when
+ *  there are no lyric words. Exposed so batch tooling can see the true need
+ *  (a derived 430s that the clamp would hide is a "regenerate the lyrics"
+ *  signal, not a retiming). */
+export function lyricsDurationSeconds(lyrics: string, bpm: number, wordsPerSec?: number): number {
   const rate = wordsPerSec && wordsPerSec > 0 ? wordsPerSec : GLOBAL_WORDS_PER_SECOND;
   const words = countLyricWords(lyrics);
-  if (!words) return plannedDuration;
+  if (!words) return 0;
 
   // Empty instrumental sections: a tag from the instrumental set with no lyric
   // line before the next tag.
@@ -205,11 +217,7 @@ export function reconcileDurationToLyrics(
     if (!hasLyric) instrumentalSections++;
   }
   const barSeconds = bpm > 0 ? 240 / bpm : 2.0;
-  const allowance = instrumentalSections * 8 * barSeconds;
-
-  const derived = Math.round(words / rate + allowance);
-  if (plannedDuration > 0 && Math.abs(derived - plannedDuration) <= 15) return plannedDuration;
-  return Math.max(60, Math.min(400, derived));
+  return Math.round(words / rate + instrumentalSections * 8 * barSeconds);
 }
 
 export interface AlbumEnrichment {
