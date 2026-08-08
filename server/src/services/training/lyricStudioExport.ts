@@ -141,6 +141,12 @@ function toStoredSong(s: TrainingSample, ds: TrainingDatasetRow, setAlbum: strin
   if (s.key.trim()) song.key = s.key.trim();
   if (s.signature.trim()) song.signature = s.signature.trim();
   if (s.language.trim()) song.language = s.language.trim();
+  // Duration is what lets Lyric Studio measure THIS artist's vocal pacing
+  // (words/sec) — per-artist medians span 0.51-3.29 w/s, and without it the
+  // planner falls back to a global constant that misprices most artists.
+  if (typeof s.duration === 'number' && Number.isFinite(s.duration) && s.duration > 0) {
+    song.duration = Math.round(s.duration * 100) / 100;
+  }
   return song;
 }
 

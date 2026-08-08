@@ -47,8 +47,11 @@ if (!Number.isInteger(SET_ID) || SET_ID <= 0 || !DATASET) {
 }
 if (!fs.existsSync(DATASET)) { console.error(`dataset dir not found: ${DATASET}`); process.exit(2); }
 
-/** Fields a sidecar may contribute, in the order the Training Studio writes them. */
-const FIELDS = ['caption', 'genre', 'bpm', 'key', 'signature', 'language'];
+/** Fields a sidecar may contribute, in the order the Training Studio writes them.
+ *  `duration` feeds the per-artist vocal-pacing rate (words/sec) — without it
+ *  the lyric planner falls back to a global constant. */
+const FIELDS = ['caption', 'genre', 'bpm', 'key', 'signature', 'language', 'duration'];
+const NUMERIC_FIELDS = new Set(['bpm', 'duration']);
 
 /** Normalised title for matching: case/punctuation/spacing insensitive. */
 const norm = (s) => String(s ?? '').toLowerCase()
@@ -94,9 +97,9 @@ for (const file of sidecars) {
   for (const f of FIELDS) {
     const v = head[f];
     if (v === undefined || v === '' || v.toUpperCase() === 'N/A') continue;
-    vals[f] = f === 'bpm' ? Number(v) : v;
+    vals[f] = NUMERIC_FIELDS.has(f) ? Number(v) : v;
   }
-  if (Number.isNaN(vals.bpm)) delete vals.bpm;
+  for (const nf of NUMERIC_FIELDS) if (Number.isNaN(vals[nf])) delete vals[nf];
   if (!Object.keys(vals).length) continue;
   const t = titleFromSidecar(file);
   if (!byTitle.has(norm(t))) byTitle.set(norm(t), { title: t, vals });
@@ -122,7 +125,7 @@ for (const song of songs) {
   for (const f of FIELDS) {
     if (!(f in hit.vals)) continue;
     const cur = song[f];
-    const empty = cur === undefined || cur === null || cur === '' || (f === 'bpm' && !(Number(cur) > 0));
+    const empty = cur === undefined || cur === null || cur === '' || (NUMERIC_FIELDS.has(f) && !(Number(cur) > 0));
     if (!empty && !FORCE) continue;
     song[f] = hit.vals[f];
     added.push(f);

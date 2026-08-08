@@ -280,6 +280,20 @@ server.tool(
       return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
     }
 
+    // Same reconciliation as the in-app path (orchestration.ts): the final
+    // duration derives from the written lyrics at the artist's measured
+    // pacing, so duration==content holds no matter what the writer planned.
+    let durationNote = '';
+    {
+      const set = db.getLyricsSet(profile.lyrics_set_id);
+      const rate = set ? (prompts.computeAlbumEnrichment(set.songs)?.wordsPerSec || 0) : 0;
+      const reconciled = prompts.reconcileDurationToLyrics(lyrics, bpm ?? 0, duration ?? 0, rate);
+      if (reconciled !== (duration ?? 0)) {
+        durationNote = `\n⏱ Duration reconciled to lyrics: ${duration ?? 0}s → ${reconciled}s (${rate > 0 ? `artist rate ${rate.toFixed(2)} w/s` : 'global rate'})`;
+        duration = reconciled;
+      }
+    }
+
     const saved = db.saveGeneration({
       profileId: profile_id,
       provider: 'mcp',
@@ -304,6 +318,7 @@ server.tool(
           `**Artist:** ${profile.artist_name}${profile.album ? ` — ${profile.album}` : ''}`,
           `**Subject:** ${saved.subject}`,
           `**BPM:** ${saved.bpm} | **Key:** ${saved.key} | **Duration:** ${saved.duration}s`,
+          durationNote,
           '',
           'The generation is now visible in the Lyric Studio UI.',
         ].join('\n'),

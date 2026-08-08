@@ -135,6 +135,83 @@ export function blueprintToSections(bp: string): string[] {
 /** Per-example ceiling for the verbatim training captions shown to the planner. */
 const CAPTION_EXAMPLE_MAX_CHARS = 2000;
 
+// ── Vocal pacing ────────────────────────────────────────────────────────────
+//
+// The LM renders a song at EXACTLY its stated duration (98.4% of 1248 logged
+// runs stop within ±1s), so duration and lyric word count must agree or the
+// song either cuts off mid-phrase or pads with improvised filler. The
+// conversion rate is words-per-second of TOTAL duration — measured over 2361
+// real vocal songs it already prices in intros, solos and outros.
+//
+// CRITICAL: pacing is an ARTIST property, not a universal constant. Per-artist
+// medians run 0.51 w/s (Muse) to 3.29 (Eminem) — 6.5x — so always prefer the
+// artist's own measured rate (AlbumEnrichment.wordsPerSec) and use this global
+// median only when no measured rate exists.
+export const GLOBAL_WORDS_PER_SECOND = 1.20;
+
+const SECTION_TAG_LINE = /^[ \t]*\[[^\]]{1,60}\][ \t]*$/;
+
+/** Words of singable lyric in a lyrics text — section-tag lines excluded. */
+export function countLyricWords(lyrics: string): number {
+  let words = 0;
+  for (const line of String(lyrics ?? '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || SECTION_TAG_LINE.test(t)) continue;
+    words += t.split(/\s+/).filter(Boolean).length;
+  }
+  return words;
+}
+
+/** Section heads that occupy time without carrying lyrics. [Intro]/[Outro] are
+ *  deliberately absent: near-universal in the real corpus, so the measured
+ *  words-per-second rate already prices them in. */
+const INSTRUMENTAL_HEADS = /^(instrumental|guitar solo|piano interlude|build|drop|breakdown|interlude)$/i;
+
+/**
+ * The duration the written lyrics actually need, at this artist's pacing.
+ *
+ * Called AFTER the lyrics are final, because the writer LLM cannot reliably
+ * count its own words while writing — the word target gets it near, this makes
+ * the duration==content invariant hold by construction. Empty declared
+ * instrumental sections get 8 bars each on top, since the corpus rate only
+ * covers the typical amount of instrumental time, not extra declared passages.
+ *
+ * Returns the planned duration unchanged when the two already agree within
+ * 15s (don't churn the planner's musical intent over noise), else the
+ * lyric-derived duration clamped to [60, 400].
+ */
+export function reconcileDurationToLyrics(
+  lyrics: string, bpm: number, plannedDuration: number, wordsPerSec?: number,
+): number {
+  const rate = wordsPerSec && wordsPerSec > 0 ? wordsPerSec : GLOBAL_WORDS_PER_SECOND;
+  const words = countLyricWords(lyrics);
+  if (!words) return plannedDuration;
+
+  // Empty instrumental sections: a tag from the instrumental set with no lyric
+  // line before the next tag.
+  let instrumentalSections = 0;
+  const rawLines = String(lyrics).split(/\r?\n/);
+  for (let i = 0; i < rawLines.length; i++) {
+    const t = rawLines[i].trim();
+    if (!SECTION_TAG_LINE.test(t)) continue;
+    const head = t.slice(1, -1).split(/\s+[-–—]\s+/)[0].trim();
+    if (!INSTRUMENTAL_HEADS.test(head)) continue;
+    let hasLyric = false;
+    for (let j = i + 1; j < rawLines.length; j++) {
+      const u = rawLines[j].trim();
+      if (SECTION_TAG_LINE.test(u)) break;
+      if (u) { hasLyric = true; break; }
+    }
+    if (!hasLyric) instrumentalSections++;
+  }
+  const barSeconds = bpm > 0 ? 240 / bpm : 2.0;
+  const allowance = instrumentalSections * 8 * barSeconds;
+
+  const derived = Math.round(words / rate + allowance);
+  if (plannedDuration > 0 && Math.abs(derived - plannedDuration) <= 15) return plannedDuration;
+  return Math.max(60, Math.min(400, derived));
+}
+
 export interface AlbumEnrichment {
   bpmMin: number;               // 0 when no track had a BPM
   bpmMax: number;
@@ -144,6 +221,13 @@ export interface AlbumEnrichment {
   captionExamples: string[];    // up to 3 verbatim training captions
   enrichedSongs: number;        // songs carrying at least one enriched field
   totalSongs: number;
+  /** This artist's measured vocal pacing: median words-per-second over songs
+   *  carrying both lyrics and a real duration. 0 = unknown (fall back to
+   *  GLOBAL_WORDS_PER_SECOND). Per-artist medians span 0.51 (Muse) to 3.29
+   *  (Eminem) — a 6.5x spread — so a global constant misprices most artists. */
+  wordsPerSec: number;
+  /** How many songs the pacing median was computed over. */
+  pacedSongs: number;
 }
 
 /** Unique non-empty values ordered by frequency (ties keep first-seen order). */
@@ -175,6 +259,7 @@ export function computeAlbumEnrichment(
   const genres: string[] = [];
   const signatures: string[] = [];
   const captions: string[] = [];
+  const paceRates: number[] = [];
   let enriched = 0;
 
   for (const s of songs) {
@@ -184,6 +269,15 @@ export function computeAlbumEnrichment(
     const genre = typeof s.genre === 'string' ? s.genre.trim() : '';
     const signature = typeof s.signature === 'string' ? s.signature.trim() : '';
     const caption = typeof s.caption === 'string' ? s.caption.trim() : '';
+    // Vocal pacing needs BOTH real lyrics and a real duration on the same song.
+    const dur = Number(s.duration);
+    if (Number.isFinite(dur) && dur > 30 && typeof s.lyrics === 'string') {
+      const words = countLyricWords(s.lyrics);
+      const rate = words / dur;
+      // Per-song clamp guards against corrupt metadata (one dataset measures a
+      // physically impossible 8 w/s — bad sidecar durations, not fast rapping).
+      if (words >= 40 && rate >= 0.3 && rate <= 3.6) paceRates.push(rate);
+    }
     const has = (Number.isFinite(bpm) && bpm > 0) || !!key || !!genre || !!caption || !!signature;
     if (!has) continue;
     enriched++;
@@ -195,7 +289,14 @@ export function computeAlbumEnrichment(
     if (caption) captions.push(caption);
   }
 
-  if (!enriched) return null;
+  if (!enriched && !paceRates.length) return null;
+
+  // Median over at least 4 songs; fewer is too noisy to trust over the global.
+  let wordsPerSec = 0;
+  if (paceRates.length >= 4) {
+    const sorted = [...paceRates].sort((a, b) => a - b);
+    wordsPerSec = Math.round(sorted[Math.floor(sorted.length / 2)] * 100) / 100;
+  }
 
   return {
     bpmMin: bpms.length ? Math.min(...bpms) : 0,
@@ -212,6 +313,8 @@ export function computeAlbumEnrichment(
     captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, CAPTION_EXAMPLE_MAX_CHARS)),
     enrichedSongs: enriched,
     totalSongs: songs.length,
+    wordsPerSec,
+    pacedSongs: paceRates.length,
   };
 }
 
@@ -313,6 +416,9 @@ export function formatAlbumEnrichment(e: AlbumEnrichment): string[] {
   if (e.keys.length) lines.push(`Keys used: ${e.keys.join(', ')}`);
   if (e.genres.length) lines.push(`Detected genre: ${e.genres.join(', ')}`);
   if (e.signatures.length) lines.push(`Time signatures: ${e.signatures.join(', ')}`);
+  if (e.wordsPerSec > 0) {
+    lines.push(`Vocal pacing: ~${e.wordsPerSec.toFixed(2)} words/second of song time (median of ${e.pacedSongs} tracks) — plan duration and lyric quantity around this rate.`);
+  }
   lines.push(`(from ${e.enrichedSongs} of ${e.totalSongs} tracks)`);
   return lines;
 }
@@ -1105,15 +1211,19 @@ export function buildGenerationPrompt(
     // whatever it invented mid-phrase. That is the "enters a guitar solo then
     // cuts off" failure, and the "all sections crammed into the first half"
     // failure — one cause, two appearances.
-    const WORDS_PER_SECOND = 1.20;   // corpus median, 2361 songs
+    // THIS ARTIST'S measured pacing first, global median only as fallback —
+    // per-artist medians span 0.51 to 3.29 w/s, so the global constant
+    // misprices most artists (a third of the words Eminem needs, nearly double
+    // what Pink Floyd sings). The rate is words over TOTAL duration, so it
+    // already prices in intros, instrumental breaks and outros — never apply
+    // it to a transitions-deducted figure, that discounts the same time twice.
+    const paceEnrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+    const artistRate = paceEnrich && paceEnrich.wordsPerSec > 0 ? paceEnrich.wordsPerSec : 0;
+    const wordsPerSecond = artistRate || GLOBAL_WORDS_PER_SECOND;
     const WORDS_PER_LINE_LO = 5.5;   // sparse phrasing -> more lines needed
     const WORDS_PER_LINE_HI = 8.0;   // wordy phrasing  -> fewer lines needed
-    // 1.20 w/s is total words over TOTAL duration, so it already prices in
-    // intros, instrumental breaks and outros. Applying it to a
-    // transitions-deducted figure would discount that time twice and
-    // reintroduce the very under-budgeting this replaces.
     const singableBars = totalBars - transitionBars;
-    const targetWords = Math.round(targetDuration * WORDS_PER_SECOND);
+    const targetWords = Math.round(targetDuration * wordsPerSecond);
     const minLyricLines = Math.max(8, Math.floor(targetWords / WORDS_PER_LINE_HI));
     const maxLyricLines = Math.max(minLyricLines + 4, Math.ceil(targetWords / WORDS_PER_LINE_LO));
     const minutes = Math.floor(targetDuration / 60);
@@ -1122,6 +1232,9 @@ export function buildGenerationPrompt(
     lines.push('', '=== DURATION BUDGET ===');
     lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')}) at ${bpm} BPM.`);
     lines.push(`That is ~${totalBars} bars, of which ~${singableBars} carry vocals once transitions are allowed for.`);
+    lines.push(artistRate
+      ? `This artist sings a measured ~${artistRate.toFixed(2)} words per second (median of ${paceEnrich!.pacedSongs} of their real recordings).`
+      : `Assuming a typical ~${GLOBAL_WORDS_PER_SECOND.toFixed(2)} words per second of vocal pacing (no measured rate for this artist).`);
     lines.push(`*** WRITE APPROXIMATELY ${targetWords} WORDS of lyrics in total, across ALL sections. ***`);
     lines.push(`That is roughly ${minLyricLines}-${maxLyricLines} lines depending on how long your lines are — count WORDS, not lines, because a wordy line takes far longer to sing than a short one.`);
     lines.push('');

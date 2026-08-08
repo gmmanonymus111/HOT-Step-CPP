@@ -14,6 +14,7 @@ import {
   buildGenerationPrompt,
   buildRefinementPrompt,
   buildTitlePrompt,
+  reconcileDurationToLyrics,
 } from '../prompts.js';
 import type { LyricsProfile } from '../profilerService.js';
 import { withModelSuffix } from '../modelName.js';
@@ -213,8 +214,19 @@ export async function generateLyricsStreaming(
   // Tag the title with the model that wrote it, same as the MCP path does
   title = withModelSuffix(title, effectiveModel);
 
+  // Duration is derived from the FINAL lyrics at this artist's measured pacing,
+  // not trusted from the plan: the LM renders at exactly the stated duration,
+  // so duration==content must hold or the song cuts off / pads with filler.
+  // The planner's number survives only when the lyrics already agree with it.
   let duration = metadata.duration || 0;
   if (metadata.bpm > 0 && !duration) duration = estimateDuration(raw, metadata.bpm);
+  const reconciled = reconcileDurationToLyrics(
+    raw, metadata.bpm, duration, (profile as any).audio_enrichment?.wordsPerSec);
+  if (reconciled !== duration) {
+    console.log(`[LLM] Duration reconciled to lyrics: ${duration}s -> ${reconciled}s` +
+      ` (rate ${((profile as any).audio_enrichment?.wordsPerSec > 0) ? 'artist' : 'global'})`);
+    duration = reconciled;
+  }
 
   return {
     lyrics: raw, provider: providerName, model: effectiveModel, title,
