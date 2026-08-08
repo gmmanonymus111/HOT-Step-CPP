@@ -908,12 +908,22 @@ export function buildMetadataPrompt(
   if (profile.perspective) lines.push(`Perspective / voice: ${profile.perspective}`);
 
   // Audio truth from the source recordings (Training Studio export). Guidance,
-  // not a cage: the planner may leave the ranges when the subject demands it.
+  // not a cage — but the tempo bound IS firm now. Measured over the existing
+  // 1487 generations, 94.8% already sat inside their album's range; the 73 that
+  // did not skewed to both extremes (42 slower than anything on the record, 31
+  // faster) because bulk runs were being told to write "a ballad and a fast
+  // one" per album. That produces a 68 BPM Bowie against a 113-137 album and a
+  // 96 BPM Electric Callboy against 118-178 — tempos those artists never play
+  // on that record. Variety has to come from inside the artist's own range.
   const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
   if (enrich) {
     lines.push('', ...formatAlbumEnrichment(enrich));
     if (enrich.bpmMax > 0) {
-      lines.push(`Choose a BPM inside the album's measured range (${enrich.bpmMin}–${enrich.bpmMax}) unless the subject truly demands otherwise.`);
+      lines.push(
+        `TEMPO: choose a BPM inside this album's measured range (${enrich.bpmMin}–${enrich.bpmMax}). That range IS this artist's range on this record — it is measured from the actual recordings, not a guess.`,
+        'Do NOT reach outside it for contrast. If the album has no slow songs, this artist does not write a ballad here; if it has no fast songs, do not write a thrash number. Ignore any generic genre tempo table in favour of these measured values.',
+        'Get variety from WITHIN the range — pick a different point in it than recent songs, and vary the feel, subject, key and arrangement rather than the extremes.',
+      );
     }
     if (enrich.keys.length) {
       lines.push('Prefer a key from this album\'s list (or a closely related key) so the song sits in the same tonal world.');
