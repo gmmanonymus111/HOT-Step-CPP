@@ -180,6 +180,93 @@ export function computeAlbumEnrichment(
   };
 }
 
+// ── Caption re-planning ─────────────────────────────────────────────────────
+//
+// Rewrites the caption of an EXISTING generation into the nine-sentence format
+// the sound adapters were actually trained on, leaving its lyrics, title,
+// subject, bpm, key and duration untouched. Used by the bulk migration of
+// captions written before the 2026-08-08 format fix, which came out at
+// 258-986 chars against training captions of 1149-1537.
+//
+// The caption describes music that does NOT exist yet, so the only evidence is
+// the lyrics — above all their section tags, which are what sentences 7-9 have
+// to be derived from. A weak model's failure mode here is reaching for "the
+// drop" and "the breakdown" on a ballad; the rules below name that explicitly.
+
+export const CAPTION_REPLAN_SYSTEM_PROMPT = `You write music-dataset captions that condition an AI music generator.
+
+You will be given an artist's real training captions, then a batch of planned songs. For each song write ONE new caption in exactly the same format as those training captions.
+
+Return ONLY a JSON object mapping each song id to its caption string:
+{"123": "<caption>", "124": "<caption>"}
+
+No markdown, no code fences, no commentary.`;
+
+/** One song whose caption is being re-planned. Lyrics carry the section tags. */
+export interface CaptionReplanSong {
+  id: number;
+  title: string;
+  subject?: string | null;
+  bpm?: number | null;
+  key?: string | null;
+  duration?: number | null;
+  lyrics: string;
+}
+
+/**
+ * Build the user prompt for a batch of songs from ONE lyrics set.
+ *
+ * Batching per set is deliberate: the caption examples are the bulk of the
+ * prompt and are identical for every song in the set, so sending them once per
+ * set instead of once per song is a large token saving across ~190 sets.
+ */
+export function buildCaptionReplanPrompt(
+  profile: PromptProfile, songs: CaptionReplanSong[], captionExamples?: string[],
+): string {
+  const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+  const examples = captionExamples?.length ? captionExamples : (enrich?.captionExamples ?? []);
+  const lines: string[] = [];
+
+  if (examples.length) {
+    lines.push("REAL TRAINING CAPTIONS — these describe the actual recordings this artist's sound adapter was trained on. Match their format, register, vocabulary and level of detail exactly:", '');
+    examples.forEach((c, i) => lines.push(`  ${i + 1}. "${c}"`, ''));
+  }
+  if (enrich) lines.push(...formatAlbumEnrichment(enrich), '');
+
+  lines.push(
+    'CAPTION RULES (all mandatory):',
+    '- ONE line of EXACTLY 9 complete prose sentences. Not a comma-separated tag list.',
+    '- Each sentence covers one topic, in this order:',
+    ...CAPTION_SENTENCE_PLAN.map(s => `    - ${s}`),
+    '- Never name the artist, the band or the song title.',
+    '- Never state the BPM number, the key name or the time signature in the prose — they are separate fields.',
+    "- Avoid review or marketing language ('captivating', 'emotionally resonant', 'a journey'). Use concrete audio detail.",
+    '',
+    'DERIVE SENTENCES 7, 8 AND 9 FROM THE SONG\'S OWN SECTION TAGS — not from a template:',
+    '- The lyrics below carry tags such as [Intro], [Verse], [Pre-Chorus], [Chorus], [Bridge - Heavy Breakdown], [Bridge - Sparse and Quiet], [Outro - Whispered]. They tell you what actually happens and when.',
+    '- If a song has no breakdown, do NOT invent one. A ballad or a quiet track must describe the lift into its chorus and its sparse bridge, not "the drop".',
+    '- Match the stated tempo and key quality: a slow minor song and a fast major one must not get the same energy language.',
+    '- Sentence 9 must describe how THIS song ends, which its final tag tells you.',
+    '',
+    `SONGS (${songs.length}):`,
+  );
+
+  for (const s of songs) {
+    lines.push(
+      '',
+      `--- id ${s.id} ---`,
+      `Title: ${s.title}`,
+      ...(s.subject ? [`Subject: ${s.subject}`] : []),
+      `Tempo: ${s.bpm ?? 'unknown'} BPM | Key: ${s.key ?? 'unknown'} | Duration: ${s.duration ?? 'unknown'}s`,
+      'Lyrics:',
+      s.lyrics,
+    );
+  }
+
+  lines.push('', `Return the JSON object now, with exactly ${songs.length} entries.`);
+  return lines.join('\n');
+}
+
 /** The shared "=== AUDIO ANALYSIS ===" prompt block (facts only, no guidance). */
 export function formatAlbumEnrichment(e: AlbumEnrichment): string[] {
   const lines = ["=== AUDIO ANALYSIS (measured from this album's source recordings) ==="];
