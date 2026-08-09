@@ -371,23 +371,31 @@ function cmdBake(args: Map<string, string>, pre?: Scored): string {
 
 // ── main ──────────────────────────────────────────────────────────────────
 
-const cmd = process.argv[2];
-const args = parseArgs(process.argv.slice(3));
-if (cmd === 'sweep') {
-  cmdSweep(args);
-} else if (cmd === 'pick') {
-  cmdPick(args);
-} else if (cmd === 'bake') {
-  cmdBake(args);
-} else if (cmd === 'auto') {
-  cmdSweep(args);
-  const best = cmdPick(args);
-  if (best) cmdBake(args, best);
-} else {
-  console.log('usage: npx tsx scripts/lm-adapter-calibrate.ts <sweep|pick|bake|auto> [options]');
-  console.log('  sweep --dataset <slug> [--adapter <path|artist>] [--scales 0.5,0.75,1,1.25,1.5] [--variant <key>]');
-  console.log('  pick  --dataset <slug> [--variant <key>]');
-  console.log('  bake  --adapter <run dir> --scale <s>   (or via auto, uses the pick winner)');
-  console.log('  auto  sweep -> pick -> bake');
-  process.exit(cmd ? 1 : 0);
+// Exported for lm-adapter-rollout.ts (the batch orchestrator): bakeFile is the
+// safetensors surgery, resolveAdapterDir the artist-name resolution.
+export { bakeFile, resolveAdapterDir };
+
+// CLI main — guarded so importing this module never runs a command.
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const cmd = process.argv[2];
+  const args = parseArgs(process.argv.slice(3));
+  if (cmd === 'sweep') {
+    cmdSweep(args);
+  } else if (cmd === 'pick') {
+    cmdPick(args);
+  } else if (cmd === 'bake') {
+    cmdBake(args);
+  } else if (cmd === 'auto') {
+    cmdSweep(args);
+    const best = cmdPick(args);
+    if (best) cmdBake(args, best);
+  } else {
+    console.log('usage: npx tsx scripts/lm-adapter-calibrate.ts <sweep|pick|bake|auto> [options]');
+    console.log('  sweep --dataset <slug> [--adapter <path|artist>] [--scales 0.5,0.75,1,1.25,1.5] [--variant <key>]');
+    console.log('  pick  --dataset <slug> [--variant <key>]');
+    console.log('  bake  --adapter <run dir> --scale <s>   (or via auto, uses the pick winner)');
+    console.log('  auto  sweep -> pick -> bake');
+    process.exit(cmd ? 1 : 0);
+  }
 }

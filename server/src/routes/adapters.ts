@@ -217,8 +217,25 @@ router.get('/lm', (req, res) => {
      *  unversioned/legacy adapter. Every run of an artist is listed. */
     run: string;
     trigger: string; triggerPosition: 'prepend' | 'append' | '';
+    /** From the dir's hot_step_eval.json sidecar (lm-adapter-rollout.ts):
+     *  marginal+transition JS distance to the artist's ground truth — LOWER =
+     *  closer to the artist. null when the adapter was never evaluated. */
+    evalScore: number | null;
+    /** 'toward' | 'away' | 'inconclusive' | '' — the eval verdict. */
+    evalVerdict: string;
   };
   const adapters: LmAdapterEntry[] = [];
+
+  const readEvalSidecar = (dir: string): { evalScore: number | null; evalVerdict: string } => {
+    try {
+      const sc = JSON.parse(fs.readFileSync(path.join(dir, 'hot_step_eval.json'), 'utf-8')) as
+        { score?: unknown; verdict?: unknown };
+      if (typeof sc.score === 'number' && Number.isFinite(sc.score)) {
+        return { evalScore: sc.score, evalVerdict: typeof sc.verdict === 'string' ? sc.verdict : '' };
+      }
+    } catch { /* no sidecar / torn file — not evaluated */ }
+    return { evalScore: null, evalVerdict: '' };
+  };
 
   // Both trained dir layouts count: PEFT (adapter_model.safetensors) and the
   // LyCORIS LoKr export ace-train writes (lokr_weights.safetensors). Checking
@@ -237,7 +254,8 @@ router.get('/lm', (req, res) => {
     const stat = fs.statSync(model);
     const tg = readAdapterTrigger(dir);
     adapters.push({ name, path: dir, kind, size: stat.size, mtime: stat.mtimeMs,
-                    lmSize, run, trigger: tg.trigger, triggerPosition: tg.position });
+                    lmSize, run, trigger: tg.trigger, triggerPosition: tg.position,
+                    ...readEvalSidecar(dir) });
     return true;
   };
 
@@ -263,7 +281,8 @@ router.get('/lm', (req, res) => {
           const stat = fs.statSync(fullPath);
           const tg = readAdapterTrigger(fullPath);
           adapters.push({ name: entry.name, path: fullPath, kind: 'safetensors', size: stat.size,
-                          mtime: stat.mtimeMs, lmSize, run: '', trigger: tg.trigger, triggerPosition: tg.position });
+                          mtime: stat.mtimeMs, lmSize, run: '', trigger: tg.trigger, triggerPosition: tg.position,
+                          evalScore: null, evalVerdict: '' });
         }
       } catch { /* skip unreadable entries */ }
     }

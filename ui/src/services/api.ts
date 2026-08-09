@@ -317,6 +317,10 @@ export const adapterApi = {
   lmList: (folder?: string) =>
     get<{ root: string; adapters: {
       name: string; path: string; kind: 'peft' | 'lokr' | 'safetensors'; size: number; mtime: number;
+      /** Eval-score sidecar (hot_step_eval.json): marginal+transition JS to the
+       *  artist — LOWER = closer. null = never evaluated. */
+      evalScore: number | null;
+      evalVerdict: string;
       lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | '';
     }[] }>(
       `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
