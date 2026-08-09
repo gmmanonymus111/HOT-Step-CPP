@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(acestep-ggml LANGUAGES C CXX HIP)
+project(acestep-ggml LANGUAGES C CXX)
 
 # CI cache generation: 2 (2026-07-16). This file is hashed into the GitHub
 # Actions build-cache key — bump this comment to force cold builds when the
