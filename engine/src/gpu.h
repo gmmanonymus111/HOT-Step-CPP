@@ -7,7 +7,7 @@
      #define cudaGetErrorString hipGetErrorString
      #define cudaError_t hipError_t
      #define cudaSuccess hipSuccess
-  #else defined (GGML_USE_CUDA)
+  #else
      #include <cuda_runtime.h>
   #endif
 #endif
