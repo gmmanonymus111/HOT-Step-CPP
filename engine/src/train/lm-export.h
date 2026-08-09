@@ -108,6 +108,12 @@ struct LmExportMeta {
     int         muon_ns_steps = 0;
     int         muon_params   = 0;   // parameters actually on Muon
     int         muon_buckets  = 0;
+
+    // Resume provenance (--init-adapter, 2026-08-09). Additive; readers
+    // default to "trained from scratch". init_from_loss is the SOURCE run's
+    // saved_loss — the loss this run's factors started from.
+    std::string init_adapter;
+    double      init_from_loss = -1.0;
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -206,6 +212,10 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     }
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
+    if (!m.init_adapter.empty()) {
+        yyjson_mut_obj_add_strcpy(doc, cfg, "init_adapter", m.init_adapter.c_str());
+        yyjson_mut_obj_add_real(doc, cfg, "init_from_loss", m.init_from_loss);
+    }
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epoch_log.size(); i++) {

@@ -17,6 +17,7 @@
 #include "train/lm-extract.h"
 #include "train/lm-graph.h"
 #include "train/lm-optim.h"
+#include "train/lm-resume.h"
 #include "train/lm-selftest.h"
 #include "train/lm-vram.h"
 #include "version.h"
@@ -96,6 +97,14 @@ struct LmTrainArgs {
 
     float milestone_step = 1.0f;
     int   milestone_keep = 6;
+
+    // Resume (--init-adapter, 2026-08-09): dir of an exported run whose
+    // factors seed this one. Identity hyperparams are adopted from its
+    // lm_train_log.json by lm_resume_prepare (cmd_train_lm); an explicit CLI
+    // contradiction is exit 2. init_from_loss carries the source's saved_loss
+    // for the epoch-1 honesty log and the train-log provenance keys.
+    std::string init_adapter;
+    double      init_from_loss = -1.0;
 
     bool overwrite = false;
     int  limit     = 0;
@@ -569,6 +578,24 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
             return 1;
         }
     }
+    // Resume: overwrite the fresh init with the source run's factors. After
+    // lm_lora_init/lm_lokr_init so the tensors exist and the RNG stream stays
+    // identical to a scratch run (a resumed run that falls back to scratch
+    // would otherwise train from different noise than a bare run).
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        int         n_loaded = 0;
+        if (!lm_resume_load(&lora, a.init_adapter, &n_loaded, &err)) {
+            lm_fatal("resume", err);
+            return 1;
+        }
+        char b[320];
+        snprintf(b, sizeof(b), "resumed %d tensors from %s (source saved_loss %.4f) — expect epoch 1 near that loss",
+                 n_loaded, a.init_adapter.c_str(), a.init_from_loss);
+        lm_log("info", b);
+        jl("{\"type\":\"resume\",\"initAdapter\":\"%s\",\"tensors\":%d,\"sourceLoss\":%.6f}",
+           lm_json_escape(a.init_adapter).c_str(), n_loaded, a.init_from_loss);
+    }
     if (lora.n_params != vm.lora_params) {
         char b[192];
         snprintf(b, sizeof(b), "LoRA parameter count %zu != predicted %zu", lora.n_params, vm.lora_params);
@@ -840,6 +867,8 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     meta->chunk           = low ? lc.chunk : 0;
     meta->weights         = weights_used;   // §2.3 — recorded so a resume can refuse (S6); ACTUAL mode, not requested
     meta->batch           = 1;
+    meta->init_adapter    = a.init_adapter;
+    meta->init_from_loss  = a.init_from_loss;
     meta->vram_mode       = low ? "lowvram" : "naive";
     meta->vram_base_mb    = (size_t) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0);
     meta->vram_ckpt_mb    = (size_t) (ckpt_bytes / 1048576.0);
@@ -912,6 +941,18 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         const double avg   = running / std::max(1, n_micro);
         const long long ems = (long long) (ggml_time_ms() - t_ep0);
         ep_ms_sum += ems;
+
+        // Resume honesty gate (observational): epoch 1 of a resumed run is a
+        // teacher-forced pass from the loaded factors, so it should land near
+        // the source's saved_loss. A large gap = wrong init mapping, or the
+        // dataset/prompt format changed since the source run.
+        if (epoch == 0 && !a.init_adapter.empty() && a.init_from_loss > 0.0) {
+            const double gap = fabs(avg - a.init_from_loss);
+            char b[224];
+            snprintf(b, sizeof(b), "resume check: epoch 1 loss %.4f vs source saved_loss %.4f (|gap| %.4f)%s", avg,
+                     a.init_from_loss, gap, gap > 0.35 ? " — LARGER THAN EXPECTED, verify dataset/init" : "");
+            lm_log(gap > 0.35 ? "warn" : "info", b);
+        }
 
         const bool best = (out->best_loss < 0.0) || (avg < out->best_loss);
         if (best) {
