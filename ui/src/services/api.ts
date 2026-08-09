@@ -316,7 +316,7 @@ export const adapterApi = {
    *  name suffix; `trigger` is the embedded trigger word when present. */
   lmList: (folder?: string) =>
     get<{ root: string; adapters: {
-      name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
+      name: string; path: string; kind: 'peft' | 'lokr' | 'safetensors'; size: number; mtime: number;
       lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | '';
     }[] }>(
       `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),

@@ -209,7 +209,7 @@ router.post('/scan', (req, res) => {
 router.get('/lm', (req, res) => {
   const folderParam = (req.query.folder as string) || '';
   type LmAdapterEntry = {
-    name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
+    name: string; path: string; kind: 'peft' | 'lokr' | 'safetensors'; size: number; mtime: number;
     /** '0.6B' | '1.7B' | '4B' — from the lm-<size> parent folder, else the
      *  legacy -<size> name suffix, else ''. */
     lmSize: string;
@@ -220,12 +220,23 @@ router.get('/lm', (req, res) => {
   };
   const adapters: LmAdapterEntry[] = [];
 
+  // Both trained dir layouts count: PEFT (adapter_model.safetensors) and the
+  // LyCORIS LoKr export ace-train writes (lokr_weights.safetensors). Checking
+  // only the PEFT leaf made the ENTIRE LoKr-era corpus (183 adapters,
+  // 2026-08) invisible to every picker — the same bug hasWeights() already
+  // fixed for latestRunDir, re-fixed here (found 2026-08-09: /api/adapters/lm
+  // returned zero adapters).
   const pushPeft = (dir: string, name: string, lmSize: string, run: string) => {
-    const model = path.join(dir, 'adapter_model.safetensors');
-    if (!fs.existsSync(model)) return false;
+    let model = path.join(dir, 'adapter_model.safetensors');
+    let kind: 'peft' | 'lokr' = 'peft';
+    if (!fs.existsSync(model)) {
+      model = path.join(dir, 'lokr_weights.safetensors');
+      kind = 'lokr';
+      if (!fs.existsSync(model)) return false;
+    }
     const stat = fs.statSync(model);
     const tg = readAdapterTrigger(dir);
-    adapters.push({ name, path: dir, kind: 'peft', size: stat.size, mtime: stat.mtimeMs,
+    adapters.push({ name, path: dir, kind, size: stat.size, mtime: stat.mtimeMs,
                     lmSize, run, trigger: tg.trigger, triggerPosition: tg.position });
     return true;
   };

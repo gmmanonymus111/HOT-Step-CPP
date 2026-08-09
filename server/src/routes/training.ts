@@ -1640,7 +1640,11 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const weightDecay = numOpt(body.weightDecay, 0.01);
     const maxLen = numOpt(body.maxLen, 0);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 0);
+    // 0.1, NOT 0: the types.ts contract documents 0.1 and a 0 fallback
+    // silently disabled milestone snapshots for every pipeline/batch run that
+    // omitted the field — the whole 2026-08 LoKr corpus shipped without them
+    // (found 2026-08-09). 0 still disables when sent explicitly.
+    const milestoneStep = numOpt(body.milestoneStep, 0.1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
 
     const rangeFailure =
@@ -2025,7 +2029,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // handle without the caption path going untrained.
     const genreRatio = numOpt(body.genreRatio, 30);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 0);
+    // 0.1, NOT 0 — same fix as train-lm above: the 0 fallback silently
+    // disabled milestone snapshots for any caller omitting the field.
+    const milestoneStep = numOpt(body.milestoneStep, 0.1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
     const vramReserveMb = numOpt(body.vramReserveMb, 2048);
     // Micro-batching / checkpointing (design §2.2). ckptSegments mirrors the
