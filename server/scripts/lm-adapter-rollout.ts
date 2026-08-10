@@ -292,6 +292,24 @@ interface Outcome {
 async function processArtist(a: Artist, lmModel: string, scales: number[], targetLoss: number,
                              lean: { seeds: number; duration: number; samples: number }): Promise<Outcome> {
   const t0 = Date.now();
+
+  // 1. resume-train deeper
+  console.log(`   training: resume ${path.basename(a.sourceRun)} -> target ${targetLoss}`);
+  await aceClient.restoreEvictPolicy().catch(() => { /* engine may be idle already */ });
+  const tr = resumeTrain(a, lmModel, targetLoss);
+  if (!tr.ok) {
+    return { artist: a.name, status: 'failed', servedDir: '', oldScore: null, newScore: null,
+             winner: '', detail: `training: ${tr.err}`, minutes: Number(((Date.now() - t0) / 60_000).toFixed(1)) };
+  }
+  return calibrateArtist(a, tr.runDir, scales, lean, t0);
+}
+
+/** Steps 2-5 without the training: eval {old, newRun(+distinct milestones)} x
+ *  scales, pick under guards, bake, sidecars. Shared by processArtist and the
+ *  `calibrate` subcommand the Studio's lm-calibrate job invokes. */
+async function calibrateArtist(a: Artist, newRunDir: string, scales: number[],
+                               lean: { seeds: number; duration: number; samples: number },
+                               t0 = Date.now()): Promise<Outcome> {
   const evalRoot = path.join(a.tensorsDir, 'lm-eval');
   const out = (status: Outcome['status'], servedDir: string, oldS: CandScore | null, newS: CandScore | null,
                winner: string, detail: string): Outcome => ({
@@ -300,20 +318,18 @@ async function processArtist(a: Artist, lmModel: string, scales: number[], targe
     newScore: newS ? Number(newS.score.toFixed(4)) : null,
     winner, detail, minutes: Number(((Date.now() - t0) / 60_000).toFixed(1)),
   });
-
-  // 1. resume-train deeper
-  console.log(`   training: resume ${path.basename(a.sourceRun)} -> target ${targetLoss}`);
-  await aceClient.restoreEvictPolicy().catch(() => { /* engine may be idle already */ });
-  const tr = resumeTrain(a, lmModel, targetLoss);
-  if (!tr.ok) return out('failed', '', null, null, '', `training: ${tr.err}`);
+  const tr = { runDir: newRunDir };
 
   // 2. candidates: old + new final + distinct milestones, x scales
   const newWeights = weightsFileIn(tr.runDir);
   const finalHash = newWeights ? sha1File(newWeights) : '';
-  const snapshots: Array<{ label: string; dir: string }> = [
-    { label: 'old', dir: a.sourceRun },
-    { label: 'new', dir: tr.runDir },
-  ];
+  // No old snapshot on a first-ever training (sourceRun empty or the new run
+  // itself) — the new adapter then only has to beat the guards, not a rival.
+  const snapshots: Array<{ label: string; dir: string }> = [];
+  if (a.sourceRun && path.resolve(a.sourceRun) !== path.resolve(tr.runDir)) {
+    snapshots.push({ label: 'old', dir: a.sourceRun });
+  }
+  snapshots.push({ label: 'new', dir: tr.runDir });
   const msRoot = path.join(tr.runDir, 'milestones');
   if (fs.existsSync(msRoot)) {
     for (const e of fs.readdirSync(msRoot, { withFileTypes: true })) {
@@ -447,6 +463,53 @@ async function cmdRun(args: Map<string, string>): Promise<void> {
   console.log(`        npx tsx scripts/lm-adapter-rollout.ts repoint --apply`);
 }
 
+// ── calibrate (single artist, no training — the Studio's post-train job) ──
+
+/**
+ * Calibrate ONE artist around an existing freshly-trained run. Invoked by the
+ * server's lm-calibrate job (calibrateRunner.ts) after every train-lm job.
+ * Emits a final machine-readable line:  CALIBRATE_RESULT {json Outcome}
+ * The caller owns preset repointing — this command never touches the DB.
+ */
+async function cmdCalibrate(args: Map<string, string>): Promise<void> {
+  const dataset = args.get('dataset') ?? '';
+  const newRun = path.resolve(args.get('new-run') ?? '');
+  if (!dataset || !newRun) die('calibrate needs --dataset <slug> and --new-run <dir>');
+  if (!hasWeights(newRun)) die(`${newRun} holds no adapter weights`);
+  const variant = args.get('variant') || newestVariantKey(dataset);
+  const tensorsDir = variant ? path.join(tensorsRoot(dataset), variant) : '';
+  if (!variant || !fs.existsSync(path.join(tensorsDir, 'lm_codes.jsonl'))) {
+    die(`dataset "${dataset}" has no extracted lm_codes.jsonl — calibration needs the ground-truth codes`);
+  }
+  const scales = (args.get('scales') ?? '0.75,1').split(',').map(Number).filter(Number.isFinite);
+  const lean = {
+    seeds: Math.max(1, Math.trunc(Number(args.get('seeds')) || 1)),
+    duration: Math.max(30, Math.trunc(Number(args.get('duration')) || 60)),
+    samples: Math.max(4, Math.trunc(Number(args.get('samples')) || 12)),
+  };
+  // Old rival: explicit --old-run, else the newest trained run that is not the
+  // new one (and not a -calibrated bake). Empty = first-ever training.
+  const artistDir = path.dirname(newRun);
+  let oldRun = path.resolve(args.get('old-run') ?? '') || '';
+  if (!args.get('old-run')) {
+    oldRun = '';
+    try {
+      const runs = fs.readdirSync(artistDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && !/-calibrated$/i.test(e.name)
+          && hasWeights(path.join(artistDir, e.name))
+          && path.resolve(path.join(artistDir, e.name)) !== newRun)
+        .map(e => e.name)
+        .sort();
+      if (runs.length) oldRun = path.join(artistDir, runs[runs.length - 1]);
+    } catch { /* no siblings */ }
+  }
+
+  const a: Artist = { name: dataset, dir: artistDir, sourceRun: oldRun, variant, tensorsDir };
+  const outcome = await calibrateArtist(a, newRun, scales, lean);
+  console.log(`CALIBRATE_RESULT ${JSON.stringify(outcome)}`);
+  if (outcome.status === 'failed') process.exit(1);
+}
+
 // ── repoint (album presets) ───────────────────────────────────────────────
 
 function cmdRepoint(args: Map<string, string>): void {
@@ -548,14 +611,17 @@ const cmd = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 if (cmd === 'run') {
   cmdRun(args).catch(err => die(err instanceof Error ? err.message : String(err)));
+} else if (cmd === 'calibrate') {
+  cmdCalibrate(args).catch(err => die(err instanceof Error ? err.message : String(err)));
 } else if (cmd === 'repoint') {
   cmdRepoint(args);
 } else if (cmd === 'report') {
   cmdReport();
 } else {
-  console.log('usage: npx tsx scripts/lm-adapter-rollout.ts <run|repoint|report> [options]');
-  console.log('  run     [--limit N] [--artists a,b] [--scales 0.75,1] [--seeds 1] [--duration 60] [--samples 12] [--target-loss 1.5] [--dry-run]');
-  console.log('  repoint [--apply]     update album_presets.lm_adapter_path to served adapters (dry-run default)');
-  console.log('  report                summarize all rollout logs');
+  console.log('usage: npx tsx scripts/lm-adapter-rollout.ts <run|calibrate|repoint|report> [options]');
+  console.log('  run       [--limit N] [--artists a,b] [--scales 0.75,1] [--seeds 1] [--duration 60] [--samples 12] [--target-loss 1.5] [--dry-run]');
+  console.log('  calibrate --dataset <slug> --new-run <dir> [--old-run <dir>] [lean args]   (no training, no DB writes)');
+  console.log('  repoint   [--apply]     update album_presets.lm_adapter_path to served adapters (dry-run default)');
+  console.log('  report                  summarize all rollout logs');
   process.exit(cmd ? 1 : 0);
 }

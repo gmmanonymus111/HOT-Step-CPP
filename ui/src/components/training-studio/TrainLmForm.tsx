@@ -45,6 +45,14 @@ export interface TrainLmFormState {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** Resume: continue from the newest non-calibrated run of this adapter name
+   *  (server resolves the 'latest' sentinel; engine adopts identity). */
+  resumeFromLatest: boolean;
+  /** Post-training calibration: eval old-vs-new x scales, pick under guards,
+   *  bake the winner, write the score sidecar. Default ON (Rob, 2026-08-10). */
+  calibrate: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default ON. */
+  calibrateRepoint: boolean;
   /** Projection GEMM dtype (speed lever A). 'f32-window' is the default; note
    *  that on the LM 'bf16' is also the only route to the mul_mat backward, so
    *  this is a precision/speed trade, not a free dial. */
@@ -97,14 +105,20 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   seed: 42,
   order: 'shuffle',
   lossOnCot: true,
-  // Milestones OFF by default (Rob, 2026-07-30). The run now always leaves the
-  // BEST adapter in the run dir, so the main reason to snapshot mid-run — "grab
-  // something before it overfits" — is covered without writing N extra copies.
-  milestoneStep: 0,
+  // Milestones back ON at 0.1 (2026-08-10) — they were turned off 2026-07-30
+  // when their only use was "grab something before it overfits", but the
+  // post-training CALIBRATION step now evaluates milestone snapshots as
+  // candidate adapters (each at multiple scales) and picks the closest to the
+  // artist, so snapshots are inputs to a measurement, not clutter.
+  // milestone-keep caps the disk cost.
+  milestoneStep: 0.1,
   milestoneKeep: 6,
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
+  resumeFromLatest: false,
+  calibrate: true,
+  calibrateRepoint: true,
   // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
   //
   // f32-window (Rob, 2026-07-30, final) — matching the DiT's F32 mirror.
@@ -329,6 +343,42 @@ export const TrainLmForm: React.FC<Props> = ({
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>
         </label>
+      </div>
+
+      {/* ── Resume + calibration (2026-08-10) ─────────────────────────── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.resumeFromLatest}
+            disabled={lock}
+            onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('resumeFromLatest', 'Default off', CHECK_LABEL)}
+        </label>
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.calibrate}
+            disabled={lock}
+            onChange={(e) => onChange({ calibrate: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('calibrate', 'Default on', CHECK_LABEL)}
+        </label>
+        {value.calibrate && (
+          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">
+            <input
+              type="checkbox"
+              checked={value.calibrateRepoint}
+              disabled={lock}
+              onChange={(e) => onChange({ calibrateRepoint: e.target.checked })}
+              className="accent-amber-500"
+            />
+            {P('calibrateRepoint', 'Default on', CHECK_LABEL)}
+          </label>
+        )}
       </div>
 
       {/* ── Advanced ──────────────────────────────────────────────────── */}

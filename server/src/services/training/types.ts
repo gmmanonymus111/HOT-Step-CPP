@@ -18,7 +18,7 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition';
+  | 'audition' | 'lm-calibrate';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -453,6 +453,16 @@ export interface TrainLmOptions {
   stages?: TrainLmStage[];         // default ['extract','train','export']
   overwrite?: boolean;             // default false — re-extract every song
   stopEngine?: boolean;            // default TRUE — stop ace-server for the job
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  lm_train_log.json by the engine; contradictions are refused. */
+  initAdapter?: string;            // default '' = train from scratch
+  /** Run the post-training calibration job (eval candidates x scales, pick
+   *  under guards, bake the winner, write hot_step_eval.json). Default TRUE. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s) at the served
+   *  adapter. Default TRUE. Meaningless when calibrate is false. */
+  calibrateRepoint?: boolean;
   /** Per-layer gradient checkpointing + chunked CE. 'auto' (default) turns it on
    *  for 4B, and for smaller bases only when the naive path would have to skip
    *  full-song samples. */

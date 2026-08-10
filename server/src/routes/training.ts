@@ -1765,6 +1765,45 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── resume + post-training calibration (2026-08-10) ─────────────────
+    // initAdapter must be a real adapter run dir BEFORE the runner stops the
+    // engine — the engine would also refuse it, but only after a full engine
+    // stop/restart cycle (same rule as every other pre-flight check here).
+    //
+    // The sentinel 'latest' (the UI checkbox) resolves to the newest run of
+    // THIS adapter name that holds weights, excluding -calibrated bakes: a
+    // bake's factors carry the baked scale, so resuming one would train from
+    // rescaled weights and shift the adapter's effective strength mid-lineage.
+    let initAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : '';
+    if (initAdapter === 'latest') {
+      const artistDir = path.dirname(adapterDir);
+      let newest = '';
+      try {
+        const runs = fs.readdirSync(artistDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !/-calibrated$/i.test(e.name)
+            && hasWeights(path.join(artistDir, e.name)))
+          .map(e => e.name)
+          .sort();
+        if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
+      } catch { /* artist dir may not exist yet */ }
+      if (!newest && hasWeights(artistDir)) newest = artistDir;   // legacy unversioned
+      if (!newest) {
+        res.status(400).json({
+          error: `Nothing to resume — no previous trained run for "${adapterName}" (${lmSize})`,
+        });
+        return;
+      }
+      initAdapter = newest;
+    }
+    if (initAdapter && !hasWeights(initAdapter)) {
+      res.status(400).json({
+        error: `initAdapter ${initAdapter} holds no adapter weights (adapter_model/lokr_weights.safetensors)`,
+      });
+      return;
+    }
+    const calibrate = body.calibrate !== false;           // default ON (Rob, 2026-08-10)
+    const calibrateRepoint = body.calibrateRepoint !== false;
+
     // ── stages ───────────────────────────────────────────────────────────
     const requestedStages = Array.isArray(body.stages) ? body.stages : [];
     const stages = TRAIN_LM_STAGES.filter(s => requestedStages.includes(s));
@@ -1814,6 +1853,9 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
+      initAdapter,
+      calibrate,
+      calibrateRepoint,
       lowVram,
       attnHeadBlock: Math.trunc(attnHeadBlock),
       chunk: Math.trunc(chunk),

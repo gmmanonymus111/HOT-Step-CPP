@@ -353,6 +353,7 @@ function laneFor(job: TrainingJob): 'gpu' | 'net' {
     case 'train-lm':
     case 'train-dit':
     case 'audition':
+    case 'lm-calibrate':   // drives /lm generations — engine must be up, GPU-serial
       return 'gpu';
     case 'label':
       return (job.opts as LabelOptions | undefined)?.useUnderstand === true ? 'gpu' : 'net';
@@ -1220,6 +1221,31 @@ export function startTrainLmJob(datasetId: string, opts: unknown): TrainingJob {
   enqueue(job, async (j) => {
     const { runTrainLmJob } = await import('./trainLmRunner.js');
     await runTrainLmJob(j);
+  });
+  return job;
+}
+
+/**
+ * Post-training LM calibration (2026-08-10) — evals candidate adapters x
+ * scales against the dataset's ground-truth codes, picks under guards, bakes
+ * the winner and repoints presets. Needs ace-server UP (it drives /lm), so it
+ * lives in the GPU lane strictly AFTER the train job whose `finally` restarts
+ * the engine. Enqueued by trainLmRunner on success when opts.calibrate.
+ */
+export interface LmCalibrateOptions {
+  /** The just-trained run dir the calibration is centered on. */
+  newRunDir: string;
+  /** Explicit rival ('' = auto: newest other non-calibrated run). */
+  oldRunDir: string;
+  variantKey: string;
+  repoint: boolean;
+}
+
+export function startLmCalibrateJob(datasetId: string, opts: LmCalibrateOptions): TrainingJob {
+  const job = createJob('lm-calibrate', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runLmCalibrateJob } = await import('./calibrateRunner.js');
+    await runLmCalibrateJob(j);
   });
   return job;
 }

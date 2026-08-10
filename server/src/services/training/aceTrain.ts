@@ -222,6 +222,14 @@ export interface ResolvedTrainLmOptions {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** Resume source run dir ('' = scratch). When set, the identity flags
+   *  (adapter type, rank/alpha, lokr dims, --weights) are NOT emitted — the
+   *  engine adopts them from the source run's log and refuses contradictions,
+   *  so emitting the form's defaults would fail every resume of a run whose
+   *  identity differs from the current form state. */
+  initAdapter: string;
+  calibrate: boolean;
+  calibrateRepoint: boolean;
   /** 'auto' = the engine's own default (ON for 4B, and for smaller bases only
    *  when the naive fit would drop full-song samples). */
   lowVram: 'auto' | 'on' | 'off';
@@ -271,18 +279,26 @@ export function buildTrainLmArgs(input: {
     ...(o.ditModel ? ['--dit', o.ditModel] : []),
     '--lm', o.lmModel,
     '--lm-size', o.lmSize,
-    // Always emitted so an ace-train that predates --adapter-type rejects it
-    // loudly rather than silently training a LoRA when a LoKr was asked for.
-    '--adapter-type', o.adapterType,
+    // Resume: the engine adopts identity hyperparams (adapter type, rank/alpha,
+    // lokr dims, --weights) from the source run's log and REFUSES explicit
+    // contradictions — so with --init-adapter the identity flags are omitted
+    // entirely; emitting the form's defaults would fail every resume of a run
+    // whose identity differs from the current form state.
+    ...(o.initAdapter ? ['--init-adapter', o.initAdapter] : []),
+    // Always emitted (scratch runs) so an ace-train that predates
+    // --adapter-type rejects it loudly rather than silently training a LoRA
+    // when a LoKr was asked for.
+    ...(o.initAdapter ? [] : ['--adapter-type', o.adapterType]),
     // Always emitted so an ace-train that predates --optimizer rejects it loudly
     // rather than silently training on AdamW when Muon was asked for.
     '--optimizer', o.optimizer,
     ...(o.optimizer === 'muon'
       ? ['--muon-lr-scale', String(o.muonLrScale), '--muon-ns-steps', String(o.muonNsSteps)]
       : []),
-    ...(o.adapterType === 'lokr'
-      ? ['--lokr-dim', String(o.lokrDim), '--lokr-alpha', String(o.lokrAlpha), '--lokr-factor', String(o.lokrFactor)]
-      : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
+    ...(o.initAdapter ? []
+      : o.adapterType === 'lokr'
+        ? ['--lokr-dim', String(o.lokrDim), '--lokr-alpha', String(o.lokrAlpha), '--lokr-factor', String(o.lokrFactor)]
+        : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
     '--lr', String(o.learningRate),
     '--epochs', String(o.epochs),
     '--grad-accum', String(o.gradAccum),
@@ -309,7 +325,10 @@ export function buildTrainLmArgs(input: {
   // (2026-07-29), so a normal run now DOES emit --weights bf16 explicitly.
   // An older ace-train.exe without --weights/--batch only stays compatible
   // if the caller explicitly requests 'f32-window'.
-  if (o.weights && o.weights !== 'f32-window') args.push('--weights', o.weights);
+  // Suppressed on resume like the other identity flags — the S6 rule makes a
+  // --weights that contradicts the source run a hard refuse, and the server
+  // default ('bf16') contradicts the whole f32-window-trained corpus.
+  if (!o.initAdapter && o.weights && o.weights !== 'f32-window') args.push('--weights', o.weights);
   if (o.batch !== undefined && o.batch !== 1) args.push('--batch', String(o.batch));
   // Always emitted, both sides: an ace-train that predates --bwd rejects it
   // loudly rather than silently running the slow out_prod backward.

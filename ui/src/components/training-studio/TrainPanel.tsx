@@ -220,6 +220,11 @@ export const TrainPanel: React.FC = () => {
       stages: form.stages,
       overwrite: form.overwrite,
       stopEngine: form.stopEngine,
+      // Resume + post-training calibration (2026-08-10). 'latest' = the server
+      // resolves the newest non-calibrated run of this adapter name.
+      ...(form.resumeFromLatest ? { initAdapter: 'latest' } : {}),
+      calibrate: form.calibrate,
+      calibrateRepoint: form.calibrateRepoint,
       // Speed levers. Sent only when the user moved them off the shipped
       // default, so a normal start posts the same body it always did — and an
       // engine without the flags never sees them.
