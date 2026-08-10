@@ -459,8 +459,10 @@ async function cmdGenerate(args: Map<string, string>): Promise<void> {
   const tensorsDir = path.join(tensorsRoot(slug), variant);
   const rowsFull = readCodesFile(slug, variant);
   const adapterPath = resolveDitAdapter(adapterArg);
-  // The variant IS the base the latents came from — render on it, not a default.
-  const synthModel = variant;
+  // The variant IS the base the latents came from — render on it, not a
+  // default. The variant key is the model name with the extension stripped
+  // (variantKeyFor), so put it back for the engine's resolver.
+  const synthModel = `${variant}.gguf`;
 
   const scale = Number(args.get('scale')) || 1.0;
   const steps = Math.trunc(Number(args.get('steps')) || 8);
