@@ -309,7 +309,7 @@ async function processArtist(a: Artist, lmModel: string, scales: number[], targe
  *  `calibrate` subcommand the Studio's lm-calibrate job invokes. */
 async function calibrateArtist(a: Artist, newRunDir: string, scales: number[],
                                lean: { seeds: number; duration: number; samples: number },
-                               t0 = Date.now()): Promise<Outcome> {
+                               t0 = Date.now(), tag = 'rollout'): Promise<Outcome> {
   const evalRoot = path.join(a.tensorsDir, 'lm-eval');
   const out = (status: Outcome['status'], servedDir: string, oldS: CandScore | null, newS: CandScore | null,
                winner: string, detail: string): Outcome => ({
@@ -343,7 +343,7 @@ async function calibrateArtist(a: Artist, newRunDir: string, scales: number[],
     for (const s of scales) {
       cands.push({
         label: `${snap.label}@${s}`, adapterDir: snap.dir, scale: s,
-        outDir: path.join(evalRoot, `rollout-${snap.label}-s${String(s).replace('.', '_')}`),
+        outDir: path.join(evalRoot, `${tag}-${snap.label}-s${String(s).replace('.', '_')}`),
       });
     }
   }
@@ -505,7 +505,7 @@ async function cmdCalibrate(args: Map<string, string>): Promise<void> {
   }
 
   const a: Artist = { name: dataset, dir: artistDir, sourceRun: oldRun, variant, tensorsDir };
-  const outcome = await calibrateArtist(a, newRun, scales, lean);
+  const outcome = await calibrateArtist(a, newRun, scales, lean, Date.now(), args.get('tag') || 'rollout');
   console.log(`CALIBRATE_RESULT ${JSON.stringify(outcome)}`);
   if (outcome.status === 'failed') process.exit(1);
 }

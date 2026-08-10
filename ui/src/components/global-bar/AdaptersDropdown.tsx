@@ -61,7 +61,7 @@ export const AdaptersDropdown: React.FC = () => {
   // the Node route so freshly trained adapters appear WITHOUT an engine
   // restart — selection sends the absolute path, which the engine's
   // path-fallback resolver loads directly.
-  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number; lmSize?: string; run?: string }[]>([]);
+  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number; lmSize?: string; run?: string; evalScore?: number | null; evalVerdict?: string }[]>([]);
   const refreshLmAdapters = useCallback(() => {
     adapterApi.lmList(gp.lmAdapterFolder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
   }, [gp.lmAdapterFolder]);
@@ -479,6 +479,20 @@ export const AdaptersDropdown: React.FC = () => {
                   {a.run && (
                     <span className="text-zinc-500 flex-shrink-0 font-mono" style={{ fontSize: '9px' }} title={a.run}>
                       {a.run.slice(0, 10)}
+                    </span>
+                  )}
+                  {/* Artist-match eval score (hot_step_eval.json) — LOWER =
+                      closer to the artist. Green when the verdict was 'toward'. */}
+                  {typeof a.evalScore === 'number' && (
+                    <span
+                      className={`flex-shrink-0 font-mono ${
+                        a.evalVerdict === 'toward' ? 'text-emerald-500'
+                          : a.evalVerdict === 'away' ? 'text-red-400' : 'text-zinc-500'
+                      }`}
+                      style={{ fontSize: '9px' }}
+                      title={`Artist-match score (lower = closer) — verdict: ${a.evalVerdict || 'n/a'}`}
+                    >
+                      {a.evalScore.toFixed(3)}
                     </span>
                   )}
                   {a.lmSize && (

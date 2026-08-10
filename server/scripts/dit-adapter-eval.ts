@@ -518,6 +518,12 @@ async function cmdGenerate(args: Map<string, string>): Promise<void> {
     try {
       const t0 = Date.now();
       const wav = await synthClip(row, durSec, seed, side === 'adapter' ? adapterPath : '', scale, steps, synthModel);
+      if (args.get('keep-audio')) {
+        const audioDir = path.join(outDir, 'audio');
+        fs.mkdirSync(audioDir, { recursive: true });
+        const stem = row.file.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60);
+        fs.writeFileSync(path.join(audioDir, `${side}_${stem}_s${seed}.wav`), wav);
+      }
       const lat = await encodeLatents(wav);
       runs.gens.push({
         rowId: row.id, side, seed,
