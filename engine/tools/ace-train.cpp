@@ -324,6 +324,15 @@ static void print_usage(void) {
             "    --target-loss <f>           0.4         0 = disabled (run to the epoch cap)\n"
             "    --order <shuffle|fixed>     shuffle\n"
             "\n"
+            "  Resume:\n"
+            "    --init-adapter <dir>        continue training from an exported run (PEFT LoRA or\n"
+            "                                LoKr dir). Identity hyperparams (adapter type, rank/\n"
+            "                                alpha, lokr dims, target-mlp, layers, base model) are\n"
+            "                                ADOPTED from its dit_train_log.json; an explicit\n"
+            "                                contradicting flag is refused. Layer-window coverage is\n"
+            "                                tolerant: uncovered sites start at zero delta. mirror\n"
+            "                                and --bwd may differ (measured ~7e-5 loss drift).\n"
+            "\n"
             "  Crop / memory:\n"
             "    --crop <n>                  0           latent frames; 0 = auto-fit\n"
             "    --crop-min <n>              375\n"
@@ -1266,7 +1275,8 @@ static int cmd_train_lm(int argc, char ** argv) {
 // ─── train-dit (plan §2.1) ──────────────────────────────────────────────────
 
 static int cmd_train_dit(int argc, char ** argv) {
-    DitTrainArgs a;
+    DitTrainArgs      a;
+    DitResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
     std::string  stages_csv, dit_arg;
     bool         safety_user = false;
 
@@ -1276,17 +1286,18 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) a.out_dir = argv[++i];
         else if (!strcmp(argv[i], "--models") && i + 1 < argc) a.models_dir = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
-        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
-        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--init-adapter") && i + 1 < argc) a.init_adapter = argv[++i];
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) { a.adapter_type = argv[++i]; saw.adapter_type = true; }
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) { a.rank = atoi(argv[++i]); saw.rank = true; }
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) { a.alpha = atoi(argv[++i]); saw.alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) { a.lokr_dim = atoi(argv[++i]); saw.lokr_dim = true; }
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) { a.lokr_alpha = (float) atof(argv[++i]); saw.lokr_alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) { a.lokr_factor = atoi(argv[++i]); saw.lokr_factor = true; }
         else if (!strcmp(argv[i], "--lokr-decompose-both")) a.lokr_decompose_both = true;
         else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
-        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
-        else if (!strcmp(argv[i], "--no-target-mlp")) a.target_mlp = false;
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) { a.layers = atoi(argv[++i]); saw.layers = true; }
+        else if (!strcmp(argv[i], "--target-mlp")) { a.target_mlp = true; saw.target_mlp = true; }
+        else if (!strcmp(argv[i], "--no-target-mlp")) { a.target_mlp = false; saw.target_mlp = true; }
         else if (!strcmp(argv[i], "--loss-weighting") && i + 1 < argc) a.loss_weighting = argv[++i];
         else if (!strcmp(argv[i], "--snr-gamma") && i + 1 < argc) a.snr_gamma = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--t-bias") && i + 1 < argc) a.t_bias = (float) atof(argv[++i]);
@@ -1353,6 +1364,22 @@ static int cmd_train_dit(int argc, char ** argv) {
             fprintf(stderr, "ace-train train-dit: --stages must name at least one of train,export\n");
             return 2;
         }
+    }
+
+    // ── resume (--init-adapter): adopt the source run's identity ─────────
+    // BEFORE the sanity checks so they validate the ADOPTED values. Explicit
+    // CLI contradictions exit 2 inside prepare. Same shape as train-lm's.
+    DitResumeSource resume_src;
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        if (!dit_resume_prepare(&a, saw, &resume_src, &err)) {
+            fprintf(stderr, "ace-train train-dit: %s\n", err.c_str());
+            return 2;
+        }
+        a.init_from_ma5 = resume_src.saved_ma5;
+        fprintf(stderr, "[train-dit] resuming %s (%s, saved ma5 %.4f @ epoch %d) — identity adopted from its log\n",
+                a.init_adapter.c_str(), resume_src.adapter_type.c_str(), resume_src.saved_ma5,
+                resume_src.saved_epoch);
     }
 
     // ── numeric sanity (the server clamps these too; be defensive) ───────
@@ -1448,6 +1475,16 @@ static int cmd_train_dit(int argc, char ** argv) {
             return 2;
         }
         a.dit_name = name;
+        // Resume base check: a DiT adapter is per-base (cross-base transfer is
+        // its own basin-sensitive minefield — docs/plans lokr-cross-base) so a
+        // different base file is a hard refuse, not a warn.
+        if (!a.init_adapter.empty() && !resume_src.dit_name.empty() && resume_src.dit_name != a.dit_name) {
+            fprintf(stderr,
+                    "ace-train train-dit: --init-adapter %s was trained on %s but --dit resolved to %s — "
+                    "a resumed adapter must stay on its own base\n",
+                    a.init_adapter.c_str(), resume_src.dit_name.c_str(), a.dit_name.c_str());
+            return 2;
+        }
     }
 
     // MUST precede every model load and graph build — the ggml patch latches

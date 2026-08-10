@@ -67,6 +67,10 @@ struct DitTrainLog {
     std::string order = "shuffle";
     std::string loss_weighting = "flow_snr";
     double      snr_gamma = 5.0, t_bias = 0.5;
+    // Resume provenance (--init-adapter, 2026-08-10). Additive; readers default
+    // to "trained from scratch". init_from_ma5 is the SOURCE run's saved_ma5.
+    std::string init_adapter;
+    double      init_from_ma5 = -1.0;
     bool        channel_balance = true;
     double      timestep_mu = -0.4, timestep_sigma = 1.0, t_min = 0.0, t_max = 1.0, cfg_ratio = 0.15;
     int         genre_ratio = 0;
@@ -166,6 +170,10 @@ static bool dit_write_train_log(const std::string & dir, const DitTrainLog & m) 
     yyjson_mut_obj_add_real(doc, cfg, "target_loss", m.target_loss);
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
+    if (!m.init_adapter.empty()) {
+        yyjson_mut_obj_add_strcpy(doc, cfg, "init_adapter", m.init_adapter.c_str());
+        yyjson_mut_obj_add_real(doc, cfg, "init_from_ma5", m.init_from_ma5);
+    }
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epochs_log.size(); i++) {

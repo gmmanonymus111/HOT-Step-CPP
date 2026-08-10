@@ -22,6 +22,7 @@
 
 #include "train/dit-data.h"
 #include "train/dit-export.h"
+#include "train/dit-resume.h"
 #include "train/dit-selftest.h"
 #include "train/dit-train-ckpt.h"
 
@@ -134,6 +135,13 @@ struct DitTrainArgs {
 
     float milestone_step = 0.1f;
     int   milestone_keep = 6;
+
+    // Resume (--init-adapter, 2026-08-10): dir of an exported run whose factors
+    // seed this one. Identity hyperparams adopted from its dit_train_log.json
+    // by dit_resume_prepare (cmd_train_dit); explicit contradictions exit 2.
+    // init_from_ma5 carries the source's saved_ma5 for provenance/logging.
+    std::string init_adapter;
+    double      init_from_ma5 = -1.0;
 
     bool overwrite = false;
     int  limit     = 0;
@@ -805,6 +813,38 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             dit_train_free(&M);
             return 1;
         }
+    }
+    // Resume: overwrite the fresh init with the source run's factors. After
+    // adapter->init so the tensors exist; coverage-tolerant (see dit-resume.h —
+    // the trained layer window may differ between runs).
+    if (!a.init_adapter.empty()) {
+        DitResumeStats rs;
+        std::string    err;
+        const bool     rok = is_lokr ? dit_resume_load_lokr(&lokr, a.init_adapter, &rs, &err)
+                                     : dit_resume_load_lora(&lora, a.init_adapter, &rs, &err);
+        if (!rok) {
+            lm_fatal("resume", err);
+            ggml_backend_buffer_free(buf_static);
+            ggml_free(ctx_static);
+            dit_train_free(&M);
+            return 1;
+        }
+        if (rs.loaded == 0) {
+            lm_fatal("resume", "no tensors from " + a.init_adapter +
+                                   " overlap this run's trained layer window — nothing was resumed");
+            ggml_backend_buffer_free(buf_static);
+            ggml_free(ctx_static);
+            dit_train_free(&M);
+            return 1;
+        }
+        char b[320];
+        snprintf(b, sizeof(b),
+                 "resumed %d tensors from %s (source ma5 %.4f); %d site(s) start fresh, %d file layer(s) outside "
+                 "this window",
+                 rs.loaded, a.init_adapter.c_str(), a.init_from_ma5, rs.fresh_sites, rs.skipped_file);
+        lm_log("info", b);
+        jl("{\"type\":\"resume\",\"initAdapter\":\"%s\",\"tensors\":%d,\"freshSites\":%d,\"sourceMa5\":%.6f}",
+           lm_json_escape(a.init_adapter).c_str(), rs.loaded, rs.fresh_sites, a.init_from_ma5);
     }
     const DitAdapter * ad = adapter;
 
@@ -1741,6 +1781,8 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.crop_max        = a.crop_max;
     log.mirror          = a.mirror;
     log.bwd             = a.bwd;
+    log.init_adapter    = a.init_adapter;
+    log.init_from_ma5   = a.init_from_ma5;
     log.lr              = a.lr;
     log.epochs          = a.epochs;
     log.grad_accum      = a.grad_accum;
