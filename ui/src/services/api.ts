@@ -321,7 +321,7 @@ export const adapterApi = {
        *  artist — LOWER = closer. null = never evaluated. */
       evalScore: number | null;
       evalVerdict: string;
-      lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | '';
+      lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | 'replace' | '';
     }[] }>(
       `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 };

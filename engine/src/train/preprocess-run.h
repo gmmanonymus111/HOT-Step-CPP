@@ -199,8 +199,20 @@ static std::string pp_caption_text(const PSample & s, const PManifest & mf, bool
             text = text.empty() ? tag : tag + ", " + text;
         } else if (pos == "append") {
             text = text.empty() ? tag : text + ", " + tag;
+        } else if (pos == "replace") {
+            // The caption IS the trigger (2026-08-12). Every descriptive word
+            // from the sidecar is dropped, so the trigger token alone has to
+            // carry genre/timbre/feel and the adapter is forced to learn them
+            // rather than lean on the prose. The Build panel has always
+            // labelled this "Instead of the caption"; until now preprocess
+            // silently did nothing (verbatim Side-Step), which trained an
+            // adapter whose captions carried no trigger at all.
+            //
+            // The `# Metas` block (bpm/timesignature/keyscale/duration) and
+            // the lyric prompt are built separately in pp_prompt_strings and
+            // are NOT affected — only the caption text collapses.
+            text = tag;
         }
-        // "replace": tag is NOT applied here — verbatim Side-Step behaviour.
     }
     return text;
 }

@@ -89,11 +89,17 @@ function codesDuration(codesCount: number): number {
 function applyTriggerTag(caption: string, tag: string, position: string): string {
   const t = String(tag ?? '').trim();
   if (!t || !caption) return caption;
-  if (caption.toLowerCase().includes(t.toLowerCase())) return caption;
   const pos = position || 'prepend';
+  // 'replace' collapses the caption to the trigger, which is what the dataset
+  // was preprocessed with — so it runs BEFORE the already-contains check. That
+  // check exists to avoid duplicating a token in a caption that keeps its prose
+  // (pre-tagged lm_codes.jsonl rows, users typing the trigger themselves); for
+  // 'replace' the prose has to go regardless of whether the tag is in it.
+  if (pos === 'replace') return t;
+  if (caption.toLowerCase().includes(t.toLowerCase())) return caption;
   if (pos === 'prepend') return `${t}, ${caption}`;
   if (pos === 'append') return `${caption}, ${t}`;
-  return caption;   // 'replace'
+  return caption;
 }
 
 // ── Codes-row lookup ──────────────────────────────────────────────────────

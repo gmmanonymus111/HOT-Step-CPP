@@ -759,6 +759,31 @@ static int cmd_preprocess(int argc, char ** argv) {
                 cmp_i("max_lyric_tokens", cs.max_lyric_tokens, o.max_lyric_tokens);
                 cmp_i("vae_chunk", cs.vae_chunk, o.vae_chunk);
                 cmp_i("vae_overlap", cs.vae_overlap, o.vae_overlap);
+
+                // Trigger pair — resolved exactly the way pp_caption_text does,
+                // because it decides the CAPTION that got text-encoded into
+                // this file. NOT cmp_s: that skips an empty `had`, and the
+                // costliest change here (a cache written before the dataset had
+                // a tag, or with the key absent) has precisely that shape. An
+                // empty position means "prepend", and position is meaningless
+                // without a tag, so both sides normalise before comparing.
+                const std::string want_tag = s.custom_tag.empty() ? mf.custom_tag : s.custom_tag;
+                const std::string want_pos_raw = s.tag_position.empty() ? mf.tag_position : s.tag_position;
+                auto norm_pos = [](const std::string & tag, const std::string & pos) {
+                    return tag.empty() ? std::string() : (pos.empty() ? std::string("prepend") : pos);
+                };
+                const std::string had_pos  = norm_pos(cs.custom_tag, cs.tag_position);
+                const std::string want_pos = norm_pos(want_tag, want_pos_raw);
+                if (cs.custom_tag != want_tag) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "custom_tag " + (cs.custom_tag.empty() ? std::string("(none)") : cs.custom_tag)
+                                 + "\xE2\x86\x92" + (want_tag.empty() ? std::string("(none)") : want_tag);
+                }
+                if (had_pos != want_pos) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "tag_position " + (had_pos.empty() ? std::string("(none)") : had_pos)
+                                 + "\xE2\x86\x92" + (want_pos.empty() ? std::string("(none)") : want_pos);
+                }
             }
             if (!resume_diff.empty()) {
                 char wb[640];

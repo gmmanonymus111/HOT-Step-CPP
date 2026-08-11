@@ -427,14 +427,20 @@ static std::string lm_apply_tag(const std::string & text, const std::string & ta
     if (pos == "append") {
         return text.empty() ? tag : text + ", " + tag;
     }
-    return text;  // "replace": tag is not applied here (verbatim Side-Step behaviour)
+    if (pos == "replace") {
+        return tag;  // the caption IS the trigger — see preprocess-run.h
+    }
+    return text;
 }
 
-// Normalise a (trigger, position) pair for embedding. Only "prepend" and
-// "append" are ever written: `tag_position: "replace"` deliberately does NOT
-// apply the tag during preprocessing (preprocess-run.h:203, verbatim Side-Step),
-// so those captions carried no tag at all and claiming a trigger would be false.
-// `reason` receives a human-readable note when a non-empty tag is dropped.
+// Normalise a (trigger, position) pair for embedding. All three positions are
+// embeddable: each one puts the trigger into the training caption, so claiming
+// it is truthful. "replace" means the caption IS the trigger — the adapter saw
+// nothing but that token, and inference has to reproduce exactly that or it is
+// off-distribution, which is why the position travels with the trigger instead
+// of being assumed. (Before 2026-08-12 "replace" applied no tag at all during
+// preprocessing, so it was correctly refused here; preprocess-run.h now honours
+// it.) `reason` receives a human-readable note when a non-empty tag is dropped.
 static bool lm_trigger_normalize(std::string * tag, std::string * position, std::string * reason) {
     if (!tag || tag->empty()) {
         if (position) {
@@ -446,10 +452,10 @@ static bool lm_trigger_normalize(std::string * tag, std::string * position, std:
     if (pos.empty()) {
         pos = "prepend";
     }
-    if (pos != "prepend" && pos != "append") {
+    if (pos != "prepend" && pos != "append" && pos != "replace") {
         if (reason) {
-            *reason = "trigger \"" + *tag + "\" not embedded: tag_position \"" + pos +
-                      "\" never applies the tag during training, so the captions carried no trigger";
+            *reason = "trigger \"" + *tag + "\" not embedded: unknown tag_position \"" + pos +
+                      "\" (expected prepend | append | replace)";
         }
         tag->clear();
         if (position) {

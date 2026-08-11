@@ -216,7 +216,7 @@ router.get('/lm', (req, res) => {
     /** Training-run stamp (YYYY-MM-DD_HH-MM-SS subfolder); '' for an
      *  unversioned/legacy adapter. Every run of an artist is listed. */
     run: string;
-    trigger: string; triggerPosition: 'prepend' | 'append' | '';
+    trigger: string; triggerPosition: 'prepend' | 'append' | 'replace' | '';
     /** From the dir's hot_step_eval.json sidecar (lm-adapter-rollout.ts):
      *  marginal+transition JS distance to the artist's ground truth — LOWER =
      *  closer to the artist. null when the adapter was never evaluated. */

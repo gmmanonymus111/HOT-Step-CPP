@@ -393,8 +393,11 @@ export interface AdapterFile {
   size: number;
   /** Trigger word embedded in the adapter's safetensors metadata ('' = none). */
   trigger?: string;
-  /** The position that trigger sat at in the training captions. */
-  triggerPosition?: 'prepend' | 'append' | '';
+  /**
+   * The position that trigger sat at in the training captions. 'replace' means
+   * the trigger WAS the whole caption, so inference must drop the caption too.
+   */
+  triggerPosition?: 'prepend' | 'append' | 'replace' | '';
 }
 
 /** Model registry file entry */

@@ -691,6 +691,12 @@ static bool pm_read_cached_latents(const char * path, std::vector<float> & out, 
 // path compares these and re-encodes on a mismatch.
 struct PCacheSettings {
     std::string compat, dtype, timbre, normalize, model_variant, target_db;
+    // The trigger pair is part of the CAPTION the text encoder baked into this
+    // file (preprocess-run.h pp_caption_text), so a change to either has to
+    // re-encode. Without them, flipping tag_position prepend→replace left every
+    // cached file "matching" and the run silently trained on the old captions
+    // while preprocess_meta.json advertised the new setting (2026-08-12).
+    std::string custom_tag, tag_position;
     int         max_duration = -1, max_caption_tokens = -1, max_lyric_tokens = -1;
     int         vae_chunk = -1, vae_overlap = -1;
     bool        valid = false;  // false = no readable __metadata__ (legacy/corrupt file)
@@ -733,6 +739,8 @@ static bool pm_read_cached_settings(const char * path, PCacheSettings & s) {
         s.normalize     = pm_js_str(md, "normalize");
         s.model_variant = pm_js_str(md, "model_variant");
         s.target_db     = pm_js_str(md, "target_db");
+        s.custom_tag    = pm_js_str(md, "custom_tag");
+        s.tag_position  = pm_js_str(md, "tag_position");
 
         std::string v;
         v = pm_js_str(md, "max_duration");
