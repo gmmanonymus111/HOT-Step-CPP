@@ -419,7 +419,7 @@ export interface TrainLmOptions {
   /** Adapter directory stem; final dir is `<adapterName>-<lmSize>`.
    *  Omit = the dataset slug. */
   adapterName?: string;
-  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  targetLoss?: number;             // default 0.2;  0 disables auto-stop
   epochs?: number;                 // default 16 (hard cap)
   rank?: number;                   // default 16
   alpha?: number;                  // default 32
@@ -448,7 +448,7 @@ export interface TrainLmOptions {
   seed?: number;                   // default 42
   lossOnCot?: boolean;             // default true
   order?: 'shuffle' | 'fixed';     // default 'shuffle'
-  milestoneStep?: number;          // default 0.1;  0 disables
+  milestoneStep?: number;          // default 0 (milestones off)
   milestoneKeep?: number;          // default 6
   stages?: TrainLmStage[];         // default ['extract','train','export']
   overwrite?: boolean;             // default false — re-extract every song

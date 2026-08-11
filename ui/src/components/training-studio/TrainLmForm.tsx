@@ -72,7 +72,8 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmSize: '4B',
   lmModel: '',
   adapterName: '',
-  targetLoss: 2.0,
+  // 0.2 (Rob, 2026-08-12) — was 2.0.
+  targetLoss: 0.2,
   epochs: 150,
   adapterType: 'lokr',
   optimizer: 'muon',
@@ -105,13 +106,10 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   seed: 42,
   order: 'shuffle',
   lossOnCot: true,
-  // Milestones back ON at 0.1 (2026-08-10) — they were turned off 2026-07-30
-  // when their only use was "grab something before it overfits", but the
-  // post-training CALIBRATION step now evaluates milestone snapshots as
-  // candidate adapters (each at multiple scales) and picks the closest to the
-  // artist, so snapshots are inputs to a measurement, not clutter.
-  // milestone-keep caps the disk cost.
-  milestoneStep: 0.1,
+  // Milestones OFF by default again (Rob, 2026-08-12) — they were ON at 0.1
+  // from 2026-08-10 to feed the post-training calibration step with candidate
+  // snapshots. Set a step > 0 to re-enable; milestone-keep caps the disk cost.
+  milestoneStep: 0,
   milestoneKeep: 6,
   stages: ['extract', 'train', 'export'],
   overwrite: false,
@@ -311,7 +309,7 @@ export const TrainLmForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', 'Default 2.0 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 0.2 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -319,7 +317,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 2.0) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.2) })}
             className={FIELD}
           />
         </label>

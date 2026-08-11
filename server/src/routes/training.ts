@@ -1595,7 +1595,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
     const epochs = numOpt(body.epochs, 150);
-    const targetLoss = numOpt(body.targetLoss, 2.0);
+    // 0.2 (Rob, 2026-08-12) — was 2.0.
+    const targetLoss = numOpt(body.targetLoss, 0.2);
     const rank = numOpt(body.rank, 16);
     // LoKr is the DEFAULT (Rob, 2026-07-30) — an omitted adapterType now means
     // LoKr, so a caller that wants the old LoRA path must say so explicitly.
@@ -1640,11 +1641,12 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const weightDecay = numOpt(body.weightDecay, 0.01);
     const maxLen = numOpt(body.maxLen, 0);
     const seed = numOpt(body.seed, 42);
-    // 0.1, NOT 0: the types.ts contract documents 0.1 and a 0 fallback
-    // silently disabled milestone snapshots for every pipeline/batch run that
-    // omitted the field — the whole 2026-08 LoKr corpus shipped without them
-    // (found 2026-08-09). 0 still disables when sent explicitly.
-    const milestoneStep = numOpt(body.milestoneStep, 0.1);
+    // 0 = milestones OFF by default (Rob, 2026-08-12). History: the default was
+    // 0.1 from 2026-08-09 (a 0 fallback had silently disabled snapshots for the
+    // whole 2026-08 LoKr corpus, back when nobody wanted that); now off is the
+    // intended default for both the form and pipeline/batch runs. Callers that
+    // want milestone snapshots must send milestoneStep explicitly.
+    const milestoneStep = numOpt(body.milestoneStep, 0);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
 
     const rangeFailure =
