@@ -1524,6 +1524,44 @@ int ace_lm_generate(AceLm *            ctx,
         bool parse_use_cot_caption = (mode == LM_MODE_INSPIRE) ? true : req->use_cot_caption;
         parse_phase1_into_aces(phase1_texts, parse_base, aces, seed, mode_name, gen_lyrics, parse_use_cot_caption);
 
+        // Degenerate-caption guard (2026-08-11). Phase-1 text sampling has no
+        // repetition penalty (apply_code_rep_penalty is audio-codes only) and
+        // the captions adapters learned to write are ~320 tokens long, so a
+        // run occasionally collapses into a repeated chunk and/or emits
+        // invalid UTF-8. That is not merely cosmetic: the enriched caption
+        // becomes the DiT's text conditioning for the whole song, and bad
+        // bytes used to make the entire LM result serialize as "[]".
+        //
+        // REJECT, never re-sample: changing Phase-1 sampling would move the
+        // distribution every adapter calibration score was measured under. A
+        // healthy caption takes this branch never and is bit-identical.
+        for (auto & a : aces) {
+            if (a.caption.empty() || a.caption == ace.caption) {
+                continue;  // nothing generated here to distrust
+            }
+            std::string why;
+            size_t      salvage = a.caption.size();
+            if (!caption_is_degenerate(a.caption, &why, &salvage)) {
+                continue;
+            }
+            if (!ace.caption.empty()) {
+                fprintf(stderr, "[LM-Phase1] degenerate caption (%s) — restoring the request caption\n", why.c_str());
+                a.caption = ace.caption;
+            } else if (salvage > 0 && salvage < a.caption.size()) {
+                // Nothing to restore (inspire mode / no user caption): keep the
+                // clean prefix rather than shipping the loop into the DiT.
+                fprintf(stderr, "[LM-Phase1] degenerate caption (%s) — truncating to the clean prefix (%zu/%zu bytes)\n",
+                        why.c_str(), salvage, a.caption.size());
+                a.caption.resize(salvage);
+                while (!a.caption.empty() && isspace((unsigned char) a.caption.back())) {
+                    a.caption.pop_back();
+                }
+            } else {
+                fprintf(stderr, "[LM-Phase1] degenerate caption (%s) and nothing to fall back to — keeping it\n",
+                        why.c_str());
+            }
+        }
+
         // Caption preservation: the LM may enrich the user caption, but
         // never silently delete it. If the merge ended up with an empty
         // caption while the request had one, restore the request value.
