@@ -375,6 +375,13 @@ export interface ResolvedTrainDitOptions {
   muonMinDim: number;
   batch: number; ckptSegments: number;
   stages: TrainDitStage[]; overwrite: boolean; stopEngine: boolean;
+  /** Resume source run dir ('' = scratch). When set, identity flags (adapter
+   *  type, rank/alpha, lokr dims, target-mlp, layers) are NOT emitted — the
+   *  engine adopts them from the source run's log and refuses contradictions.
+   *  Same rule as ResolvedTrainLmOptions.initAdapter. */
+  initAdapter: string;
+  calibrate: boolean;
+  calibrateRepoint: boolean;
 }
 
 /**
@@ -443,22 +450,29 @@ export function buildTrainDitArgs(input: {
     // would make resolve_model('') exit 2, AFTER the runner already stopped the
     // engine.
     ...(o.ditPath ? ['--dit', o.ditPath] : []),
-    '--adapter-type', o.adapterType,
+    // Resume: identity flags (adapter type, rank/alpha, lokr dims, layers,
+    // target-mlp below) are omitted — the engine adopts them from the source
+    // run's log and refuses explicit contradictions, so emitting the form's
+    // defaults would fail every resume of a differently-shaped run. Same rule
+    // as buildTrainLmArgs.
+    ...(o.initAdapter ? ['--init-adapter', o.initAdapter] : []),
+    ...(o.initAdapter ? [] : ['--adapter-type', o.adapterType]),
     // §2.1: lora trains via --rank/--alpha; lokr via the four --lokr-* flags.
     // The two are mutually exclusive on the CLI side, so only one set is ever
     // emitted — sending both would be harmless (ace-train ignores the unused
     // side) but would misreport the run in logs/JSONL relays that echo argv.
-    ...(o.adapterType === 'lokr'
-      ? [
-          '--lokr-dim', String(o.lokrDim),
-          '--lokr-alpha', String(o.lokrAlpha),
-          '--lokr-factor', String(o.lokrFactor),
-          // Flag-shaped, default on (§2.1) — same "only the non-default side
-          // is emitted" convention as --channel-balance below.
-          ...(o.lokrDecomposeBoth ? [] : ['--no-lokr-decompose-both']),
-        ]
-      : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
-    '--layers', String(o.layers),
+    ...(o.initAdapter ? []
+      : o.adapterType === 'lokr'
+        ? [
+            '--lokr-dim', String(o.lokrDim),
+            '--lokr-alpha', String(o.lokrAlpha),
+            '--lokr-factor', String(o.lokrFactor),
+            // Flag-shaped, default on (§2.1) — same "only the non-default side
+            // is emitted" convention as --channel-balance below.
+            ...(o.lokrDecomposeBoth ? [] : ['--no-lokr-decompose-both']),
+          ]
+        : ['--rank', String(o.rank), '--alpha', String(o.alpha)]),
+    ...(o.initAdapter ? [] : ['--layers', String(o.layers)]),
     '--crop', String(o.crop),
     '--crop-min', String(o.cropMin),
     '--crop-max', String(o.cropMax),
@@ -504,7 +518,9 @@ export function buildTrainDitArgs(input: {
   // and the checkbox in TrainDitForm would be dead. Needs an ace-train that
   // knows --no-target-mlp (added alongside the default flip); an older binary
   // rejects the unknown option loudly rather than doing the wrong thing.
-  args.push(o.targetMlp ? '--target-mlp' : '--no-target-mlp');
+  // On resume it is an IDENTITY flag (changes which tensors exist) and is
+  // suppressed like the others — the engine adopts it from the source log.
+  if (!o.initAdapter) args.push(o.targetMlp ? '--target-mlp' : '--no-target-mlp');
   // Muon knobs only when Muon is actually selected — they are inert on the
   // AdamW path, and emitting them there would put noise in the recorded argv
   // of every run that never used them.

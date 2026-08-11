@@ -88,6 +88,12 @@ export interface TrainDitFormState {
   stages: TrainDitStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** Resume: continue from the newest non-calibrated run of this adapter name. */
+  resumeFromLatest: boolean;
+  /** Post-training latent-Frechet calibration (default ON, 2026-08-11). */
+  calibrate: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default ON. */
+  calibrateRepoint: boolean;
 }
 
 /** §2.6 defaults, with the DiT retune applied: 400 epochs, r128/a256, 30 %
@@ -165,6 +171,9 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,
+  resumeFromLatest: false,
+  calibrate: true,
+  calibrateRepoint: true,
 };
 
 /** K1/K2 (lokr-dit-training plan §0): LoKR is the UI's DEFAULT adapter type —
@@ -549,6 +558,42 @@ export const TrainDitForm: React.FC<Props> = ({
           })}
         </span>
       )}
+
+      {/* ── Resume + calibration (2026-08-11) ─────────────────────────── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.resumeFromLatest}
+            disabled={lock}
+            onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('resumeFromLatest', 'Default off', CHECK_LABEL)}
+        </label>
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.calibrate}
+            disabled={lock}
+            onChange={(e) => onChange({ calibrate: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('calibrate', 'Default on', CHECK_LABEL)}
+        </label>
+        {value.calibrate && (
+          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">
+            <input
+              type="checkbox"
+              checked={value.calibrateRepoint}
+              disabled={lock}
+              onChange={(e) => onChange({ calibrateRepoint: e.target.checked })}
+              className="accent-amber-500"
+            />
+            {P('calibrateRepoint', 'Default on', CHECK_LABEL)}
+          </label>
+        )}
+      </div>
 
       {/* ── Advanced ──────────────────────────────────────────────────── */}
       <details className="rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2">

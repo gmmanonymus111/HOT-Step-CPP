@@ -354,6 +354,7 @@ function laneFor(job: TrainingJob): 'gpu' | 'net' {
     case 'train-dit':
     case 'audition':
     case 'lm-calibrate':   // drives /lm generations — engine must be up, GPU-serial
+    case 'dit-calibrate':  // drives /synth + /vae — same rule
       return 'gpu';
     case 'label':
       return (job.opts as LabelOptions | undefined)?.useUnderstand === true ? 'gpu' : 'net';
@@ -1246,6 +1247,17 @@ export function startLmCalibrateJob(datasetId: string, opts: LmCalibrateOptions)
   enqueue(job, async (j) => {
     const { runLmCalibrateJob } = await import('./calibrateRunner.js');
     await runLmCalibrateJob(j);
+  });
+  return job;
+}
+
+/** DiT twin: latent-Frechet calibration after train-dit (2026-08-11).
+ *  Same options shape; the runner picks the DiT script + preset column. */
+export function startDitCalibrateJob(datasetId: string, opts: LmCalibrateOptions): TrainingJob {
+  const job = createJob('dit-calibrate', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runDitCalibrateJob } = await import('./calibrateRunner.js');
+    await runDitCalibrateJob(j);
   });
   return job;
 }

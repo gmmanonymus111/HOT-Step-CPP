@@ -51,8 +51,17 @@ function log(job: TrainingJob, level: 'info' | 'warn' | 'error', message: string
 }
 
 export async function runLmCalibrateJob(job: TrainingJob): Promise<void> {
+  return runCalibrateJob(job, 'lm');
+}
+
+export async function runDitCalibrateJob(job: TrainingJob): Promise<void> {
+  return runCalibrateJob(job, 'dit');
+}
+
+async function runCalibrateJob(job: TrainingJob, kind: 'lm' | 'dit'): Promise<void> {
   if (isCancelled(job)) return;
   const opts = job.opts as LmCalibrateOptions;
+  const script = kind === 'lm' ? 'scripts/lm-adapter-rollout.ts' : 'scripts/dit-adapter-rollout.ts';
 
   try {
     const ds = getDataset(job.datasetId);
@@ -62,10 +71,10 @@ export async function runLmCalibrateJob(job: TrainingJob): Promise<void> {
     job.startedAt = Date.now();
     job.phase = 'calibrate';
     emitJob(job);
-    pushLog(`[Training] lm-calibrate job ${job.id}: ${ds.slug} around ${opts.newRunDir}`);
+    pushLog(`[Training] ${kind}-calibrate job ${job.id}: ${ds.slug} around ${opts.newRunDir}`);
 
     const args = [
-      'tsx', 'scripts/lm-adapter-rollout.ts', 'calibrate',
+      'tsx', script, 'calibrate',
       '--dataset', ds.slug,
       '--new-run', opts.newRunDir,
       ...(opts.oldRunDir ? ['--old-run', opts.oldRunDir] : []),
@@ -118,7 +127,7 @@ export async function runLmCalibrateJob(job: TrainingJob): Promise<void> {
     // -calibrated bake, or the old run itself (then this is a no-op for
     // presets already there).
     if (opts.repoint && done.servedDir) {
-      const touched = refreshPresetsForNewRun(done.servedDir, 'lm');
+      const touched = refreshPresetsForNewRun(done.servedDir, kind);
       if (touched) log(job, 'info', `${touched} album preset(s) now point at ${path.basename(done.servedDir)}`);
     }
 
@@ -126,12 +135,12 @@ export async function runLmCalibrateJob(job: TrainingJob): Promise<void> {
       ? ` (new ${done.newScore} vs old ${done.oldScore})`
       : '';
     log(job, 'info', `calibration ${done.status}: ${done.winner || 'n/a'}${scoreTxt} — ${done.detail}`);
-    pushLog(`[Training] lm-calibrate job ${job.id}: ${done.status}${scoreTxt} → ${done.servedDir || 'unchanged'}`);
+    pushLog(`[Training] ${kind}-calibrate job ${job.id}: ${done.status}${scoreTxt} → ${done.servedDir || 'unchanged'}`);
     finishJob(job, 'done');
   } catch (err) {
     if (isCancelled(job)) return;
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[Training] lm-calibrate job ${job.id} FAILED — ${message}`);
+    console.error(`[Training] ${kind}-calibrate job ${job.id} FAILED — ${message}`);
     finishJob(job, 'failed', message);
   }
 }

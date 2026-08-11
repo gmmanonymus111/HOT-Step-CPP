@@ -18,7 +18,7 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition' | 'lm-calibrate';
+  | 'audition' | 'lm-calibrate' | 'dit-calibrate';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -594,6 +594,15 @@ export interface TrainDitOptions {
   milestoneStep?: number;          // default 0.1;  0 disables
   milestoneKeep?: number;          // default 6
   vramReserveMb?: number;          // default 2048
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  dit_train_log.json by the engine; contradictions are refused. */
+  initAdapter?: string;            // default '' = train from scratch
+  /** Run the post-training DiT calibration job (latent-Frechet eval of
+   *  old-vs-new x scales, strict-win pick, bake, sidecar). Default TRUE. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default TRUE. */
+  calibrateRepoint?: boolean;
   /** Frozen-weight mirror precision. Default 'bf16' (2026-07-29) — keeps the
    *  trainable layers' matmul weights in the base's native BF16 instead of
    *  promoting them to F32, roughly halving the mirror's VRAM. Needs the

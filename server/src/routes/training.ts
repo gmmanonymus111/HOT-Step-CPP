@@ -2182,6 +2182,34 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const stages = TRAIN_DIT_STAGES.filter(s => requestedStages.includes(s));
     const resolvedStages: TrainDitStage[] = stages.length > 0 ? [...stages] : [...TRAIN_DIT_STAGES];
 
+    // ── 8b. resume (--init-adapter, 2026-08-11) — same rules as train-lm:
+    // 'latest' resolves to the newest non-calibrated run of this adapter name
+    // (bakes excluded — their factors carry the baked scale), and any explicit
+    // path must hold weights BEFORE the runner stops the engine.
+    let ditInitAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : '';
+    if (ditInitAdapter === 'latest') {
+      const artistDir = path.dirname(adapterDir);
+      let newest = '';
+      try {
+        const runs = fs.readdirSync(artistDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !/-calibrated$/i.test(e.name)
+            && hasWeights(path.join(artistDir, e.name)))
+          .map(e => e.name)
+          .sort();
+        if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
+      } catch { /* artist dir may not exist yet */ }
+      if (!newest && hasWeights(artistDir)) newest = artistDir;
+      if (!newest) {
+        res.status(400).json({ error: `Nothing to resume — no previous trained run for "${adapterName}"` });
+        return;
+      }
+      ditInitAdapter = newest;
+    }
+    if (ditInitAdapter && !hasWeights(ditInitAdapter)) {
+      res.status(400).json({ error: `initAdapter ${ditInitAdapter} holds no adapter weights` });
+      return;
+    }
+
     // ── 9. queue ─────────────────────────────────────────────────────────
     // No VRAM gating here (§4.5): only ace-train knows the mirror size, and only
     // after the base is loaded with the engine already stopped.
@@ -2257,6 +2285,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
+      initAdapter: ditInitAdapter,
+      calibrate: body.calibrate !== false,           // default ON (Rob, 2026-08-11)
+      calibrateRepoint: body.calibrateRepoint !== false,
     };
 
     const job = queue.startTrainDitJob(ds.id, opts);

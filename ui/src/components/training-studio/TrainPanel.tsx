@@ -287,6 +287,10 @@ export const TrainPanel: React.FC = () => {
       genreRatio: ditForm.genreRatio,
       seed: ditForm.seed,
       order: ditForm.order,
+      // Resume + post-training calibration (2026-08-11), same shape as train-lm.
+      ...(ditForm.resumeFromLatest ? { initAdapter: 'latest' } : {}),
+      calibrate: ditForm.calibrate,
+      calibrateRepoint: ditForm.calibrateRepoint,
       milestoneStep: ditForm.milestoneStep,
       milestoneKeep: ditForm.milestoneKeep,
       vramReserveMb: ditForm.vramReserveMb,
