@@ -5,6 +5,7 @@
 
 import type { AceRequest } from '../../services/aceClient.js';
 import { mapPath } from '../../services/pathMapper.js';
+import { normalizeLanguage } from '../languageCodes.js';
 import { parseAdapterSections, stripAdapterDirectives } from './adapterSections.js';
 import { applyTriggers, resolveAdapterTriggers, resolveTriggerSpecs } from './triggerWords.js';
 import { readAdapterTrigger } from '../adapters/stMetadata.js';
@@ -66,7 +67,20 @@ export function translateParams(params: any): AceRequest {
     const ts = String(params.timeSignature);
     req.timesignature = ts.includes('/') ? ts.split('/')[0] : ts;
   }
-  if (params.vocalLanguage) req.vocal_language = params.vocalLanguage;
+  // ALWAYS sent, and normalized to an ISO code (2026-08-11).
+  //
+  // The engine only pins the CoT's `language:` field when the request carries
+  // a vocal_language that is not 'unknown' (pipeline-lm.cpp force_field); with
+  // it absent the LM picks the language itself under the FSM's 51-code mask.
+  // That is broken for LM adapters, which were trained on `language: english`
+  // — a value the FSM cannot emit — so their probability mass lands on a
+  // forbidden word and whichever allowed code survives wins: measured on
+  // 4yearstrong_someway, 6 seeds unpinned, the adapter produced sr/pt/fr on 3
+  // of 6 runs (base LM 1 of 6). Every UI path already defaults this to 'en',
+  // so defaulting here changes nothing for them and fixes API/script callers
+  // and stale saved params. Send 'unknown' explicitly to keep the old
+  // let-the-LM-decide behaviour.
+  req.vocal_language = normalizeLanguage(params.vocalLanguage);
 
   // Seed (DiT / generation phase)
   if (params.randomSeed) {

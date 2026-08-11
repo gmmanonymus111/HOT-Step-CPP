@@ -12,6 +12,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { datasetSampleId } from './paths.js';
 import { loadSidecarMetadata } from './datasetScan.js';
+import { normalizeLanguage } from '../languageCodes.js';
 import * as audioMeta from './audioMeta.js';
 import type { TrainingDatasetRow, TrainingSample } from './types.js';
 
@@ -180,7 +181,8 @@ export async function buildDataset(
     default_artist: ds.defaultArtist || '',
     default_album: ds.defaultAlbum || '',
     default_genre: ds.defaultGenre || '',
-    default_language: ds.defaultLanguage || 'english',
+    // ISO code, never a full name — see languageCodes.ts.
+    default_language: normalizeLanguage(ds.defaultLanguage),
   };
   for (const [key, value] of Object.entries(prior.metadata)) {
     if ((OWNED_METADATA_KEYS as readonly string[]).includes(key)) continue;

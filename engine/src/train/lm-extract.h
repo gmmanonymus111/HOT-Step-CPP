@@ -426,7 +426,9 @@ static bool lm_extract_run(const LmExtractOpts & o, std::string * err) {
         row.lyrics        = lm_md_get(md, "lyrics");
         row.keyscale      = lm_md_get(md, "keyscale");
         row.timesignature = lm_md_get(md, "timesignature");
-        row.language      = lm_md_get(md, "language");
+        // Normalized: the preprocess __metadata__ this reads carries the
+        // dataset's raw default_language, which was 'english' corpus-wide.
+        row.language      = lm_normalize_language(lm_md_get(md, "language"));
         row.bpm           = atoi(lm_md_get(md, "bpm").c_str());
         row.duration      = atoi(lm_md_get(md, "duration").c_str());
         row.id            = s.id.empty() ? lm_md_get(md, "sample_id") : s.id;

@@ -9,6 +9,7 @@
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §3, §4.12
 
 import { getDb } from '../../db/database.js';
+import { normalizeLanguage } from '../languageCodes.js';
 import type { TagPosition, TrainingDatasetRow } from './types.js';
 
 interface DbRow {
@@ -53,7 +54,12 @@ function toRow(r: DbRow): TrainingDatasetRow {
     defaultArtist: r.default_artist,
     defaultAlbum: r.default_album,
     defaultGenre: r.default_genre,
-    defaultLanguage: r.default_language,
+    // Normalized on READ so the ~183 rows still storing the old 'english'
+    // literal cannot re-seed it into sidecars (labelingQueue force-writes this
+    // value on every label pass) and from there back into training data. An
+    // EMPTY value stays empty — it means "do not force a language", which is
+    // not the same as 'en'. See services/languageCodes.ts.
+    defaultLanguage: r.default_language ? normalizeLanguage(r.default_language) : '',
     sampleCount: r.sample_count,
     labeledCount: r.labeled_count,
     excludedCount: r.excluded_count,

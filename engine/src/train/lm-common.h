@@ -25,12 +25,14 @@
 #include "ggml-backend.h"
 
 #include <algorithm>
+#include <cctype>   // tolower — lm_normalize_language
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>  // std::pair — lm_normalize_language's name table
 #include <vector>
 
 // ─── JSONL plumbing (defined in ace-train.cpp) ──────────────────────────────
@@ -344,6 +346,70 @@ static bool stmd_read(const char * path, std::map<std::string, std::string> * ou
 static inline std::string lm_md_get(const std::map<std::string, std::string> & md, const char * key) {
     auto it = md.find(key);
     return it == md.end() ? std::string() : it->second;
+}
+
+// Normalize a dataset language to an ISO code the INFERENCE FSM can emit
+// (2026-08-11). metadata-fsm.h:203-208 constrains the CoT's `language:` field
+// to 51 ISO codes; a full name like "english" is not among them, so an adapter
+// trained on it learns a token the sampler is forbidden to produce — with the
+// language unpinned the model's mass sits on a blocked word and whichever
+// allowed code survives the mask wins (measured: sr/pt/fr on 3 of 6 seeds).
+// The whole 183-dataset corpus carried "english"; the tensor __metadata__ this
+// reads STILL DOES, so normalizing here is what stops a re-extract from
+// reintroducing it. Unrecognised values become "unknown" — a value the FSM
+// does accept — rather than passing through.
+static std::string lm_normalize_language(const std::string & raw_in) {
+    std::string raw;
+    for (char c : raw_in) {
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+            raw += (char) tolower((unsigned char) c);
+        }
+    }
+    if (raw.empty()) {
+        return "";  // absent stays absent — build_cot_yaml omits the line
+    }
+    static const char * kValid[] = {
+        "ar", "az", "bg", "bn", "ca", "cs", "da", "de", "el", "en",  "es", "fa", "fi",
+        "fr", "he", "hi", "hr", "ht", "hu", "id", "is", "it", "ja",  "ko", "la", "lt",
+        "ms", "ne", "nl", "no", "pa", "pl", "pt", "ro", "ru", "sa",  "sk", "sr", "sv",
+        "sw", "ta", "te", "th", "tl", "tr", "uk", "ur", "vi", "yue", "zh", "unknown",
+    };
+    for (const char * v : kValid) {
+        if (raw == v) {
+            return raw;
+        }
+    }
+    static const std::pair<const char *, const char *> kNames[] = {
+        { "arabic", "ar" }, { "azerbaijani", "az" }, { "bulgarian", "bg" }, { "bengali", "bn" },
+        { "catalan", "ca" }, { "czech", "cs" }, { "danish", "da" }, { "german", "de" },
+        { "greek", "el" }, { "english", "en" }, { "spanish", "es" }, { "persian", "fa" },
+        { "farsi", "fa" }, { "finnish", "fi" }, { "french", "fr" }, { "hebrew", "he" },
+        { "hindi", "hi" }, { "croatian", "hr" }, { "haitian", "ht" }, { "hungarian", "hu" },
+        { "indonesian", "id" }, { "icelandic", "is" }, { "italian", "it" }, { "japanese", "ja" },
+        { "korean", "ko" }, { "latin", "la" }, { "lithuanian", "lt" }, { "malay", "ms" },
+        { "nepali", "ne" }, { "dutch", "nl" }, { "norwegian", "no" }, { "punjabi", "pa" },
+        { "polish", "pl" }, { "portuguese", "pt" }, { "romanian", "ro" }, { "russian", "ru" },
+        { "sanskrit", "sa" }, { "slovak", "sk" }, { "serbian", "sr" }, { "swedish", "sv" },
+        { "swahili", "sw" }, { "tamil", "ta" }, { "telugu", "te" }, { "thai", "th" },
+        { "tagalog", "tl" }, { "turkish", "tr" }, { "ukrainian", "uk" }, { "urdu", "ur" },
+        { "vietnamese", "vi" }, { "cantonese", "yue" }, { "chinese", "zh" }, { "mandarin", "zh" },
+    };
+    for (const auto & kv : kNames) {
+        if (raw == kv.first) {
+            return kv.second;
+        }
+    }
+    // "en-gb" / "en_us": take the primary subtag when it is itself valid.
+    const size_t dash = raw.find_first_of("-_");
+    if (dash != std::string::npos) {
+        const std::string primary = raw.substr(0, dash);
+        for (const char * v : kValid) {
+            if (primary == v) {
+                return primary;
+            }
+        }
+    }
+    return "unknown";
 }
 
 // Apply the dataset's custom tag exactly the way preprocess-run.h:192-204 does.
