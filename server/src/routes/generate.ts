@@ -323,6 +323,19 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         const resultRes = await aceClient.getJobResult(lmJobId);
         lmResults = await resultRes.json() as AceRequest[];
 
+        // A COMPLETED LM job with zero parseable results is a failure, not an
+        // empty batch. Before this check (2026-08-11), an engine-side
+        // serialization failure (invalid UTF-8 in LM output made
+        // request_to_json ship "[]" while logging success) slid into the
+        // "LM skipped" batch path, which then submitted a synth request with
+        // an EMPTY caption and died on a confusing 400 two phases later.
+        if (!Array.isArray(lmResults) || lmResults.length === 0) {
+          throw new Error(
+            'LM job completed but returned no parseable results — see ace_engine.log '
+            + '(a request_to_json serialization failure logs there; the engine now sanitizes '
+            + 'invalid UTF-8 in LM output, so hitting this again means something new)');
+        }
+
         // The LM echo is the C++ AceRequest with LM-generated fields filled
         // in — ServerFields-only sideband (adapter_runtime_quant, alignment
         // timing, rebase, plugin_params, …) is not part of the C++ struct and

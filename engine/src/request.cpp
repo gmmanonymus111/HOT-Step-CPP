@@ -700,10 +700,15 @@ bool request_write(const AceRequest * r, const char * path) {
     }
 
     yyjson_mut_doc * doc = request_build_doc(r, true);
-    size_t           len;
+    size_t           len  = 0;
     char *           json = yyjson_mut_write(doc, WRITE_FLAGS | YYJSON_WRITE_NEWLINE_AT_END, &len);
     yyjson_mut_doc_free(doc);
 
+    if (!json) {  // same invalid-UTF-8 failure request_to_json guards against
+        fprintf(stderr, "[Request] ERROR: cannot serialize request for %s (invalid UTF-8?)\n", path);
+        fclose(f);
+        return false;
+    }
     fwrite(json, 1, len, f);
     free(json);
     fclose(f);
@@ -712,11 +717,69 @@ bool request_write(const AceRequest * r, const char * path) {
     return true;
 }
 
+// Replace invalid UTF-8 byte sequences with U+FFFD so yyjson can serialize
+// the string. LM-sampled text can legitimately contain broken sequences — a
+// BPE tokenizer truncated mid-multibyte-character emits partial bytes — and
+// with use_cot_caption the LM rewrites `caption`, giving raw model output a
+// path into the serialized fields (found live 2026-08-11: an adapter+CoT
+// generation made yyjson_mut_write return NULL, the old code built a
+// std::string from that NULL, and the engine shipped "[]" while logging
+// "1 results" — the server then 400'd on an empty caption).
+static std::string sanitize_utf8(const std::string & in) {
+    std::string out;
+    out.reserve(in.size());
+    size_t i = 0;
+    const size_t  n = in.size();
+    const auto cont = [&](size_t k) { return i + k < n && ((unsigned char) in[i + k] & 0xC0) == 0x80; };
+    while (i < n) {
+        const unsigned char c = (unsigned char) in[i];
+        size_t take = 0;
+        if (c < 0x80) {
+            take = 1;
+        } else if ((c & 0xE0) == 0xC0 && c >= 0xC2 && cont(1)) {
+            take = 2;
+        } else if ((c & 0xF0) == 0xE0 && cont(1) && cont(2)) {
+            take = 3;
+        } else if ((c & 0xF8) == 0xF0 && c <= 0xF4 && cont(1) && cont(2) && cont(3)) {
+            take = 4;
+        }
+        if (take == 0) {
+            out += "\xEF\xBF\xBD";  // U+FFFD replacement character
+            i += 1;
+        } else {
+            out.append(in, i, take);
+            i += take;
+        }
+    }
+    return out;
+}
+
 std::string request_to_json(const AceRequest * r, bool sparse) {
     yyjson_mut_doc * doc = request_build_doc(r, sparse);
-    size_t           len;
+    size_t           len  = 0;
     char *           json = yyjson_mut_write(doc, WRITE_FLAGS, &len);
     yyjson_mut_doc_free(doc);
+
+    if (!json) {
+        // Serialization refused — almost always invalid UTF-8 in an
+        // LM-generated field. Sanitize the text fields the LM can write and
+        // retry ONCE; a result the client can parse with a few replacement
+        // characters beats an empty body that fails the whole generation.
+        fprintf(stderr, "[Request] request_to_json: yyjson_mut_write returned NULL — sanitizing text fields\n");
+        AceRequest fixed  = *r;
+        fixed.caption     = sanitize_utf8(fixed.caption);
+        fixed.lyrics      = sanitize_utf8(fixed.lyrics);
+        fixed.keyscale    = sanitize_utf8(fixed.keyscale);
+        fixed.timesignature = sanitize_utf8(fixed.timesignature);
+        fixed.vocal_language = sanitize_utf8(fixed.vocal_language);
+        yyjson_mut_doc * doc2 = request_build_doc(&fixed, sparse);
+        json                  = yyjson_mut_write(doc2, WRITE_FLAGS, &len);
+        yyjson_mut_doc_free(doc2);
+        if (!json) {
+            fprintf(stderr, "[Request] request_to_json: still unserializable after sanitize — returning {}\n");
+            return "{}";
+        }
+    }
 
     std::string result(json, len);
     free(json);
