@@ -35,6 +35,9 @@ void request_init(AceRequest * r) {
     r->lm_top_k             = 0;
     r->lm_rep_penalty       = 1.0f;
     r->lm_rep_window        = 64;
+    r->lm_rep_mode          = "presence";
+    r->lm_dry_base          = 1.75f;
+    r->lm_dry_min_len       = 6;
     r->lm_negative_prompt   = "";
     r->lm_seed              = -1;
     r->use_cot_caption      = true;
@@ -251,6 +254,15 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "lm_rep_window")) && yyjson_is_num(v)) {
         r->lm_rep_window = (int) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_rep_mode")) && yyjson_is_str(v)) {
+        r->lm_rep_mode = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_dry_base")) && yyjson_is_num(v)) {
+        r->lm_dry_base = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_dry_min_len")) && yyjson_is_num(v)) {
+        r->lm_dry_min_len = (int) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "guidance_scale")) && yyjson_is_num(v)) {
         r->guidance_scale = (float) yyjson_get_num(v);
@@ -516,6 +528,15 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->lm_rep_window != def.lm_rep_window) {
         yyjson_mut_obj_add_int(doc, root, "lm_rep_window", r->lm_rep_window);
+    }
+    if (all || r->lm_rep_mode != def.lm_rep_mode) {
+        yyjson_mut_obj_add_str(doc, root, "lm_rep_mode", r->lm_rep_mode.c_str());
+    }
+    if (all || r->lm_dry_base != def.lm_dry_base) {
+        yyjson_mut_obj_add_real(doc, root, "lm_dry_base", r->lm_dry_base);
+    }
+    if (all || r->lm_dry_min_len != def.lm_dry_min_len) {
+        yyjson_mut_obj_add_int(doc, root, "lm_dry_min_len", r->lm_dry_min_len);
     }
     if (all || r->lm_top_p != def.lm_top_p) {
         yyjson_mut_obj_add_real(doc, root, "lm_top_p", r->lm_top_p);

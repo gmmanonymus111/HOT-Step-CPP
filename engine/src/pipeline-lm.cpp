@@ -352,29 +352,135 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
     return results;
 }
 
-// Windowed repetition penalty over recently emitted audio codes (HF-style:
-// positive logits divided, negative multiplied). Slot 0 (im_end) is never
-// touched. Music codes legitimately repeat (sustained textures), so the
-// penalty is gentle and windowed — its job is to make degenerate short-cycle
-// loops self-extinguish (each repeat accumulates penalty on the loop's few
-// codes until an escape token wins), not to forbid repetition outright.
-// Loops became reachable once planner-LM adapters started sharpening the
-// code distribution toward one artist's statistics.
+// ── Anti-loop: windowed repetition penalty over recently emitted audio codes ──
+//
+// Loops became reachable once planner-LM adapters started sharpening the code
+// distribution toward one artist's statistics. Three modes, all inert at
+// penalty == 1.0, all leaving slot 0 (im_end) untouched so the penalty can
+// never provoke an early stop.
+//
+// The hard part is that a "token" here is a 200 ms frame drawn from a 64k FSQ
+// codebook, and musical structure IS code reuse — bars, phrase restatement,
+// sustained textures. A penalty that keys on code identity alone cannot
+// distinguish "the chorus restates the verse groove" from "stuck in a loop",
+// which is why upstream ACE-Step locks this at 1.0 and why PRESENCE costs
+// structure at any strength that actually breaks loops.
+enum LmRepMode {
+    LM_REP_PRESENCE  = 0,  // legacy, default
+    LM_REP_FREQUENCY = 1,
+    LM_REP_DRY       = 2,
+};
+
+// Occurrence cap for FREQUENCY. A sustained pad can hold one code for seconds;
+// without a cap its penalty would grow without bound and the texture would be
+// forcibly broken. 8 occurrences = 1.6 s at 5 Hz.
+#define LM_REP_FREQ_MAX_COUNT 8
+
+// Exponent cap for DRY, so a pathological match length cannot overflow powf().
+#define LM_REP_DRY_MAX_EXP 24
+
+// Longest suffix DRY will try to match. Bounds the per-step scan at
+// O(window * LM_REP_DRY_MAX_MATCH); anything past this is already maximally
+// penalised, so extending the search buys nothing.
+#define LM_REP_DRY_MAX_MATCH 64
+
+struct CodeRepPenalty {
+    float penalty     = 1.0f;
+    int   window      = 64;
+    int   mode        = LM_REP_PRESENCE;
+    float dry_base    = 1.75f;
+    int   dry_min_len = 6;
+};
+
+static int lm_rep_mode_from_name(const std::string & name) {
+    if (name == "frequency") {
+        return LM_REP_FREQUENCY;
+    }
+    if (name == "dry") {
+        return LM_REP_DRY;
+    }
+    // "presence", "" and anything unrecognised fall back to the legacy mode:
+    // an unknown string must never silently change the sound.
+    if (!name.empty() && name != "presence") {
+        fprintf(stderr, "[LM-Rep] WARNING unknown lm_rep_mode \"%s\", using \"presence\"\n", name.c_str());
+    }
+    return LM_REP_PRESENCE;
+}
+
+// PRESENCE / FREQUENCY share HF-style scaling (positive logits divided,
+// negative multiplied). DRY subtracts instead: division can only push a
+// positive logit toward 0, which may still beat a genuinely-bad negative
+// logit, and DRY needs to be able to actually bury a code.
 static void apply_code_rep_penalty(float *                  compact_logits,
                                    const std::vector<int> & codes,
-                                   float                    penalty,
-                                   int                      window) {
-    if (penalty <= 1.0f || codes.empty()) {
+                                   const CodeRepPenalty &   rep) {
+    if (rep.penalty <= 1.0f || codes.empty() || rep.window <= 0) {
         return;
     }
-    size_t start = codes.size() > (size_t) window ? codes.size() - (size_t) window : 0;
+    const int n     = (int) codes.size();
+    const int start = n > rep.window ? n - rep.window : 0;
+
+    if (rep.mode == LM_REP_DRY) {
+        // For every earlier position j in the window, measure how much of the
+        // run-up to j matches the run-up to the write head. If the match is at
+        // least dry_min_len long, then emitting codes[j] now would extend a
+        // verbatim repeat, so penalise exactly that code — and nothing else.
+        const int   min_len = rep.dry_min_len > 1 ? rep.dry_min_len : 1;
+        // Map the shared 1.0-1.5 penalty slider onto DRY's multiplier, so that
+        // 1.0 is off and 1.1 lands on llama.cpp's canonical default of 0.8.
+        const float multiplier = (rep.penalty - 1.0f) * 8.0f;
+        const float base       = rep.dry_base > 1.0f ? rep.dry_base : 1.75f;
+
+        // Longest match found per candidate code — a code reachable from
+        // several earlier positions should be penalised by its worst case, not
+        // by whichever position happened to be scanned last.
+        std::unordered_map<int, int> best_match;
+        for (int j = start + 1; j < n; j++) {
+            int L = 0;
+            while (L < LM_REP_DRY_MAX_MATCH && j - 1 - L >= start && codes[j - 1 - L] == codes[n - 1 - L]) {
+                L++;
+                if (n - 1 - L < start) {
+                    break;  // ran off the head of the window
+                }
+            }
+            if (L < min_len) {
+                continue;
+            }
+            auto it = best_match.find(codes[j]);
+            if (it == best_match.end() || L > it->second) {
+                best_match[codes[j]] = L;
+            }
+        }
+        for (const auto & kv : best_match) {
+            int   e = kv.second - min_len;
+            float sub = multiplier * powf(base, (float) (e < LM_REP_DRY_MAX_EXP ? e : LM_REP_DRY_MAX_EXP));
+            compact_logits[kv.first + 1] -= sub;
+        }
+        return;
+    }
+
+    if (rep.mode == LM_REP_FREQUENCY) {
+        std::unordered_map<int, int> counts;
+        for (int i = start; i < n; i++) {
+            counts[codes[i]]++;
+        }
+        for (const auto & kv : counts) {
+            int   c = kv.second < LM_REP_FREQ_MAX_COUNT ? kv.second : LM_REP_FREQ_MAX_COUNT;
+            float p = powf(rep.penalty, (float) c);
+            float & l = compact_logits[kv.first + 1];  // compact layout: [im_end, code_0, ...]
+            l = l > 0.0f ? l / p : l * p;
+        }
+        return;
+    }
+
+    // PRESENCE (legacy): one flat penalty per distinct code in the window.
     std::unordered_set<int> seen;
-    for (size_t i = start; i < codes.size(); i++) {
+    for (int i = start; i < n; i++) {
         seen.insert(codes[i]);
     }
     for (int c : seen) {
-        float & l = compact_logits[c + 1];  // compact layout: [im_end, code_0, ...]
-        l = l > 0.0f ? l / penalty : l * penalty;
+        float & l = compact_logits[c + 1];
+        l = l > 0.0f ? l / rep.penalty : l * rep.penalty;
     }
 }
 
@@ -396,8 +502,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                                                  bool                           use_batch_cfg,
                                                  bool (*cancel)(void *),
                                                  void * cancel_data,
-                                                 float  rep_penalty = 1.0f,
-                                                 int    rep_window  = 64) {
+                                                 const CodeRepPenalty & rep = CodeRepPenalty()) {
     int  V             = lm_vocab_size(m);
     bool use_cfg       = cfg_scale > 1.0f;
     bool shared_prompt = ((int) aces.size() == 1);
@@ -623,7 +728,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             }
 
             // Anti-loop: windowed repetition penalty over this sequence's recent codes
-            apply_code_rep_penalty(compact_logits.data(), seqs[orig_i].audio_codes, rep_penalty, rep_window);
+            apply_code_rep_penalty(compact_logits.data(), seqs[orig_i].audio_codes, rep);
 
             // CPU samples instantly because it only has to sort ~2049 items instead of 150,000+
             int compact_tok =
@@ -696,8 +801,7 @@ static std::vector<std::string> run_phase2_trtllm(
     const char*            negative_prompt,
     bool (*cancel)(void*),
     void* cancel_data,
-    float rep_penalty = 1.0f,
-    int   rep_window  = 64
+    const CodeRepPenalty & rep = CodeRepPenalty()
 ) {
     int  V             = LM_TRTLLM_VOCAB;
     bool use_cfg       = cfg_scale > 1.0f;
@@ -786,7 +890,7 @@ static std::vector<std::string> run_phase2_trtllm(
         }
 
         // Anti-loop: windowed repetition penalty over recent codes
-        apply_code_rep_penalty(compact.data(), audio_codes, rep_penalty, rep_window);
+        apply_code_rep_penalty(compact.data(), audio_codes, rep);
 
         int compact_tok = sample_top_k_p(compact.data(), compact_V, temperature, top_p, top_k, rng);
         int tok = (compact_tok == 0) ? TOKEN_IM_END : (AUDIO_CODE_BASE + compact_tok - 1);
@@ -1619,27 +1723,52 @@ int ace_lm_generate(AceLm *            ctx,
         fprintf(stderr, "[LM-Generate] %s mode, no audio code generation\n",
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
+        CodeRepPenalty rep;
+        rep.penalty     = req->lm_rep_penalty;
+        rep.window      = req->lm_rep_window;
+        rep.mode        = lm_rep_mode_from_name(req->lm_rep_mode);
+        rep.dry_base    = req->lm_dry_base;
+        rep.dry_min_len = req->lm_dry_min_len;
+        if (rep.penalty > 1.0f) {
+            if (rep.mode == LM_REP_DRY) {
+                fprintf(stderr, "[LM-Rep] mode=dry penalty=%.3f window=%d (%.1f s @5Hz) base=%.2f min_len=%d\n",
+                        rep.penalty, rep.window, rep.window / 5.0f, rep.dry_base, rep.dry_min_len);
+            } else {
+                fprintf(stderr, "[LM-Rep] mode=%s penalty=%.3f window=%d (%.1f s @5Hz)\n",
+                        rep.mode == LM_REP_FREQUENCY ? "frequency" : "presence", rep.penalty, rep.window,
+                        rep.window / 5.0f);
+            }
+        }
+
         // TRT-LLM Executor: highest priority, N=1 only
 #ifdef HOT_STEP_TRTLLM
         if (ctx->use_trtllm && lm_batch_size == 1) {
             const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
             batch_codes = run_phase2_trtllm(&ctx->lm_trtllm, *bpe, aces[0],
                                              temperature, top_p, top_k, seed, cfg_scale,
-                                             req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data,
-                                             req->lm_rep_penalty, req->lm_rep_window);
+                                             req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data, rep);
         } else
 #endif
         // Speculative decode: draft model available + batch_size=1
         if (ctx->draft_loaded && lm_batch_size == 1) {
             const char * neg = (neg_prompt && neg_prompt[0]) ? neg_prompt : nullptr;
+            // The speculative path has never applied the repetition penalty:
+            // draft and target sample from different distributions, and
+            // penalising only one side breaks the acceptance test. Say so
+            // rather than letting the knob silently do nothing.
+            if (rep.penalty > 1.0f) {
+                fprintf(stderr,
+                        "[LM-Rep] WARNING speculative decode is active (draft model loaded, batch=1) and does not "
+                        "support the repetition penalty — it will be IGNORED for this generation. Unload the draft "
+                        "model or use lm_batch_size > 1 to get it back.\n");
+            }
             batch_codes = run_phase2_speculative(model, &ctx->draft, *bpe, aces[0],
                                                   temperature, top_p, top_k, seed, cfg_scale,
                                                   req->lm_cfg_cutoff_ratio, neg, cancel, cancel_data);
         } else {
             batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
                                            req->lm_cfg_cutoff_ratio,
-                                           neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data,
-                                           req->lm_rep_penalty, req->lm_rep_window);
+                                           neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data, rep);
         }
         if (batch_codes.empty()) {
             return -1;

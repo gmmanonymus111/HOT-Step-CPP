@@ -10,7 +10,7 @@
 import React from 'react';
 import { useGlobalParamsStore } from '../stores/globalParamsStore';
 import type { AdapterGroupScales } from '../stores/globalParamsStore';
-import type { GenerationParams } from '../types';
+import type { GenerationParams, LmRepMode } from '../types';
 
 // Re-export types that consumers may import from here
 export type { AdapterGroupScales } from '../stores/globalParamsStore';
@@ -117,6 +117,9 @@ export interface GlobalParams {
   // Anti-loop repetition penalty on code sampling (local HOT-Step feature)
   lmRepPenalty: number; setLmRepPenalty: (v: number) => void;
   lmRepWindow: number; setLmRepWindow: (v: number) => void;
+  lmRepMode: LmRepMode; setLmRepMode: (v: LmRepMode) => void;
+  lmDryBase: number; setLmDryBase: (v: number) => void;
+  lmDryMinLen: number; setLmDryMinLen: (v: number) => void;
   lmNegativePrompt: string; setLmNegativePrompt: (v: string) => void;
   lmCodesStrength: number; setLmCodesStrength: (v: number) => void;
   // Post-processing

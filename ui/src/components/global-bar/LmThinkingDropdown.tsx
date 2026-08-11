@@ -10,8 +10,20 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
 import { SeedManagerDrawer } from './SeedManagerDrawer';
+import type { LmRepMode } from '../../types';
 
-const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
+/** One line each on what the mode costs you, since the audible trade-off is
+ *  the whole point of the choice. */
+const REP_MODE_HELP: Record<LmRepMode, string> = {
+  presence:
+    'Penalises every distinct code in the window once, however often it recurred. Cannot tell a stuck loop from ordinary musical restatement, so strengths that break loops also flatten structure.',
+  frequency:
+    'Penalty rises with how often each code recurred (capped at 8). Same as Presence for one-off codes, so a loop is hit far harder than the section around it — try a much lower penalty here.',
+  dry:
+    'Penalises only codes that would extend a verbatim recent cycle, growing exponentially with match length. Leaves non-verbatim restatement alone. Raise Min Match if sustained textures get chewed up.',
+};
+
+const inputClasses ="w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
 
 /** Seed input with local string buffer — prevents parseInt("-") snap-back */
 const SeedInput: React.FC<{ value: number; onChange: (v: number) => void; className: string }> = ({ value, onChange, className }) => {
@@ -66,8 +78,30 @@ export const LmThinkingDropdown: React.FC = () => {
       <Slider label="Repetition Penalty" value={gp.lmRepPenalty}
         onChange={gp.setLmRepPenalty} min={1.0} max={1.5} step={0.01} showInput />
       {gp.lmRepPenalty > 1.0 && (
-        <Slider label="Rep. Window (codes)" value={gp.lmRepWindow}
-          onChange={gp.setLmRepWindow} min={8} max={256} step={8} showInput />
+        <>
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">Rep. Mode</label>
+            <select className={inputClasses} value={gp.lmRepMode}
+              onChange={e => gp.setLmRepMode(e.target.value as LmRepMode)}>
+              <option value="presence">Presence (legacy)</option>
+              <option value="frequency">Frequency (count-scaled)</option>
+              <option value="dry">DRY (verbatim-loop breaker)</option>
+            </select>
+            <p className="mt-1.5 text-[11px] leading-snug text-zinc-500">{REP_MODE_HELP[gp.lmRepMode] ?? REP_MODE_HELP.presence}</p>
+          </div>
+
+          <Slider label={`Rep. Window (codes) — ${(gp.lmRepWindow / 5).toFixed(1)}s`} value={gp.lmRepWindow}
+            onChange={gp.setLmRepWindow} min={8} max={256} step={8} showInput />
+
+          {gp.lmRepMode === 'dry' && (
+            <>
+              <Slider label="DRY Base" value={gp.lmDryBase}
+                onChange={gp.setLmDryBase} min={1.05} max={4} step={0.05} showInput />
+              <Slider label={`DRY Min Match — ${(gp.lmDryMinLen / 5).toFixed(1)}s`} value={gp.lmDryMinLen}
+                onChange={gp.setLmDryMinLen} min={2} max={32} step={1} showInput />
+            </>
+          )}
+        </>
       )}
 
       <div>

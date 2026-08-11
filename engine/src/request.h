@@ -60,11 +60,33 @@ struct AceRequest {
     float       lm_cfg_cutoff_ratio; // 1.0 (1.0 = full CFG, 0.5 = CFG for first 50% of tokens)
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
-    float       lm_rep_penalty;      // 1.0 = off. HF-style windowed repetition
-                                     // penalty over recently emitted audio codes;
-                                     // breaks degenerate code loops (adapters
-                                     // sharpen the code distribution). ~1.05-1.15.
+    float       lm_rep_penalty;      // 1.0 = off. Windowed repetition penalty
+                                     // over recently emitted audio codes; breaks
+                                     // degenerate code loops (adapters sharpen
+                                     // the code distribution). ~1.05-1.15.
     int         lm_rep_window;       // 64 codes (~13 s at 5 Hz) penalty lookback
+    // How lm_rep_penalty is turned into a per-code logit adjustment. All three
+    // modes are inert at lm_rep_penalty == 1.0.
+    //   "presence"  (default, legacy) — every DISTINCT code in the window is
+    //               penalised once, however often it recurred. It therefore
+    //               cannot tell a stuck loop from ordinary musical restatement,
+    //               and at strengths that break loops it also flattens the
+    //               structural reuse (bars, phrase restatement, sustains) that
+    //               the 5 Hz code stream encodes.
+    //   "frequency" — penalty^occurrences, occurrences capped at
+    //               LM_REP_FREQ_MAX_COUNT. Identical to "presence" for codes
+    //               seen once, so the loop's few codes are hit far harder than
+    //               the section's one-off codes and a much gentler penalty
+    //               suffices.
+    //   "dry"       — Don't Repeat Yourself. Penalises ONLY codes that would
+    //               extend a verbatim recent cycle, scaled exponentially in the
+    //               matched suffix length. Non-verbatim restatement is left
+    //               completely alone; verbatim loops are annihilated.
+    std::string lm_rep_mode;         // "presence"
+    float       lm_dry_base;         // 1.75 ("dry" only) growth per extra matched code
+    int         lm_dry_min_len;      // 6    ("dry" only) matched codes before any
+                                     // penalty at all (~1.2 s at 5 Hz). Raise it if
+                                     // legitimate sustained textures get chewed up.
     std::string lm_negative_prompt;  // ""
     int64_t     lm_seed;             // -1 = random. mt19937 consumes the low 32
                                      // bits. Same int64_t storage trick as seed

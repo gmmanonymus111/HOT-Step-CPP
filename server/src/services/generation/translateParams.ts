@@ -112,6 +112,9 @@ export function translateParams(params: any): AceRequest {
   // Anti-loop repetition penalty on code sampling (local HOT-Step feature)
   if (params.lmRepPenalty !== undefined) req.lm_rep_penalty = params.lmRepPenalty;
   if (params.lmRepWindow !== undefined) req.lm_rep_window = params.lmRepWindow;
+  if (params.lmRepMode !== undefined) req.lm_rep_mode = params.lmRepMode;
+  if (params.lmDryBase !== undefined) req.lm_dry_base = params.lmDryBase;
+  if (params.lmDryMinLen !== undefined) req.lm_dry_min_len = params.lmDryMinLen;
   if (params.negative_prompt) req.negative_prompt = params.negative_prompt;
   if (params.lmNegativePrompt) req.lm_negative_prompt = params.lmNegativePrompt;
 

@@ -76,6 +76,12 @@ export interface UnifiedRecentSong {
   generation_id: number | null;
 }
 
+/** How the LM repetition penalty is turned into a per-code logit adjustment.
+ *  'presence'  — legacy: one flat penalty per distinct code in the window.
+ *  'frequency' — penalty^occurrences, so loops are hit far harder than one-offs.
+ *  'dry'       — penalise only codes that would extend a verbatim recent cycle. */
+export type LmRepMode = 'presence' | 'frequency' | 'dry';
+
 /** Parameters sent to the generation API */
 export interface GenerationParams {
   // Content
@@ -103,6 +109,11 @@ export interface GenerationParams {
   /** LM repetition penalty (>1 enables) + lookback window in codes. */
   lmRepPenalty?: number;
   lmRepWindow?: number;
+  /** How the penalty is applied: 'presence' (legacy), 'frequency', or 'dry'. */
+  lmRepMode?: LmRepMode;
+  /** 'dry' only. */
+  lmDryBase?: number;
+  lmDryMinLen?: number;
   useCotCaption: boolean;
   skipLrc?: boolean;  // Skip LRC (timed-lyrics) generation
 

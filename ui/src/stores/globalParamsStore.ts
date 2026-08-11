@@ -7,7 +7,7 @@
 // Uses the SAME hs-* localStorage keys -- zero migration needed.
 
 import { create } from 'zustand';
-import type { GenerationParams } from '../types';
+import type { GenerationParams, LmRepMode } from '../types';
 import { DEFAULT_SETTINGS, type AppSettings } from '../components/settings/SettingsPanel';
 
 // -- Types --
@@ -153,6 +153,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmTopP: readKey("hs-lmTopP", 0.92),
   lmRepPenalty: readKey("hs-lmRepPenalty", 1.1),
   lmRepWindow: readKey("hs-lmRepWindow", 64),
+  lmRepMode: readKey<LmRepMode>("hs-lmRepMode", 'presence'),
+  lmDryBase: readKey("hs-lmDryBase", 1.75),
+  lmDryMinLen: readKey("hs-lmDryMinLen", 6),
   lmNegativePrompt: readKey("hs-lmNegativePrompt", 'NO USER INPUT'),
   lmCodesStrength: readKey("hs-lmCodesStrength", 1.0),
   postProcessingEnabled: readKey("hs-postProcessingEnabled", true),
@@ -334,6 +337,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setLmTopK: (v: any) => { set({ lmTopK: v }); writeKey("hs-lmTopK", v); },
   setLmTopP: (v: any) => { set({ lmTopP: v }); writeKey("hs-lmTopP", v); },
   setLmRepPenalty: (v: any) => { set({ lmRepPenalty: v }); writeKey("hs-lmRepPenalty", v); },
+  setLmRepMode: (v: any) => { set({ lmRepMode: v }); writeKey("hs-lmRepMode", v); },
+  setLmDryBase: (v: any) => { set({ lmDryBase: v }); writeKey("hs-lmDryBase", v); },
+  setLmDryMinLen: (v: any) => { set({ lmDryMinLen: v }); writeKey("hs-lmDryMinLen", v); },
   setLmRepWindow: (v: any) => { set({ lmRepWindow: v }); writeKey("hs-lmRepWindow", v); },
   setLmNegativePrompt: (v: any) => { set({ lmNegativePrompt: v }); writeKey("hs-lmNegativePrompt", v); },
   setLmCodesStrength: (v: any) => { set({ lmCodesStrength: v }); writeKey("hs-lmCodesStrength", v); },
@@ -539,6 +545,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       lmTopK: s.lmTopK, lmTopP: s.lmTopP, lmNegativePrompt: s.lmNegativePrompt,
       lmRepPenalty: s.lmRepPenalty > 1.0 ? s.lmRepPenalty : undefined,
       lmRepWindow: s.lmRepPenalty > 1.0 ? s.lmRepWindow : undefined,
+      lmRepMode: s.lmRepPenalty > 1.0 ? s.lmRepMode : undefined,
+      lmDryBase: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryBase : undefined,
+      lmDryMinLen: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryMinLen : undefined,
       audioCoverStrength: (!s.skipLm && s.lmCodesStrength < 1.0) ? s.lmCodesStrength : undefined,
       postProcessingEnabled: s.postProcessingEnabled,
       spectralLifterEnabled: s.postProcessingEnabled ? s.spectralLifterEnabled : false,
