@@ -37,7 +37,7 @@ void request_init(AceRequest * r) {
     r->lm_rep_window        = 64;
     r->lm_rep_mode          = "presence";
     r->lm_dry_base          = 1.75f;
-    r->lm_dry_min_len       = 6;
+    r->lm_dry_min_len       = 3;
     r->lm_negative_prompt   = "";
     r->lm_seed              = -1;
     r->use_cot_caption      = true;

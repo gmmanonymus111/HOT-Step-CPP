@@ -155,7 +155,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmRepWindow: readKey("hs-lmRepWindow", 64),
   lmRepMode: readKey<LmRepMode>("hs-lmRepMode", 'presence'),
   lmDryBase: readKey("hs-lmDryBase", 1.75),
-  lmDryMinLen: readKey("hs-lmDryMinLen", 6),
+  lmDryMinLen: readKey("hs-lmDryMinLen", 3),
   lmNegativePrompt: readKey("hs-lmNegativePrompt", 'NO USER INPUT'),
   lmCodesStrength: readKey("hs-lmCodesStrength", 1.0),
   postProcessingEnabled: readKey("hs-postProcessingEnabled", true),

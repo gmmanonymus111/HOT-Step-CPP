@@ -84,9 +84,18 @@ struct AceRequest {
     //               completely alone; verbatim loops are annihilated.
     std::string lm_rep_mode;         // "presence"
     float       lm_dry_base;         // 1.75 ("dry" only) growth per extra matched code
-    int         lm_dry_min_len;      // 6    ("dry" only) matched codes before any
-                                     // penalty at all (~1.2 s at 5 Hz). Raise it if
+    int         lm_dry_min_len;      // 3    ("dry" only) matched codes before any
+                                     // penalty at all (~0.6 s at 5 Hz). Raise it if
                                      // legitimate sustained textures get chewed up.
+                                     // Do not raise it far: this is a licence to
+                                     // repeat verbatim, and the LM will use all of
+                                     // it and then restart the cycle with a fresh
+                                     // code. Measured on one 151 s track, min_len 6
+                                     // left 4% of frames in a >=2 s loop and produced
+                                     // 94 runs of >=6 verbatim frames (vs 36 with the
+                                     // penalty off) -- short stitched repeats that
+                                     // still sound like one continuous loop. min_len
+                                     // 3 gave 0% looped frames and 4 such runs.
     std::string lm_negative_prompt;  // ""
     int64_t     lm_seed;             // -1 = random. mt19937 consumes the low 32
                                      // bits. Same int64_t storage trick as seed
