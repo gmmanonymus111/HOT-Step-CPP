@@ -378,6 +378,11 @@ export function buildLmRequest(
     ...(resolved.bpm > 0 ? { bpm: resolved.bpm } : {}),
     ...(resolved.keyscale ? { keyscale: resolved.keyscale } : {}),
     ...(resolved.timesignature ? { timesignature: resolved.timesignature } : {}),
+    // Pin the CoT language like generations do (2026-08-11 ISO fix): adapters
+    // trained on `language: english` can't emit it under the FSM's ISO mask,
+    // so unpinned plans land on random codes (observed: fr). All datasets are
+    // English (Rob, 2026-08-12).
+    vocal_language: 'en',
     seed: resolved.seed,
     lm_seed: resolved.seed,
     lm_mode: 'generate',
