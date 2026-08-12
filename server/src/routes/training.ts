@@ -22,7 +22,7 @@
 //   GET    /pipeline/:id                                — one pipeline
 //   DELETE /pipeline/:id                                — cancel a pipeline
 //   POST   /pipeline/:id/pause                          — hold at the next stage boundary
-//   POST   /pipeline/:id/resume                         — continue a paused pipeline
+//   POST   /pipeline/:id/resume                         — continue a paused OR ended/cancelled pipeline
 //   GET    /defaults                                    — stored per-stage defaults
 //   PUT    /defaults                                    — set per-stage defaults
 //   GET    /jobs                                        — active + finished jobs
@@ -560,6 +560,10 @@ router.post('/pipeline/:id/pause', (req: Request, res: Response) => {
   }
 });
 
+// Resume also revives ended/cancelled/restart-recovered pipelines: the runner
+// rebuilds its loop from the persisted record, keeps everything already done,
+// and re-runs the rest (failures retry). 409 only when another pipeline is
+// already active.
 router.post('/pipeline/:id/resume', (req: Request, res: Response) => {
   try {
     const result = resumePipeline(req.params.id as string);
@@ -567,8 +571,8 @@ router.post('/pipeline/:id/resume', (req: Request, res: Response) => {
       res.status(404).json({ error: 'Pipeline not found' });
       return;
     }
-    if (result === 'not_active') {
-      res.status(409).json({ error: 'Pipeline is not paused' });
+    if (result === 'busy') {
+      res.status(409).json({ error: 'A pipeline is already running' });
       return;
     }
     res.json({ ok: true });

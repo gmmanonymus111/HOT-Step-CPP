@@ -99,6 +99,70 @@ const PipelineItemRow: React.FC<{ item: PipelineItem; stages: PipelineStage[] }>
   );
 };
 
+const StatusIcon: React.FC<{ status: PipelineSummary['status'] }> = ({ status }) => {
+  if (status === 'running') return <Loader2 size={15} className="animate-spin text-amber-500 flex-shrink-0" />;
+  if (status === 'paused') return <PauseCircle size={15} className="text-sky-500 flex-shrink-0" />;
+  if (status === 'done') return <CheckCircle2 size={15} className="text-emerald-500 flex-shrink-0" />;
+  if (status === 'failed') return <XCircle size={15} className="text-rose-500 flex-shrink-0" />;
+  return <AlertTriangle size={15} className="text-amber-500 flex-shrink-0" />;
+};
+
+/** Recent (non-active) pipeline: one collapsed title line; click to expand the
+ *  per-folder rows. Anything with work left can be resumed — the server keeps
+ *  done items done and re-runs the rest, so a cancelled/failed/restart-killed
+ *  batch continues from where it stopped. */
+const RecentPipelineRow: React.FC<{ pipeline: PipelineSummary; resumeBlocked: boolean }> = ({ pipeline, resumeBlocked }) => {
+  const { t } = useTranslation();
+  const resumePipeline = useTrainingStore(s => s.resumePipeline);
+  const [open, setOpen] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  const doneItems = pipeline.items.filter(i => i.status === 'done').length;
+  const failedItems = pipeline.items.filter(i => i.status === 'failed').length;
+  const resumable = pipeline.items.some(i => i.status !== 'done');
+
+  return (
+    <div className={`${CARD} flex flex-col gap-2 !p-3`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+        >
+          {open ? <ChevronDown size={13} className="text-zinc-500 flex-shrink-0" /> : <ChevronRight size={13} className="text-zinc-500 flex-shrink-0" />}
+          <StatusIcon status={pipeline.status} />
+          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">
+            {t('trainingStudio.monitor.progress', { done: doneItems, total: pipeline.items.length })}
+            {failedItems > 0 && (
+              <span className="text-rose-500 ml-2">{t('trainingStudio.monitor.failedCount', { count: failedItems })}</span>
+            )}
+          </span>
+        </button>
+        <span className="text-[11px] text-zinc-500 flex items-center gap-1 flex-shrink-0">
+          <Clock size={11} /> {formatWhen(pipeline.createdAt)}
+        </span>
+        {resumable && (
+          <button
+            onClick={() => { setResuming(true); void resumePipeline(pipeline.id).finally(() => setResuming(false)); }}
+            disabled={resumeBlocked || resuming}
+            title={resumeBlocked ? t('trainingStudio.monitor.resumeBlocked') : t('trainingStudio.monitor.resumeHint')}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/20 transition-colors flex-shrink-0 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {resuming ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />} {t('trainingStudio.monitor.resume')}
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="divide-y divide-zinc-200 dark:divide-white/5">
+          {pipeline.items.map(item => (
+            <PipelineItemRow key={item.sourceDir} item={item} stages={pipeline.stages.length > 0 ? pipeline.stages : PIPELINE_STAGES.slice()} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const PipelineCard: React.FC<{ pipeline: PipelineSummary; active: boolean }> = ({ pipeline, active }) => {
   const { t } = useTranslation();
   const cancelPipeline = useTrainingStore(s => s.cancelPipeline);
@@ -114,11 +178,7 @@ const PipelineCard: React.FC<{ pipeline: PipelineSummary; active: boolean }> = (
   return (
     <div className={`${CARD} flex flex-col gap-3 ${pipeline.status === 'failed' ? 'border-rose-500/30' : ''}`}>
       <div className="flex items-center gap-2 flex-wrap">
-        {pipeline.status === 'running' && <Loader2 size={15} className="animate-spin text-amber-500 flex-shrink-0" />}
-        {pipeline.status === 'paused' && <PauseCircle size={15} className="text-sky-500 flex-shrink-0" />}
-        {pipeline.status === 'done' && <CheckCircle2 size={15} className="text-emerald-500 flex-shrink-0" />}
-        {pipeline.status === 'failed' && <XCircle size={15} className="text-rose-500 flex-shrink-0" />}
-        {pipeline.status === 'cancelled' && <AlertTriangle size={15} className="text-amber-500 flex-shrink-0" />}
+        <StatusIcon status={pipeline.status} />
         <div className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 flex-1 min-w-0">
           {t('trainingStudio.monitor.progress', { done: doneItems, total: pipeline.items.length })}
           {failedItems > 0 && (
@@ -245,8 +305,8 @@ export const MonitorPanel: React.FC = () => {
             {t('trainingStudio.monitor.recent', { count: recent.length })}
           </button>
           {recentOpen && (
-            <div className="flex flex-col gap-3">
-              {recent.map(p => <PipelineCard key={p.id} pipeline={p} active={false} />)}
+            <div className="flex flex-col gap-2">
+              {recent.map(p => <RecentPipelineRow key={p.id} pipeline={p} resumeBlocked={!!activePipeline} />)}
             </div>
           )}
         </div>

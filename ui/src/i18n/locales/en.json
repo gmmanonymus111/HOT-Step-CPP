@@ -106,6 +106,8 @@
     "trainingStudio.monitor.pausing": "pausing — current stage finishes first",
     "trainingStudio.monitor.paused": "paused",
     "trainingStudio.monitor.resume": "Resume",
+    "trainingStudio.monitor.resumeHint": "Continue this pipeline from where it stopped — finished datasets stay done, everything else re-runs.",
+    "trainingStudio.monitor.resumeBlocked": "Another pipeline is already active — pause or cancel it first.",
     "trainingStudio.monitor.recent": "Recent pipelines ({{count}})",
     "trainingStudio.step.label": "Label",
     "trainingStudio.step.review": "Review",

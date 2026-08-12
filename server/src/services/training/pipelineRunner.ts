@@ -28,8 +28,8 @@ import * as queue from './labelingQueue.js';
 import { trainingBaseDir } from './paths.js';
 import { getTrainingDefaults } from './trainingDefaults.js';
 import type {
-  PipelineFolderSpec, PipelineItem, PipelineStage, PipelineStageResult, PipelineSummary,
-  TrainingDefaults,
+  PipelineFolderSpec, PipelineItem, PipelineItemStatus, PipelineStage, PipelineStageResult,
+  PipelineSummary, TrainingDefaults,
 } from './types.js';
 
 /** Canonical stage order. Any subset a caller asks for is filtered through it. */
@@ -102,39 +102,57 @@ function pipelinesDir(): string {
   return path.join(trainingBaseDir, 'pipelines');
 }
 
+/** What actually lives in a snapshot file: the wire summary plus the private
+ *  per-item creation specs. Resume needs the specs (customTag is not derivable
+ *  from the items); files written before specs were persisted still resume via
+ *  the item-based fallback in revivePipeline. */
+type SnapshotFile = PipelineSummary & { specs?: PipelineFolderSpec[] };
+
+function writeSnapshotFile(snap: SnapshotFile): void {
+  fs.mkdirSync(pipelinesDir(), { recursive: true });
+  fs.writeFileSync(
+    path.join(pipelinesDir(), `${snap.id}.json`),
+    JSON.stringify(snap, null, 2),
+    'utf-8',
+  );
+}
+
 /** Snapshot on every item/stage transition — same spirit as jobs' _meta.json. */
 function persist(state: PipelineState): void {
   try {
-    fs.mkdirSync(pipelinesDir(), { recursive: true });
-    fs.writeFileSync(
-      path.join(pipelinesDir(), `${state.id}.json`),
-      JSON.stringify(toSummary(state), null, 2),
-      'utf-8',
-    );
+    writeSnapshotFile({ ...toSummary(state), specs: state.specs });
   } catch (err: any) {
     console.warn(`[Training] Could not persist pipeline ${state.id}: ${err.message}`);
   }
 }
 
-function readSnapshots(): PipelineSummary[] {
-  const out: PipelineSummary[] = [];
+function readSnapshotFiles(): SnapshotFile[] {
+  const out: SnapshotFile[] = [];
   try {
     const base = pipelinesDir();
     if (!fs.existsSync(base)) return out;
     for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
       try {
-        out.push(JSON.parse(fs.readFileSync(path.join(base, entry.name), 'utf-8')) as PipelineSummary);
+        out.push(JSON.parse(fs.readFileSync(path.join(base, entry.name), 'utf-8')) as SnapshotFile);
       } catch { /* skip corrupted snapshot */ }
     }
   } catch { /* pipelines dir unreadable — memory list is still valid */ }
   return out;
 }
 
+/** The wire view of the snapshots — specs stay private to the runner. */
+function readSnapshots(): PipelineSummary[] {
+  return readSnapshotFiles().map(({ specs: _specs, ...summary }) => summary);
+}
+
 /**
- * v1 does not auto-resume (§7): a server restart loses the loop, so rewrite any
- * `running` snapshot as failed rather than leaving a pipeline that looks live
- * forever. Mirrors labelingQueue's recoverStaleJobs.
+ * A server restart loses the in-memory loop, but the snapshot IS the work list
+ * — every item, every stage's status, and the creation specs. Recover any
+ * running/paused pipeline as 'paused' so Resume can rebuild the loop and carry
+ * on from the last completed stage. The stage that was mid-flight when the
+ * process died is reset to pending (its job died with the process) and re-runs
+ * from scratch on resume.
  */
 function recoverStalePipelines(): void {
   try {
@@ -144,28 +162,28 @@ function recoverStalePipelines(): void {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
       const file = path.join(base, entry.name);
       try {
-        const snap = JSON.parse(fs.readFileSync(file, 'utf-8')) as PipelineSummary;
-        // 'paused' is just a parked loop — a restart loses it the same way.
+        const snap = JSON.parse(fs.readFileSync(file, 'utf-8')) as SnapshotFile;
         if (snap.status !== 'running' && snap.status !== 'paused') continue;
-        snap.status = 'failed';
-        snap.finishedAt = Date.now();
+        snap.status = 'paused';
+        snap.pauseRequested = false;
+        snap.finishedAt = null;
         for (const item of snap.items ?? []) {
           for (const stage of item.stages ?? []) {
-            if (stage.status === 'running') {
-              stage.status = 'failed';
-              stage.error = 'Server restarted';
-              stage.finishedAt = Date.now();
-            } else if (stage.status === 'pending' || stage.status === 'creating') {
-              stage.status = 'cancelled';
+            if (stage.status === 'running' || stage.status === 'creating') {
+              stage.status = 'pending';
+              stage.jobId = '';
+              stage.error = null;
+              stage.startedAt = null;
+              stage.finishedAt = null;
             }
           }
-          if (item.status === 'pending' || item.status === 'creating' || item.status === 'running') {
-            item.status = 'failed';
-            item.error = 'Server restarted';
+          if (item.status === 'creating' || item.status === 'running') {
+            item.status = 'pending';
             item.currentStage = null;
           }
         }
         fs.writeFileSync(file, JSON.stringify(snap, null, 2), 'utf-8');
+        console.log(`[Training] Pipeline ${snap.id} recovered as paused after restart — resume to continue`);
       } catch { /* skip corrupted snapshot */ }
     }
   } catch { /* pipelines dir unreadable */ }
@@ -236,9 +254,31 @@ export function startPipeline(folders: PipelineFolderSpec[], stages: PipelineSta
 /** Cancels the running job, then marks everything still pending as cancelled. */
 export function cancelPipeline(id: string): boolean {
   const state = pipelines.get(id);
-  // A pipeline from a previous process run exists but has nothing to cancel —
-  // still a 200, since the id is real.
-  if (!state) return readSnapshots().some(p => p.id === id);
+  if (!state) {
+    // Not owned by this process. A finished snapshot has nothing to cancel —
+    // still a 200, since the id is real. But one recovered as 'paused' after a
+    // restart must stay dismissable, so rewrite the file directly.
+    const snap = readSnapshotFiles().find(p => p.id === id);
+    if (!snap) return false;
+    if (isActive(snap.status)) {
+      snap.status = 'cancelled';
+      snap.pauseRequested = false;
+      snap.finishedAt = Date.now();
+      for (const item of snap.items ?? []) {
+        for (const stage of item.stages ?? []) {
+          if (stage.status !== 'done' && stage.status !== 'failed') stage.status = 'cancelled';
+        }
+        if (item.status !== 'done' && item.status !== 'failed') item.status = 'cancelled';
+        item.currentStage = null;
+      }
+      try {
+        writeSnapshotFile(snap);
+      } catch (err: any) {
+        console.warn(`[Training] Could not cancel snapshot pipeline ${id}: ${err.message}`);
+      }
+    }
+    return true;
+  }
   // 'paused' must stay cancellable — the parked loop exits on cancelRequested.
   if (!isActive(state.status)) return true;
 
@@ -270,6 +310,7 @@ export function cancelPipeline(id: string): boolean {
 // parked — the UI shows the gap as "pausing".
 
 export type PipelinePauseResult = 'ok' | 'not_found' | 'not_active';
+export type PipelineResumeResult = 'ok' | 'not_found' | 'busy';
 
 export function pausePipeline(id: string): PipelinePauseResult {
   const state = pipelines.get(id);
@@ -283,20 +324,80 @@ export function pausePipeline(id: string): PipelinePauseResult {
   return 'ok';
 }
 
-export function resumePipeline(id: string): PipelinePauseResult {
+export function resumePipeline(id: string): PipelineResumeResult {
   const state = pipelines.get(id);
-  if (!state) return readSnapshots().some(p => p.id === id) ? 'not_active' : 'not_found';
-  if (!isActive(state.status)) return 'not_active';
-  if (state.pauseRequested || state.status === 'paused') {
-    state.pauseRequested = false;
-    // Flip status here rather than waiting for the parked loop's next poll, so
-    // the UI's immediate refetch already sees 'running'. The loop's own flip on
-    // wake-up is idempotent.
-    if (state.status === 'paused') state.status = 'running';
-    persist(state);
-    console.log(`[Training] Pipeline ${id} resumed`);
+
+  // Live and active: just lift the pause.
+  if (state && isActive(state.status)) {
+    if (state.pauseRequested || state.status === 'paused') {
+      state.pauseRequested = false;
+      // Flip status here rather than waiting for the parked loop's next poll,
+      // so the UI's immediate refetch already sees 'running'. The loop's own
+      // flip on wake-up is idempotent.
+      if (state.status === 'paused') state.status = 'running';
+      persist(state);
+      console.log(`[Training] Pipeline ${id} resumed`);
+    }
+    return 'ok';
   }
+
+  // Terminal in this session, or snapshot-only from a previous one (possibly
+  // recovered as 'paused' after a restart): rebuild the loop from the record.
+  const snap: SnapshotFile | undefined = state
+    ? { ...toSummary(state), specs: state.specs }
+    : readSnapshotFiles().find(p => p.id === id);
+  if (!snap) return 'not_found';
+  if (hasActivePipeline()) return 'busy';
+  revivePipeline(snap);
   return 'ok';
+}
+
+/**
+ * Resume-from-record: a pipeline is just a list of datasets × stages plus the
+ * stored stage params, so any ended/cancelled/restart-killed pipeline can pick
+ * up where it stopped. Everything 'done' stays done; every other item and
+ * stage resets to pending and re-runs — failures retry too, since the most
+ * common cause of a dead batch is a server restart, not a bad dataset. A stage
+ * that was mid-flight re-runs from its own start; only that stage's progress
+ * is lost.
+ */
+function revivePipeline(snap: SnapshotFile): void {
+  const items: PipelineItem[] = snap.items.map(item => {
+    if (item.status === 'done') return { ...item, stages: item.stages.map(s => ({ ...s })) };
+    return {
+      ...item,
+      status: 'pending',
+      error: null,
+      currentStage: null,
+      stages: item.stages.map(s => s.status === 'done'
+        ? { ...s }
+        : { stage: s.stage, jobId: '', status: 'pending', error: null, startedAt: null, finishedAt: null }),
+    };
+  });
+
+  const state: PipelineState = {
+    id: snap.id,
+    status: 'running',
+    stages: [...snap.stages],
+    items,
+    createdAt: snap.createdAt,
+    finishedAt: null,
+    pauseRequested: false,
+    cancelRequested: false,
+    // Snapshots from before specs were persisted rebuild them from the items:
+    // only customTag is lost, and it only mattered at dataset creation — any
+    // item that got that far already has its dataset.
+    specs: snap.specs && snap.specs.length === snap.items.length
+      ? snap.specs.map(s => ({ ...s }))
+      : snap.items.map(i => ({ sourceDir: i.sourceDir, name: i.name })),
+  };
+
+  pipelines.set(state.id, state);
+  persist(state);
+  const remaining = items.filter(i => i.status !== 'done').length;
+  console.log(
+    `[Training] Pipeline ${state.id} resumed from record — ${remaining} of ${items.length} folder(s) left to run`);
+  setImmediate(() => { void runPipeline(state); });
 }
 
 /** Parks the loop while a pause is requested. Called only at stage/item
@@ -321,6 +422,8 @@ async function runPipeline(state: PipelineState): Promise<void> {
   try {
     for (let i = 0; i < state.items.length; i++) {
       const item = state.items[i];
+      // Resumed pipeline: items completed in an earlier run stay done.
+      if (item.status === 'done') continue;
       await waitWhilePaused(state);
       if (state.cancelRequested) {
         cancelItem(item);
@@ -397,6 +500,8 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
   persist(state);
 
   for (const result of item.stages) {
+    // Resumed pipeline: stages completed in an earlier run stay done.
+    if (result.status === 'done') continue;
     await waitWhilePaused(state);
     if (state.cancelRequested) {
       cancelItem(item);
@@ -405,8 +510,11 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
     }
     await runStage(state, item, result);
 
-    if (result.status !== 'done') {
-      if (result.status === 'cancelled') {
+    // Fresh read: TS still holds the `!== 'done'` narrowing from the skip
+    // above and can't see runStage's mutation of result.status.
+    const outcome = result.status as PipelineItemStatus;
+    if (outcome !== 'done') {
+      if (outcome === 'cancelled') {
         cancelItem(item);
         persist(state);
       } else {
