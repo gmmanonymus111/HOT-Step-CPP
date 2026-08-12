@@ -380,13 +380,17 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     // identically (A/B discipline); free-text prompts (no row) still let the
     // LM predict, which is the point of that mode. Duration is NOT taken from
     // the row — the user's audition length wins; the engine pins it already.
-    bpm: row ? row.bpm : 0,
-    keyscale: row ? row.keyscale : '',
+    // Explicit pins (Lyric Studio source) win over the sample row; both are
+    // normalized identically so either path forces the same tokens.
+    bpm: Math.trunc(num(opts.bpm)) > 0 ? Math.trunc(num(opts.bpm)) : (row ? row.bpm : 0),
+    keyscale: str(opts.keyscale).trim() || (row ? row.keyscale : ''),
     // Numerator only ('4/4' → '4') — the exact normalization translateParams
     // applies to every generation, so an audition and a generation force the
     // same TIMESIG token into the CoT. (Rows store '4/4'; note the trainer
     // conditioned on the row string — see 2026-08-12 parity investigation.)
-    timesignature: row ? String(row.timesignature).split('/')[0] : '',
+    timesignature: str(opts.timesignature).trim()
+      ? str(opts.timesignature).trim().split('/')[0]
+      : (row ? String(row.timesignature).split('/')[0] : ''),
     lmModel,
     ditModel,
     vaeModel: str(opts.vaeModel),

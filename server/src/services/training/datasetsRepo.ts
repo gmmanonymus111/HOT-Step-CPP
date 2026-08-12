@@ -32,6 +32,7 @@ interface DbRow {
   built_at: string;
   dataset_json_path: string;
   album_name: string;
+  lyrics_set_id: number;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +70,7 @@ function toRow(r: DbRow): TrainingDatasetRow {
     builtAt: r.built_at,
     datasetJsonPath: r.dataset_json_path,
     albumName: r.album_name ?? '',
+    lyricsSetId: r.lyrics_set_id ?? 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -92,6 +94,7 @@ const COLUMN_OF: Record<string, string> = {
   builtAt: 'built_at',
   datasetJsonPath: 'dataset_json_path',
   albumName: 'album_name',
+  lyricsSetId: 'lyrics_set_id',
 };
 
 export function listDatasets(): TrainingDatasetRow[] {

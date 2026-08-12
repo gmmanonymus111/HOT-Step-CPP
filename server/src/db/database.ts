@@ -252,6 +252,13 @@ export function initDb(): void {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='album_name'`,
       alter: `ALTER TABLE training_datasets ADD COLUMN album_name TEXT NOT NULL DEFAULT ''`,
     },
+    // Persistent dataset → Lyric Studio link, written by the export commit and
+    // lazily backfilled when the audition's Lyric Studio prompt source resolves
+    // the album by detection. 0 = never linked.
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='lyrics_set_id'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN lyrics_set_id INTEGER NOT NULL DEFAULT 0`,
+    },
   ];
   for (const m of trainingMigrations) {
     const row = db.prepare(m.check).get() as { c: number };

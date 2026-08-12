@@ -14,7 +14,8 @@ import {
   AlertTriangle, ChevronDown, ChevronRight, Dices, Headphones, History, Loader2, PauseCircle, PlugZap,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { AuditionOptions, AuditionPreview, AuditionSideSpec } from '../../services/trainingApi';
+import type { AuditionOptions, AuditionPreview, AuditionSideSpec, LsGenerationsResponse } from '../../services/trainingApi';
+import { getLsGenerations } from '../../services/trainingApi';
 import { StyledSelect } from '../shared/StyledSelect';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useGlobalParamsStore } from '../../stores/globalParamsStore';
@@ -26,7 +27,14 @@ import { LmAdapterPicker, type LmAdapterOption } from './LmAdapterPicker';
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
 const FIELD = 'w-full rounded-lg px-3 py-2 text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-300 dark:border-white/10 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-amber-500 disabled:opacity-50';
 
-type PromptSource = 'sample' | 'text' | 'lm';
+type PromptSource = 'sample' | 'text' | 'lm' | 'lyricstudio';
+
+/** "B Major" → "B major" — the same normalization Lyric Studio's own
+ *  send-to-Create applies (useAudioGeneration.ts). */
+function normalizeKey(k: string): string {
+  const parts = k.trim().split(/\s+/);
+  return parts.length === 2 ? `${parts[0]} ${parts[1].toLowerCase()}` : k.trim();
+}
 
 /** A milestone the badge row asked to audition. `nonce` makes repeat clicks on
  *  the same milestone distinguishable — the effect keys on it, not on the path. */
@@ -91,6 +99,14 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   // the adapter's training base.
   const [renderDitAdapter, setRenderDitAdapter] = usePersistedState('hs-auditionRenderDitAdapter', false);
   const ditAdapterAvailable = !!trainDitStatus?.adapterExists;
+  // Render step count (Rob, 2026-08-13): server default is 8; more steps =
+  // slower but closer to a real generation's render quality. Clamped 2..60
+  // server-side either way.
+  const [renderSteps, setRenderSteps] = usePersistedState('hs-auditionRenderSteps', 8);
+  // Lyric Studio prompt source: the linked album's generated lyrics.
+  const [lsData, setLsData] = useState<LsGenerationsResponse | null>(null);
+  const [lsLoading, setLsLoading] = useState(false);
+  const [lsGenId, setLsGenId] = useState(0);
   // The render runs on whatever DiT the user has selected in the models tab
   // (Rob, 2026-07-29) — the same hs-ditModel every generation uses. '' falls
   // back server-side (newest xl-turbo, else the detok DiT).
@@ -136,6 +152,8 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
     setAdapterPickedByUser(false);
     setAdapterPath('');
     setAdapterLabel('');
+    setLsData(null);
+    setLsGenId(0);
   } else if (adapterExists && trainedDir && trainedDir !== seenTrainedDir) {
     setSeenTrainedDir(trainedDir);
     if (!adapterPickedByUser) {
@@ -195,6 +213,30 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
     setLyrics(s.lyrics);
   };
 
+  // Lyric Studio source: fetch the linked album's generations once per dataset,
+  // lazily on first selection of the source. The first fetch for a never-linked
+  // dataset runs the export preview's artist/album detection server-side and
+  // persists the resolved link, so later fetches are one indexed query.
+  useEffect(() => {
+    if (source !== 'lyricstudio' || !selectedDatasetId || lsData || lsLoading) return;
+    setLsLoading(true);
+    getLsGenerations(selectedDatasetId)
+      .then(d => setLsData(d))
+      .catch(() => setLsData({ lyricsSetId: 0, artist: '', album: '', generations: [] }))
+      .finally(() => setLsLoading(false));
+  }, [source, selectedDatasetId, lsData, lsLoading]);
+
+  const lsGen = lsData?.generations.find(g => g.id === lsGenId);
+
+  const pickLsGeneration = (id: number) => {
+    setLsGenId(id);
+    const g = lsData?.generations.find(x => x.id === id);
+    if (!g) return;
+    setCaption(g.caption);
+    setLyrics(g.lyrics);
+    if (g.duration > 0) setDurationSec(Math.min(300, Math.max(10, g.duration)));
+  };
+
   const buildOptions = (kind: 'ab' | 'milestone'): AuditionOptions => {
     const sides: AuditionSideSpec[] = [{
       slot: 'base',
@@ -233,6 +275,15 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       ...(trainLmStatus?.variantKey ? { variantKey: trainLmStatus.variantKey } : {}),
       ...(auditionLmModel ? { lmModel: auditionLmModel } : {}),
       ...(source === 'sample' && sampleId ? { sampleId } : {}),
+      // Lyric Studio source: pin the plan to the generation's bpm/key so the
+      // audition anchors where a real generation of this song would (the same
+      // force_fields path as the sample-row pins).
+      ...(source === 'lyricstudio' && lsGen
+        ? {
+          ...(lsGen.bpm > 0 ? { bpm: lsGen.bpm } : {}),
+          ...(lsGen.key.trim() ? { keyscale: normalizeKey(lsGen.key) } : {}),
+        }
+        : {}),
       temperature,
       topP,
       cfgScale,
@@ -247,6 +298,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       ...(renderDit
         ? {
           renderDit: true,
+          renderSteps,
           ...(selectedDitModel ? { renderDitModel: selectedDitModel } : {}),
           ...(renderDitAdapter && ditAdapterAvailable
             ? {
@@ -369,7 +421,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
           {t('trainingStudio.audition.promptSource')}
         </span>
         <div className="flex items-center gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-black/20 border border-zinc-200 dark:border-white/10 w-fit">
-          {(['sample', 'text', 'lm'] as PromptSource[]).map(s => (
+          {(['sample', 'text', 'lm', 'lyricstudio'] as PromptSource[]).map(s => (
             <button
               key={s}
               onClick={() => setSource(s)}
@@ -382,7 +434,8 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
               {t(
                 s === 'sample' ? 'trainingStudio.audition.sourceSample'
                   : s === 'text' ? 'trainingStudio.audition.sourceText'
-                    : 'trainingStudio.audition.sourceLm',
+                    : s === 'lm' ? 'trainingStudio.audition.sourceLm'
+                      : 'trainingStudio.audition.sourceLyricStudio',
               )}
             </button>
           ))}
@@ -424,6 +477,54 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
           <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
             <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
             {t('trainingStudio.audition.sourceLmWarning')}
+          </div>
+        )}
+
+        {source === 'lyricstudio' && (
+          <div className="flex flex-col gap-2">
+            {lsLoading && (
+              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                <Loader2 size={12} className="animate-spin" /> {t('trainingStudio.audition.lsLoading')}
+              </div>
+            )}
+            {!lsLoading && lsData && lsData.lyricsSetId === 0 && (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
+                <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                {t('trainingStudio.audition.lsNoLink')}
+              </div>
+            )}
+            {!lsLoading && lsData && lsData.lyricsSetId > 0 && lsData.generations.length === 0 && (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
+                <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                {t('trainingStudio.audition.lsNoGens', { artist: lsData.artist, album: lsData.album })}
+              </div>
+            )}
+            {!lsLoading && lsData && lsData.generations.length > 0 && (
+              <>
+                <StyledSelect
+                  accent="amber"
+                  value={lsGenId ? String(lsGenId) : ''}
+                  onChange={(v) => pickLsGeneration(Number(v) || 0)}
+                  placeholder={t('trainingStudio.audition.lsPick')}
+                  options={[
+                    { value: '', label: t('trainingStudio.audition.lsPick') },
+                    ...lsData.generations.map(g => ({
+                      value: String(g.id),
+                      label: `${g.title || '(untitled)'} · ${g.createdAt.slice(0, 10)}`,
+                    })),
+                  ]}
+                  searchPlaceholder="Filter songs…"
+                />
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-500">
+                  {t('trainingStudio.audition.lsLinkedNote', { artist: lsData.artist, album: lsData.album })}
+                  {lsGen && (lsGen.bpm > 0 || lsGen.key.trim()) && (
+                    <span className="ml-1 tabular-nums">
+                      {lsGen.bpm > 0 ? `· ${lsGen.bpm} BPM ` : ''}{lsGen.key.trim() ? `· ${normalizeKey(lsGen.key)}` : ''}
+                    </span>
+                  )}
+                </p>
+              </>
+            )}
           </div>
         )}
 
@@ -570,6 +671,8 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
             ['repPenalty', repPenalty, setRepPenalty, 1, 1.5, 0.01],
             ['adapterScale', adapterScale, setAdapterScale, 0, 2, 0.05],
             ['baseScale', baseScale, setBaseScale, 0, 2, 0.05],
+            // DiT render step count — only used when the render toggle is on.
+            ['renderSteps', renderSteps, setRenderSteps, 2, 60, 1],
           ] as Array<[string, number, (v: number) => void, number, number, number]>).map(
             ([key, val, setter, min, max, step]) => (
               <label key={key} className="flex flex-col gap-1">

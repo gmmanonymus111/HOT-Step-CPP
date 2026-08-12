@@ -108,6 +108,7 @@ import { AuditionError, decodeStoredCodes } from '../services/training/auditionS
 import {
   commitLyricStudioExport, LyricStudioExportError, previewLyricStudioExport,
 } from '../services/training/lyricStudioExport.js';
+import { getGenerations, getLyricsSet } from '../db/lireekDb.js';
 import type {
   AuditionListResponse, AuditionOptions, AuditionSideSpec,
   BulkSetInput, CaptionOptions, CreateDatasetInput, FieldSource, GeniusOptions, LabelOptions, LmSize,
@@ -2413,6 +2414,62 @@ function auditionAdapterError(value: string): string | null {
   }
   return null;
 }
+
+/**
+ * The linked Lyric Studio album's generated lyrics, as audition prompts.
+ *
+ * Link resolution: the persisted `lyrics_set_id` on the dataset row (written by
+ * the export commit) wins; a never-linked dataset falls back to the export
+ * preview's artist/album detection (tag majority vote), and a successful
+ * detection is persisted back onto the row so the scan only ever runs once.
+ */
+router.get('/datasets/:id/ls-generations', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+
+    let lyricsSetId = ds.lyricsSetId ?? 0;
+    // A stale link (album deleted in Lyric Studio) degrades to re-detection.
+    if (lyricsSetId > 0 && !getLyricsSet(lyricsSetId)) lyricsSetId = 0;
+    if (lyricsSetId <= 0) {
+      const samples = await buildSamples(ds);
+      const preview = await previewLyricStudioExport(ds, samples);
+      lyricsSetId = preview.existingLyricsSetId ?? 0;
+      if (lyricsSetId > 0) {
+        try { repo.updateDataset(ds.id, { lyricsSetId }); } catch { /* lazy backfill only */ }
+      }
+    }
+
+    if (lyricsSetId <= 0) {
+      res.json({ lyricsSetId: 0, artist: '', album: '', generations: [] });
+      return;
+    }
+
+    const set = getLyricsSet(lyricsSetId);
+    const gens = getGenerations(undefined, lyricsSetId).map(g => ({
+      id: Number(g.id),
+      title: String(g.title ?? ''),
+      caption: String(g.caption ?? ''),
+      lyrics: String(g.lyrics ?? ''),
+      bpm: Math.trunc(Number(g.bpm) || 0),
+      key: String(g.key ?? ''),
+      duration: Math.trunc(Number(g.duration) || 0),
+      createdAt: String(g.created_at ?? ''),
+    }));
+    res.json({
+      lyricsSetId,
+      artist: String(set?.artist_name ?? ''),
+      album: String(set?.album ?? ''),
+      generations: gens,
+    });
+  } catch (err: any) {
+    console.error(`[Training] ls-generations failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
   try {

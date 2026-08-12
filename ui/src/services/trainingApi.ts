@@ -1103,6 +1103,11 @@ export interface AuditionOptions {
   vaeModel?: string;              // default: engine's resolve_name default
   variantKey?: string;            // default: newestVariantKey(slug)
   sampleId?: string;              // when set, caption/lyrics default from its lm_codes.jsonl row
+  /** Explicit metadata pins (Lyric Studio prompt source) — force_fields'd into
+   *  the CoT like the sample-row pins; win over the row when both present. */
+  bpm?: number;
+  keyscale?: string;
+  timesignature?: string;
   temperature?: number;           // default 0.85, clamp 0.1..2
   topP?: number;                  // default 0.9,  clamp 0.05..1
   cfgScale?: number;              // default 2.0,  clamp 0..10
@@ -1141,6 +1146,33 @@ export async function startAudition(id: string, opts: AuditionOptions): Promise<
   return request<{ jobId: string }>(
     `/datasets/${encodeURIComponent(id)}/audition`,
     { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+/** One Lyric Studio generation, offered as an audition prompt. */
+export interface LsGeneration {
+  id: number;
+  title: string;
+  caption: string;
+  lyrics: string;
+  bpm: number;          // 0 = unknown
+  key: string;          // '' = unknown
+  duration: number;     // seconds, 0 = unknown
+  createdAt: string;
+}
+
+export interface LsGenerationsResponse {
+  lyricsSetId: number;  // 0 = this dataset has no linked Lyric Studio album
+  artist: string;
+  album: string;
+  generations: LsGeneration[];
+}
+
+/** Generated lyrics of the dataset's linked Lyric Studio album (persisted
+ *  link, falling back to artist/album detection which then persists). */
+export async function getLsGenerations(id: string): Promise<LsGenerationsResponse> {
+  return request<LsGenerationsResponse>(
+    `/datasets/${encodeURIComponent(id)}/ls-generations`,
   );
 }
 

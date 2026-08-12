@@ -54,6 +54,10 @@ export interface TrainingDatasetSummary {
   /** Friendly album name from the tracks' embedded tags — '' when unknown.
    *  Cached in the row; detected by datasetAssets.ts (majority vote). */
   albumName: string;
+  /** Lyric Studio lyrics_sets.id this dataset exported to — 0 = never linked.
+   *  Written by the export commit; lazily backfilled when the audition's
+   *  Lyric Studio prompt source resolves the album by detection. */
+  lyricsSetId?: number;
   createdAt: string;          // ISO
   updatedAt: string;          // ISO
   /** What the dataset has on DISK beyond its row — attached by the list and
@@ -793,6 +797,12 @@ export interface AuditionOptions {
   vaeModel?: string;              // default: engine's resolve_name default
   variantKey?: string;            // default: newestVariantKey(slug)
   sampleId?: string;              // when set, caption/lyrics default from its lm_codes.jsonl row
+  /** Explicit metadata pins (Lyric Studio prompt source): force_fields'd into
+   *  the CoT FSM exactly like the sample-row pins. Take precedence over the
+   *  sample row when both are present; 0/'' = not pinned. */
+  bpm?: number;
+  keyscale?: string;
+  timesignature?: string;         // '4' or '4/4' — normalized to the numerator
   temperature?: number;           // default 0.85, clamp 0.1..2
   topP?: number;                  // default 0.9,  clamp 0.05..1
   cfgScale?: number;              // default 2.0,  clamp 0..10

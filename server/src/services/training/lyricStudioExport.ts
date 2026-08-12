@@ -24,6 +24,7 @@ import {
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
 import { resolveArtistTitle } from './enhanceService.js';
 import * as audioMeta from './audioMeta.js';
+import { updateDataset } from './datasetsRepo.js';
 import { findDitAdapter, findLmAdapter } from './datasetAssets.js';
 import type {
   LyricStudioExportInput, LyricStudioExportPreview,
@@ -313,6 +314,10 @@ export async function commitLyricStudioExport(
     const created = saveLyricsSet(artist.id, albumName, songs.length, songs, imageUrl || null);
     lyricsSetId = Number(created.id);
   }
+
+  // Persist the dataset → album link on the row (Rob, 2026-08-13): the
+  // audition's Lyric Studio prompt source reads it without re-detecting.
+  try { updateDataset(ds.id, { lyricsSetId }); } catch { /* link is a convenience — never fail the export */ }
 
   if (!artist.image_url && config.lireek.geniusAccessToken) {
     try {
