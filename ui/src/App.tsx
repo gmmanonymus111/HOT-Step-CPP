@@ -52,6 +52,7 @@ import {
   getActiveMediaElement,
   handleOriginalReady,
   handleAltReady,
+  handleNoAdapterReady,
   handleFinish as pbHandleFinish,
   setCurrentTime as pbSetCurrentTime,
   setIsPlaying as pbSetIsPlaying,
@@ -64,7 +65,7 @@ import {
   setShuffle as pbSetShuffle,
   cycleRepeat as pbCycleRepeat,
   setSpectrumEnabled as pbSetSpectrumEnabled,
-  toggleMastered as pbToggleMastered,
+  setPlaybackVariant as pbSetPlaybackVariant,
   setTrimMode as pbSetTrimMode,
   handleTrimClick as pbHandleTrimClick,
   reloadCurrentTrack as pbReloadCurrentTrack,
@@ -272,6 +273,7 @@ const AppContent: React.FC = () => {
   const volume = usePlaybackSelector(s => s.volume);
   const playbackRate = usePlaybackSelector(s => s.playbackRate);
   const playMastered = usePlaybackSelector(s => s.playMastered);
+  const playNoAdapter = usePlaybackSelector(s => s.playNoAdapter);
   const spectrumEnabled = usePlaybackSelector(s => s.spectrumEnabled);
   const shuffle = usePlaybackSelector(s => s.shuffle);
   const repeat = usePlaybackSelector(s => s.repeat);
@@ -283,6 +285,7 @@ const AppContent: React.FC = () => {
   const abActiveLabel = usePlaybackSelector(s => s.playMastered && s.abMode ? 'B' as const : 'A' as const);
   const wavesurferRef = useRef<WaveformPlayerHandle>(null);
   const wavesurferAltRef = useRef<WaveformPlayerHandle>(null);
+  const wavesurferNoAdapterRef = useRef<WaveformPlayerHandle>(null);
   const discoMode = useDiscoMode();
 
   // Disco hue assignments per panel (0-360)
@@ -304,15 +307,15 @@ const AppContent: React.FC = () => {
   // We pass the refs themselves (not .current) so the store always gets
   // the latest handle even if useImperativeHandle hasn't committed yet.
   useEffect(() => {
-    registerPlayers(wavesurferRef, wavesurferAltRef);
+    registerPlayers(wavesurferRef, wavesurferAltRef, wavesurferNoAdapterRef);
   }, []);
 
-  // Track spectrum analyzer media element — updates on mastered toggle
+  // Track spectrum analyzer media element — updates on variant toggle
   const [spectrumMediaEl, setSpectrumMediaEl] = useState<HTMLMediaElement | null>(null);
   useEffect(() => {
     const el = getActiveMediaElement();
     if (el) setSpectrumMediaEl(el);
-  }, [playMastered, currentTrack, isPlaying]);
+  }, [playMastered, playNoAdapter, currentTrack, isPlaying]);
 
   // Sync disco beat detection with playback state
   useEffect(() => {
@@ -816,6 +819,7 @@ const AppContent: React.FC = () => {
                   title: song.title || 'Untitled',
                   audioUrl: song.audioUrl || song.audio_url || '',
                   masteredAudioUrl: song.masteredAudioUrl || song.mastered_audio_url || '',
+                  noAdapterAudioUrl: song.noAdapterAudioUrl || song.noadapter_audio_url || '',
                   artistName: song.artistName || '',
                   coverUrl: song.coverUrl || song.cover_url || '',
                   duration: typeof song.duration === 'number' ? song.duration : undefined,
@@ -930,6 +934,7 @@ const AppContent: React.FC = () => {
                   title: song.title || 'Untitled',
                   audioUrl: song.audioUrl || song.audio_url || '',
                   masteredAudioUrl: song.masteredAudioUrl || song.mastered_audio_url || '',
+                  noAdapterAudioUrl: song.noAdapterAudioUrl || song.noadapter_audio_url || '',
                   artistName: song.artistName || '',
                   coverUrl: song.coverUrl || song.cover_url || '',
                   duration: typeof song.duration === 'number' ? song.duration : undefined,
@@ -1049,6 +1054,7 @@ const AppContent: React.FC = () => {
                 title: song.title || 'Untitled',
                 audioUrl: song.audioUrl || song.audio_url || '',
                 masteredAudioUrl: song.masteredAudioUrl || song.mastered_audio_url || '',
+                noAdapterAudioUrl: song.noAdapterAudioUrl || song.noadapter_audio_url || '',
                 artistName: song.artistName || '',
                 coverUrl: song.coverUrl || song.cover_url || '',
                 duration: typeof song.duration === 'number' ? song.duration : undefined,
@@ -1335,17 +1341,17 @@ const AppContent: React.FC = () => {
               onCancel={() => pbSetTrimMode(false)}
             />
           )}
-          {/* Dual waveform: original + mastered stacked, opacity-switched */}
+          {/* Triple waveform: original + mastered + no-adapter reference stacked, opacity-switched */}
           <div className="relative" style={{ height: 56 }}>
             <div style={{
               position: 'absolute', inset: 0,
-              opacity: playMastered ? 0 : 1,
-              pointerEvents: playMastered ? 'none' : 'auto',
+              opacity: (playMastered || playNoAdapter) ? 0 : 1,
+              pointerEvents: (playMastered || playNoAdapter) ? 'none' : 'auto',
               transition: 'opacity 0.15s ease',
             }}>
               <WaveformPlayer
                 ref={wavesurferRef}
-                volume={playMastered ? 0 : volume}
+                volume={(playMastered || playNoAdapter) ? 0 : volume}
                 playbackRate={playbackRate}
                 onTimeUpdate={pbSetCurrentTime}
                 onDurationChange={() => {}}
@@ -1354,7 +1360,7 @@ const AppContent: React.FC = () => {
                 onWaveformClick={handleWaveformClick}
                 onReady={(dur) => {
                   handleOriginalReady(dur);
-                  if (!playMastered) {
+                  if (!playMastered && !playNoAdapter) {
                     setSpectrumMediaEl(wavesurferRef.current?.getMediaElement() ?? null);
                   }
                 }}
@@ -1379,6 +1385,29 @@ const AppContent: React.FC = () => {
                   handleAltReady(dur);
                   if (playMastered) {
                     setSpectrumMediaEl(wavesurferAltRef.current?.getMediaElement() ?? null);
+                  }
+                }}
+              />
+            </div>
+            <div style={{
+              position: 'absolute', inset: 0,
+              opacity: playNoAdapter ? 1 : 0,
+              pointerEvents: playNoAdapter ? 'auto' : 'none',
+              transition: 'opacity 0.15s ease',
+            }}>
+              <WaveformPlayer
+                ref={wavesurferNoAdapterRef}
+                volume={playNoAdapter ? volume : 0}
+                playbackRate={playbackRate}
+                onTimeUpdate={pbSetCurrentTime}
+                onDurationChange={() => {}}
+                onPlayChange={pbSetIsPlaying}
+                onFinish={() => pbHandleFinish('noadapter')}
+                onWaveformClick={handleWaveformClick}
+                onReady={(dur) => {
+                  handleNoAdapterReady(dur);
+                  if (playNoAdapter) {
+                    setSpectrumMediaEl(wavesurferNoAdapterRef.current?.getMediaElement() ?? null);
                   }
                 }}
               />
@@ -1417,7 +1446,8 @@ const AppContent: React.FC = () => {
           onDelete={() => currentSong && handleDelete(currentSong as Song)}
           onDownload={() => currentSong && downloadTrack(currentSong as Song)}
           playMastered={playMastered}
-          onToggleMastered={pbToggleMastered}
+          playNoAdapter={playNoAdapter}
+          onSetPlaybackVariant={pbSetPlaybackVariant}
           spectrumEnabled={spectrumEnabled}
           onToggleSpectrum={() => pbSetSpectrumEnabled(!spectrumEnabled)}
           showPlaylist={showPlaylist}

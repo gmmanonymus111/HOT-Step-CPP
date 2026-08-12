@@ -612,6 +612,7 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
             audioUrl: s.result?.audioUrls?.[0] || '',
             songId: s.result?.songIds?.[0],
             masteredAudioUrl: s.result?.masteredAudioUrl,
+            noAdapterAudioUrl: s.result?.noAdapterAudioUrl,
             audioDuration: s.result?.duration,
           });
           resolve();

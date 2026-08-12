@@ -15,6 +15,7 @@ export interface PlaylistItem {
   title: string;
   audioUrl: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   artistName?: string;
   coverUrl?: string;
   duration?: number; // seconds

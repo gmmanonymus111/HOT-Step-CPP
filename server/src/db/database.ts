@@ -298,6 +298,12 @@ export function initDb(): void {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='metadata_overrides'`,
       alter: `ALTER TABLE songs ADD COLUMN metadata_overrides TEXT DEFAULT ''`,
     },
+    {
+      // No-adapter reference render: low-step bare-DiT output (adapter bypassed,
+      // no post-processing) for A/B-ing what the DiT adapter contributes.
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='noadapter_audio_url'`,
+      alter: `ALTER TABLE songs ADD COLUMN noadapter_audio_url TEXT DEFAULT ''`,
+    },
   ];
   for (const m of songsMigrations) {
     const row = db.prepare(m.check).get() as any;

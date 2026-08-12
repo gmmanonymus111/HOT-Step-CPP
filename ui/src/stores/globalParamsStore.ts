@@ -105,6 +105,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // pick planner adapters from there, like the DiT adapter folder.
   lmAdapterFolder: readKey("hs-lmAdapterFolder", ''),
   advancedAdapters: readKey("hs-advancedAdapters", false),
+  // Optional 3rd output: low-step render on the bare DiT (adapter bypassed,
+  // LM adapter kept, no post-processing) for A/B-ing the DiT adapter by ear.
+  noAdapterRender: readKey("hs-noAdapterRender", false),
   adaptersOpen: readKey("hs-adaptersOpen", false),
   inferenceSteps: readKey("hs-inferenceSteps", 12),
   guidanceScale: readKey("hs-guidanceScale", 9.0),
@@ -286,6 +289,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setAdapterFolder: (v: any) => { set({ adapterFolder: v }); writeKey("hs-adapterFolder", v); },
   setLmAdapterFolder: (v: any) => { set({ lmAdapterFolder: v }); writeKey("hs-lmAdapterFolder", v); },
   setAdvancedAdapters: (v: any) => { set({ advancedAdapters: v }); writeKey("hs-advancedAdapters", v); },
+  setNoAdapterRender: (v: any) => { set({ noAdapterRender: v }); writeKey("hs-noAdapterRender", v); },
   setAdaptersOpen: (v: any) => { set({ adaptersOpen: v }); writeKey("hs-adaptersOpen", v); },
   setInferenceSteps: (v: any) => { set({ inferenceSteps: v }); writeKey("hs-inferenceSteps", v); },
   setGuidanceScale: (v: any) => { set({ guidanceScale: v }); writeKey("hs-guidanceScale", v); },
@@ -512,6 +516,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
         ? s.adapterRuntimeQuant : undefined,
       // Merge low-VRAM storage (native-quant re-encode) — only relevant in merge mode.
       adapterMergeLowVram: (primary && s.adapterMode !== 'runtime' && s.adapterMergeLowVram) ? true : undefined,
+      // No-adapter reference render — only meaningful with a DiT adapter loaded.
+      noAdapterRender: (primary && s.noAdapterRender) ? true : undefined,
       // Basin re-base: only sent with an adapter and a chosen source. Works in
       // both merge and runtime modes (runtime folds the nudge into the delta sum);
       // the engine skips it on the per-section masking path.

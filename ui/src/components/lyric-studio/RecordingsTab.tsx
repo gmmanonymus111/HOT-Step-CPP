@@ -117,6 +117,7 @@ export const RecordingsTab: React.FC<RecordingsTabProps> = ({
                           tags: [],
                           audioUrl,
                           masteredAudioUrl: status.result.masteredAudioUrl || '',
+                          noAdapterAudioUrl: status.result.noAdapterAudioUrl || '',
                           created_at: ag.created_at,
                         });
                       }
@@ -314,6 +315,7 @@ const AddToPlaylistButton: React.FC<{ song: Song; artistName?: string }> = ({ so
         title: song.title || 'Untitled',
         audioUrl: song.audioUrl || '',
         masteredAudioUrl: song.masteredAudioUrl || '',
+        noAdapterAudioUrl: song.noAdapterAudioUrl || '',
         artistName: artistName || '',
         coverUrl: song.coverUrl || '',
         duration: seconds,

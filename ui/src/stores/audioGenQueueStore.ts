@@ -51,6 +51,7 @@ export interface AudioQueueItem {
   audioUrl?: string;
   songId?: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   audioDuration?: number;
 }
 
@@ -368,6 +369,7 @@ export function completeManualQueueItem(id: string, result: {
   audioUrl: string;
   songId?: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   audioDuration?: number;
 }): void {
   const item = _state.items.find(i => i.id === id);
@@ -376,6 +378,7 @@ export function completeManualQueueItem(id: string, result: {
   item.audioUrl = result.audioUrl;
   if (result.songId) item.songId = result.songId;
   if (result.masteredAudioUrl) item.masteredAudioUrl = result.masteredAudioUrl;
+  if (result.noAdapterAudioUrl) item.noAdapterAudioUrl = result.noAdapterAudioUrl;
   if (result.audioDuration) item.audioDuration = result.audioDuration;
   item.progress = 100;
   item.stage = 'Complete!';
@@ -444,6 +447,7 @@ function _maybeAutoAddToPlaylist(item: AudioQueueItem): void {
     title: item.generation.title || 'Untitled',
     audioUrl: item.audioUrl || '',
     masteredAudioUrl: item.masteredAudioUrl || '',
+    noAdapterAudioUrl: item.noAdapterAudioUrl || '',
     artistName: item.artistName || '',
     coverUrl: item.coverUrl || item.artistImageUrl || '',
     duration: item.audioDuration || 0,
@@ -592,6 +596,7 @@ export async function enqueueSimpleGen(
           item.audioUrl = audioUrl;
           item.songId = songIds[0];
           item.masteredAudioUrl = masteredUrl;
+          item.noAdapterAudioUrl = status.result?.noAdapterAudioUrl;
           item.audioDuration = status.result?.duration;
           item.progress = 100;
           item.stage = 'Complete!';
@@ -851,6 +856,7 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
         item.audioUrl = audioUrl;
         if (songId) item.songId = songId;
         if (masteredUrl) item.masteredAudioUrl = masteredUrl;
+        if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
         if (status.result?.duration) item.audioDuration = status.result.duration;
       }
       item.status = 'succeeded';
@@ -1091,6 +1097,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
           item.audioUrl = audioUrl;
           if (songId) item.songId = songId;
           if (masteredUrl) item.masteredAudioUrl = masteredUrl;
+          if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
           if (status.result?.duration) item.audioDuration = status.result.duration;
           _emit(true);
           // If server didn't provide duration, probe the audio file

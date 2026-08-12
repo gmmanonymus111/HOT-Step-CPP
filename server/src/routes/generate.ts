@@ -63,6 +63,8 @@ interface GenerationJob {
     keyScale?: string;
     timeSignature?: string;
     masteredAudioUrl?: string;
+    /** No-adapter reference render (bare-DiT low-step output), when enabled */
+    noAdapterAudioUrl?: string;
     timing?: StageTiming[];
     totalMs?: number;
   };
@@ -1078,6 +1080,84 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       latentUrls.push(latentUrl);
     } // end per-track synth loop
 
+    // ── No-adapter reference render (optional 3rd output) ─────
+    // Re-synth each track at a low step count on the BARE DiT: identical LM
+    // output (caption/lyrics/audio codes — an LM adapter's influence is kept)
+    // and identical seed, but every DiT adapter field stripped. Runs AFTER the
+    // main loop so the bare DiT is loaded once for all tracks. The output is
+    // deliberately raw: no auto-trim, no post-processing — it exists purely so
+    // the user can hear what the song sounds like without the DiT adapter.
+    // Per-track parallel array like masteredUrls; '' = no reference render.
+    const noAdapterUrls: string[] = [];
+    const NO_ADAPTER_STEPS = 20;
+    const anyDitAdapter = lmResults.some(r => (r.adapters && r.adapters.length > 0) || r.adapter);
+    if (job.params.noAdapterRender && anyDitAdapter) {
+      for (let trackIdx = 0; trackIdx < audioUrls.length; trackIdx++) {
+        const baseReq = lmResults[trackIdx];
+        const trackLabel = audioUrls.length > 1 ? ` (track ${trackIdx + 1}/${audioUrls.length})` : '';
+        let refUrl = '';
+        const refStart = performance.now();
+        // Feed the stall watchdog during the bare-DiT reload + denoise steps
+        // (the main loop's line subscriber is gone by now).
+        const unsubRef = subscribeLines((line) => {
+          if (line.source !== 'engine') return;
+          const step = line.text.match(/\[DiT(?:-TRT)?\] Step (\d+)\/(\d+)/);
+          if (step) {
+            job.stage = `No-adapter reference${trackLabel}: Step ${step[1]}/${step[2]}`;
+            return;
+          }
+          const load = line.text.match(/\[Store\] Load (.+?):\s+\d+\s*ms/);
+          if (load) job.stage = `No-adapter reference${trackLabel}: loading ${load[1]}...`;
+        });
+        try {
+          const refReq = { ...baseReq };
+          delete refReq.adapter;
+          delete refReq.adapter_scale;
+          delete refReq.adapters;
+          delete refReq.adapter_sections;
+          delete refReq.adapter_section_align_at;
+          delete refReq.adapter_section_isolation;
+          delete refReq.adapter_group_scales;
+          delete refReq.adapter_mode;
+          delete refReq.adapter_runtime_quant;
+          delete refReq.adapter_merge_lowvram;
+          delete refReq.rebase_source;
+          delete refReq.rebase_beta;
+          delete (refReq as any).get_lrc;
+          refReq.inference_steps = NO_ADAPTER_STEPS;
+
+          job.stage = `No-adapter reference${trackLabel}...`;
+          let refJobId: string;
+          if (srcAudioBuf || refAudioBuf || srcLatentBuf || refLatentBuf || seedLatentBuf) {
+            refJobId = await aceClient.submitSynthMultipart(refReq, srcAudioBuf, refAudioBuf, srcLatentBuf, refLatentBuf, 'wav16', coResident, seedLatentBuf);
+          } else {
+            refJobId = await aceClient.submitSynth(refReq, 'wav16', coResident);
+          }
+          job.aceJobId = refJobId;
+          await pollUntilDone(refJobId, job, abortController.signal, timeoutMinutes);
+
+          const refRes = await aceClient.getJobResult(refJobId);
+          const refBuffer = Buffer.from(await refRes.arrayBuffer());
+          const refContentType = refRes.headers.get('content-type') || 'audio/mpeg';
+          const refExt = refContentType.includes('wav') ? 'wav' : 'mp3';
+          const rawBase = path.basename(audioUrls[trackIdx]).replace(/\.[^.]+$/, '');
+          const refFilename = `${rawBase}_noadapter.${refExt}`;
+          fs.writeFileSync(path.join(config.data.audioDir, refFilename), refBuffer);
+          refUrl = `/audio/${refFilename}`;
+          logGeneration(job.id, 'INFO',
+            `[No-Adapter Ref] Track ${trackIdx + 1}: saved ${refFilename} (${NO_ADAPTER_STEPS} steps, ${(refBuffer.length / 1024).toFixed(0)} KB, ${((performance.now() - refStart) / 1000).toFixed(1)}s)`);
+        } catch (refErr: any) {
+          if (refErr.message === 'Cancelled') throw refErr;
+          logGeneration(job.id, 'WARNING', `[No-Adapter Ref] Track ${trackIdx + 1}: failed (non-fatal): ${refErr.message}`);
+        } finally {
+          unsubRef();
+        }
+        noAdapterUrls.push(refUrl);
+        const refMs = Math.round(performance.now() - refStart);
+        if (refMs > 50) timing.push({ name: `No-Adapter Ref${audioUrls.length > 1 ? ` Track ${trackIdx + 1}` : ''}`, ms: refMs });
+      }
+    }
+
     // Collect deferred parallel tasks (whisper, cover art) to await before completion
     // This array was populated inside the per-track loop above
     // and will be joined before DB insert.
@@ -1282,13 +1362,15 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       getDb().prepare(`
         INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
                            duration, bpm, key_scale, time_signature, tags, dit_model,
-                           generation_params, mastered_audio_url, latent_url, quality_scores)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           generation_params, mastered_audio_url, latent_url, quality_scores,
+                           noadapter_audio_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         songId, job.userId, title, trackLyrics, style, trackCaption,
         audioUrl, trackDuration, bpm, keyScale, timeSignature,
         JSON.stringify([]), aceReq.synth_model || '', JSON.stringify(trackParams),
         trackMastered, trackLatent, qualityJson,
+        noAdapterUrls[i] || '',
       );
       songIds.push(songId);
 
@@ -1376,6 +1458,7 @@ async function runGeneration(job: GenerationJob): Promise<void> {
       keyScale,
       timeSignature,
       masteredAudioUrl: masteredUrls.find(u => !!u) || undefined,
+      noAdapterAudioUrl: noAdapterUrls.find(u => !!u) || undefined,
       timing,
       totalMs,
     };

@@ -292,6 +292,7 @@ export const RepaintStudio: React.FC = () => {
             audioUrl,
             songId,
             masteredAudioUrl: s.result?.masteredAudioUrl,
+            noAdapterAudioUrl: s.result?.noAdapterAudioUrl,
             audioDuration: s.result?.duration,
           });
         } else if (s.status === 'failed') {

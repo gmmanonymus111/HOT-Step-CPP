@@ -245,6 +245,7 @@ const AddToPlaylistBtn: React.FC<{ rs: UnifiedRecentSong }> = ({ rs }) => {
         title: rs.title || 'Untitled',
         audioUrl: rs.audio_url || '',
         masteredAudioUrl: rs.mastered_audio_url || '',
+        noAdapterAudioUrl: rs.noadapter_audio_url || '',
         artistName: rs.artist_name || '',
         coverUrl: rs.cover_url || rs.artist_image || '',
         duration: rs.duration || 0,

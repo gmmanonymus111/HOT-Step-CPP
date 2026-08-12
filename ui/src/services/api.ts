@@ -107,6 +107,8 @@ function normalizeSong(s: any): Song {
     createdAt: s.created_at ? new Date(s.created_at) : undefined,
     masteredAudioUrl: s.mastered_audio_url || s.masteredAudioUrl || '',
     mastered_audio_url: s.mastered_audio_url,
+    noAdapterAudioUrl: s.noadapter_audio_url || s.noAdapterAudioUrl || '',
+    noadapter_audio_url: s.noadapter_audio_url,
     latentUrl: s.latent_url || s.latentUrl || '',
     latent_url: s.latent_url,
     quality_scores: s.quality_scores,

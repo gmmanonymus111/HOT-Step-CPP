@@ -33,6 +33,8 @@ export interface PlaybackTrack {
   title: string;
   audioUrl: string;
   masteredAudioUrl?: string;
+  /** No-adapter reference render (bare-DiT low-step output, unprocessed) */
+  noAdapterAudioUrl?: string;
   kickStemUrl?: string;
   snareStemUrl?: string;
   hihatStemUrl?: string;
@@ -74,9 +76,13 @@ export interface PlaybackState {
   // Only set to false by an explicit stop() call, which collapses the player bar.
   playerActive: boolean;
 
-  // ── Mastered/Original Toggle ──
+  // ── Variant Switch (no-adapter / original / mastered) ──
   playMastered: boolean;
   hasMastered: boolean;
+  /** Third deck: no-adapter reference render. Never both playMastered and
+   *  playNoAdapter — 'original' is the state where both are false. */
+  playNoAdapter: boolean;
+  hasNoAdapter: boolean;
   currentAudioUrl: string | null;
 
   // ── Preferences (persisted) ──
@@ -174,7 +180,8 @@ function saveTrackList(tl: PersistedTrackList): void {
   // and a restored list only needs to be playable, not fully hydrated.
   const slim: PlaybackTrack[] = tl.trackList.slice(0, MAX_PERSISTED_TRACKS).map(t => ({
     id: t.id, title: t.title, audioUrl: t.audioUrl,
-    masteredAudioUrl: t.masteredAudioUrl, kickStemUrl: t.kickStemUrl,
+    masteredAudioUrl: t.masteredAudioUrl,
+    noAdapterAudioUrl: t.noAdapterAudioUrl, kickStemUrl: t.kickStemUrl,
     snareStemUrl: t.snareStemUrl, hihatStemUrl: t.hihatStemUrl,
     discoDataUrl: t.discoDataUrl, artistName: t.artistName,
     coverUrl: t.coverUrl, duration: t.duration, style: t.style,
@@ -199,16 +206,20 @@ type WsRef = { current: WaveformPlayerHandle | null };
 
 let _wsOriginalRef: WsRef = { current: null };
 let _wsAltRef: WsRef = { current: null };
+let _wsNoAdapterRef: WsRef = { current: null };
 
 export function registerPlayers(
   orig: WsRef,
-  alt: WsRef
+  alt: WsRef,
+  noAdapter?: WsRef
 ): void {
   _wsOriginalRef = orig;
   _wsAltRef = alt;
+  if (noAdapter) _wsNoAdapterRef = noAdapter;
 }
 
 export function getActiveMediaElement(): HTMLMediaElement | null {
+  if (_state.playNoAdapter && _wsNoAdapterRef.current) return _wsNoAdapterRef.current.getMediaElement();
   if (_state.playMastered && _wsAltRef.current) return _wsAltRef.current.getMediaElement();
   if (_wsOriginalRef.current) return _wsOriginalRef.current.getMediaElement();
   return null;
@@ -235,6 +246,8 @@ let _state: PlaybackState = {
 
   playMastered: false,
   hasMastered: false,
+  playNoAdapter: false,
+  hasNoAdapter: false,
   currentAudioUrl: null,
 
   trimMode: false,
@@ -318,12 +331,13 @@ function scheduleAutoAdvance(reason: string, delayMs: number): void {
   }, delayMs);
 }
 
-/** Attempt to start both players. Retries if the AUDIBLE track isn't ready. */
+/** Attempt to start all loaded players. Retries if the AUDIBLE track isn't ready. */
 function startBothPlayers(): void {
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
 
   const wsOrig = _wsOriginalRef.current;
   const wsAlt = _wsAltRef.current;
+  const wsNoAdapter = _wsNoAdapterRef.current;
 
   // Start original if ready
   let origReady = false;
@@ -345,9 +359,19 @@ function startBothPlayers(): void {
     }
   }
 
+  // Start no-adapter deck if ready
+  let noAdapterReady = false;
+  if (wsNoAdapter && _state.hasNoAdapter) {
+    const m = wsNoAdapter.getMediaElement();
+    if (m && m.readyState >= 2) {
+      if (m.paused) wsNoAdapter.play();
+      noAdapterReady = true;
+    }
+  }
+
   // The AUDIBLE track must be ready before we declare success.
-  // playMastered=true → alt is audible, playMastered=false → original is audible.
-  const audibleReady = _state.playMastered ? altReady : origReady;
+  const audibleReady = _state.playNoAdapter ? noAdapterReady
+    : _state.playMastered ? altReady : origReady;
 
   if (audibleReady) {
     _retryCount = 0;
@@ -365,13 +389,14 @@ function startBothPlayers(): void {
   if (_retryCount <= MAX_RETRIES) {
     _retryTimer = setTimeout(startBothPlayers, RETRY_INTERVAL);
   } else {
-    // Mastered track failed but original is ready — fall back to original
-    if (_state.playMastered && origReady) {
-      console.warn('[Playback] Mastered audio failed to load, falling back to original');
+    // Mastered/no-adapter track failed but original is ready — fall back to original
+    if ((_state.playMastered || _state.playNoAdapter) && origReady) {
+      console.warn('[Playback] Selected variant failed to load, falling back to original');
       _retryCount = 0;
       _suppressPlayFalse = false;
       setState({
         playMastered: false,
+        playNoAdapter: false,
         currentAudioUrl: _state.currentTrack?.audioUrl || null,
         isPlaying: true,
         isLoading: false,
@@ -386,7 +411,7 @@ function startBothPlayers(): void {
     _suppressPlayFalse = false;
     console.error(
       `[Playback] gave up waiting for "${_state.currentTrack?.title}" after ${MAX_RETRIES * RETRY_INTERVAL}ms`
-      + ` (playMastered=${_state.playMastered} origReady=${origReady} altReady=${altReady})`
+      + ` (playMastered=${_state.playMastered} playNoAdapter=${_state.playNoAdapter} origReady=${origReady} altReady=${altReady})`
     );
     setState({
       isPlaying: false,
@@ -402,13 +427,16 @@ function startBothPlayers(): void {
 }
 
 function applyVolumes(): void {
-  _wsOriginalRef.current?.setVolume(_state.playMastered ? 0 : _state.volume);
-  _wsAltRef.current?.setVolume(_state.playMastered ? _state.volume : 0);
+  const audible = _state.playNoAdapter ? 'noadapter' : _state.playMastered ? 'mastered' : 'original';
+  _wsOriginalRef.current?.setVolume(audible === 'original' ? _state.volume : 0);
+  _wsAltRef.current?.setVolume(audible === 'mastered' ? _state.volume : 0);
+  _wsNoAdapterRef.current?.setVolume(audible === 'noadapter' ? _state.volume : 0);
 }
 
 function applyPlaybackRate(): void {
   _wsOriginalRef.current?.setPlaybackRate(_state.playbackRate);
   _wsAltRef.current?.setPlaybackRate(_state.playbackRate);
+  _wsNoAdapterRef.current?.setPlaybackRate(_state.playbackRate);
 }
 
 function persistTrackList(): void {
@@ -461,6 +489,7 @@ function loadTrack(track: PlaybackTrack): void {
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
 
   const hasMastered = !!track.masteredAudioUrl;
+  const hasNoAdapter = !!track.noAdapterAudioUrl;
   const useMastered = hasMastered;
 
   // If already playing, suppress the isPlaying→false transition so the
@@ -478,6 +507,8 @@ function loadTrack(track: PlaybackTrack): void {
     duration: 0,
     hasMastered,
     playMastered: useMastered,
+    hasNoAdapter,
+    playNoAdapter: false,    // never default to the reference render
     currentAudioUrl: useMastered ? track.masteredAudioUrl! : track.audioUrl,
   });
 
@@ -490,6 +521,12 @@ function loadTrack(track: PlaybackTrack): void {
     // it would otherwise keep running the PREVIOUS track's audio, silent because
     // its volume is zeroed, until that audio ended and fired its own finish.
     _wsAltRef.current?.pause();
+  }
+  if (_wsNoAdapterRef.current && hasNoAdapter) {
+    _wsNoAdapterRef.current.loadUrl(track.noAdapterAudioUrl!);
+  } else {
+    // Same stale-audio guard as the alt deck above.
+    _wsNoAdapterRef.current?.pause();
   }
 
   applyVolumes();
@@ -538,6 +575,7 @@ export function togglePlay(): void {
   _suppressPlayFalse = false;
   _wsOriginalRef.current?.playPause();
   if (_state.hasMastered) _wsAltRef.current?.playPause();
+  if (_state.hasNoAdapter) _wsNoAdapterRef.current?.playPause();
 }
 
 /** Stop playback entirely — pauses audio, resets position, and collapses the player bar */
@@ -546,9 +584,10 @@ export function stop(): void {
   if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
   _retryCount = 0;
 
-  // Pause both WaveSurfer instances (don't call playPause — we want guaranteed pause)
+  // Pause all WaveSurfer instances (don't call playPause — we want guaranteed pause)
   const wsOrig = _wsOriginalRef.current;
   const wsAlt = _wsAltRef.current;
+  const wsNoAdapter = _wsNoAdapterRef.current;
   if (wsOrig) {
     const m = wsOrig.getMediaElement();
     if (m && !m.paused) wsOrig.playPause();
@@ -556,6 +595,10 @@ export function stop(): void {
   if (wsAlt) {
     const m = wsAlt.getMediaElement();
     if (m && !m.paused) wsAlt.playPause();
+  }
+  if (wsNoAdapter) {
+    const m = wsNoAdapter.getMediaElement();
+    if (m && !m.paused) wsNoAdapter.playPause();
   }
 
   setState({
@@ -568,6 +611,8 @@ export function stop(): void {
     loadError: null,
     hasMastered: false,
     playMastered: false,
+    hasNoAdapter: false,
+    playNoAdapter: false,
     currentAudioUrl: null,
     trimMode: false,
     trimInPoint: null,
@@ -579,10 +624,11 @@ export function stop(): void {
   });
 }
 
-/** Seek both WaveSurfer instances to a time in seconds */
+/** Seek all WaveSurfer instances to a time in seconds */
 export function seek(time: number): void {
   const wsOrig = _wsOriginalRef.current;
   const wsAlt = _wsAltRef.current;
+  const wsNoAdapter = _wsNoAdapterRef.current;
   if (wsOrig) {
     const d = wsOrig.getDuration();
     if (d > 0) wsOrig.seekTo(time / d);
@@ -590,6 +636,10 @@ export function seek(time: number): void {
   if (wsAlt) {
     const d = wsAlt.getDuration();
     if (d > 0) wsAlt.seekTo(time / d);
+  }
+  if (wsNoAdapter) {
+    const d = wsNoAdapter.getDuration();
+    if (d > 0) wsNoAdapter.seekTo(time / d);
   }
 }
 
@@ -659,6 +709,60 @@ export function previous(): void {
   loadTrack(prevTrack);
 }
 
+export type PlaybackVariant = 'noadapter' | 'original' | 'mastered';
+
+/** Switch the audible deck between the no-adapter reference, the raw
+ *  (unmastered) output, and the mastered output. Position-syncs the target
+ *  deck to the currently audible one, so the A/B comparison is seamless. */
+export function setPlaybackVariant(variant: PlaybackVariant): void {
+  const track = _state.currentTrack;
+  if (!track || _state.abMode) return;
+  if (variant === 'mastered' && !_state.hasMastered) return;
+  if (variant === 'noadapter' && !_state.hasNoAdapter) return;
+
+  const current: PlaybackVariant = _state.playNoAdapter ? 'noadapter'
+    : _state.playMastered ? 'mastered' : 'original';
+  if (variant === current) return;
+
+  const deckFor = (v: PlaybackVariant) =>
+    v === 'noadapter' ? _wsNoAdapterRef.current
+    : v === 'mastered' ? _wsAltRef.current
+    : _wsOriginalRef.current;
+
+  const activeWs = deckFor(current);
+  const targetWs = deckFor(variant);
+  if (!targetWs) return;
+
+  // Sync target position from the currently audible deck. The reference render
+  // skips auto-trim so its duration can differ — sync by absolute seconds.
+  if (activeWs) {
+    const activeTime = activeWs.getCurrentTime();
+    const targetDur = targetWs.getDuration();
+    if (targetDur > 0) targetWs.seekTo(Math.min(activeTime, targetDur) / targetDur);
+  }
+
+  // Keep every loaded deck rolling (browser may have paused a shadow deck)
+  if (_state.isPlaying) {
+    for (const v of ['original', 'mastered', 'noadapter'] as PlaybackVariant[]) {
+      if (v === 'mastered' && !_state.hasMastered) continue;
+      if (v === 'noadapter' && !_state.hasNoAdapter) continue;
+      const ws = deckFor(v);
+      const m = ws?.getMediaElement();
+      if (ws && m?.paused) ws.play();
+    }
+  }
+
+  setState({
+    playMastered: variant === 'mastered',
+    playNoAdapter: variant === 'noadapter',
+    currentAudioUrl: variant === 'mastered' ? (track.masteredAudioUrl || track.audioUrl)
+      : variant === 'noadapter' ? (track.noAdapterAudioUrl || track.audioUrl)
+      : track.audioUrl,
+  });
+
+  applyVolumes();
+}
+
 /** Toggle between mastered and original audio */
 export function toggleMastered(): void {
   const wsOrig = _wsOriginalRef.current;
@@ -687,6 +791,7 @@ export function toggleMastered(): void {
 
   setState({
     playMastered: wantMastered,
+    playNoAdapter: false,
     currentAudioUrl: wantMastered
       ? _state.currentTrack.masteredAudioUrl || _state.currentTrack.audioUrl
       : _state.currentTrack.audioUrl,
@@ -717,6 +822,8 @@ export function enterABMode(trackA: PlaybackTrack, trackB: PlaybackTrack): void 
     source: 'direct',
     hasMastered: true,       // Tell system alt player is active
     playMastered: false,     // A is audible (original = A)
+    hasNoAdapter: false,     // third deck unused in A/B mode
+    playNoAdapter: false,
     currentAudioUrl: trackA.audioUrl,
     isLoading: true,
     isPlaying: _state.isPlaying,
@@ -728,6 +835,7 @@ export function enterABMode(trackA: PlaybackTrack, trackB: PlaybackTrack): void 
   // Load audio into WaveSurfer instances
   _wsOriginalRef.current?.loadUrl(trackA.audioUrl);
   _wsAltRef.current?.loadUrl(trackB.audioUrl);
+  _wsNoAdapterRef.current?.pause();
 
   applyVolumes();
   applyPlaybackRate();
@@ -782,6 +890,21 @@ export function handleAltReady(duration: number): void {
   startBothPlayers();
 }
 
+/** No-adapter reference deck became ready — sync position then start */
+export function handleNoAdapterReady(duration: number): void {
+  if (_loadingTrackId && _state.currentTrack && _loadingTrackId !== _state.currentTrack.id) return;
+  const wsOrig = _wsOriginalRef.current;
+  const wsNoAdapter = _wsNoAdapterRef.current;
+  if (wsNoAdapter && wsOrig) {
+    const origDur = wsOrig.getDuration();
+    const origTime = wsOrig.getCurrentTime();
+    if (origDur > 0 && duration > 0) {
+      wsNoAdapter.seekTo(Math.min(origTime, duration) / duration);
+    }
+  }
+  startBothPlayers();
+}
+
 /** Called by WaveSurfer onTimeUpdate */
 export function setCurrentTime(t: number): void {
   // Avoid excessive re-renders — only update if changed meaningfully
@@ -813,8 +936,9 @@ export function setIsPlaying(playing: boolean): void {
  *  Instead: only the audible player may drive the playlist, and a given track may
  *  advance the playlist at most once. */
 let _lastFinishedTrackId: string | null = null;
-export function handleFinish(which: 'original' | 'alt' = 'original'): void {
-  const audible: 'original' | 'alt' = _state.playMastered ? 'alt' : 'original';
+export function handleFinish(which: 'original' | 'alt' | 'noadapter' = 'original'): void {
+  const audible: 'original' | 'alt' | 'noadapter' = _state.playNoAdapter ? 'noadapter'
+    : _state.playMastered ? 'alt' : 'original';
   if (which !== audible) return;
 
   // Re-pointing a player at a new URL makes it emit one last finish for the
@@ -831,6 +955,10 @@ export function handleFinish(which: 'original' | 'alt' = 'original'): void {
     if (_state.hasMastered && _wsAltRef.current) {
       _wsAltRef.current.seekTo(0);
       _wsAltRef.current.play();
+    }
+    if (_state.hasNoAdapter && _wsNoAdapterRef.current) {
+      _wsNoAdapterRef.current.seekTo(0);
+      _wsNoAdapterRef.current.play();
     }
     return;
   }
@@ -947,6 +1075,9 @@ export function reloadCurrentTrack(newDuration?: number): void {
   _wsOriginalRef.current?.loadUrl(bustCache(track.audioUrl));
   if (_wsAltRef.current && track.masteredAudioUrl) {
     _wsAltRef.current.loadUrl(bustCache(track.masteredAudioUrl));
+  }
+  if (_wsNoAdapterRef.current && track.noAdapterAudioUrl) {
+    _wsNoAdapterRef.current.loadUrl(bustCache(track.noAdapterAudioUrl));
   }
   if (newDuration !== undefined) {
     setState({ duration: newDuration });

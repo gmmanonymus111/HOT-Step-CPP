@@ -7,7 +7,7 @@ import {
   Shuffle, Repeat, Repeat1,
   Volume2, VolumeX,
   RotateCcw, Trash2, Download,
-  Music, Sparkles, Activity, ListMusic, Scissors, X,
+  Music, Activity, ListMusic, Scissors, X,
 } from 'lucide-react';
 import { DiscoIcon } from './DiscoIcon';
 import { useTranslation } from 'react-i18next';
@@ -37,7 +37,8 @@ interface PlayerProps {
   onDelete?: () => void;
   onDownload?: () => void;
   playMastered: boolean;
-  onToggleMastered: () => void;
+  playNoAdapter: boolean;
+  onSetPlaybackVariant: (v: 'noadapter' | 'original' | 'mastered') => void;
   spectrumEnabled: boolean;
   onToggleSpectrum: () => void;
   showPlaylist: boolean;
@@ -82,7 +83,8 @@ export const Player: React.FC<PlayerProps> = ({
   onDelete,
   onDownload,
   playMastered,
-  onToggleMastered,
+  playNoAdapter,
+  onSetPlaybackVariant,
   spectrumEnabled,
   onToggleSpectrum,
   showPlaylist,
@@ -184,8 +186,9 @@ export const Player: React.FC<PlayerProps> = ({
         <span className="text-[10px] text-zinc-500 font-mono w-10 flex-shrink-0">{formatTime(duration)}</span>
       </div>
 
-      {/* Right: Volume + Actions */}
-      <div className="flex items-center gap-3 w-[280px] flex-shrink-0 justify-end">
+      {/* Right: Volume + Actions — min-width keeps the layout stable, but the
+          cluster may grow when the text variant switch is present */}
+      <div className="flex items-center gap-3 min-w-[280px] flex-shrink-0 justify-end">
         {/* Playback Rate */}
         <button
           onClick={() => {
@@ -199,19 +202,49 @@ export const Player: React.FC<PlayerProps> = ({
           {playbackRate}x
         </button>
 
-        {/* Mastered toggle — only when song has mastered version (not in A/B mode) */}
-        {!abMode && currentSong.masteredAudioUrl && (
-          <button
-            onClick={onToggleMastered}
-            className={`p-1.5 rounded-lg transition-all ${
-              playMastered
-                ? 'text-amber-400 bg-amber-500/10 shadow-[0_0_8px_rgba(245,158,11,0.15)]'
-                : 'text-zinc-500 hover:text-amber-400 hover:bg-amber-500/5'
-            }`}
-            title={playMastered ? t('player.playingMastered') : t('player.playingOriginal')}
-          >
-            <Sparkles size={15} />
-          </button>
+        {/* Variant switch — no-adapter reference / unmastered / mastered.
+            Segments appear only when the song carries that variant; hidden
+            entirely (like the old icon toggle) when neither extra exists. */}
+        {!abMode && (currentSong.masteredAudioUrl || currentSong.noAdapterAudioUrl) && (
+          <div className="flex rounded-lg overflow-hidden border border-zinc-300 dark:border-white/10 flex-shrink-0">
+            {currentSong.noAdapterAudioUrl && (
+              <button
+                onClick={() => onSetPlaybackVariant('noadapter')}
+                className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                  playNoAdapter
+                    ? 'bg-purple-500/15 text-purple-400 shadow-[0_0_8px_rgba(168,85,247,0.15)]'
+                    : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-purple-400'
+                }`}
+                title={t('player.variantNoAdapterHint')}
+              >
+                {t('player.variantNoAdapter')}
+              </button>
+            )}
+            <button
+              onClick={() => onSetPlaybackVariant('original')}
+              className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                !playMastered && !playNoAdapter
+                  ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-white'
+                  : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+              }`}
+              title={t('player.variantUnmasteredHint')}
+            >
+              {t('player.variantUnmastered')}
+            </button>
+            {currentSong.masteredAudioUrl && (
+              <button
+                onClick={() => onSetPlaybackVariant('mastered')}
+                className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                  playMastered
+                    ? 'bg-amber-500/15 text-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.15)]'
+                    : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-amber-400'
+                }`}
+                title={t('player.variantMasteredHint')}
+              >
+                {t('player.variantMastered')}
+              </button>
+            )}
+          </div>
         )}
 
         {/* A/B toggle — only in A/B comparison mode */}

@@ -37,6 +37,9 @@ export interface Song {
   // Mastered version
   masteredAudioUrl?: string;
   mastered_audio_url?: string;
+  // No-adapter reference render (bare-DiT low-step output, no post-processing)
+  noAdapterAudioUrl?: string;
+  noadapter_audio_url?: string;
   kickStemUrl?: string;
   kick_stem_url?: string;
   snareStemUrl?: string;
@@ -60,6 +63,7 @@ export interface UnifiedRecentSong {
   title: string;
   audio_url: string;
   mastered_audio_url: string;
+  noadapter_audio_url?: string;
   latent_url: string;
   cover_url: string;
   duration: number;
@@ -172,6 +176,9 @@ export interface GenerationParams {
   /** Merge-mode low-VRAM storage: re-encode merged weights to the base's native
    *  quant instead of F32 promotion. */
   adapterMergeLowVram?: boolean;
+  /** Optional 3rd output: raw 20-step render on the bare DiT (adapter bypassed,
+   *  LM adapter kept, no post-processing) for A/B-ing the DiT adapter. */
+  noAdapterRender?: boolean;
   /** Basin re-base: source DiT model name + nudge strength (merge mode only). */
   rebaseSource?: string;
   rebaseBeta?: number;
@@ -340,6 +347,7 @@ export interface GenerationJob {
     keyScale?: string;
     timeSignature?: string;
     masteredAudioUrl?: string;
+    noAdapterAudioUrl?: string;
   };
   error?: string;
 }

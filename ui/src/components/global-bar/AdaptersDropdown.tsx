@@ -544,6 +544,32 @@ export const AdaptersDropdown: React.FC = () => {
               onChange={gp.setAdapterScale} min={0} max={4} step={0.05} showInput />
           )}
 
+          {/* No-adapter reference render — optional 3rd output per generation */}
+          <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{t('adapter.noAdapterRender', 'No-adapter reference')}</span>
+                {gp.noAdapterRender && <span className="w-1.5 h-1.5 rounded-full bg-purple-400" title="Reference render active" />}
+              </div>
+              <p className="text-[10px] text-zinc-600 mt-0.5">
+                {t('adapter.noAdapterRenderHint', 'Adds a raw 20-step render with the DiT adapter bypassed (LM adapter kept, no post-processing) — hear the song without the adapter via the playbar switch.')}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={gp.noAdapterRender}
+              onClick={() => gp.setNoAdapterRender(!gp.noAdapterRender)}
+              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                gp.noAdapterRender ? 'bg-purple-600' : 'bg-zinc-300 dark:bg-zinc-700'
+              }`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                gp.noAdapterRender ? 'translate-x-4' : ''
+              }`} />
+            </button>
+          </div>
+
           {/* Loading Mode */}
           <div>
             <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('adapter.loadingMode')}</label>

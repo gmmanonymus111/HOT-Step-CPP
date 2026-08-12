@@ -59,6 +59,8 @@ export interface GlobalParams {
   rebaseBeta: number; setRebaseBeta: (v: number) => void;
   adapterFolder: string; setAdapterFolder: (v: string) => void;
   advancedAdapters: boolean; setAdvancedAdapters: (v: boolean) => void;
+  // No-adapter reference render: extra low-step bare-DiT output per generation
+  noAdapterRender: boolean; setNoAdapterRender: (v: boolean) => void;
   adaptersOpen: boolean; setAdaptersOpen: (v: boolean) => void;
   // Generation
   inferenceSteps: number; setInferenceSteps: (v: number) => void;
