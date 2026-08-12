@@ -327,7 +327,11 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     // the row — the user's audition length wins; the engine pins it already.
     bpm: row ? row.bpm : 0,
     keyscale: row ? row.keyscale : '',
-    timesignature: row ? row.timesignature : '',
+    // Numerator only ('4/4' → '4') — the exact normalization translateParams
+    // applies to every generation, so an audition and a generation force the
+    // same TIMESIG token into the CoT. (Rows store '4/4'; note the trainer
+    // conditioned on the row string — see 2026-08-12 parity investigation.)
+    timesignature: row ? String(row.timesignature).split('/')[0] : '',
     lmModel,
     ditModel,
     vaeModel: str(opts.vaeModel),
@@ -464,6 +468,10 @@ export async function renderSideThroughDit(
   const req: AceRequest = {
     caption: result.caption || resolved.caption,
     lyrics: result.lyrics || resolved.lyrics,
+    // Parity with generations (which always send 'en'): without this the
+    // engine's lyric-encoder input carries the unknown-language tag instead of
+    // [en] — a real conditioning difference (found 2026-08-12, parity test).
+    vocal_language: 'en',
     duration: result.durationSec || resolved.durationSec,
     ...(result.bpm > 0 ? { bpm: result.bpm } : {}),
     ...(result.keyscale ? { keyscale: result.keyscale } : {}),
