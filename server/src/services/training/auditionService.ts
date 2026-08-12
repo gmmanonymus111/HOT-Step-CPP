@@ -183,6 +183,13 @@ export interface ResolvedAudition {
   lyrics: string;
   seed: number;
   durationSec: number;
+  /** Dataset-sample metadata pinning (0/'' = let the LM predict). Filled from
+   *  the sample's lm_codes.jsonl row so both sides plan at the ground-truth
+   *  bpm/key/timesig — the engine force_fields any non-empty value into the
+   *  CoT FSM (pipeline-lm.cpp:1592-1606). */
+  bpm: number;
+  keyscale: string;
+  timesignature: string;
   lmModel: string;
   ditModel: string;
   vaeModel: string;
@@ -309,7 +316,18 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     seed,
     // Cap raised 120 → 300 (Rob, 2026-07-29): a 3-minute audition is a
     // legitimate ask; the LM cost scales linearly and the deadline has slack.
-    durationSec: Math.trunc(clamp(opts.durationSec, 30, 10, 300)),
+    // Default 30 → 180 (Rob, 2026-08-12): a 30 s plan is too short to judge.
+    durationSec: Math.trunc(clamp(opts.durationSec, 180, 10, 300)),
+    // Dataset Sample mode: pin the plan to the sample's ground-truth metadata.
+    // Without this nothing anchors bpm/key/timesig, the FSM samples them
+    // freely, and the plan drifts from the trainer's conditioning (a 2/4
+    // timesig on a 4/4 dataset — Rob, 2026-08-12). Applied to BOTH sides
+    // identically (A/B discipline); free-text prompts (no row) still let the
+    // LM predict, which is the point of that mode. Duration is NOT taken from
+    // the row — the user's audition length wins; the engine pins it already.
+    bpm: row ? row.bpm : 0,
+    keyscale: row ? row.keyscale : '',
+    timesignature: row ? row.timesignature : '',
     lmModel,
     ditModel,
     vaeModel: str(opts.vaeModel),
@@ -318,7 +336,9 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     temperature: clamp(opts.temperature, 0.85, 0.1, 2),
     topP: clamp(opts.topP, 0.9, 0.05, 1),
     cfgScale: clamp(opts.cfgScale, 2.0, 0, 10),
-    repPenalty: clamp(opts.repPenalty, 1.0, 1, 1.5),
+    // Default 1.0 → 1.1 (Rob, 2026-08-12): adapters sharpen the code
+    // distribution; a mild presence penalty is the better audition baseline.
+    repPenalty: clamp(opts.repPenalty, 1.1, 1, 1.5),
     format: opts.format === 'mp3' ? 'mp3' : 'wav16',
     coResident: opts.coResident !== false,
     renderDit: opts.renderDit === true,
@@ -351,6 +371,13 @@ export function buildLmRequest(
     caption: resolved.caption,
     lyrics: resolved.lyrics,
     duration: resolved.durationSec,
+    // Sample-mode metadata pins (empty = absent = LM predicts). The engine
+    // force_fields these into the CoT, so the plan keeps the dataset's
+    // bpm/key/timesig while the CoT caption rewrite still shows the
+    // planner's own voice.
+    ...(resolved.bpm > 0 ? { bpm: resolved.bpm } : {}),
+    ...(resolved.keyscale ? { keyscale: resolved.keyscale } : {}),
+    ...(resolved.timesignature ? { timesignature: resolved.timesignature } : {}),
     seed: resolved.seed,
     lm_seed: resolved.seed,
     lm_mode: 'generate',

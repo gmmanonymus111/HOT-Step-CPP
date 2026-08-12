@@ -72,7 +72,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   const [sampleId, setSampleId] = useState('');
   const [sampleLocked, setSampleLocked] = useState(true);
   const [seed, setSeed] = useState('');
-  const [durationSec, setDurationSec] = useState(30);
+  const [durationSec, setDurationSec] = useState(180);
   const [twoSided, setTwoSided] = useState(true);
   const [baseLabel, setBaseLabel] = useState('');
   const [baseAdapter, setBaseAdapter] = useState('');
@@ -90,7 +90,9 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   const [temperature, setTemperature] = useState(0.85);
   const [topP, setTopP] = useState(0.9);
   const [cfgScale, setCfgScale] = useState(2);
-  const [repPenalty, setRepPenalty] = useState(1);
+  // 1.1 default (Rob, 2026-08-12): adapters sharpen the code distribution; a
+  // mild presence penalty (engine window 64 codes ≈ 13 s) is the baseline.
+  const [repPenalty, setRepPenalty] = useState(1.1);
   const [openHistory, setOpenHistory] = useState<Record<string, boolean>>({});
   const [milestoneNotice, setMilestoneNotice] = useState('');
   const [milestoneOptions, setMilestoneOptions] = useState<LmAdapterOption[]>([]);
@@ -532,7 +534,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
             min={10}
             max={300}
             value={durationSec}
-            onChange={(e) => setDurationSec(Number(e.target.value) || 30)}
+            onChange={(e) => setDurationSec(Number(e.target.value) || 180)}
             className={`${FIELD} tabular-nums`}
           />
         </label>
