@@ -14,7 +14,7 @@
 // the bulk runner is now also a legitimate owner of a job worth watching.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, Pause, PauseCircle, Play, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { PIPELINE_STAGES, type PipelineItem, type PipelineStage, type PipelineSummary } from '../../services/trainingApi';
@@ -102,15 +102,20 @@ const PipelineItemRow: React.FC<{ item: PipelineItem; stages: PipelineStage[] }>
 const PipelineCard: React.FC<{ pipeline: PipelineSummary; active: boolean }> = ({ pipeline, active }) => {
   const { t } = useTranslation();
   const cancelPipeline = useTrainingStore(s => s.cancelPipeline);
+  const pausePipeline = useTrainingStore(s => s.pausePipeline);
+  const resumePipeline = useTrainingStore(s => s.resumePipeline);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
   const doneItems = pipeline.items.filter(i => i.status === 'done').length;
   const failedItems = pipeline.items.filter(i => i.status === 'failed').length;
+  // Requested but not yet parked — the in-flight stage is still finishing.
+  const pausePending = pipeline.status === 'running' && pipeline.pauseRequested === true;
 
   return (
     <div className={`${CARD} flex flex-col gap-3 ${pipeline.status === 'failed' ? 'border-rose-500/30' : ''}`}>
       <div className="flex items-center gap-2 flex-wrap">
         {pipeline.status === 'running' && <Loader2 size={15} className="animate-spin text-amber-500 flex-shrink-0" />}
+        {pipeline.status === 'paused' && <PauseCircle size={15} className="text-sky-500 flex-shrink-0" />}
         {pipeline.status === 'done' && <CheckCircle2 size={15} className="text-emerald-500 flex-shrink-0" />}
         {pipeline.status === 'failed' && <XCircle size={15} className="text-rose-500 flex-shrink-0" />}
         {pipeline.status === 'cancelled' && <AlertTriangle size={15} className="text-amber-500 flex-shrink-0" />}
@@ -119,10 +124,32 @@ const PipelineCard: React.FC<{ pipeline: PipelineSummary; active: boolean }> = (
           {failedItems > 0 && (
             <span className="text-rose-500 ml-2">{t('trainingStudio.monitor.failedCount', { count: failedItems })}</span>
           )}
+          {pausePending && (
+            <span className="text-sky-500 ml-2 font-normal">{t('trainingStudio.monitor.pausing')}</span>
+          )}
+          {pipeline.status === 'paused' && (
+            <span className="text-sky-500 ml-2 font-normal">{t('trainingStudio.monitor.paused')}</span>
+          )}
         </div>
         <span className="text-[11px] text-zinc-500 flex items-center gap-1 flex-shrink-0">
           <Clock size={11} /> {formatWhen(pipeline.createdAt)}
         </span>
+        {active && (pausePending || pipeline.status === 'paused' ? (
+          <button
+            onClick={() => void resumePipeline(pipeline.id)}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 hover:bg-emerald-500/20 transition-colors flex-shrink-0 flex items-center gap-1"
+          >
+            <Play size={11} /> {t('trainingStudio.monitor.resume')}
+          </button>
+        ) : (
+          <button
+            onClick={() => void pausePipeline(pipeline.id)}
+            title={t('trainingStudio.monitor.pauseHint')}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-sky-500/10 border border-sky-500/20 text-sky-500 hover:bg-sky-500/20 transition-colors flex-shrink-0 flex items-center gap-1"
+          >
+            <Pause size={11} /> {t('trainingStudio.monitor.pause')}
+          </button>
+        ))}
         {active && (
           <button
             onClick={() => setConfirmCancel(true)}
@@ -167,7 +194,7 @@ export const MonitorPanel: React.FC = () => {
     void loadPipelines();
   }, [loadPipelines]);
 
-  const activePipeline = pipelines.find(p => p.status === 'running') ?? null;
+  const activePipeline = pipelines.find(p => p.status === 'running' || p.status === 'paused') ?? null;
   const recent = pipelines.filter(p => p.id !== activePipeline?.id);
 
   // Poll only while something is running; once it drops out, catch up the

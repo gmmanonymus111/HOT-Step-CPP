@@ -267,6 +267,8 @@ interface TrainingState {
   loadPipelines(): Promise<void>;
   startPipeline(input: StartPipelineInput): Promise<PipelineSummary>;
   cancelPipeline(id: string): Promise<void>;
+  pausePipeline(id: string): Promise<void>;
+  resumePipeline(id: string): Promise<void>;
 }
 
 /** Split a detail payload into the row map + display order. */
@@ -874,6 +876,24 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   cancelPipeline: async (id) => {
     try {
       await trainingApi.cancelPipeline(id);
+      await get().loadPipelines();
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  pausePipeline: async (id) => {
+    try {
+      await trainingApi.pausePipeline(id);
+      await get().loadPipelines();
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  resumePipeline: async (id) => {
+    try {
+      await trainingApi.resumePipeline(id);
       await get().loadPipelines();
     } catch (err) {
       set({ error: errMessage(err) });

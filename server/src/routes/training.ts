@@ -21,6 +21,8 @@
 //   GET    /pipeline                                    — active + recent pipelines
 //   GET    /pipeline/:id                                — one pipeline
 //   DELETE /pipeline/:id                                — cancel a pipeline
+//   POST   /pipeline/:id/pause                          — hold at the next stage boundary
+//   POST   /pipeline/:id/resume                         — continue a paused pipeline
 //   GET    /defaults                                    — stored per-stage defaults
 //   PUT    /defaults                                    — set per-stage defaults
 //   GET    /jobs                                        — active + finished jobs
@@ -71,7 +73,8 @@ import { listDatasetsWithAssets } from '../services/training/datasetAssets.js';
 import { createDatasetFromFolder, DatasetCreateError } from '../services/training/datasetCreate.js';
 import { detailFor, syncCounters } from '../services/training/datasetDetail.js';
 import {
-  cancelPipeline, getPipeline, hasActivePipeline, listPipelines, PIPELINE_STAGES, startPipeline,
+  cancelPipeline, getPipeline, hasActivePipeline, listPipelines, pausePipeline, PIPELINE_STAGES,
+  resumePipeline, startPipeline,
 } from '../services/training/pipelineRunner.js';
 import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
@@ -532,6 +535,45 @@ router.delete('/pipeline/:id', (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err: any) {
     console.error(`[Training] Pipeline cancel failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Pause/resume are boundary holds, not kills — the in-flight stage always
+// finishes first (pipelineRunner.ts). Both are idempotent on an active
+// pipeline; a finished/cancelled one answers 409.
+router.post('/pipeline/:id/pause', (req: Request, res: Response) => {
+  try {
+    const result = pausePipeline(req.params.id as string);
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    if (result === 'not_active') {
+      res.status(409).json({ error: 'Pipeline is not running' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline pause failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/pipeline/:id/resume', (req: Request, res: Response) => {
+  try {
+    const result = resumePipeline(req.params.id as string);
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    if (result === 'not_active') {
+      res.status(409).json({ error: 'Pipeline is not paused' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline resume failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

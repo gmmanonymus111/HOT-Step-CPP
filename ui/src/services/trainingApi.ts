@@ -755,7 +755,7 @@ export interface LyricStudioExportResult {
 
 export type PipelineStage =
   'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
-export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type PipelineStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface PipelineFolderSpec {
@@ -799,6 +799,9 @@ export interface PipelineSummary {
   items: PipelineItem[];
   createdAt: number;
   finishedAt: number | null;
+  /** Pause asked for but the in-flight stage is still finishing; status flips
+   *  to 'paused' once the runner parks. Absent on pre-pause snapshots. */
+  pauseRequested?: boolean;
 }
 
 export interface TrainingDefaults {
@@ -1158,6 +1161,14 @@ export async function listPipelines(): Promise<PipelineSummary[]> {
 
 export async function getPipeline(id: string): Promise<PipelineSummary> {
   return request<PipelineSummary>(`/pipeline/${encodeURIComponent(id)}`);
+}
+
+export async function pausePipeline(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/pipeline/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+}
+
+export async function resumePipeline(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/pipeline/${encodeURIComponent(id)}/resume`, { method: 'POST' });
 }
 
 export async function cancelPipeline(id: string): Promise<void> {

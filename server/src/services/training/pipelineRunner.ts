@@ -79,6 +79,12 @@ interface PipelineState extends PipelineSummary {
   specs: PipelineFolderSpec[];
 }
 
+/** A pipeline the runner still owns: its loop is (or will be) making progress.
+ *  'paused' counts — the loop is parked, not gone. */
+function isActive(status: PipelineState['status']): boolean {
+  return status === 'running' || status === 'paused';
+}
+
 const pipelines = new Map<string, PipelineState>();
 
 function sleep(ms: number): Promise<void> {
@@ -139,7 +145,8 @@ function recoverStalePipelines(): void {
       const file = path.join(base, entry.name);
       try {
         const snap = JSON.parse(fs.readFileSync(file, 'utf-8')) as PipelineSummary;
-        if (snap.status !== 'running') continue;
+        // 'paused' is just a parked loop — a restart loses it the same way.
+        if (snap.status !== 'running' && snap.status !== 'paused') continue;
         snap.status = 'failed';
         snap.finishedAt = Date.now();
         for (const item of snap.items ?? []) {
@@ -169,7 +176,7 @@ recoverStalePipelines();
 
 export function hasActivePipeline(): boolean {
   for (const state of pipelines.values()) {
-    if (state.status === 'running') return true;
+    if (isActive(state.status)) return true;
   }
   return false;
 }
@@ -187,8 +194,8 @@ export function listPipelines(): PipelineSummary[] {
   const disk = readSnapshots().filter(p => !seen.has(p.id));
 
   const byNewest = (a: PipelineSummary, b: PipelineSummary): number => b.createdAt - a.createdAt;
-  const running = live.filter(p => p.status === 'running').sort(byNewest);
-  const rest = [...live.filter(p => p.status !== 'running'), ...disk].sort(byNewest);
+  const running = live.filter(p => isActive(p.status)).sort(byNewest);
+  const rest = [...live.filter(p => !isActive(p.status)), ...disk].sort(byNewest);
   return [...running, ...rest].slice(0, MAX_LISTED);
 }
 
@@ -211,6 +218,7 @@ export function startPipeline(folders: PipelineFolderSpec[], stages: PipelineSta
     })),
     createdAt: Date.now(),
     finishedAt: null,
+    pauseRequested: false,
     cancelRequested: false,
     specs: folders.map(spec => ({ ...spec })),
   };
@@ -231,9 +239,11 @@ export function cancelPipeline(id: string): boolean {
   // A pipeline from a previous process run exists but has nothing to cancel —
   // still a 200, since the id is real.
   if (!state) return readSnapshots().some(p => p.id === id);
-  if (state.status !== 'running') return true;
+  // 'paused' must stay cancellable — the parked loop exits on cancelRequested.
+  if (!isActive(state.status)) return true;
 
   state.cancelRequested = true;
+  state.pauseRequested = false;
   for (const item of state.items) {
     for (const stage of item.stages) {
       if (stage.status === 'running') {
@@ -251,12 +261,67 @@ export function cancelPipeline(id: string): boolean {
   return true;
 }
 
+// ── Pause / resume ───────────────────────────────────────────────────────
+//
+// Pause is a STAGE-BOUNDARY hold, never a kill: the in-flight stage (which can
+// be a multi-hour training job) runs to completion, then the loop parks before
+// starting the next stage or item. Nothing about the current run is disturbed.
+// `pauseRequested` is the user's intent; status 'paused' is the loop actually
+// parked — the UI shows the gap as "pausing".
+
+export type PipelinePauseResult = 'ok' | 'not_found' | 'not_active';
+
+export function pausePipeline(id: string): PipelinePauseResult {
+  const state = pipelines.get(id);
+  if (!state) return readSnapshots().some(p => p.id === id) ? 'not_active' : 'not_found';
+  if (!isActive(state.status)) return 'not_active';
+  if (!state.pauseRequested) {
+    state.pauseRequested = true;
+    persist(state);
+    console.log(`[Training] Pipeline ${id} pause requested — holding at the next stage boundary`);
+  }
+  return 'ok';
+}
+
+export function resumePipeline(id: string): PipelinePauseResult {
+  const state = pipelines.get(id);
+  if (!state) return readSnapshots().some(p => p.id === id) ? 'not_active' : 'not_found';
+  if (!isActive(state.status)) return 'not_active';
+  if (state.pauseRequested || state.status === 'paused') {
+    state.pauseRequested = false;
+    // Flip status here rather than waiting for the parked loop's next poll, so
+    // the UI's immediate refetch already sees 'running'. The loop's own flip on
+    // wake-up is idempotent.
+    if (state.status === 'paused') state.status = 'running';
+    persist(state);
+    console.log(`[Training] Pipeline ${id} resumed`);
+  }
+  return 'ok';
+}
+
+/** Parks the loop while a pause is requested. Called only at stage/item
+ *  boundaries. Returns on resume or cancel; the caller re-checks cancel. */
+async function waitWhilePaused(state: PipelineState): Promise<void> {
+  if (!state.pauseRequested || state.cancelRequested) return;
+  state.status = 'paused';
+  persist(state);
+  console.log(`[Training] Pipeline ${state.id} paused`);
+  while (state.pauseRequested && !state.cancelRequested) {
+    await sleep(POLL_MS);
+  }
+  if (!state.cancelRequested && state.status === 'paused') {
+    state.status = 'running';
+    persist(state);
+  }
+}
+
 // ── Orchestration (§3.1) ─────────────────────────────────────────────────
 
 async function runPipeline(state: PipelineState): Promise<void> {
   try {
     for (let i = 0; i < state.items.length; i++) {
       const item = state.items[i];
+      await waitWhilePaused(state);
       if (state.cancelRequested) {
         cancelItem(item);
         continue;
@@ -332,6 +397,7 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
   persist(state);
 
   for (const result of item.stages) {
+    await waitWhilePaused(state);
     if (state.cancelRequested) {
       cancelItem(item);
       persist(state);

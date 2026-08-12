@@ -861,7 +861,7 @@ export interface LyricStudioExportResult {
 
 export type PipelineStage =
   'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
-export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type PipelineStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface PipelineFolderSpec {
@@ -905,6 +905,10 @@ export interface PipelineSummary {
   items: PipelineItem[];
   createdAt: number;
   finishedAt: number | null;
+  /** Pause has been requested but the in-flight stage is still finishing.
+   *  status flips to 'paused' once the runner parks at the next stage
+   *  boundary. Absent on snapshots written before pause existed. */
+  pauseRequested?: boolean;
 }
 
 export interface TrainingDefaults {
