@@ -15,6 +15,7 @@
 #include "vae-enc.h"
 #include "version.h"
 
+#include "train/lm-common.h"     // lm_normalize_language — parity with inference
 #include "train/preprocess-io.h"
 #include "train/st-write.h"
 
@@ -224,8 +225,14 @@ static void pp_prompt_strings(const PSample & s, const std::string & caption_tex
         snprintf(bpm_b, sizeof(bpm_b), "%d", s.bpm);
     }
     const char * ks   = s.keyscale.empty() ? "N/A" : s.keyscale.c_str();
-    const char * ts   = s.timesignature.empty() ? "N/A" : s.timesignature.c_str();
-    const char * lang = s.language.empty() ? "unknown" : s.language.c_str();
+    // Both normalized to what INFERENCE conditions on (2026-08-12 parity):
+    // timesig numerator ('4/4' → '4') and ISO language ('english' → 'en').
+    // Raw values here baked "timesignature: 4/4" / "Languages\nenglish" into
+    // the training tensors while every generation sends '4' / 'en'.
+    const std::string ts_n   = pm_timesig_numerator(s.timesignature);
+    const std::string lang_n = lm_normalize_language(s.language);
+    const char * ts   = ts_n.empty() ? "N/A" : ts_n.c_str();
+    const char * lang = lang_n.empty() ? "unknown" : lang_n.c_str();
 
     char metas[512];
     snprintf(metas, sizeof(metas), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm_b,

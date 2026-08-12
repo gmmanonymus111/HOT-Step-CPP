@@ -61,7 +61,9 @@ static inline AcePrompt lm_prompt_from_row(const LmCodeRow & r) {
     p.duration       = (float) r.duration;
     p.bpm            = r.bpm;
     p.keyscale       = r.keyscale;
-    p.timesignature  = r.timesignature;
+    // Older lm_codes.jsonl rows still store '4/4'; normalize at prompt build
+    // so retraining them conditions like inference without a re-extract.
+    p.timesignature  = pm_timesig_numerator(r.timesignature);
     p.vocal_language = r.language;
     return p;
 }

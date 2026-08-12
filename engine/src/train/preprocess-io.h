@@ -226,6 +226,16 @@ static std::string pm_iso8601_utc_now() {
     return std::string(buf);
 }
 
+// Time signatures are labeled '4/4', but the ACE-Step convention everywhere at
+// inference is the NUMERATOR only ('4'): translateParams sends it that way for
+// every generation and the audition pins match it (2026-08-12 parity test).
+// Training must condition on the same token, so every trainer-facing consumer
+// (LM extract/prompt build, DiT preprocess metas) routes through this.
+static inline std::string pm_timesig_numerator(const std::string & ts) {
+    const size_t slash = ts.find('/');
+    return slash == std::string::npos ? ts : ts.substr(0, slash);
+}
+
 // ─── yyjson accessors (tolerant: wrong type == missing) ─────────────────────
 
 static std::string pm_js_str(yyjson_val * obj, const char * key, const char * dflt = "") {
