@@ -46,10 +46,12 @@ export interface TrainLmFormState {
   overwrite: boolean;
   stopEngine: boolean;
   /** Resume: continue from the newest non-calibrated run of this adapter name
-   *  (server resolves the 'latest' sentinel; engine adopts identity). */
+   *  (server resolves the 'latest' sentinel; engine adopts identity).
+   *  Default ON (Rob, 2026-08-12). */
   resumeFromLatest: boolean;
   /** Post-training calibration: eval old-vs-new x scales, pick under guards,
-   *  bake the winner, write the score sidecar. Default ON (Rob, 2026-08-10). */
+   *  bake the winner, write the score sidecar. Default OFF (Rob, 2026-08-12);
+   *  it was ON from 2026-08-10. */
   calibrate: boolean;
   /** Let calibration repoint this artist's album preset(s). Default ON. */
   calibrateRepoint: boolean;
@@ -72,8 +74,10 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmSize: '4B',
   lmModel: '',
   adapterName: '',
-  // 0.2 (Rob, 2026-08-12) — was 2.0.
-  targetLoss: 0.2,
+  // 0.1 (Rob, 2026-08-12) — was 0.2, and 2.0 before that. The server route's
+  // own fallback tracks this number so a batch-pipeline run (which POSTs an
+  // empty option bag) stops at the same loss a manual run does.
+  targetLoss: 0.1,
   epochs: 150,
   adapterType: 'lokr',
   optimizer: 'muon',
@@ -114,8 +118,13 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
-  resumeFromLatest: false,
-  calibrate: true,
+  // Resume ON, calibrate OFF (Rob, 2026-08-12) — the inverse of the 2026-08-10
+  // seed. Continuing the newest run is now the normal way to train: with target
+  // loss at 0.1 a re-run is almost always "keep going", not "start over".
+  // Resume is soft on the server: an adapter name with no previous run trains
+  // from scratch rather than failing, which is what makes it safe as a default.
+  resumeFromLatest: true,
+  calibrate: false,
   calibrateRepoint: true,
   // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
   //
@@ -309,7 +318,7 @@ export const TrainLmForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', 'Default 0.2 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 0.1 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -317,7 +326,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.2) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.1) })}
             className={FIELD}
           />
         </label>
@@ -353,7 +362,7 @@ export const TrainLmForm: React.FC<Props> = ({
             onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
             className="accent-amber-500"
           />
-          {P('resumeFromLatest', 'Default off', CHECK_LABEL)}
+          {P('resumeFromLatest', 'Default on', CHECK_LABEL)}
         </label>
         <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
           <input
@@ -363,7 +372,7 @@ export const TrainLmForm: React.FC<Props> = ({
             onChange={(e) => onChange({ calibrate: e.target.checked })}
             className="accent-amber-500"
           />
-          {P('calibrate', 'Default on', CHECK_LABEL)}
+          {P('calibrate', 'Default off', CHECK_LABEL)}
         </label>
         {value.calibrate && (
           <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">

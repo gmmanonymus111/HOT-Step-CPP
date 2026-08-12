@@ -466,7 +466,11 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
       }
     }
 
-    // Post-training calibration (default ON, Rob 2026-08-10): queued into the
+    // Post-training calibration — OPT-IN since 2026-08-12 (it was default ON
+    // from 2026-08-10). Note the consequence in the branch above: with
+    // calibration off the new run takes this artist's album presets outright,
+    // under the older newest-run-wins rule, with no beat-the-previous guard.
+    // Queued into the
     // same GPU lane, so it runs right after this job's finally has restarted
     // the engine it needs. oldRunDir '' = the calibrate command auto-picks the
     // newest other non-calibrated run — or the resume source when this run was

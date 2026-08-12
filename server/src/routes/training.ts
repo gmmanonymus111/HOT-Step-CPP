@@ -1642,8 +1642,11 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
     const epochs = numOpt(body.epochs, 150);
-    // 0.2 (Rob, 2026-08-12) — was 2.0.
-    const targetLoss = numOpt(body.targetLoss, 0.2);
+    // 0.1 (Rob, 2026-08-12) — was 0.2 earlier the same day, 2.0 before that.
+    // Tracks TRAIN_LM_DEFAULTS.targetLoss: the batch pipeline POSTs the STORED
+    // per-stage defaults (`{}` in practice), so this fallback IS the number a
+    // bulk run trains to, and it has to be the one the form shows.
+    const targetLoss = numOpt(body.targetLoss, 0.1);
     const rank = numOpt(body.rank, 16);
     // LoKr is the DEFAULT (Rob, 2026-07-30) — an omitted adapterType now means
     // LoKr, so a caller that wants the old LoRA path must say so explicitly.
@@ -1823,7 +1826,13 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // THIS adapter name that holds weights, excluding -calibrated bakes: a
     // bake's factors carry the baked scale, so resuming one would train from
     // rescaled weights and shift the adapter's effective strength mid-lineage.
-    let initAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : '';
+    //
+    // AN OMITTED initAdapter NOW MEANS 'latest' TOO (Rob, 2026-08-12), matching
+    // the form's now-ticked Continue checkbox. The batch pipeline POSTs `{}`, so
+    // without this a bulk re-run over already-trained datasets would restart
+    // every adapter from scratch while the identical manual run continued it —
+    // the same form-vs-pipeline split that once trained 0.6B adapters in bulk.
+    let initAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : 'latest';
     if (initAdapter === 'latest') {
       const artistDir = path.dirname(adapterDir);
       let newest = '';
@@ -1836,11 +1845,14 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
         if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
       } catch { /* artist dir may not exist yet */ }
       if (!newest && hasWeights(artistDir)) newest = artistDir;   // legacy unversioned
+      // "Nothing to resume" is NOT an error any more. It was a 400 while resume
+      // was a deliberate opt-in; now that it is the default for both the form
+      // and the pipeline, a first-ever run for an adapter name would fail on the
+      // one thing it cannot possibly satisfy. Fall through to a scratch run and
+      // say so in the log, so a bulk sweep can mix new and existing datasets.
       if (!newest) {
-        res.status(400).json({
-          error: `Nothing to resume — no previous trained run for "${adapterName}" (${lmSize})`,
-        });
-        return;
+        console.log(
+          `[Training] train-lm: nothing to resume for "${adapterName}" (${lmSize}) — training from scratch`);
       }
       initAdapter = newest;
     }
@@ -1850,7 +1862,10 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       });
       return;
     }
-    const calibrate = body.calibrate !== false;           // default ON (Rob, 2026-08-10)
+    // Calibration is OPT-IN (Rob, 2026-08-12) — it was default ON from
+    // 2026-08-10. Only an explicit `true` runs it, so the batch pipeline's empty
+    // bag no longer appends an eval pass to every adapter in a bulk sweep.
+    const calibrate = body.calibrate === true;
     const calibrateRepoint = body.calibrateRepoint !== false;
 
     // ── stages ───────────────────────────────────────────────────────────

@@ -423,7 +423,7 @@ export interface TrainLmOptions {
   /** Adapter directory stem; final dir is `<adapterName>-<lmSize>`.
    *  Omit = the dataset slug. */
   adapterName?: string;
-  targetLoss?: number;             // default 0.2;  0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 16 (hard cap)
   rank?: number;                   // default 16
   alpha?: number;                  // default 32
@@ -459,10 +459,14 @@ export interface TrainLmOptions {
   stopEngine?: boolean;            // default TRUE — stop ace-server for the job
   /** Resume: continue training from this exported adapter run dir
    *  (--init-adapter). Identity hyperparams are adopted from its
-   *  lm_train_log.json by the engine; contradictions are refused. */
-  initAdapter?: string;            // default '' = train from scratch
+   *  lm_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-12);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
   /** Run the post-training calibration job (eval candidates x scales, pick
-   *  under guards, bake the winner, write hot_step_eval.json). Default TRUE. */
+   *  under guards, bake the winner, write hot_step_eval.json).
+   *  Default FALSE (2026-08-12) — only an explicit `true` runs it. */
   calibrate?: boolean;
   /** Let calibration repoint this artist's album preset(s) at the served
    *  adapter. Default TRUE. Meaningless when calibrate is false. */

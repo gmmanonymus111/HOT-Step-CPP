@@ -222,7 +222,12 @@ export const TrainPanel: React.FC = () => {
       stopEngine: form.stopEngine,
       // Resume + post-training calibration (2026-08-10). 'latest' = the server
       // resolves the newest non-calibrated run of this adapter name.
-      ...(form.resumeFromLatest ? { initAdapter: 'latest' } : {}),
+      //
+      // ALWAYS SENT, both ways. Since 2026-08-12 an OMITTED initAdapter means
+      // 'latest' on the LM route (so the batch pipeline's empty body resumes),
+      // which makes '' the only way to say "from scratch" — unticking the box
+      // would otherwise be a no-op.
+      initAdapter: form.resumeFromLatest ? 'latest' : '',
       calibrate: form.calibrate,
       calibrateRepoint: form.calibrateRepoint,
       // Speed levers. Sent only when the user moved them off the shipped
