@@ -12,6 +12,7 @@ import * as prompts from './prompts.js';
 // shared with the in-app pipeline; appended HERE (not in the LLM prompt) so it
 // is deterministic.
 import { withModelSuffix } from '../../../server/src/services/lireek/modelName.js';
+import { recalculateProfileStats } from '../../../server/src/services/lireek/profilerService.js';
 
 const server = new McpServer({
   name: 'lyricstudio',
@@ -576,7 +577,7 @@ server.tool(
       '',
       'After generating all 4 JSON responses, call `save_profile` with the merged data.',
       '',
-      '> **Note:** Rule-based stats (rhyme analysis, meter, syllable counts, structure blueprints, etc.) are computed by the app\'s profiler service, not by the LLM. When saving the profile, include the LLM-generated fields. The app will have partial data but the most important parts (themes, vocabulary, tone, imagery, subjects) will be present.',
+      '> **Note:** Rule-based stats (rhyme analysis, meter, syllable counts, structure blueprints, representative excerpts, etc.) are computed deterministically from the lyrics — do NOT invent them. Just include the LLM-generated prose fields; `save_profile` computes and attaches all rule-based stats automatically on save.',
     ].join('\n');
 
     return { content: [{ type: 'text', text }] };
@@ -612,8 +613,12 @@ server.tool(
     // Add artist name to the profile data
     parsed.artist = lyricsSet.artist_name;
     if (lyricsSet.album) parsed.album = lyricsSet.album;
-    // Deterministic, never agent-derived — measured facts from the source audio.
-    parsed.audio_enrichment = prompts.computeAlbumEnrichment(lyricsSet.songs);
+    // Rule-based stats (meter, rhyme, repetition, vocabulary), structure
+    // blueprints, representative excerpts and audio enrichment are deterministic
+    // and computed from the lyrics — never agent-derived. Without this, MCP-built
+    // profiles render "Average verse length: undefined lines" and carry no
+    // excerpts or structural vocabulary into generation prompts.
+    parsed = recalculateProfileStats(lyricsSet.songs, parsed);
 
     // The provider/model were hardcoded to 'antigravity'/'claude-opus-4' here, so
     // EVERY profile built through MCP was stamped claude-opus-4 whatever actually
