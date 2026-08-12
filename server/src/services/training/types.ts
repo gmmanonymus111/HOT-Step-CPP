@@ -769,6 +769,17 @@ export interface AuditionPreview {
   renderSteps?: number;
   /** The resolved DiT-adapter run dir the *-render-adapter files used. */
   renderDitAdapter?: string;
+  /** Mirrored-generation receipts (2026-08-12 parity recipe): everything
+   *  "Send to Custom-Gen" needs to reproduce this run bit-identically.
+   *  Absent on previews recorded before the feature. */
+  captionInput?: string;    // the caption BEFORE the trigger tag was applied
+  bpm?: number;             // metadata pins the LM was forced to (0/'' = LM predicted)
+  keyscale?: string;
+  timesignature?: string;   // numerator form ('4'), as pinned
+  lmTemperature?: number;
+  lmTopP?: number;
+  lmCfgScale?: number;
+  lmRepPenalty?: number;
 }
 
 export interface AuditionOptions {

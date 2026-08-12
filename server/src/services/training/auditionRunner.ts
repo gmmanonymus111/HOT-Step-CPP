@@ -214,6 +214,15 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
       sampleId: resolved.sampleId,
       variantKey: resolved.variantKey,
       sides: results,
+      // Mirrored-generation receipts — what "Send to Custom-Gen" replays.
+      captionInput: resolved.captionUntagged,
+      bpm: resolved.bpm,
+      keyscale: resolved.keyscale,
+      timesignature: resolved.timesignature,
+      lmTemperature: resolved.temperature,
+      lmTopP: resolved.topP,
+      lmCfgScale: resolved.cfgScale,
+      lmRepPenalty: resolved.repPenalty,
       ...(resolved.renderDit
         ? { renderDitModel: resolved.renderDitModel, renderSteps: resolved.renderSteps }
         : {}),

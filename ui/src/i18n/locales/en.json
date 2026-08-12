@@ -235,6 +235,8 @@
     "trainingStudio.audition.renderDitAdapterHint": "Adds a second render per side through the latest trained DiT adapter — four results: base LM, base LM + DiT adapter, LM adapter, LM adapter + DiT adapter. All renders run on the adapter's training base so the adapter is the only variable.",
     "trainingStudio.audition.renderedAdapterLabel": "Rendered · DiT adapter",
     "trainingStudio.audition.renderAdapterFailed": "DiT-adapter render failed — {{error}}. The bare render and sketch are still valid.",
+    "trainingStudio.audition.sendToCustomGen": "Send to Custom-Gen",
+    "trainingStudio.audition.sendToCustomGenHint": "Set up the Create page to reproduce this exact result — same seed, prompt, models, adapters and mirrored settings. Generate there without touching anything and you get this render back; then start tweaking.",
     "trainingStudio.audition.codesCount": "{{count}} codes",
     "trainingStudio.audition.lmMs": "{{ms}}ms LM",
     "trainingStudio.audition.decodeMs": "{{ms}}ms decode",

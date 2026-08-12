@@ -1080,6 +1080,16 @@ export interface AuditionPreview {
   renderSteps?: number;
   /** The resolved DiT-adapter run dir the *-render-adapter files used. */
   renderDitAdapter?: string;
+  /** Mirrored-generation receipts — what "Send to Custom-Gen" replays.
+   *  Absent on previews recorded before the feature. */
+  captionInput?: string;    // the caption BEFORE the trigger tag was applied
+  bpm?: number;             // metadata pins (0/'' = LM predicted)
+  keyscale?: string;
+  timesignature?: string;   // numerator form ('4')
+  lmTemperature?: number;
+  lmTopP?: number;
+  lmCfgScale?: number;
+  lmRepPenalty?: number;
 }
 
 export interface AuditionOptions {

@@ -182,6 +182,9 @@ export interface ResolvedAudition {
   kind: AuditionKind;
   sides: AuditionSideSpec[];
   caption: string;
+  /** The caption BEFORE applyTriggerTag — what a mirrored generation must send
+   *  when an LM adapter (whose embedded trigger re-tags it) is in play. */
+  captionUntagged: string;
   lyrics: string;
   seed: number;
   durationSec: number;
@@ -336,6 +339,7 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     kind: opts.kind === 'milestone' ? 'milestone' : 'ab',
     sides,
     caption: taggedCaption,
+    captionUntagged: caption,
     lyrics,
     seed,
     // Cap raised 120 → 300 (Rob, 2026-07-29): a 3-minute audition is a

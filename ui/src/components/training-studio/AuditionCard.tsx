@@ -696,6 +696,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
                 key={`${latest.previewId}-${side.slot}`}
                 side={side}
                 identicalCodes={hasIdenticalCodes(latest)}
+                preview={latest}
               />
             ))}
           </div>
@@ -732,6 +733,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
                         key={`${p.previewId}-${side.slot}`}
                         side={side}
                         identicalCodes={hasIdenticalCodes(p)}
+                        preview={p}
                       />
                     ))}
                   </div>
