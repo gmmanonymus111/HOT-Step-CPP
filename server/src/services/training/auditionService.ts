@@ -104,6 +104,29 @@ function applyTriggerTag(caption: string, tag: string, position: string): string
   return caption;
 }
 
+/**
+ * Inverse of applyTriggerTag / lm_apply_tag — remove the dataset trigger from a
+ * caption that carries it. The captionInput receipt MUST be genuinely untagged:
+ * in Dataset Sample mode the "input" caption is the lm_codes.jsonl row, which
+ * is PRE-TAGGED, so `caption`-before-applyTriggerTag is not it (found live:
+ * "boxcarracer, boxcarracer, …" after a Send to Custom-Gen — the generation
+ * side re-injects the adapter's embedded trigger with no skip-if-present).
+ * Prefix and suffix are both tried regardless of the declared position — the
+ * tag sits wherever the row put it. 'replace' captions have no prose left to
+ * recover; a mid-caption tag (user-typed) is left alone.
+ */
+function stripTriggerTag(caption: string, tag: string, position: string): string {
+  const t = String(tag ?? '').trim();
+  if (!t || !caption) return caption;
+  if ((position || 'prepend') === 'replace') return caption;
+  const lc = caption.toLowerCase();
+  const lt = t.toLowerCase();
+  if (lc === lt) return '';
+  if (lc.startsWith(`${lt}, `)) return caption.slice(t.length + 2);
+  if (lc.endsWith(`, ${lt}`)) return caption.slice(0, caption.length - t.length - 2);
+  return caption;
+}
+
 // ── Codes-row lookup ──────────────────────────────────────────────────────
 
 export interface CodesRow {
@@ -182,8 +205,10 @@ export interface ResolvedAudition {
   kind: AuditionKind;
   sides: AuditionSideSpec[];
   caption: string;
-  /** The caption BEFORE applyTriggerTag — what a mirrored generation must send
-   *  when an LM adapter (whose embedded trigger re-tags it) is in play. */
+  /** The tagged caption with the dataset trigger STRIPPED (stripTriggerTag) —
+   *  what a mirrored generation must send when an LM adapter (whose embedded
+   *  trigger re-tags it) is in play. Not simply the pre-applyTriggerTag input:
+   *  the sample-mode row fallback arrives pre-tagged. */
   captionUntagged: string;
   lyrics: string;
   seed: number;
@@ -339,7 +364,9 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     kind: opts.kind === 'milestone' ? 'milestone' : 'ab',
     sides,
     caption: taggedCaption,
-    captionUntagged: caption,
+    // Stripped, not `caption`-as-received: the sample-mode row fallback is
+    // pre-tagged, so only an explicit strip guarantees this is untagged.
+    captionUntagged: stripTriggerTag(taggedCaption, ds.customTag, ds.tagPosition),
     lyrics,
     seed,
     // Cap raised 120 → 300 (Rob, 2026-07-29): a 3-minute audition is a
