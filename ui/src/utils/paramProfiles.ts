@@ -70,6 +70,7 @@ export const PARAM_GROUPS: { title: string; fields: string[] }[] = [
     fields: [
       'lmSeed', 'lmSeedFollowsDit', 'skipLm', 'skipLrc', 'useCotCaption',
       'lmTemperature', 'lmCfgScale', 'lmTopK', 'lmTopP', 'lmNegativePrompt', 'lmCodesStrength',
+      'lmCodesMode', 'lmCodesSteps',
     ],
   },
   {
@@ -184,6 +185,12 @@ export function applyProfileData(raw: ProfileData): void {
       partial[field] = p[field];
       try { localStorage.setItem(fieldStorageKey(field), JSON.stringify(p[field])); } catch { /* full */ }
     }
+  }
+  // Profiles saved before the LM-codes step-count mode existed carry only
+  // lmCodesStrength; restore them in ratio mode so they behave as saved.
+  if (p.lmCodesStrength !== undefined && p.lmCodesMode === undefined) {
+    partial.lmCodesMode = 'ratio';
+    try { localStorage.setItem('hs-lmCodesMode', JSON.stringify('ratio')); } catch { /* full */ }
   }
   useGlobalParamsStore.setState(partial);
 }

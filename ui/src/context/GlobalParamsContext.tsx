@@ -124,6 +124,8 @@ export interface GlobalParams {
   lmDryMinLen: number; setLmDryMinLen: (v: number) => void;
   lmNegativePrompt: string; setLmNegativePrompt: (v: string) => void;
   lmCodesStrength: number; setLmCodesStrength: (v: number) => void;
+  lmCodesMode: 'ratio' | 'steps'; setLmCodesMode: (v: 'ratio' | 'steps') => void;
+  lmCodesSteps: number; setLmCodesSteps: (v: number) => void;
   // Post-processing
   postProcessingEnabled: boolean; setPostProcessingEnabled: (v: boolean) => void;
   spectralLifterEnabled: boolean; setSpectralLifterEnabled: (v: boolean) => void;

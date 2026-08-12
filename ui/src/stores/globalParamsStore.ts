@@ -161,6 +161,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmDryMinLen: readKey("hs-lmDryMinLen", 3),
   lmNegativePrompt: readKey("hs-lmNegativePrompt", 'NO USER INPUT'),
   lmCodesStrength: readKey("hs-lmCodesStrength", 1.0),
+  // LM codes window mode: 'ratio' scales by fraction of the step budget
+  // (lmCodesStrength), 'steps' pins an absolute step count (lmCodesSteps).
+  // Both collapse to audio_cover_strength at request build — no engine field.
+  lmCodesMode: readKey("hs-lmCodesMode", 'ratio' as 'ratio' | 'steps'),
+  lmCodesSteps: readKey("hs-lmCodesSteps", 6),
   postProcessingEnabled: readKey("hs-postProcessingEnabled", true),
   spectralLifterEnabled: readKey("hs-spectralLifterEnabled", false),
   slDenoiseStrength: readKey("hs-slDenoiseStrength", 0.3),
@@ -347,6 +352,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setLmRepWindow: (v: any) => { set({ lmRepWindow: v }); writeKey("hs-lmRepWindow", v); },
   setLmNegativePrompt: (v: any) => { set({ lmNegativePrompt: v }); writeKey("hs-lmNegativePrompt", v); },
   setLmCodesStrength: (v: any) => { set({ lmCodesStrength: v }); writeKey("hs-lmCodesStrength", v); },
+  setLmCodesMode: (v: any) => { set({ lmCodesMode: v }); writeKey("hs-lmCodesMode", v); },
+  setLmCodesSteps: (v: any) => { set({ lmCodesSteps: v }); writeKey("hs-lmCodesSteps", v); },
   setPostProcessingEnabled: (v: any) => { set({ postProcessingEnabled: v }); writeKey("hs-postProcessingEnabled", v); },
   setSpectralLifterEnabled: (v: any) => { set({ spectralLifterEnabled: v }); writeKey("hs-spectralLifterEnabled", v); },
   setSlDenoiseStrength: (v: any) => { set({ slDenoiseStrength: v }); writeKey("hs-slDenoiseStrength", v); },
@@ -486,6 +493,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     const triggerWords: string[] = triggerSpecs.map(s => s.word);
     const triggerWord = triggerWords.join(', ');
 
+    // LM codes window → audio_cover_strength fraction. Steps mode converts the
+    // absolute count against the current step budget; +0.5 lands mid-bin so the
+    // engine's floor(num_steps * strength) yields exactly that many steps
+    // despite f32 rounding. At or above the budget → 1.0 (no silence switch).
+    const lmCodesEff = s.lmCodesMode === 'steps'
+      ? (s.lmCodesSteps >= s.inferenceSteps ? 1.0 : Math.max(0, s.lmCodesSteps + 0.5) / s.inferenceSteps)
+      : s.lmCodesStrength;
+
     return {
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
       // Planner-LM adapter (runtime LoRA on the 5Hz LM) — aceReq fields, so
@@ -554,7 +569,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       lmRepMode: s.lmRepPenalty > 1.0 ? s.lmRepMode : undefined,
       lmDryBase: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryBase : undefined,
       lmDryMinLen: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryMinLen : undefined,
-      audioCoverStrength: (!s.skipLm && s.lmCodesStrength < 1.0) ? s.lmCodesStrength : undefined,
+      audioCoverStrength: (!s.skipLm && lmCodesEff < 1.0) ? lmCodesEff : undefined,
       postProcessingEnabled: s.postProcessingEnabled,
       spectralLifterEnabled: s.postProcessingEnabled ? s.spectralLifterEnabled : false,
       slDenoiseStrength: (s.postProcessingEnabled && s.spectralLifterEnabled) ? s.slDenoiseStrength : undefined,

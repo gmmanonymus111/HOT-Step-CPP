@@ -111,8 +111,33 @@ export const LmThinkingDropdown: React.FC = () => {
           placeholder="NO USER INPUT" />
       </div>
 
-      <Slider label="LM Codes Strength" value={gp.lmCodesStrength}
-        onChange={gp.setLmCodesStrength} min={0} max={1} step={0.05} showInput />
+      {/* LM codes window: how far into the DiT schedule the codes condition
+          generation. Ratio = fraction of the step budget; Step Count = an
+          absolute number of steps that stays fixed when the budget changes.
+          Both are sent as audio_cover_strength (steps convert at build). */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">LM Codes</label>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Step Count</span>
+            <ToggleSwitch checked={gp.lmCodesMode === 'steps'}
+              onChange={v => gp.setLmCodesMode(v ? 'steps' : 'ratio')} accentColor="sky" />
+          </div>
+        </div>
+        {gp.lmCodesMode === 'steps' ? (
+          <>
+            <Slider label={`Codes Steps — first ${Math.min(gp.lmCodesSteps, gp.inferenceSteps)} of ${gp.inferenceSteps}`}
+              value={gp.lmCodesSteps} onChange={gp.setLmCodesSteps}
+              min={0} max={gp.inferenceSteps} step={1} showInput />
+            <p className="mt-1.5 text-[11px] leading-snug text-zinc-500">
+              Codes condition exactly this many steps, regardless of the Steps setting. At the maximum they apply to every step.
+            </p>
+          </>
+        ) : (
+          <Slider label="Strength" value={gp.lmCodesStrength}
+            onChange={gp.setLmCodesStrength} min={0} max={1} step={0.05} showInput />
+        )}
+      </div>
 
       {/* LM Seed — independent from the Generation (DiT) seed by default,
           unless "Use DiT Seed" is on, which ties lm_seed to the DiT seed
@@ -154,15 +179,18 @@ export const LmThinkingDropdown: React.FC = () => {
 
 /** Summary badge for the LM / Thinking section */
 export const LmThinkingBadge: React.FC = () => {
-  const { skipLm, useCotCaption, lmTemperature, lmCfgScale, lmCodesStrength, lmSeedFollowsDit } = useGlobalParams();
+  const { skipLm, useCotCaption, lmTemperature, lmCfgScale, lmCodesStrength, lmCodesMode, lmCodesSteps, inferenceSteps, lmSeedFollowsDit } = useGlobalParams();
 
   if (skipLm) return null;
 
   const seedLabel = lmSeedFollowsDit ? 'DiT' : 'Fix';
+  const csLabel = lmCodesMode === 'steps'
+    ? (lmCodesSteps < inferenceSteps ? ` · CS ${lmCodesSteps}st` : '')
+    : (lmCodesStrength < 1.0 ? ` · CS ${lmCodesStrength.toFixed(2)}` : '');
 
   return (
     <span className="text-[10px] text-zinc-500 font-mono truncate">
-      {useCotCaption ? 'CoT · ' : ''}T{lmTemperature.toFixed(2)} · CFG {lmCfgScale.toFixed(1)}{lmCodesStrength < 1.0 ? ` · CS ${lmCodesStrength.toFixed(2)}` : ''} · Seed {seedLabel}
+      {useCotCaption ? 'CoT · ' : ''}T{lmTemperature.toFixed(2)} · CFG {lmCfgScale.toFixed(1)}{csLabel} · Seed {seedLabel}
     </span>
   );
 };
