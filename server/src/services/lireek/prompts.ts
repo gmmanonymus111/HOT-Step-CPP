@@ -565,7 +565,7 @@ ${SECTION_LABEL_RULE}
 - PUNCTUATION: Every lyric line MUST end with punctuation (period, comma, exclamation mark, question mark, dash, or ellipsis). The vocal model uses it for phrasing.
 - CHORUS: Every song needs at least one [Chorus]. If a section repeats throughout the song, it is a chorus — label it [Chorus], not [Bridge]. A bridge is a one-time contrasting section, typically appearing once before the final chorus.
 - LINE BUDGET: If the user prompt gives a duration budget with a maximum total line count, treat it as a hard ceiling — the music model skips lines beyond it and the song comes out truncated.
-- INSTRUMENTAL INTRO: Default to opening with an instrumental [Intro] — just the header, no lyric lines under it — so the music establishes itself before vocals enter. If this particular song genuinely wants to slam straight into the first verse, you may skip it; make that a deliberate, occasional choice. NEVER write count-ins like "One, two, three, four!".
+- INSTRUMENTAL INTRO: Default to letting the music establish itself before vocals enter. Do that by OMITTING the intro tag entirely — the music model shapes natural intros itself — or, only when you deliberately want an extended instrumental opening, declaring it with a descriptor ([Intro - Instrumental]). NEVER write a bare [Intro] header with no lyric lines under it. If this particular song genuinely wants to slam straight into the first verse, that is also fine; make it a deliberate, occasional choice. NEVER write count-ins like "One, two, three, four!".
 
 === TIER 2: STYLE TARGETS (calibrate to THIS artist — deviate only with intent) ===
 
