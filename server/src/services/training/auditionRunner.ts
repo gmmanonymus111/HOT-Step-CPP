@@ -150,23 +150,47 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
       await evictLmIfFlipped();
       job.phase = 'audition-render';
       emitProgress(job);
-      for (const outcome of renderQueue) {
-        if (!outcome.result.ok || !outcome.audioCodes) continue;
-        if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
-        const t0 = Date.now();
-        try {
-          const rendered = await renderSideThroughDit(resolved, outcome.result, outcome.audioCodes, {
-            isCancelled: () => isCancelled(job),
-          });
-          outcome.result.renderMs = Date.now() - t0;
-          audio.push(rendered);
-          outcome.result.renderUrl = `/api/training/previews/${previewId}/${outcome.result.slot}-render`;
-          log(job, 'info', `${outcome.result.label}: DiT render ${outcome.result.renderMs} ms`);
-        } catch (err: any) {
+      if (resolved.renderDitAdapterPath) {
+        // The pinning is worth a log line: with adapter renders on, the user's
+        // DiT pick / xl-turbo default is overridden by the adapter's training
+        // base (resolveAuditionInputs) — otherwise "why did it render on
+        // xl-thirds?" has no answer in the stream.
+        log(job, 'info',
+          `DiT-adapter renders on ${resolved.renderDitModel || '(engine default)'} — ` +
+          `adapter ${resolved.renderDitAdapterPath}`);
+      }
+      // Bare renders first for BOTH sides, then adapter renders for both: the
+      // engine caches the runtime delta between consecutive requests, so
+      // grouping by adapter loads it once instead of twice.
+      for (const withAdapter of resolved.renderDitAdapterPath ? [false, true] : [false]) {
+        for (const outcome of renderQueue) {
+          if (!outcome.result.ok || !outcome.audioCodes) continue;
           if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
-          outcome.result.renderError = err instanceof Error ? err.message : String(err);
-          log(job, 'warn',
-            `${outcome.result.label}: DiT render failed — ${outcome.result.renderError} (the codes sketch is still playable)`);
+          const what = withAdapter ? 'DiT-adapter render' : 'DiT render';
+          const t0 = Date.now();
+          try {
+            const rendered = await renderSideThroughDit(resolved, outcome.result, outcome.audioCodes, {
+              isCancelled: () => isCancelled(job),
+            }, withAdapter ? resolved.renderDitAdapterPath : '');
+            const ms = Date.now() - t0;
+            audio.push(rendered);
+            if (withAdapter) {
+              outcome.result.renderAdapterMs = ms;
+              outcome.result.renderAdapterUrl =
+                `/api/training/previews/${previewId}/${outcome.result.slot}-render-adapter`;
+            } else {
+              outcome.result.renderMs = ms;
+              outcome.result.renderUrl = `/api/training/previews/${previewId}/${outcome.result.slot}-render`;
+            }
+            log(job, 'info', `${outcome.result.label}: ${what} ${ms} ms`);
+          } catch (err: any) {
+            if (isCancelled(job)) { finishJob(job, 'cancelled'); return; }
+            const message = err instanceof Error ? err.message : String(err);
+            if (withAdapter) outcome.result.renderAdapterError = message;
+            else outcome.result.renderError = message;
+            log(job, 'warn',
+              `${outcome.result.label}: ${what} failed — ${message} (the codes sketch is still playable)`);
+          }
         }
       }
     }
@@ -193,6 +217,9 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
       ...(resolved.renderDit
         ? { renderDitModel: resolved.renderDitModel, renderSteps: resolved.renderSteps }
         : {}),
+      ...(resolved.renderDitAdapterPath
+        ? { renderDitAdapter: resolved.renderDitAdapterPath }
+        : {}),
     };
 
     // Written UNCONDITIONALLY, even when every side failed. The record is
@@ -203,7 +230,7 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
     // fixing whatever broke.
     if (!writePreview(preview, audio)) {
       log(job, 'warn', 'The preview could not be written to disk');
-      for (const r of preview.sides) { r.audioUrl = ''; r.renderUrl = ''; }
+      for (const r of preview.sides) { r.audioUrl = ''; r.renderUrl = ''; r.renderAdapterUrl = ''; }
     }
 
     // C14 receipt, surfaced in the log as well as the UI: two identical hashes

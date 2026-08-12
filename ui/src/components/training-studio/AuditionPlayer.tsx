@@ -102,6 +102,31 @@ export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
             </div>
           )}
 
+          {/* DiT-adapter render — the same codes through the dataset's trained
+              sound adapter. With the bare render above this side shows both
+              halves of its row in the 2×2 matrix. */}
+          {side.renderAdapterUrl && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                {t('trainingStudio.audition.renderedAdapterLabel')}
+                {!!side.renderAdapterMs && (
+                  <span className="ml-2 normal-case font-normal text-zinc-500 tabular-nums">
+                    {t('trainingStudio.audition.renderMs', { ms: Math.round(side.renderAdapterMs) })}
+                  </span>
+                )}
+              </span>
+              <audio src={side.renderAdapterUrl} controls preload="none" className="w-full h-9" />
+            </div>
+          )}
+          {side.renderAdapterError && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+              <span className="min-w-0 break-words">
+                {t('trainingStudio.audition.renderAdapterFailed', { error: side.renderAdapterError })}
+              </span>
+            </div>
+          )}
+
           {side.audioUrl ? (
             /* Local to the card — preview audio is not a library song, so it
                never goes through the global playback store (same rule as

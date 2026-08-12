@@ -1053,6 +1053,11 @@ export interface AuditionSideResult {
   renderUrl?: string;       // /api/training/previews/<id>/<slot>-render
   renderMs?: number;        // wall clock of the /synth render
   renderError?: string;     // render failed; the codes sketch above is still valid
+  /** Opt-in SECOND render through the dataset's trained DiT adapter — with
+   *  renderUrl this gives the 2×2 {base LM, LM adapter} × {bare DiT, DiT adapter}. */
+  renderAdapterUrl?: string;   // /api/training/previews/<id>/<slot>-render-adapter
+  renderAdapterMs?: number;
+  renderAdapterError?: string;
 }
 
 export interface AuditionPreview {
@@ -1073,6 +1078,8 @@ export interface AuditionPreview {
   /** Set when the sides carry DiT renders — reproducibility receipt. */
   renderDitModel?: string;
   renderSteps?: number;
+  /** The resolved DiT-adapter run dir the *-render-adapter files used. */
+  renderDitAdapter?: string;
 }
 
 export interface AuditionOptions {
@@ -1099,6 +1106,11 @@ export interface AuditionOptions {
   renderDit?: boolean;            // default false
   renderSteps?: number;           // default 8, clamp 2..60
   renderDitModel?: string;        // default: newest installed xl-turbo, else the detok DiT
+  /** With renderDit: ALSO render each side through the dataset's latest trained
+   *  DiT adapter (2×2 matrix). Server resolves the adapter and pins every
+   *  render to its training base; 409 when nothing is trained. */
+  renderDitAdapter?: boolean;     // default false
+  renderDitAdapterName?: string;  // default: the dataset slug
 }
 
 export interface AuditionListResponse {

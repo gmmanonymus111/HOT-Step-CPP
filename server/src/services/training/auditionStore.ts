@@ -25,9 +25,10 @@ const MAX_BYTES = 1024 * 1024 * 1024;
 
 const PREVIEW_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SLOT_RE = /^(base|adapter)$/;
-// A slot's stored audio: the codes sketch (`base.wav`) or its opt-in DiT
-// render (`base-render.wav`). Both are addressed by the same static route.
-const FILE_KEY_RE = /^(base|adapter)(-render)?$/;
+// A slot's stored audio: the codes sketch (`base.wav`), its opt-in DiT render
+// (`base-render.wav`), or the DiT-adapter render (`base-render-adapter.wav`).
+// All are addressed by the same static route.
+const FILE_KEY_RE = /^(base|adapter)(-render(-adapter)?)?$/;
 
 export function previewsRoot(): string {
   return path.join(config.training.dir, 'previews');
@@ -77,6 +78,9 @@ export interface PreviewAudio {
   ext: 'wav' | 'mp3';
   /** True for the opt-in DiT render — stored as `<slot>-render.<ext>`. */
   render?: boolean;
+  /** True for the DiT-adapter render — stored as `<slot>-render-adapter.<ext>`.
+   *  Only meaningful together with `render`. */
+  renderAdapter?: boolean;
 }
 
 /**
@@ -95,7 +99,8 @@ export function writePreview(rec: AuditionPreview, audio: PreviewAudio[]): boole
   try {
     fs.mkdirSync(dir, { recursive: true });
     for (const a of audio) {
-      const file = previewFile(rec.previewId, a.render ? `${a.slot}-render` : a.slot, a.ext);
+      const key = a.renderAdapter ? `${a.slot}-render-adapter` : a.render ? `${a.slot}-render` : a.slot;
+      const file = previewFile(rec.previewId, key, a.ext);
       if (!file) continue;
       fs.writeFileSync(file, a.buf);
     }

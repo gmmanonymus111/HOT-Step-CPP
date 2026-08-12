@@ -59,6 +59,7 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   const selectedDatasetId = useTrainingStore(s => s.selectedDatasetId);
   const activeJob = useTrainingStore(s => s.activeJob);
   const trainLmStatus = useTrainingStore(s => s.trainLmStatus);
+  const trainDitStatus = useTrainingStore(s => s.trainDitStatus);
   const auditions = useTrainingStore(s => s.auditions);
   const auditionRunning = useTrainingStore(s => s.auditionRunning);
   const auditionError = useTrainingStore(s => s.auditionError);
@@ -83,6 +84,13 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
   // Persisted (Rob, 2026-07-29): the "hear it as music" choice tends to be a
   // standing preference, not a per-run one.
   const [renderDit, setRenderDit] = usePersistedState('hs-auditionRenderDit', false);
+  // Sub-option of the render: a second render per side through the dataset's
+  // latest trained DiT adapter — the 2×2 {base LM, LM adapter} × {bare DiT,
+  // DiT adapter}. Only offered when TrainPanel's status says one exists; the
+  // server re-resolves by name (never a client path) and pins every render to
+  // the adapter's training base.
+  const [renderDitAdapter, setRenderDitAdapter] = usePersistedState('hs-auditionRenderDitAdapter', false);
+  const ditAdapterAvailable = !!trainDitStatus?.adapterExists;
   // The render runs on whatever DiT the user has selected in the models tab
   // (Rob, 2026-07-29) — the same hs-ditModel every generation uses. '' falls
   // back server-side (newest xl-turbo, else the detok DiT).
@@ -233,10 +241,20 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       coResident: true,
       kind,
       // Opt-in DiT render (Rob, 2026-07-29): the user's selected DiT at the
-      // server-default 8 steps, never a sound adapter — the toggle is the
-      // whole knob.
+      // server-default 8 steps. With the DiT-adapter sub-toggle (2026-08-12)
+      // the server adds a second render per side through the dataset's latest
+      // trained DiT adapter and pins all renders to its training base.
       ...(renderDit
-        ? { renderDit: true, ...(selectedDitModel ? { renderDitModel: selectedDitModel } : {}) }
+        ? {
+          renderDit: true,
+          ...(selectedDitModel ? { renderDitModel: selectedDitModel } : {}),
+          ...(renderDitAdapter && ditAdapterAvailable
+            ? {
+              renderDitAdapter: true,
+              ...(trainDitStatus?.adapterName ? { renderDitAdapterName: trainDitStatus.adapterName } : {}),
+            }
+            : {}),
+        }
         : {}),
     };
   };
@@ -575,20 +593,48 @@ export const AuditionCard: React.FC<AuditionCardProps> = ({ milestoneRequest }) 
       </details>
 
       {/* ── Render-through-DiT opt-in ────────────────────────────────────── */}
-      <label className="flex items-start gap-2.5 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={renderDit}
-          onChange={(e) => setRenderDit(e.target.checked)}
-          className="mt-0.5 accent-amber-500"
-        />
-        <span className="text-xs text-zinc-700 dark:text-zinc-300">
-          <span className="font-semibold">{t('trainingStudio.audition.renderDit')}</span>
-          <span className="block text-[11px] text-zinc-500 mt-0.5">
-            {t('trainingStudio.audition.renderDitHint')}
+      <div className="flex flex-col gap-2">
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={renderDit}
+            onChange={(e) => setRenderDit(e.target.checked)}
+            className="mt-0.5 accent-amber-500"
+          />
+          <span className="text-xs text-zinc-700 dark:text-zinc-300">
+            <span className="font-semibold">{t('trainingStudio.audition.renderDit')}</span>
+            <span className="block text-[11px] text-zinc-500 mt-0.5">
+              {t('trainingStudio.audition.renderDitHint')}
+            </span>
           </span>
-        </span>
-      </label>
+        </label>
+        {/* Hidden entirely (not disabled) when no DiT adapter is trained for
+            this dataset — an option that can never work is noise. */}
+        {renderDit && ditAdapterAvailable && (
+          <label className="flex items-start gap-2.5 cursor-pointer ml-6">
+            <input
+              type="checkbox"
+              checked={renderDitAdapter}
+              onChange={(e) => setRenderDitAdapter(e.target.checked)}
+              className="mt-0.5 accent-emerald-500"
+            />
+            <span className="text-xs text-zinc-700 dark:text-zinc-300">
+              <span className="font-semibold">{t('trainingStudio.audition.renderDitAdapter')}</span>
+              <span className="block text-[11px] text-zinc-500 mt-0.5">
+                {t('trainingStudio.audition.renderDitAdapterHint')}
+              </span>
+              {trainDitStatus?.adapterDir && (
+                <span
+                  className="block text-[10px] font-mono text-zinc-500 mt-0.5 truncate max-w-[420px]"
+                  title={trainDitStatus.adapterDir}
+                >
+                  {trainDitStatus.adapterDir.replace(/[\\/]+$/, '').split(/[\\/]/).slice(-3).join('/')}
+                </span>
+              )}
+            </span>
+          </label>
+        )}
+      </div>
 
       {/* ── Run ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 flex-wrap">

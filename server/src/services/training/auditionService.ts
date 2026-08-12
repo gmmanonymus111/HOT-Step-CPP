@@ -24,9 +24,11 @@ import path from 'path';
 import crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import { aceClient, type AceRequest } from '../aceClient.js';
+import { mapPath } from '../pathMapper.js';
 import { getModelSnapshot, pickLmFor, tensorsRoot } from './aceTrain.js';
-import { lmSizeOfAdapterPath } from './adapterLayout.js';
+import { hasWeights, lmSizeOfAdapterPath } from './adapterLayout.js';
 import { readLabel } from './labelStore.js';
+import { adapterDitDirFor } from './trainDitStatus.js';
 import { newestVariantKey, variantDitModel, variantExists } from './trainLmStatus.js';
 import { writePreview, type PreviewAudio } from './auditionStore.js';
 import type {
@@ -204,6 +206,9 @@ export interface ResolvedAudition {
   renderDit: boolean;
   renderSteps: number;
   renderDitModel: string;   // '' = let the engine resolve its default DiT
+  /** '' = no adapter renders. Else the resolved DiT-adapter run dir — every
+   *  side gets a SECOND render through it (the 2×2 matrix). */
+  renderDitAdapterPath: string;
 }
 
 /**
@@ -264,6 +269,25 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     : Math.floor(Math.random() * 2 ** 31);
 
   const ditModel = str(opts.ditModel) || variantDitModel(ds.slug, variantKey) || '';
+
+  // Opt-in DiT-adapter renders (Rob, 2026-08-12): the 2×2 matrix {base LM, LM
+  // adapter} × {bare DiT, DiT adapter}. Resolved server-side from the exact
+  // layout the DiT trainer writes — name defaults to the dataset slug, base is
+  // the variant's own training DiT — never a client-supplied path. A 409, not
+  // a silent skip: the card hides the toggle when nothing is trained, so
+  // reaching this without weights means the state is stale and the user should
+  // know rather than get a 3-artifact preview labelled as a 4-artifact one.
+  let renderDitAdapterPath = '';
+  if (opts.renderDit === true && opts.renderDitAdapter === true) {
+    const adapterName = str(opts.renderDitAdapterName).trim() || ds.slug;
+    const dir = adapterDitDirFor(adapterName, ditModel);
+    if (!hasWeights(dir)) {
+      throw new AuditionError(409,
+        `No trained DiT adapter for "${adapterName}" on base ${ditModel || '(unknown)'} — ` +
+        'train one first, or turn the DiT-adapter render off');
+    }
+    renderDitAdapterPath = dir;
+  }
 
   const sides: AuditionSideSpec[] = (Array.isArray(opts.sides) ? opts.sides : []).map(s => ({
     slot: s.slot === 'adapter' ? 'adapter' : 'base',
@@ -347,9 +371,16 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     coResident: opts.coResident !== false,
     renderDit: opts.renderDit === true,
     renderSteps: Math.trunc(clamp(opts.renderSteps, 8, 2, 60)),
-    renderDitModel: opts.renderDit === true
-      ? (str(opts.renderDitModel) || pickRenderDit(ditModel))
-      : '',
+    // With adapter renders, EVERY render is pinned to the adapter's training
+    // base (the variant's DiT), overriding the user's pick and the xl-turbo
+    // default: cross-base adapters are basin-sensitive, and the bare render
+    // must differ from the adapter render by the adapter alone.
+    renderDitModel: opts.renderDit !== true
+      ? ''
+      : renderDitAdapterPath && ditModel
+        ? ditModel
+        : (str(opts.renderDitModel) || pickRenderDit(ditModel)),
+    renderDitAdapterPath,
   };
 }
 
@@ -450,9 +481,13 @@ async function awaitEngineJob(
 /**
  * The opt-in DiT render of one side's codes (§Rob 2026-07-29): a fresh /synth
  * request carrying the side's audio_codes and the ECHOED plan fields, at a
- * fixed step count on a DiT shared by both sides, with NO sound adapter — the
- * planner adapter must remain the A/B's only variable. Request built FRESH,
- * exactly like the /codes-decode one (module-header sideband rule).
+ * fixed step count on a DiT shared by both sides. The BARE pass carries NO
+ * sound adapter — the planner adapter must remain the A/B's only variable.
+ * `ditAdapter` (Rob, 2026-08-12) is the deliberate second pass through the
+ * dataset's trained DiT adapter, completing the 2×2 matrix; runtime mode so
+ * nothing is merged into the base and the delta unloads with the job. Request
+ * built FRESH, exactly like the /codes-decode one (module-header sideband
+ * rule).
  *
  * Called by the RUNNER after every LM side has finished and the pinned LM has
  * been evicted — never inside a side, where keep_loaded's EVICT_NEVER would
@@ -464,6 +499,7 @@ export async function renderSideThroughDit(
   result: AuditionSideResult,
   audioCodes: string,
   hooks: SideHooks,
+  ditAdapter = '',
 ): Promise<PreviewAudio> {
   const req: AceRequest = {
     caption: result.caption || resolved.caption,
@@ -482,15 +518,26 @@ export async function renderSideThroughDit(
     task_type: 'text2music',
     ...(resolved.renderDitModel ? { synth_model: resolved.renderDitModel } : {}),
     ...(resolved.vaeModel ? { vae_model: resolved.vaeModel } : {}),
-    // NO adapter / adapters / lm_* fields — deliberately.
+    // The bare pass carries NO adapter / adapters / lm_* fields — deliberately.
+    // The adapter pass carries exactly one adapter, scale 1.0, runtime mode.
+    // mapPath: the same Windows→Docker translation every Create-panel adapter
+    // path gets (identity in native mode).
+    ...(ditAdapter ? { adapter: mapPath(ditAdapter), adapter_scale: 1.0, adapter_mode: 'runtime' } : {}),
   };
+  const what = ditAdapter ? 'DiT-adapter render' : 'DiT render';
   const jobId = await aceClient.submitSynth(req, resolved.format);
-  await awaitEngineJob(jobId, 'DiT render', hooks);
+  await awaitEngineJob(jobId, what, hooks);
   const res = await aceClient.getJobResult(jobId);
-  if (!res.ok) throw new Error(`DiT render result fetch failed (${res.status})`);
+  if (!res.ok) throw new Error(`${what} result fetch failed (${res.status})`);
   const buf = Buffer.from(await res.arrayBuffer());
-  if (!buf.length) throw new Error('DiT render returned no audio');
-  return { slot: result.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav', render: true };
+  if (!buf.length) throw new Error(`${what} returned no audio`);
+  return {
+    slot: result.slot,
+    buf,
+    ext: resolved.format === 'mp3' ? 'mp3' : 'wav',
+    render: true,
+    ...(ditAdapter ? { renderAdapter: true } : {}),
+  };
 }
 
 /**

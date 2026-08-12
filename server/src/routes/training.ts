@@ -2521,6 +2521,20 @@ router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── 6b. DiT-adapter render name — same bar as the train-dit adapterName
+    // validator: the regex plus the safeAdapterName cross-check, because this
+    // string reaches path.join inside adapterDitDirFor. The resolved dir is
+    // then server-derived (never a client path), so this is the whole surface.
+    const rdaName = typeof (body as { renderDitAdapterName?: unknown }).renderDitAdapterName === 'string'
+      ? (body.renderDitAdapterName as string).trim()
+      : '';
+    if (rdaName && (!ADAPTER_NAME_RE.test(rdaName) || safeAdapterName(rdaName) !== rdaName)) {
+      res.status(400).json({
+        error: 'renderDitAdapterName must match [A-Za-z0-9._-]{1,64} and cannot start with a dot',
+      });
+      return;
+    }
+
     // ── 7. numeric fields clamp silently in resolveAuditionInputs (§3.2.7).
     // They never 400: an out-of-range temperature is a slider mishap, not a
     // reason to refuse an audition.

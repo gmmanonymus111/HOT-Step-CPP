@@ -731,6 +731,12 @@ export interface AuditionSideResult {
   renderUrl?: string;       // /api/training/previews/<id>/<slot>-render
   renderMs?: number;        // wall clock of the /synth render
   renderError?: string;     // render failed; the codes sketch above is still valid
+  /** Opt-in SECOND render of the same codes through the dataset's trained DiT
+   *  adapter (renderDitAdapter) — together with renderUrl this gives the 2×2
+   *  matrix {base LM, LM adapter} × {bare DiT, DiT adapter}. */
+  renderAdapterUrl?: string;   // /api/training/previews/<id>/<slot>-render-adapter
+  renderAdapterMs?: number;    // wall clock of the adapter /synth render
+  renderAdapterError?: string; // adapter render failed; bare render/sketch still valid
   codesCount: number;       // number of 5 Hz codes the LM emitted
   codesSha1: string;        // sha1 of the raw audio_codes string — the determinism receipt
   durationSec: number;      // codesCount / 5, rounded to 0.1
@@ -761,6 +767,8 @@ export interface AuditionPreview {
   /** Set when the sides carry DiT renders — reproducibility receipt. */
   renderDitModel?: string;
   renderSteps?: number;
+  /** The resolved DiT-adapter run dir the *-render-adapter files used. */
+  renderDitAdapter?: string;
 }
 
 export interface AuditionOptions {
@@ -787,6 +795,13 @@ export interface AuditionOptions {
   renderDit?: boolean;            // default false
   renderSteps?: number;           // default 8, clamp 2..60
   renderDitModel?: string;        // default: newest installed xl-turbo, else the detok DiT
+  /** With renderDit: ALSO render each side through the dataset's latest trained
+   *  DiT adapter, giving the 2×2 {base LM, LM adapter} × {bare DiT, DiT
+   *  adapter}. The adapter is resolved server-side from the adapter layout;
+   *  409 when none is trained. Pins every render to the adapter's training
+   *  base (cross-base adapters are basin-sensitive). */
+  renderDitAdapter?: boolean;     // default false; only meaningful with renderDit
+  renderDitAdapterName?: string;  // default: the dataset slug (the trainer's default)
 }
 
 export interface AuditionListResponse {
