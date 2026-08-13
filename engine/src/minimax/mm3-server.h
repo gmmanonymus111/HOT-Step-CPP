@@ -14,22 +14,34 @@
 // Endpoints (all family-scoped under /mm3/ so they can never collide with the
 // ACE-Step surface):
 //
-//   GET  /mm3/props   discovery + per-component config summary + residency + VRAM
-//   POST /mm3/warm    load both GGUFs into VRAM (idempotent)
-//   POST /mm3/unload  free them (idempotent)
+//   GET  /mm3/props       discovery + per-component config summary + residency + VRAM
+//   POST /mm3/warm        load both GGUFs into VRAM (idempotent)
+//   POST /mm3/unload      free them (idempotent)
+//   POST /mm3/voc-decode  DEBUG: vocoder-only decode, latents in -> WAV out
 //
-// SCOPE: residency and metadata only. There is no /mm3/synth yet — inference
-// arrives in a later increment.
+// SCOPE: residency, metadata, and the standalone vocoder. There is no
+// /mm3/synth yet — the LM / depth / cond / DiT stages arrive in later
+// increments.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
-// these handlers run on httplib threads. g_mm3_mutex serialises MM3 load/unload
-// against itself, which is all this increment needs (allocation and free only).
-// When /mm3/synth lands it must go through the existing job queue like /synth
-// does, so MM3 compute shares the one GPU worker rather than racing it.
+// these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
+// unload and vocoder decode against each other. /mm3/voc-decode is a bring-up
+// and parity-validation endpoint, NOT a production path: it does real GPU work
+// on an httplib thread, so it can contend with the ACE worker. When the full
+// /mm3/synth lands it must go through the existing job queue like /synth does,
+// so MM3 compute shares the one GPU worker rather than racing it.
 
 #include "mm3-model.h"
+#include "mm3-vocoder-graph.h"
 
+#include "audio-io.h"
 #include "yyjson.h"
+
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <random>
+#include <vector>
 
 #ifdef __GNUC__
 #    pragma GCC diagnostic push
@@ -333,6 +345,9 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
 
     const bool   was_loaded = g_mm3.loaded;
     const size_t freed      = mm3_vram_bytes(g_mm3);
+    // Vocoder graph state holds derived weights + a scheduler that point into
+    // the model's buffers and hold a backend reference — tear it down first.
+    mm3_vocoder_free(&g_mm3_voc);
     mm3_unload(&g_mm3);
 
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
@@ -350,6 +365,137 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
     }
 }
 
+// FNV-1a over the raw output bytes. Used only by the selftest response, as a
+// crisp "byte-identical across runs" signal that rms/peak alone cannot give.
+static uint64_t mm3_fnv1a(const void * data, size_t n) {
+    const uint8_t * p = (const uint8_t *) data;
+    uint64_t        h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// POST /mm3/voc-decode — vocoder-only bring-up + parity endpoint.
+//
+//   ?frames=L        body is raw little-endian F32, exactly 128*L*4 bytes,
+//                    channel-major (channel c at offset c*L) — i.e. the memory
+//                    order of a torch [1, 128, L] contiguous tensor.
+//                    Returns 16-bit PCM stereo WAV at mm3.voc.sampling_rate.
+//
+//   ?selftest=1      ignores the body. Generates L=256 deterministic
+//                    pseudo-random latents (std::mt19937 seeded 20260813,
+//                    N(0, 0.5)) and returns JSON statistics instead of audio.
+//                    Re-running must reproduce the same hash.
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_voc_decode(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return;
+    }
+
+    const MM3VocConfig & vc = g_mm3.synth_cfg.voc;
+    const int64_t        LC = (int64_t) vc.latent_channels;
+    const int            sr = (int) vc.sampling_rate;
+
+    const bool selftest = req.has_param("selftest") && req.get_param_value("selftest") != "0";
+
+    int64_t L = 0;
+    if (selftest) {
+        L = 256;
+    } else {
+        if (!req.has_param("frames")) {
+            mm3_json_error(res, 400, "missing ?frames=<latent frame count>");
+            return;
+        }
+        L = strtoll(req.get_param_value("frames").c_str(), nullptr, 10);
+    }
+    if (L <= 0 || L > 8192) {
+        mm3_json_error(res, 400, "frames must be in 1..8192");
+        return;
+    }
+
+    std::vector<float> latents((size_t) (LC * L));
+    if (selftest) {
+        std::mt19937                          rng(20260813u);
+        std::normal_distribution<float>       dist(0.0f, 0.5f);
+        for (size_t i = 0; i < latents.size(); i++) {
+            latents[i] = dist(rng);
+        }
+    } else {
+        const size_t want = (size_t) (LC * L) * sizeof(float);
+        if (req.body.size() != want) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "body is %zu bytes, expected %zu (= %lld channels * %lld frames * 4)",
+                     req.body.size(), want, (long long) LC, (long long) L);
+            mm3_json_error(res, 400, buf);
+            return;
+        }
+        memcpy(latents.data(), req.body.data(), want);
+    }
+
+    std::vector<float> audio;
+    std::string        err;
+    const auto         t0 = std::chrono::steady_clock::now();
+    const bool         ok = mm3_vocoder_decode(g_mm3, latents.data(), L, audio, &err);
+    const double       ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!ok) {
+        mm3_json_error(res, 500, err.empty() ? "vocoder decode failed" : err);
+        return;
+    }
+
+    const int T = (int) (audio.size() / 2);
+    fprintf(stderr, "[MM3-Voc] Decoded %lld latent frames -> %d samples/ch (%.2fs @ %d Hz) in %.0f ms\n",
+            (long long) L, T, (double) T / (double) (sr > 0 ? sr : 1), sr, ms);
+
+    if (!selftest) {
+        std::string wav = audio_encode_wav_s16(audio.data(), T, sr);
+        res.set_content(wav, "audio/wav");
+        return;
+    }
+
+    double sum_sq  = 0.0;
+    float  peak    = 0.0f;
+    bool   has_nan = false;
+    for (float v : audio) {
+        if (std::isnan(v) || std::isinf(v)) {
+            has_nan = true;
+            continue;
+        }
+        sum_sq += (double) v * (double) v;
+        float a = std::fabs(v);
+        if (a > peak) {
+            peak = a;
+        }
+    }
+    const double rms = audio.empty() ? 0.0 : std::sqrt(sum_sq / (double) audio.size());
+
+    yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_bool(doc, root, "selftest", true);
+    yyjson_mut_obj_add_int(doc, root, "frames", L);
+    yyjson_mut_obj_add_int(doc, root, "n_samples", T);
+    yyjson_mut_obj_add_int(doc, root, "channels", 2);
+    yyjson_mut_obj_add_int(doc, root, "sample_rate", sr);
+    yyjson_mut_obj_add_real(doc, root, "rms", rms);
+    yyjson_mut_obj_add_real(doc, root, "peak", (double) peak);
+    yyjson_mut_obj_add_bool(doc, root, "has_nan", has_nan);
+    yyjson_mut_obj_add_real(doc, root, "ms", ms);
+    yyjson_mut_obj_add_uint(doc, root, "hash",
+                            mm3_fnv1a(audio.data(), audio.size() * sizeof(float)));
+    char * json = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    res.set_content(json ? json : "{}", "application/json");
+    if (json) {
+        free(json);
+    }
+}
+
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
@@ -358,4 +504,5 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Get("/mm3/props", mm3_handle_props);
     svr.Post("/mm3/warm", mm3_handle_warm);
     svr.Post("/mm3/unload", mm3_handle_unload);
+    svr.Post("/mm3/voc-decode", mm3_handle_voc_decode);
 }
