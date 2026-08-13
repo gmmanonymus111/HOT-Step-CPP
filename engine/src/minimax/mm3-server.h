@@ -24,10 +24,13 @@
 //                         7 codes + 7 hiddens + both pre-CFG logit rows out
 //   POST /mm3/cond-encode DEBUG: the condition encoder, fused AR hiddens in ->
 //                         latent-rate DiT conditioning out
+//   POST /mm3/lm-plan     the AR planning stage end to end: prompt (or token ids)
+//                         in -> RVQ codes + the [F, 8, 4096] conditioning block
 //
 // SCOPE: residency, metadata, the standalone vocoder, the standalone flow stage,
-// and the two AR-side modules that feed it. There is no /mm3/synth yet — the LM
-// itself and the chunk-overlap orchestration arrive in later increments.
+// and stage 1 (the AR planner) end to end. There is no /mm3/synth yet — the
+// chunk-overlap orchestration that joins stage 1 to stage 2 arrives in a later
+// increment.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
 // these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
@@ -37,10 +40,13 @@
 // /mm3/synth lands it must go through the existing job queue like /synth does,
 // so MM3 compute shares the one GPU worker rather than racing it.
 
+#include "mm3-ar-loop.h"
 #include "mm3-cond-graph.h"
 #include "mm3-depth-graph.h"
 #include "mm3-dit-graph.h"
+#include "mm3-lm-graph.h"
 #include "mm3-model.h"
+#include "mm3-tokenizer.h"
 #include "mm3-vocoder-graph.h"
 
 #include "audio-io.h"
@@ -353,13 +359,16 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
     std::lock_guard<std::mutex> lock(g_mm3_mutex);
 
     const bool   was_loaded = g_mm3.loaded;
-    const size_t freed      = mm3_vram_bytes(g_mm3);
+    // The AR stage's KV cache is a separate allocation from the weights and can
+    // be gigabytes on its own — count it, or /mm3/unload under-reports badly.
+    const size_t freed      = mm3_vram_bytes(g_mm3) + g_mm3_lm.kv_bytes;
     // Graph state holds derived weights + schedulers that point into the model's
     // buffers and hold backend references — tear them down first.
     mm3_vocoder_free(&g_mm3_voc);
     mm3_dit_free(&g_mm3_dit);
     mm3_depth_free(&g_mm3_depth);
     mm3_cond_free(&g_mm3_cond);
+    mm3_lm_free(&g_mm3_lm);
     mm3_unload(&g_mm3);
 
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
@@ -852,6 +861,332 @@ static void mm3_handle_cond_encode(const httplib::Request & req, httplib::Respon
     res.set_content((const char *) out.data(), out.size() * sizeof(float), "application/octet-stream");
 }
 
+// ── /mm3/lm-plan ────────────────────────────────────────────────────────────
+
+static MM3Tokenizer g_mm3_tokenizer;
+
+// Read a JSON array of ints into `out`. Returns false if the key exists but is
+// not an array of numbers — a typo must fail loudly, not silently plan nothing.
+static bool mm3_json_int_array(yyjson_val * root, const char * key, std::vector<int32_t> * out, bool * present) {
+    *present         = false;
+    yyjson_val * arr = root ? yyjson_obj_get(root, key) : nullptr;
+    if (!arr || yyjson_is_null(arr)) {
+        return true;
+    }
+    if (!yyjson_is_arr(arr)) {
+        return false;
+    }
+    *present = true;
+    out->clear();
+    out->reserve(yyjson_arr_size(arr));
+    yyjson_val *    v;
+    yyjson_arr_iter it;
+    yyjson_arr_iter_init(arr, &it);
+    while ((v = yyjson_arr_iter_next(&it))) {
+        if (!yyjson_is_num(v)) {
+            return false;
+        }
+        out->push_back((int32_t) yyjson_get_sint(v));
+    }
+    return true;
+}
+
+static int64_t mm3_json_i64(yyjson_val * root, const char * key, int64_t dflt) {
+    yyjson_val * v = root ? yyjson_obj_get(root, key) : nullptr;
+    return (v && yyjson_is_num(v)) ? (int64_t) yyjson_get_sint(v) : dflt;
+}
+
+static bool mm3_json_bool(yyjson_val * root, const char * key, bool dflt) {
+    yyjson_val * v = root ? yyjson_obj_get(root, key) : nullptr;
+    return (v && yyjson_is_bool(v)) ? yyjson_get_bool(v) : dflt;
+}
+
+// POST /mm3/lm-plan[?dump=N]
+//
+// The autoregressive planning stage: prompt in, RVQ codes plus the per-frame
+// hidden-state block the condition encoder consumes out.
+//
+// BODY (JSON):
+//   prompt          the FULLY ASSEMBLED prompt template, e.g. the contents of
+//                   the fixture `tok_prompt_template.txt`. Caption/lyrics
+//                   assembly and the reference's text hygiene are a later
+//                   increment; this endpoint tokenises what it is given.
+//   ids_cond,       explicit token id rows, bypassing the tokenizer. When given
+//   ids_uncond      they win over `prompt`; `ids_uncond` alone may be omitted and
+//                   is then derived by the 3-token CFG mask rule.
+//   max_frames      emitted frames (default 300); capped at mm3.max_audio_frames.
+//   seed            std::mt19937_64 seed (default 42).
+//   forced_semantic [I]      replay mode: bypass sampling entirely
+//   forced_acoustic [I * 7]  flat, iteration-major
+//   tokenize_only   true -> return the two id rows and stop. Works COLD (no warm,
+//                   no VRAM): the vocab is a GGUF header read.
+//   hiddens         true -> append the [F, 8, 4096] conditioning block to the
+//                   binary body (39 MB at 300 frames, so opt-in).
+//
+// QUERY:
+//   dump=N          capture the first N iterations' parity tensors and return a
+//                   BINARY body instead of JSON.
+//
+// BINARY BODY (little-endian, no framing; H, SV, NC, F, I, D from the headers):
+//   if dump > 0:
+//     f32 prefill_hidden [2, H]
+//     D x { f32 last_hidden [2, H]   f32 sem_logits [2, SV]   f32 guided [SV]
+//           f32 feedback    [2, H]   f32 depth_hidden [NC, H] }
+//   if hiddens:
+//     f32 frame_hiddens [F, NC+1, H]
+//   i32 semantic_all [I]
+//   i32 acoustic_all [I, NC]
+//
+// Parity targets, with forced_semantic = `codes_semantic_all` and
+// forced_acoustic = `codes_acoustic_all`:
+//   prefill_hidden -> lm_prefill_last_hidden
+//   iteration k    -> lm_i{k}_{last_hidden, semantic_logits, guided_logits,
+//                             feedback_embed, depth_hidden}
+// `guided` carries -inf at masked candidates BY DESIGN (~16333 of 16384); compare
+// the finite positions and assert the -inf masks match.
+//
+// 503 unless MM3 is warm (except tokenize_only).
+static void mm3_handle_lm_plan(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    yyjson_doc * doc = req.body.empty() ? nullptr : yyjson_read(req.body.data(), req.body.size(), 0);
+    yyjson_val * root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!req.body.empty() && (!root || !yyjson_is_obj(root))) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        mm3_json_error(res, 400, "body must be a JSON object");
+        return;
+    }
+    // Everything below must free `doc` on the way out.
+    struct DocGuard {
+        yyjson_doc * d;
+        ~DocGuard() {
+            if (d) {
+                yyjson_doc_free(d);
+            }
+        }
+    } guard{ doc };
+
+    const MM3LmConfig & lc = g_mm3.lm_cfg;
+    const int64_t       NC = (int64_t) lc.num_codebooks - 1;
+
+    // ── token ids: explicit, or tokenise the assembled template ──
+    std::vector<int32_t> ids_cond, ids_uncond;
+    bool                 have_cond = false, have_uncond = false;
+    if (!mm3_json_int_array(root, "ids_cond", &ids_cond, &have_cond) ||
+        !mm3_json_int_array(root, "ids_uncond", &ids_uncond, &have_uncond)) {
+        mm3_json_error(res, 400, "ids_cond / ids_uncond must be arrays of integers");
+        return;
+    }
+    if (!have_cond) {
+        yyjson_val * pv = root ? yyjson_obj_get(root, "prompt") : nullptr;
+        if (!pv || !yyjson_is_str(pv)) {
+            mm3_json_error(res, 400, "need either \"prompt\" (the assembled template) or \"ids_cond\"");
+            return;
+        }
+        std::string terr;
+        if (!mm3_tokenizer_load(g_mm3, &g_mm3_tokenizer, &terr)) {
+            mm3_json_error(res, 503, terr);
+            return;
+        }
+        mm3_tokenizer_encode(g_mm3_tokenizer, std::string(yyjson_get_str(pv), yyjson_get_len(pv)), &ids_cond);
+        have_cond = true;
+    }
+    if (ids_cond.size() < 3) {
+        mm3_json_error(res, 400, "the prompt must tokenise to at least 3 tokens");
+        return;
+    }
+    if (!have_uncond) {
+        mm3_tokenizer_uncond(lc, ids_cond, &ids_uncond);
+    } else if (ids_uncond.size() != ids_cond.size()) {
+        mm3_json_error(res, 400, "ids_uncond must be the same length as ids_cond");
+        return;
+    }
+
+    if (mm3_json_bool(root, "tokenize_only", false)) {
+        yyjson_mut_doc * o    = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val * orot = yyjson_mut_obj(o);
+        yyjson_mut_doc_set_root(o, orot);
+        yyjson_mut_obj_add_uint(o, orot, "n_tokens", ids_cond.size());
+        yyjson_mut_val * a = yyjson_mut_arr(o);
+        for (int32_t id : ids_cond) {
+            yyjson_mut_arr_add_int(o, a, id);
+        }
+        yyjson_mut_obj_add_val(o, orot, "ids_cond", a);
+        yyjson_mut_val * b = yyjson_mut_arr(o);
+        for (int32_t id : ids_uncond) {
+            yyjson_mut_arr_add_int(o, b, id);
+        }
+        yyjson_mut_obj_add_val(o, orot, "ids_uncond", b);
+        char * json = yyjson_mut_write(o, 0, NULL);
+        yyjson_mut_doc_free(o);
+        res.set_content(json ? json : "{}", "application/json");
+        if (json) {
+            free(json);
+        }
+        return;
+    }
+
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return;
+    }
+
+    // ── options ──
+    MM3ArOptions opt;
+    opt.max_frames      = mm3_json_i64(root, "max_frames", 300);
+    opt.seed            = (uint64_t) mm3_json_i64(root, "seed", 42);
+    opt.collect_hiddens = mm3_json_bool(root, "hiddens", false);
+    opt.dump_iters      = req.has_param("dump") ? strtoll(req.get_param_value("dump").c_str(), nullptr, 10) : 0;
+
+    std::vector<int32_t> f_sem, f_ac;
+    bool                 has_sem = false, has_ac = false;
+    if (!mm3_json_int_array(root, "forced_semantic", &f_sem, &has_sem) ||
+        !mm3_json_int_array(root, "forced_acoustic", &f_ac, &has_ac)) {
+        mm3_json_error(res, 400, "forced_semantic / forced_acoustic must be arrays of integers");
+        return;
+    }
+    if (has_sem != has_ac) {
+        mm3_json_error(res, 400, "forced replay needs BOTH forced_semantic and forced_acoustic");
+        return;
+    }
+    if (has_sem) {
+        if ((int64_t) f_ac.size() != (int64_t) f_sem.size() * NC) {
+            char buf[176];
+            snprintf(buf, sizeof(buf), "forced_acoustic has %zu entries, expected %lld (= %zu iterations * %lld)",
+                     f_ac.size(), (long long) ((int64_t) f_sem.size() * NC), f_sem.size(), (long long) NC);
+            mm3_json_error(res, 400, buf);
+            return;
+        }
+        opt.forced_semantic = f_sem.data();
+        opt.forced_acoustic = f_ac.data();
+        opt.forced_len      = (int64_t) f_sem.size();
+    }
+
+    const bool binary = opt.dump_iters > 0 || opt.collect_hiddens;
+
+    MM3ArResult r;
+    std::string err;
+    if (!mm3_ar_plan(g_mm3, ids_cond.data(), ids_uncond.data(), (int64_t) ids_cond.size(), opt, &r, &err)) {
+        mm3_json_error(res, 500, err.empty() ? "AR planning failed" : err);
+        return;
+    }
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.n_frames);
+    res.set_header("X-MM3-Frames", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.n_iterations);
+    res.set_header("X-MM3-Iterations", hdr);
+    snprintf(hdr, sizeof(hdr), "%zu", r.dumps.size());
+    res.set_header("X-MM3-Dump-Iters", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.hidden_dim);
+    res.set_header("X-MM3-Hidden", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.sem_vocab);
+    res.set_header("X-MM3-Sem-Vocab", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) (r.n_codebooks - 1));
+    res.set_header("X-MM3-Codebooks", hdr);
+    snprintf(hdr, sizeof(hdr), "%zu", ids_cond.size());
+    res.set_header("X-MM3-Prompt-Tokens", hdr);
+    res.set_header("X-MM3-Eos", r.eos_hit ? "1" : "0");
+    snprintf(hdr, sizeof(hdr), "%.1f", r.total_ms);
+    res.set_header("X-MM3-Ms", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.prefill_ms);
+    res.set_header("X-MM3-Ms-Prefill", hdr);
+    snprintf(hdr, sizeof(hdr), "%.3f", r.lm_steps ? r.lm_ms / (double) r.lm_steps : 0.0);
+    res.set_header("X-MM3-Ms-Lm-Step", hdr);
+    snprintf(hdr, sizeof(hdr), "%.3f", r.n_iterations ? r.depth_ms / (double) r.n_iterations : 0.0);
+    res.set_header("X-MM3-Ms-Depth-Frame", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.host_ms);
+    res.set_header("X-MM3-Ms-Host", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", (double) g_mm3_lm.kv_bytes / (1024.0 * 1024.0));
+    res.set_header("X-MM3-KV-MB", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.nonfinite_logits);
+    res.set_header("X-MM3-Nonfinite", hdr);
+
+    if (binary) {
+        std::string body;
+        size_t      want = 0;
+        if (opt.dump_iters > 0) {
+            want += (size_t) (2 * r.hidden_dim) * sizeof(float);
+            want += r.dumps.size() * (size_t) (2 * r.hidden_dim + 3 * r.sem_vocab + (r.n_codebooks - 1) * r.hidden_dim) *
+                    sizeof(float);
+        }
+        want += r.frame_hiddens.size() * sizeof(float);
+        want += (r.semantic_all.size() + r.acoustic_all.size()) * sizeof(int32_t);
+        body.reserve(want);
+
+        auto put_f = [&](const std::vector<float> & v) {
+            body.append((const char *) v.data(), v.size() * sizeof(float));
+        };
+        if (opt.dump_iters > 0) {
+            put_f(r.prefill_hidden);
+            for (const auto & d : r.dumps) {
+                put_f(d.last_hidden);
+                put_f(d.sem_logits);
+                put_f(d.guided);
+                put_f(d.feedback);
+                put_f(d.depth_hidden);
+            }
+        }
+        put_f(r.frame_hiddens);
+        body.append((const char *) r.semantic_all.data(), r.semantic_all.size() * sizeof(int32_t));
+        body.append((const char *) r.acoustic_all.data(), r.acoustic_all.size() * sizeof(int32_t));
+        res.set_content(body, "application/octet-stream");
+        return;
+    }
+
+    yyjson_mut_doc * o    = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * orot = yyjson_mut_obj(o);
+    yyjson_mut_doc_set_root(o, orot);
+    yyjson_mut_obj_add_uint(o, orot, "frames", r.n_frames);
+    yyjson_mut_obj_add_uint(o, orot, "iterations", r.n_iterations);
+    yyjson_mut_obj_add_bool(o, orot, "eos", r.eos_hit);
+    yyjson_mut_obj_add_uint(o, orot, "prompt_tokens", ids_cond.size());
+    yyjson_mut_obj_add_uint(o, orot, "hidden_dim", r.hidden_dim);
+    yyjson_mut_obj_add_uint(o, orot, "num_codebooks", r.n_codebooks);
+    yyjson_mut_obj_add_uint(o, orot, "kv_bytes", g_mm3_lm.kv_bytes);
+    yyjson_mut_obj_add_uint(o, orot, "kv_positions", g_mm3_lm.n_ctx);
+    yyjson_mut_obj_add_uint(o, orot, "nonfinite_logits", r.nonfinite_logits);
+
+    yyjson_mut_val * tm = yyjson_mut_obj(o);
+    yyjson_mut_obj_add_val(o, orot, "ms", tm);
+    yyjson_mut_obj_add_real(o, tm, "total", r.total_ms);
+    yyjson_mut_obj_add_real(o, tm, "prefill", r.prefill_ms);
+    yyjson_mut_obj_add_real(o, tm, "lm", r.lm_ms);
+    yyjson_mut_obj_add_real(o, tm, "depth", r.depth_ms);
+    yyjson_mut_obj_add_real(o, tm, "host", r.host_ms);
+    yyjson_mut_obj_add_real(o, tm, "per_lm_step", r.lm_steps ? r.lm_ms / (double) r.lm_steps : 0.0);
+    yyjson_mut_obj_add_real(o, tm, "per_frame",
+                            r.n_frames ? (r.total_ms - r.prefill_ms) / (double) r.n_frames : 0.0);
+
+    // Codes for EVERY iteration, including the un-emitted iteration 0: emitted
+    // frame j is iteration j+1, and a consumer that wants only the emitted codes
+    // drops the first entry.
+    yyjson_mut_val * sem = yyjson_mut_arr(o);
+    for (int32_t v : r.semantic_all) {
+        yyjson_mut_arr_add_int(o, sem, v);
+    }
+    yyjson_mut_obj_add_val(o, orot, "semantic", sem);
+
+    yyjson_mut_val * ac = yyjson_mut_arr(o);
+    for (int64_t i = 0; i < r.n_iterations; i++) {
+        yyjson_mut_val * row = yyjson_mut_arr(o);
+        for (int64_t j = 0; j < r.n_codebooks - 1; j++) {
+            yyjson_mut_arr_add_int(o, row, r.acoustic_all[(size_t) (i * (r.n_codebooks - 1) + j)]);
+        }
+        yyjson_mut_arr_add_val(ac, row);
+    }
+    yyjson_mut_obj_add_val(o, orot, "acoustic", ac);
+
+    char * json = yyjson_mut_write(o, 0, NULL);
+    yyjson_mut_doc_free(o);
+    res.set_content(json ? json : "{}", "application/json");
+    if (json) {
+        free(json);
+    }
+}
+
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
@@ -865,4 +1200,5 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Post("/mm3/flow-sample", mm3_handle_flow_sample);
     svr.Post("/mm3/depth-frame", mm3_handle_depth_frame);
     svr.Post("/mm3/cond-encode", mm3_handle_cond_encode);
+    svr.Post("/mm3/lm-plan", mm3_handle_lm_plan);
 }

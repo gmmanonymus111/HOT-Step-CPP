@@ -79,12 +79,16 @@
 //    F16 K/V cast is pure downside at this size. The mask is a per-step F32
 //    constant built once into the derived-weight buffer.
 //
-// D. SAMPLING IS GREEDY (argmax) OR FORCED. The reference samples multinomially
-//    from the top-50 of the CFG-guided distribution with a torch Generator, which
-//    is not reproducible outside torch. Parity is therefore validated on LOGITS,
-//    with `forced_codes` feeding the fixture's own sampled codes so the sequence
-//    the graph sees is bit-for-bit the reference's. The real AR loop increment
-//    will add top-k multinomial sampling behind the same seam.
+// D. SAMPLING IS SEEDED TOP-K MULTINOMIAL, GREEDY, OR FORCED. The reference
+//    samples multinomially from the top-50 of the CFG-guided distribution with a
+//    torch Generator, which is not reproducible outside torch. Parity is therefore
+//    validated on LOGITS, with `forced_codes` feeding the fixture's own sampled
+//    codes so the sequence the graph sees is bit-for-bit the reference's.
+//    UPDATED (increment 5): the AR loop passes its own std::mt19937_64 and the
+//    checkpoint's top-k, and the same `mm3_sample_top_k` the LM uses runs here —
+//    the seam design note A anticipated. With no generator the behaviour is
+//    unchanged: greedy argmax over the CFG-guided logits, which is what
+//    POST /mm3/depth-frame still does by default.
 //
 // ── Parity, measured 2026-08-13 (AR iteration 0, RTX 5090, f16 GGUF) ──────────
 //
@@ -115,6 +119,7 @@
 // cache, which would cut positions but not the seven weight sweeps.
 
 #include "mm3-model.h"
+#include "mm3-sample.h"
 
 #include "backend.h"
 #include "ggml.h"
@@ -125,6 +130,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -499,11 +505,15 @@ static MM3DepthGraph g_mm3_depth;
 //                   though the reference's multinomial draw is not reproducible.
 //   out             codes, the 7 CONDITIONAL-row hidden states (the flow stage's
 //                   conditioning), and both pre-CFG logit rows per codebook.
+//   rng             optional; when non-null each code is drawn by the reference's
+//                   top-k multinomial recipe (mm3-sample.h) instead of argmax.
+//                   Ignored under `forced_codes`.
+//   top_k           the checkpoint's `mm3.ar.top_k`; <= 0 means "no cap".
 //
 // Not thread-safe: the caller serialises (mm3-server.h holds g_mm3_mutex).
 static bool mm3_depth_decode_frame(const MM3Model & m, const float * lm_hidden_cond, const float * lm_hidden_uncond,
                                    int32_t semantic_code, const int32_t * forced_codes, MM3DepthFrame * out,
-                                   std::string * err = nullptr) {
+                                   std::string * err = nullptr, std::mt19937_64 * rng = nullptr, int top_k = 0) {
     if (!mm3_depth_prepare(m, &g_mm3_depth, err)) {
         return false;
     }
@@ -542,6 +552,7 @@ static bool mm3_depth_decode_frame(const MM3Model & m, const float * lm_hidden_c
     std::vector<int32_t> ac_rows((size_t) NC, 0);
     std::vector<float>   logit_buf((size_t) (V * 2));
     std::vector<float>   hid_buf((size_t) (H * 2));
+    std::vector<float>   samp_scratch;
 
     const auto t0 = std::chrono::steady_clock::now();
     for (int cb = 1; cb <= NC; cb++) {
@@ -576,18 +587,26 @@ static bool mm3_depth_decode_frame(const MM3Model & m, const float * lm_hidden_c
         if (forced_codes) {
             code = forced_codes[cb - 1];
         } else {
-            // Greedy over the CFG-guided distribution (design note D).
-            int32_t best_i = 0;
-            float   best_v = -INFINITY;
+            // CFG-guided distribution (design note D), reusing the logit buffer's
+            // second half — the uncond row is not needed once combined.
+            float * guided = logit_buf.data() + V;
             for (int64_t i = 0; i < V; i++) {
                 const float u = lu_row[i];
-                const float v = u + cfg * (lc_row[i] - u);
-                if (v > best_v) {
-                    best_v = v;
-                    best_i = (int32_t) i;
-                }
+                guided[i]     = u + cfg * (lc_row[i] - u);
             }
-            code = best_i;
+            if (rng) {
+                code = (int32_t) mm3_sample_top_k(guided, V, top_k, *rng, &samp_scratch);
+            } else {
+                int32_t best_i = 0;
+                float   best_v = -INFINITY;
+                for (int64_t i = 0; i < V; i++) {
+                    if (guided[i] > best_v) {
+                        best_v = guided[i];
+                        best_i = (int32_t) i;
+                    }
+                }
+                code = best_i;
+            }
         }
         out->codes[cb - 1] = code;
         // Codebook cb's feedback embedding lives at row code + (cb-1)*V (note 2).
