@@ -728,6 +728,7 @@
     "globalBar.postProcessing": "Post-Processing",
     "globalBar.profiles": "Profiles",
     "globalBar.backend": "Backend",
+    "backendGate.notSupported": "Not supported by the active backend — switch back to ACE-Step 1.5 in the global bar.",
     "profiles.title": "Parameter Profiles",
     "profiles.namePlaceholder": "New profile name…",
     "profiles.saveCurrent": "Save",

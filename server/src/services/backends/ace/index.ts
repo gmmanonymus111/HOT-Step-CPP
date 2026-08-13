@@ -28,7 +28,9 @@ async function capabilities(): Promise<BackendCapabilities> {
     backend: 'ace',
     up,
     core: {
-      duration: { max: 300 },
+      // 240 matches the UI's long-standing ACE duration ceiling — the slider
+      // max is now capability-driven, so this value IS the user-visible limit.
+      duration: { max: 240 },
       bpm: true,
       keyscale: true,
       negativePrompt: true,

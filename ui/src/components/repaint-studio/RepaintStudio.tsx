@@ -16,6 +16,7 @@ import { RepaintWaveform } from './RepaintWaveform';
 import { RegionLyricsEditor } from './RegionLyricsEditor';
 import { RepaintSettings } from './RepaintSettings';
 import { ActivitySidebar } from '../shared/ActivitySidebar';
+import { BackendCapabilityGate } from '../shared/BackendCapabilityGate';
 import {
   addManualQueueItem, updateManualQueueItem,
   completeManualQueueItem, failManualQueueItem,
@@ -348,6 +349,7 @@ export const RepaintStudio: React.FC = () => {
 
   // ── Render ──
   return (
+    <BackendCapabilityGate feature="repaint">
     <div className="flex flex-col w-full h-full bg-zinc-50 dark:bg-suno overflow-hidden">
       {/* Toast */}
       {toast && (
@@ -543,5 +545,6 @@ export const RepaintStudio: React.FC = () => {
         </div>
       </div>
     </div>
+    </BackendCapabilityGate>
   );
 };

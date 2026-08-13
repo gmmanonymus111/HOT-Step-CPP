@@ -24,6 +24,7 @@ import { LayerStack, type LayerInfo } from './LayerStack';
 import { RecentBuilds } from './RecentBuilds';
 import { PreviewPlayer } from './PreviewPlayer';
 import { Section } from '../shared/ActivitySidebar';
+import { BackendCapabilityGate } from '../shared/BackendCapabilityGate';
 import { InlineAudioQueue } from '../lyric-studio/InlineAudioQueue';
 import { useAudioGenQueueSelector } from '../../stores/audioGenQueueStore';
 
@@ -327,6 +328,7 @@ export const StemBuilder: React.FC = () => {
 
   // ── Render ──
   return (
+    <BackendCapabilityGate feature="stems">
     <div className="flex flex-col w-full h-full overflow-hidden">
       {/* Toast */}
       {toast && (
@@ -569,6 +571,7 @@ export const StemBuilder: React.FC = () => {
         </div>
       </div>
     </div>
+    </BackendCapabilityGate>
   );
 };
 

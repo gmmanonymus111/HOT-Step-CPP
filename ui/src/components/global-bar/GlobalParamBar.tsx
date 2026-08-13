@@ -9,6 +9,7 @@ import { Cpu, Plug, Sliders, Brain, AudioWaveform, Bookmark } from 'lucide-react
 import { useTranslation } from 'react-i18next';
 import { BarSection, ToggleSwitch } from './BarSection';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
+import { useCapabilities } from '../../hooks/useCapabilities';
 import { modelApi } from '../../services/api';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
@@ -30,6 +31,24 @@ export const GlobalParamBar: React.FC = () => {
   const [openSection, setOpenSection] = useState<SectionId>(null);
   const gp = useGlobalParams();
   const monitoring = useVstChainStore(s => s.monitoring);
+  const { capabilities } = useCapabilities();
+
+  // Capability gating (docs/plans/multi-backend-architecture.md §4.5,
+  // §2 principle 2): undefined/loading capabilities default to SHOWING every
+  // cluster (ACE behavior today) — never flash-hide while /api/capabilities
+  // is in flight. Only hide once a manifest has actually loaded and says no.
+  //
+  // PostProcessingDropdown has no dedicated capability flag in the manifest
+  // (BackendFeatureCapabilities has no stems/postprocess-shaped field) — it
+  // mixes ACE-VAE-specific panels (PP-VAE, Spectral Lifter) with genuinely
+  // backend-agnostic ones (Mastering, VST chain, per §3.4 of the plan doc).
+  // Gated behind `plugins` as the closest existing flag per the task brief;
+  // a future finer-grained pass could split the agnostic sub-panels out.
+  const showModels = !capabilities || capabilities.features.lm;
+  const showAdapters = !capabilities || capabilities.features.adapters;
+  const showGeneration = !capabilities || capabilities.features.plugins;
+  const showLm = !capabilities || capabilities.features.lm;
+  const showPostProcessing = !capabilities || capabilities.features.plugins;
 
   // ── Auto-select models when engine becomes ready ────────────────
   // Polls the engine until it returns a model list, then auto-selects
@@ -128,6 +147,7 @@ export const GlobalParamBar: React.FC = () => {
 
         {/* Sections — separated by dividers */}
         <div className="flex-1 flex items-stretch divide-x divide-white/5">
+          {showModels && (
           <DiscoPulseWrapper hue={0} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="models"
@@ -142,9 +162,11 @@ export const GlobalParamBar: React.FC = () => {
             <ModelsDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
 
           <BackendToggle />
 
+          {showAdapters && (
           <DiscoPulseWrapper hue={72} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="adapters"
@@ -159,7 +181,9 @@ export const GlobalParamBar: React.FC = () => {
             <AdaptersDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
 
+          {showGeneration && (
           <DiscoPulseWrapper hue={144} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="generation"
@@ -174,7 +198,9 @@ export const GlobalParamBar: React.FC = () => {
             <GenerationDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
 
+          {showLm && (
           <DiscoPulseWrapper hue={216} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="lm"
@@ -196,7 +222,9 @@ export const GlobalParamBar: React.FC = () => {
             <LmThinkingDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
 
+          {showPostProcessing && (
           <DiscoPulseWrapper hue={288} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="postprocessing"
@@ -218,6 +246,7 @@ export const GlobalParamBar: React.FC = () => {
             <PostProcessingDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
         </div>
 
         {/* Right — MonitorBar when active, otherwise Export/Import + VRAM */}
