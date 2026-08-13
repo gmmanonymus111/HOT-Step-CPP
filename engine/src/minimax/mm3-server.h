@@ -18,10 +18,12 @@
 //   POST /mm3/warm        load both GGUFs into VRAM (idempotent)
 //   POST /mm3/unload      free them (idempotent)
 //   POST /mm3/voc-decode  DEBUG: vocoder-only decode, latents in -> WAV out
+//   POST /mm3/dit-forward DEBUG: one flow-DiT forward, latents+cond in -> velocity out
+//   POST /mm3/flow-sample DEBUG: the Euler loop, noise+cond in -> final latents out
 //
-// SCOPE: residency, metadata, and the standalone vocoder. There is no
-// /mm3/synth yet — the LM / depth / cond / DiT stages arrive in later
-// increments.
+// SCOPE: residency, metadata, the standalone vocoder, and the standalone flow
+// stage. There is no /mm3/synth yet — the LM / depth / cond stages and the
+// chunk-overlap orchestration arrive in later increments.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
 // these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
@@ -31,6 +33,7 @@
 // /mm3/synth lands it must go through the existing job queue like /synth does,
 // so MM3 compute shares the one GPU worker rather than racing it.
 
+#include "mm3-dit-graph.h"
 #include "mm3-model.h"
 #include "mm3-vocoder-graph.h"
 
@@ -345,9 +348,10 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
 
     const bool   was_loaded = g_mm3.loaded;
     const size_t freed      = mm3_vram_bytes(g_mm3);
-    // Vocoder graph state holds derived weights + a scheduler that point into
-    // the model's buffers and hold a backend reference — tear it down first.
+    // Graph state holds derived weights + schedulers that point into the model's
+    // buffers and hold backend references — tear them down first.
     mm3_vocoder_free(&g_mm3_voc);
+    mm3_dit_free(&g_mm3_dit);
     mm3_unload(&g_mm3);
 
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
@@ -496,6 +500,145 @@ static void mm3_handle_voc_decode(const httplib::Request & req, httplib::Respons
     }
 }
 
+// Shared body parser for the two flow endpoints. Both take the same payload:
+// a channel-major [128, L] latent block immediately followed by a [L, 2048]
+// condition block, raw little-endian F32 — i.e. exactly
+// `np.concatenate([latents.ravel(), condition.ravel()]).tobytes()` from the
+// reference dumps, with no header and no framing.
+//
+// Returns false and writes the response itself on any error.
+static bool mm3_parse_flow_body(const httplib::Request & req, httplib::Response & res, int64_t * out_L,
+                                const float ** out_latents, const float ** out_cond) {
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return false;
+    }
+    if (!req.has_param("frames")) {
+        mm3_json_error(res, 400, "missing ?frames=<latent frame count>");
+        return false;
+    }
+    const int64_t L = strtoll(req.get_param_value("frames").c_str(), nullptr, 10);
+    if (L <= 0 || L > MM3_DIT_MAX_FRAMES) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "frames must be in 1..%d", MM3_DIT_MAX_FRAMES);
+        mm3_json_error(res, 400, buf);
+        return false;
+    }
+
+    const int64_t IC   = (int64_t) g_mm3.synth_cfg.dit.in_channels;
+    const int64_t CD   = (int64_t) g_mm3.synth_cfg.dit.condition_dim;
+    const size_t  want = (size_t) ((IC + CD) * L) * sizeof(float);
+    if (req.body.size() != want) {
+        char buf[224];
+        snprintf(buf, sizeof(buf),
+                 "body is %zu bytes, expected %zu (= (%lld latent + %lld condition channels) * %lld frames * 4)",
+                 req.body.size(), want, (long long) IC, (long long) CD, (long long) L);
+        mm3_json_error(res, 400, buf);
+        return false;
+    }
+
+    *out_L       = L;
+    *out_latents = (const float *) req.body.data();
+    *out_cond    = (const float *) req.body.data() + (size_t) (IC * L);
+    return true;
+}
+
+// POST /mm3/dit-forward?frames=L&t=<float>
+//
+// One flow-DiT forward pass. Body = latents ‖ condition (see above). Returns the
+// raw velocity prediction as 128*L little-endian F32, no framing.
+//
+// This is the parity workhorse: feed it a reference `flow_w0_sN_latents_in` plus
+// `cond_out_w0` at `t = timesteps[N]` and the output should match
+// `flow_w0_sN_pred_cond`. Pass a zeroed condition block to reproduce
+// `flow_w0_sN_pred_uncond` — CFG's unconditional branch is literally
+// zeros_like(condition).
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_dit_forward(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    int64_t       L    = 0;
+    const float * lat  = nullptr;
+    const float * cond = nullptr;
+    if (!mm3_parse_flow_body(req, res, &L, &lat, &cond)) {
+        return;
+    }
+
+    const float t = req.has_param("t") ? strtof(req.get_param_value("t").c_str(), nullptr) : 0.0f;
+
+    std::vector<float> velocity;
+    std::string        err;
+    const auto         t0 = std::chrono::steady_clock::now();
+    const bool         ok = mm3_dit_forward(g_mm3, lat, cond, L, t, velocity, &err);
+    const double       ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!ok) {
+        mm3_json_error(res, 500, err.empty() ? "DiT forward failed" : err);
+        return;
+    }
+
+    fprintf(stderr, "[MM3-DiT] Forward: L=%lld t=%.6f -> %zu floats in %.0f ms\n", (long long) L, (double) t,
+            velocity.size(), ms);
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%.1f", ms);
+    res.set_header("X-MM3-Ms", hdr);
+    res.set_content((const char *) velocity.data(), velocity.size() * sizeof(float), "application/octet-stream");
+}
+
+// POST /mm3/flow-sample?frames=L&steps=30&cfg=1.7
+//
+// The full Euler loop for one window. Body = noise ‖ condition (same layout as
+// /mm3/dit-forward). Returns the final latents as 128*L little-endian F32.
+//
+// Parity target: `flow_w0_noise_latents` + `cond_out_w0` at the defaults should
+// reproduce `flow_w0_latents_final`. Note the reference accumulates its Euler
+// updates in bf16 while this runs F32, so loop-level agreement is necessarily
+// looser than the per-step agreement /mm3/dit-forward gives.
+//
+// Window 0 has overlap 0; no chunk blending is implemented here.
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_flow_sample(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    int64_t       L     = 0;
+    const float * noise = nullptr;
+    const float * cond  = nullptr;
+    if (!mm3_parse_flow_body(req, res, &L, &noise, &cond)) {
+        return;
+    }
+
+    int steps = (int) g_mm3.synth_cfg.flow.steps;
+    if (steps <= 0) {
+        steps = 30;
+    }
+    if (req.has_param("steps")) {
+        steps = atoi(req.get_param_value("steps").c_str());
+    }
+    float cfg = g_mm3.synth_cfg.flow.cfg_scale > 0.0f ? g_mm3.synth_cfg.flow.cfg_scale : 1.7f;
+    if (req.has_param("cfg")) {
+        cfg = strtof(req.get_param_value("cfg").c_str(), nullptr);
+    }
+
+    std::vector<float> latents;
+    MM3FlowStats       stats;
+    std::string        err;
+    if (!mm3_flow_sample(g_mm3, noise, cond, L, steps, cfg, latents, &stats, &err)) {
+        mm3_json_error(res, 500, err.empty() ? "flow sample failed" : err);
+        return;
+    }
+
+    char hdr[96];
+    snprintf(hdr, sizeof(hdr), "%.1f", stats.total_ms);
+    res.set_header("X-MM3-Ms", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", stats.forwards ? stats.forward_ms / (double) stats.forwards : 0.0);
+    res.set_header("X-MM3-Ms-Per-Forward", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", (double) stats.compute_bytes / (1024.0 * 1024.0));
+    res.set_header("X-MM3-Compute-MB", hdr);
+    res.set_content((const char *) latents.data(), latents.size() * sizeof(float), "application/octet-stream");
+}
+
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
@@ -505,4 +648,6 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Post("/mm3/warm", mm3_handle_warm);
     svr.Post("/mm3/unload", mm3_handle_unload);
     svr.Post("/mm3/voc-decode", mm3_handle_voc_decode);
+    svr.Post("/mm3/dit-forward", mm3_handle_dit_forward);
+    svr.Post("/mm3/flow-sample", mm3_handle_flow_sample);
 }
