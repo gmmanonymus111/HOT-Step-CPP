@@ -15,6 +15,11 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 >
 > This is **very much experimental right now** — it's brand new, GPU-hungry (16 GB+ recommended, 24 GB+ for full-depth DiT training), and rough edges are guaranteed. If you try it, we'd love to hear how it goes on the Discord. Find it in the sidebar as **Training**.
 
+> ### 🧪 New: MiniMax-Music3 backend *(very, very rudimentary — under heavy development)*
+> HOT-Step now contains a **native C++/GGML port of [MiniMax-Music3](https://huggingface.co/MiniMaxAI/MiniMax-Music3)** as a second generation backend alongside ACE-Step 1.5 — to our knowledge the first implementation of this model outside Python. A backend switch appears in the global bar once the models are installed (Model Manager → **MiniMax-Music3** pack, ~24 GB download, ~24 GB VRAM at f16).
+>
+> Current support is **text-to-music only** (caption + lyrics + duration + seed): no covers, repaint, stems, adapters, or training for MM3 yet, and output is stored as raw 44.1 kHz WAV. Expect rough edges, breaking changes, and rapid movement — quantized (smaller/lower-VRAM) model variants are planned. Feedback very welcome on the Discord.
+
 ## Download
 
 Pre-built portable releases — no installation required. Extract, run, done.
