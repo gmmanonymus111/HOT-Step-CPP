@@ -151,7 +151,8 @@ using MM3ProgressCb = std::function<void(const MM3GenProgress &)>;
 static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const float * cond, int64_t L, int steps,
                                   float cfg_scale, int64_t overlap, const float * prev_latent, int64_t prev_stride,
                                   std::vector<float> & out_latents, MM3FlowStats * stats,
-                                  const std::function<void(int, int)> & on_step, std::string * err) {
+                                  const std::function<void(int, int)> & on_step,
+                                  const std::function<bool()> & should_cancel, std::string * err) {
     if (L <= 0 || L > MM3_DIT_MAX_FRAMES) {
         if (err) {
             *err = "frames must be in 1.." + std::to_string(MM3_DIT_MAX_FRAMES);
@@ -242,6 +243,16 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
         if (on_step) {
             on_step(i + 1, steps);
         }
+        // Between Euler steps: the coarsest useful cancel grain in this stage
+        // (one step is two DiT forwards, ~1 s at 200 frames). Bailing here
+        // leaves out_latents half-denoised, which is fine — the caller
+        // discards everything on a cancel.
+        if (should_cancel && should_cancel()) {
+            if (err) {
+                *err = MM3_ERR_CANCELLED;
+            }
+            return false;
+        }
     }
 
     // The hard splice: the blend was a boundary condition for the DiT, this is
@@ -326,6 +337,12 @@ struct MM3GenRequest {
     std::vector<std::vector<float>> forced_noise;
 
     bool keep_window_latents = false;  // populate MM3GenResult::window_latents
+
+    // Returns true to abort. Polled once per AR frame, once per Euler step, and
+    // at every stage boundary. On abort mm3_generate() returns false with
+    // *err == MM3_ERR_CANCELLED, which the job worker turns into job status 3
+    // (cancelled) rather than 2 (failed).
+    std::function<bool()> should_cancel;
 };
 
 struct MM3GenResult {
@@ -440,6 +457,19 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
             progress(MM3GenProgress{ "ar", -1, 0, f, total });
         };
     }
+    aopt.should_cancel = req.should_cancel;
+
+    // Stage-boundary cancel check. Returns true when the caller has bailed out,
+    // having already written MM3_ERR_CANCELLED into *err.
+    auto bail = [&]() -> bool {
+        if (req.should_cancel && req.should_cancel()) {
+            if (err) {
+                *err = MM3_ERR_CANCELLED;
+            }
+            return true;
+        }
+        return false;
+    };
 
     const auto t_ar = std::chrono::steady_clock::now();
     if (!mm3_ar_plan(m, ids_cond.data(), ids_uncond.data(), (int64_t) ids_cond.size(), aopt, &out->ar, err)) {
@@ -490,6 +520,9 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
         const int64_t wf  = ce - cs;
         out->chunk_frames.push_back(wf);
 
+        if (bail()) {
+            return false;
+        }
         if (progress) {
             progress(MM3GenProgress{ "cond", k, NW, 0, 1 });
         }
@@ -530,7 +563,8 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
             }
         };
         if (!mm3_flow_sample_chunk(m, noise.data(), cond.data(), L, req.steps, req.cfg_flow, overlap,
-                                   overlap > 0 ? prev_latent.data() : nullptr, prev_len, lat, &fstats, on_step, err)) {
+                                   overlap > 0 ? prev_latent.data() : nullptr, prev_len, lat, &fstats, on_step,
+                                   req.should_cancel, err)) {
             return false;
         }
         out->flow_ms += fstats.total_ms;
@@ -556,6 +590,9 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
     std::vector<std::vector<float>> wavs((size_t) NW);
     const auto t_v = std::chrono::steady_clock::now();
     for (int64_t k = 0; k < NW; k++) {
+        if (bail()) {
+            return false;
+        }
         if (progress) {
             progress(MM3GenProgress{ "vocode", k, NW, 0, 1 });
         }

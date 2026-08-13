@@ -176,7 +176,18 @@ struct MM3ArOptions {
 
     // Called after every emitted frame. Cheap; used for server-side progress.
     std::function<void(int64_t /*frames*/, int64_t /*max_frames*/)> on_frame;
+
+    // Returns true to abort. Polled once per AR iteration — the finest grain
+    // this loop has, and the only one that matters: at ~25 frames of real audio
+    // per second of wall clock, a 60 s song is thousands of poll points. On
+    // abort mm3_ar_plan() returns false with *err == MM3_ERR_CANCELLED so the
+    // caller can tell a user cancel from a real failure.
+    std::function<bool()> should_cancel;
 };
+
+// The sentinel a cancelled run reports. Compared by value, not by prefix, so a
+// genuine error can never be mistaken for a cancel.
+#define MM3_ERR_CANCELLED "cancelled"
 
 static MM3LmGraph g_mm3_lm;
 
@@ -404,6 +415,12 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
             out->n_frames++;
             if (opt.on_frame) {
                 opt.on_frame(out->n_frames, max_frames);
+            }
+            if (opt.should_cancel && opt.should_cancel()) {
+                if (err) {
+                    *err = MM3_ERR_CANCELLED;
+                }
+                return false;
             }
             if (out->n_frames >= max_frames) {
                 break;  // note 2: no feedback, no decode step, for the last frame

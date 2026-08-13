@@ -26,23 +26,24 @@
 //                         latent-rate DiT conditioning out
 //   POST /mm3/lm-plan     the AR planning stage end to end: prompt (or token ids)
 //                         in -> RVQ codes + the [F, 8, 4096] conditioning block
-//   POST /mm3/synth-e2e   BRING-UP: the WHOLE pipeline — prompt in, WAV out.
-//                         AR plan -> per-window (condition -> flow with overlap
-//                         blending) -> vocode -> stitch (mm3-pipeline.h).
+//   POST /mm3/tokenize-check  caption + lyrics in -> assembled-prompt token
+//                         count vs the 5,000 limit. Cold-capable, no VRAM.
+//   POST /mm3/synth-e2e   DEPRECATED BRING-UP: the WHOLE pipeline on an httplib
+//                         thread. Kept for parity replay + latent dumps only.
 //
-// SCOPE: residency, metadata, the standalone modules, and now the assembled
-// pipeline. /mm3/synth-e2e is a BRING-UP endpoint, not the production path: it
-// does minutes of GPU work on an httplib thread. The production /mm3/synth must
-// go through the existing job queue like /synth does, so MM3 compute shares the
-// one GPU worker rather than racing the ACE pipeline.
+// The PRODUCTION generation endpoint, POST /mm3/synth, and its progress poller
+// GET /mm3/job live in minimax/mm3-job.h — they need hot-step-server.cpp's job
+// system (Job / job_create / work_push), which is defined below this include,
+// so that file is a second, mid-file hook. Both are checked by verify-hooks.ps1.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
 // these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
-// unload and vocoder decode against each other. /mm3/voc-decode is a bring-up
-// and parity-validation endpoint, NOT a production path: it does real GPU work
-// on an httplib thread, so it can contend with the ACE worker. When the full
-// /mm3/synth lands it must go through the existing job queue like /synth does,
-// so MM3 compute shares the one GPU worker rather than racing it.
+// unload and the bring-up compute endpoints against each other AND against the
+// worker-thread /mm3/synth job, which takes the same mutex for its whole run.
+// The bring-up endpoints (/mm3/voc-decode, /mm3/dit-forward, /mm3/flow-sample,
+// /mm3/depth-frame, /mm3/cond-encode, /mm3/lm-plan, /mm3/synth-e2e) still do
+// real GPU work on an httplib thread and can therefore contend with the ACE
+// worker — that is exactly what /mm3/synth exists to avoid.
 
 #include "mm3-ar-loop.h"
 #include "mm3-cond-graph.h"
@@ -51,6 +52,7 @@
 #include "mm3-lm-graph.h"
 #include "mm3-model.h"
 #include "mm3-pipeline.h"
+#include "mm3-request.h"
 #include "mm3-tokenizer.h"
 #include "mm3-vocoder-graph.h"
 
@@ -293,6 +295,16 @@ static void mm3_handle_props(const httplib::Request &, httplib::Response & res) 
     yyjson_mut_obj_add_bool(doc, root, "available", mm3_available(g_mm3));
     yyjson_mut_obj_add_bool(doc, root, "loaded", g_mm3.loaded);
     yyjson_mut_obj_add_strcpy(doc, root, "models_dir", g_mm3.models_dir.c_str());
+
+    // synth_ready: both GGUFs found AND their headers parsed clean, i.e.
+    // POST /mm3/synth will get as far as loading weights. Deliberately NOT a
+    // VRAM or residency claim — `loaded` above is residency, and the job's own
+    // arbitration decides whether the weights fit.
+    const bool synth_ready = g_mm3.lm_file.found && g_mm3.lm_file.probe_ok && g_mm3.synth_file.found &&
+                             g_mm3.synth_file.probe_ok && g_mm3.meta_errors.empty();
+    yyjson_mut_obj_add_bool(doc, root, "synth_ready", synth_ready);
+    yyjson_mut_obj_add_uint(doc, root, "prompt_token_limit", MM3_MAX_PROMPT_TOKENS);
+    yyjson_mut_obj_add_uint(doc, root, "max_audio_frames_limit", MM3_MAX_AUDIO_FRAMES);
 
     yyjson_mut_val * dirs = yyjson_mut_arr(doc);
     for (const auto & d : g_mm3.search_dirs) {
@@ -1200,9 +1212,12 @@ static std::string mm3_json_str(yyjson_val * root, const char * key) {
     return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v), yyjson_get_len(v)) : std::string();
 }
 
+// yyjson_get_num, NOT yyjson_get_real: a JSON integer literal is stored as
+// uint/sint and yyjson_get_real returns 0.0 for it, so `"cfg_flow": 2` used to
+// read as 0. Same trap as mm3_req_num in mm3-request.h.
 static double mm3_json_f64(yyjson_val * root, const char * key, double dflt) {
     yyjson_val * v = root ? yyjson_obj_get(root, key) : nullptr;
-    return (v && yyjson_is_num(v)) ? yyjson_get_real(v) : dflt;
+    return (v && yyjson_is_num(v)) ? yyjson_get_num(v) : dflt;
 }
 
 // Slurp a raw little-endian binary blob. Used only by the parity-replay path of
@@ -1239,7 +1254,101 @@ static bool mm3_read_blob(const std::string & path, std::vector<char> * out, std
     return true;
 }
 
+// POST /mm3/tokenize-check
+//
+// Cheap, COLD-CAPABLE pre-flight for the UI: assemble the prompt template from
+// a caption + lyrics exactly as POST /mm3/synth would, tokenise it, and report
+// whether it fits the checkpoint's 5,000-token budget. Header-only GGUF read —
+// no VRAM, no warm, no GPU.
+//
+// BODY (JSON):
+//   caption  string, required, non-blank
+//   lyrics   string, optional; empty -> the instrumental substitution
+//   prompt   bool, optional (default false) — echo the assembled template back
+//            so a caller can see exactly what the model will be given
+//
+// RESPONSE: {tokens, limit, ok, caption_clean, lyrics_normalized, instrumental,
+//            [prompt]}. `ok` false is a 200, not an error: this endpoint exists
+// to answer the question, and only POST /mm3/synth turns a "no" into a 400.
+static void mm3_handle_tokenize_check(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    yyjson_doc * doc  = req.body.empty() ? nullptr : yyjson_read(req.body.data(), req.body.size(), 0);
+    yyjson_val * root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!root || !yyjson_is_obj(root)) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        mm3_json_error(res, 400, "body must be a JSON object");
+        return;
+    }
+    struct DocGuard {
+        yyjson_doc * d;
+        ~DocGuard() {
+            if (d) {
+                yyjson_doc_free(d);
+            }
+        }
+    } guard{ doc };
+
+    std::string caption, lyrics, err;
+    bool        present = false;
+    if (!mm3_req_str(root, "caption", &caption, &present, &err)) {
+        mm3_json_error(res, 400, err);
+        return;
+    }
+    if (!present || mm3_str_blank(caption)) {
+        mm3_json_error(res, 400, "\"caption\" is required and must be a non-empty string");
+        return;
+    }
+    if (!mm3_req_str(root, "lyrics", &lyrics, &present, &err)) {
+        mm3_json_error(res, 400, err);
+        return;
+    }
+    const bool echo = mm3_json_bool(root, "prompt", false);
+
+    bool              instrumental = false;
+    const std::string prompt       = mm3_assemble_prompt(caption, lyrics, &instrumental);
+
+    if (!mm3_tokenizer_load(g_mm3, &g_mm3_tokenizer, &err)) {
+        mm3_json_error(res, 503, err);
+        return;
+    }
+    std::vector<int32_t> ids;
+    mm3_tokenizer_encode(g_mm3_tokenizer, prompt, &ids);
+
+    yyjson_mut_doc * o    = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * orot = yyjson_mut_obj(o);
+    yyjson_mut_doc_set_root(o, orot);
+    yyjson_mut_obj_add_uint(o, orot, "tokens", ids.size());
+    yyjson_mut_obj_add_uint(o, orot, "limit", MM3_MAX_PROMPT_TOKENS);
+    yyjson_mut_obj_add_bool(o, orot, "ok", (int64_t) ids.size() <= MM3_MAX_PROMPT_TOKENS);
+    yyjson_mut_obj_add_bool(o, orot, "instrumental", instrumental);
+    {
+        const std::string cc = mm3_clean_caption(caption);
+        const std::string ln = mm3_normalize_lyrics(instrumental ? std::string(MM3_INSTRUMENTAL_LYRIC) : lyrics);
+        yyjson_mut_obj_add_strcpy(o, orot, "caption_clean", cc.c_str());
+        yyjson_mut_obj_add_strcpy(o, orot, "lyrics_normalized", ln.c_str());
+    }
+    if (echo) {
+        yyjson_mut_obj_add_strcpy(o, orot, "prompt", prompt.c_str());
+    }
+    char * json = yyjson_mut_write(o, 0, NULL);
+    yyjson_mut_doc_free(o);
+    res.set_content(json ? json : "{}", "application/json");
+    if (json) {
+        free(json);
+    }
+}
+
 // POST /mm3/synth-e2e[?dump_latents=1]
+//
+// DEPRECATED — kept for debugging and parity replay only. Use POST /mm3/synth
+// (minimax/mm3-job.h) for anything real: this endpoint does minutes of GPU work
+// ON AN HTTPLIB THREAD, so it races the ACE worker for the device, it cannot be
+// cancelled, and it reports no progress anywhere but stderr. What it still has
+// that /mm3/synth does not: raw `prompt`/`ids_cond` input (no caption/lyrics
+// assembly), forced-code and forced-noise parity replay, and ?dump_latents=1.
 //
 // THE ASSEMBLY, end to end: prompt -> AR plan -> per-window (condition encode ->
 // overlap-blended flow sampling) -> vocode -> stitch -> 16-bit stereo WAV.
@@ -1522,5 +1631,9 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Post("/mm3/depth-frame", mm3_handle_depth_frame);
     svr.Post("/mm3/cond-encode", mm3_handle_cond_encode);
     svr.Post("/mm3/lm-plan", mm3_handle_lm_plan);
+    svr.Post("/mm3/tokenize-check", mm3_handle_tokenize_check);
     svr.Post("/mm3/synth-e2e", mm3_handle_synth_e2e);
+    // POST /mm3/synth and GET /mm3/job are registered separately by
+    // mm3_register_job_routes() (minimax/mm3-job.h) — they need the job system,
+    // which is defined further down hot-step-server.cpp than this include.
 }

@@ -400,6 +400,16 @@ static const char * job_status_str(int s) {
     }
 }
 
+// HOT-STEP: second (and last) hook wiring engine/src/minimax/ in. Registers
+// POST /mm3/synth + GET /mm3/job, which run MiniMax-Music3 generation on THIS
+// file's work queue (work_push -> the one GPU worker thread), so MM3 and ACE
+// jobs serialise on the device instead of racing. It is included HERE rather
+// than beside minimax/mm3-server.h at the top because it needs Job,
+// job_create(), job_set_phase(), work_push() and g_store, all defined above.
+// The call site is mm3_register_job_routes(svr) next to mm3_register_routes().
+// Checked by verify-hooks.ps1.
+#include "minimax/mm3-job.h"
+
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
 // SSE clients connect to /logs and receive lines in real time.
 #define LOG_RING_BITS 9
@@ -3371,6 +3381,11 @@ int main(int argc, char ** argv) {
     // POST /mm3/unload. Discovers <models>/mm3/*.gguf and probes their headers.
     // No-op (routes report available:false) when no MM3 weights are present.
     mm3_register_routes(svr, models_dir);
+
+    // HOT-STEP: the production MM3 generation endpoint (POST /mm3/synth) and
+    // its progress poller (GET /mm3/job). Separate from the call above because
+    // minimax/mm3-job.h has to be included after this file's job system.
+    mm3_register_job_routes(svr);
 
     // HOT-STEP: GET /vram — GPU memory usage (CUDA only)
     svr.Get("/vram", [](const httplib::Request &, httplib::Response & res) {
