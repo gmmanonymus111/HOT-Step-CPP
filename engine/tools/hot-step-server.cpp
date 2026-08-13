@@ -112,7 +112,7 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 #endif
 
 #ifdef GGML_USE_CUDA
-#    include <cuda_runtime_api.h>
+#    include "../src/gpu.h"
 #endif
 
 // portable fd wrappers. avoids macros that collide with C++ method names
