@@ -27,6 +27,10 @@ export interface BackendCoreCapabilities {
   negativePrompt: boolean;
   batch: { max: number };
   seed: boolean;
+  // Open — backends may report extra core-ish knobs (mirrors the server-side
+  // index signature in backends/types.ts). Nothing here is guaranteed to
+  // exist; check with `=== true` / `?.`, never assume presence.
+  [key: string]: unknown;
 }
 
 export interface BackendFeatureCapabilities {

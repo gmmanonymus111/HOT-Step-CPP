@@ -421,7 +421,7 @@ export interface AdapterFile {
 export interface RegistryFile {
   id: string;
   filename: string;
-  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime';
+  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime' | 'mm3';
   subdir?: string;
   displayName: string;
   scale?: 'standard' | 'xl' | null;

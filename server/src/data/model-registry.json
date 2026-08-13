@@ -86,6 +86,15 @@
       ]
     },
     {
+      "id": "minimax-music3",
+      "name": "MiniMax-Music3",
+      "description": "Both MiniMax-Music3 GGUFs (LM + synth) — the full MM3 backend. ~24 GB download, ~24 GB VRAM to run.",
+      "fileIds": [
+        "mm3-lm-f16",
+        "mm3-synth-f16"
+      ]
+    },
+    {
       "id": "stem-separation",
       "name": "Stem Separation",
       "description": "All 4 models for multi-stem audio separation in Cover Studio. Required for the SuperSep pipeline.",
@@ -2250,6 +2259,50 @@
         "cuda12"
       ],
       "repoPath": "runtime/cuda12/cudart64_12.dll"
+    },
+    {
+      "id": "mm3-lm-f16",
+      "filename": "mm3-lm-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (F16)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "F16",
+      "sizeBytes": 17176762656,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Both mm3-lm and mm3-synth are required; ~24 GB combined VRAM to run.",
+      "tags": [
+        "essential"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-f16",
+      "filename": "mm3-synth-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (F16)",
+      "scale": null,
+      "variant": "synth",
+      "quant": "F16",
+      "sizeBytes": 6424997824,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Both mm3-lm and mm3-synth are required; ~24 GB combined VRAM to run.",
+      "tags": [
+        "essential"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
     },
     {
       "id": "whisper-large-v3-turbo",

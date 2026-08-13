@@ -42,6 +42,16 @@ async function capabilities(): Promise<BackendCapabilities> {
   const synthReady = props?.synth_ready === true;
   const up = engineReady && !isEngineSuspended() && synthReady;
 
+  // modelsMissing: honest, narrower than `!up` — true only when the engine IS
+  // reachable but the weight files themselves weren't found (as opposed to
+  // the engine being down/suspended, or files found-but-corrupt). This is
+  // what the UI needs to decide "point the user at the Model Manager" vs
+  // "the engine hasn't started yet". `found` is per-file (see Mm3PropsFile);
+  // fail open (false) on a stale/never-fetched manifest — a probe timeout
+  // must never be misread as "go nag the user to download 24 GB again".
+  const modelsMissing = !stale && props != null && !synthReady &&
+    (props.files?.lm?.found === false || props.files?.synth?.found === false);
+
   return {
     backend: 'minimax-m3',
     up,
@@ -63,6 +73,7 @@ async function capabilities(): Promise<BackendCapabilities> {
       maxAudioFrames: props?.max_audio_frames_limit ?? 9000,
       sampleRate: 44100,
       propsStale: stale,
+      modelsMissing,
     },
     // ALL false. This is the honest v1 manifest: none of these subsystems
     // exist for MM3 — they are not "coming soon" flags, they gate UI regions.

@@ -4,8 +4,8 @@
 // Each section shows a summary badge and expands on hover to reveal controls.
 // Sits full-width at the top of the entire window (above sidebar).
 
-import React, { useState, useCallback, useEffect } from 'react';
-import { Cpu, Plug, Sliders, Brain, AudioWaveform, Bookmark } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Cpu, Plug, Sliders, Brain, AudioWaveform, Bookmark, AlertTriangle, Download, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BarSection, ToggleSwitch } from './BarSection';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
@@ -125,6 +125,25 @@ export const GlobalParamBar: React.FC = () => {
 
     return () => clearTimeout(timer);
   }, []);
+
+  // ── MiniMax-Music3 "models missing" banner ────────────────────────
+  // capabilities().core.modelsMissing (server: backends/minimax/index.ts) is
+  // true only when the MM3 backend is active, the engine is reachable, and
+  // its weight files specifically weren't found — never for engine-down or
+  // corrupt-file cases. Surfacing is opt-in: a dismissible banner pointing at
+  // the Model Manager, never an auto-started 24 GB download.
+  const mm3ModelsMissing = capabilities?.backend === 'minimax-m3' && capabilities.core?.modelsMissing === true;
+  const [mm3BannerDismissed, setMm3BannerDismissed] = useState(false);
+  const lastBackendRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const b = capabilities?.backend;
+    // Re-arm the banner whenever the user switches INTO minimax-m3, so a
+    // dismissal doesn't stick forever across backend switches.
+    if (b === 'minimax-m3' && lastBackendRef.current !== 'minimax-m3') {
+      setMm3BannerDismissed(false);
+    }
+    lastBackendRef.current = b;
+  }, [capabilities?.backend]);
 
   const handleOpen = useCallback((id: SectionId) => {
     setOpenSection(id);
@@ -269,6 +288,29 @@ export const GlobalParamBar: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* MiniMax-Music3 models-missing banner — dismissible, links to the
+          Model Manager rather than auto-starting a 24 GB download. */}
+      {mm3ModelsMissing && !mm3BannerDismissed && (
+        <div className="flex items-center gap-2 px-4 py-2 border-t border-amber-500/20 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          <span className="flex-1">{t('globalBar.mm3ModelsMissing')}</span>
+          <button
+            onClick={() => setShowModelManager(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 font-medium transition-colors"
+          >
+            <Download size={12} />
+            {t('globalBar.mm3GetModels')}
+          </button>
+          <button
+            onClick={() => setMm3BannerDismissed(true)}
+            className="p-1 rounded-lg hover:bg-amber-500/15 text-amber-600 dark:text-amber-400 transition-colors"
+            title={t('common.dismiss')}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
 
       {/* Parameter Profiles Modal */}
       {showProfiles && <ProfilesModal onClose={() => setShowProfiles(false)} />}
