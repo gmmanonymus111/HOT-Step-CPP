@@ -15,6 +15,7 @@ import {
   buildRefinementPrompt,
   buildTitlePrompt,
   reconcileDurationToLyrics,
+  ensureInstrumentalIntro,
 } from '../prompts.js';
 import type { LyricsProfile } from '../profilerService.js';
 import { withModelSuffix } from '../modelName.js';
@@ -213,6 +214,18 @@ export async function generateLyricsStreaming(
 
   // Tag the title with the model that wrote it, same as the MCP path does
   title = withModelSuffix(title, effectiveModel);
+
+  // Most records open with a few bars before the first vocal, and the writer
+  // ignores that instruction far more often than it follows it (91% of the
+  // existing catalogue declared no instrumental section at all). Applied here
+  // deterministically, seeded from artist+title so the same song always makes
+  // the same choice — and BEFORE the duration is derived, since a declared
+  // intro is instrumental time the derivation counts.
+  const withIntro = ensureInstrumentalIntro(raw, `${profile.artist}|${title}`);
+  if (withIntro !== null) {
+    console.log(`[LLM] Instrumental intro applied to "${title}"`);
+    raw = withIntro;
+  }
 
   // Duration is derived from the FINAL lyrics at this artist's measured pacing,
   // not trusted from the plan: the LM renders at exactly the stated duration,

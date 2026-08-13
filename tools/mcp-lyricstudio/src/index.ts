@@ -281,9 +281,18 @@ server.tool(
       return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
     }
 
-    // Same reconciliation as the in-app path (orchestration.ts): the final
-    // duration derives from the written lyrics at the artist's measured
-    // pacing, so duration==content holds no matter what the writer planned.
+    // Same arrangement + duration policy as the in-app path (orchestration.ts).
+    // Intro FIRST — a declared instrumental intro is time the duration
+    // derivation counts, so applying it afterwards would under-time the song.
+    let introNote = '';
+    const withIntro = prompts.ensureInstrumentalIntro(lyrics, `${profile.artist_name}|${title}`);
+    if (withIntro !== null) {
+      lyrics = withIntro;
+      introNote = `\n🎸 Instrumental intro applied (${prompts.INSTRUMENTAL_INTRO_TAG})`;
+    }
+
+    // The final duration derives from the written lyrics at the artist's
+    // measured pacing, so duration==content holds no matter what was planned.
     let durationNote = '';
     {
       const set = db.getLyricsSet(profile.lyrics_set_id);
@@ -319,6 +328,7 @@ server.tool(
           `**Artist:** ${profile.artist_name}${profile.album ? ` — ${profile.album}` : ''}`,
           `**Subject:** ${saved.subject}`,
           `**BPM:** ${saved.bpm} | **Key:** ${saved.key} | **Duration:** ${saved.duration}s`,
+          introNote,
           durationNote,
           '',
           'The generation is now visible in the Lyric Studio UI.',
