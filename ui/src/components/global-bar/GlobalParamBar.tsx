@@ -12,6 +12,7 @@ import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { modelApi } from '../../services/api';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
+import { BackendToggle } from './BackendToggle';
 import { AdaptersDropdown, AdaptersBadge } from './AdaptersDropdown';
 import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
 import { LmThinkingDropdown, LmThinkingBadge } from './LmThinkingDropdown';
@@ -141,6 +142,8 @@ export const GlobalParamBar: React.FC = () => {
             <ModelsDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+
+          <BackendToggle />
 
           <DiscoPulseWrapper hue={72} stem="snare" className="flex-1 min-w-0">
           <BarSection

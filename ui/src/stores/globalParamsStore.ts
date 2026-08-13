@@ -9,6 +9,7 @@
 import { create } from 'zustand';
 import type { GenerationParams, LmRepMode } from '../types';
 import { DEFAULT_SETTINGS, type AppSettings } from '../components/settings/SettingsPanel';
+import { useBackendStore } from './backendStore';
 
 // -- Types --
 
@@ -509,6 +510,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       : s.lmCodesStrength;
 
     return {
+      // Multi-backend: which engine backend this request targets. Read directly
+      // from backendStore (not a globalParamsStore field) so it's always the
+      // live active id; defaults to 'ace' for installs with no second backend
+      // registered (docs/plans/multi-backend-architecture.md §4.5).
+      backend: useBackendStore.getState().activeBackendId || 'ace',
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
       // Planner-LM adapter (runtime LoRA on the 5Hz LM) — aceReq fields, so
       // they survive the LM-echo synth rebuild by construction.

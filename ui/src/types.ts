@@ -336,6 +336,10 @@ export interface GenerationParams {
   whisperLanguage?: string;
   whisperBeamSize?: number;
   whisperIsolateVocals?: boolean;
+
+  // Multi-backend: which engine backend this request targets ('ace', future:
+  // 'minimax-m3', ...). See docs/plans/multi-backend-architecture.md §4.5.
+  backend?: string;
 }
 
 /** Generation job status from the server */

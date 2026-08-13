@@ -727,6 +727,7 @@
     "globalBar.lm": "LM / Thinking",
     "globalBar.postProcessing": "Post-Processing",
     "globalBar.profiles": "Profiles",
+    "globalBar.backend": "Backend",
     "profiles.title": "Parameter Profiles",
     "profiles.namePlaceholder": "New profile name…",
     "profiles.saveCurrent": "Save",
