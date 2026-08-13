@@ -580,7 +580,7 @@ export interface TrainDitOptions {
   crop?: number;                   // default 0 = auto-fit
   cropMin?: number;                // default 375
   cropMax?: number;                // default 1250
-  targetLoss?: number;             // default 0.4 (lora) / 0.6 (lokr, K2); 0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 400 (hard cap)
   learningRate?: number;           // default 0.0005 (lora) / 0.01 (lokr, K2)
   gradAccum?: number;              // default 4 (lora) / 20 (lokr — Side-Step's effective batch 20, which the lokr lr assumes)
@@ -604,10 +604,14 @@ export interface TrainDitOptions {
   vramReserveMb?: number;          // default 2048
   /** Resume: continue training from this exported adapter run dir
    *  (--init-adapter). Identity hyperparams are adopted from its
-   *  dit_train_log.json by the engine; contradictions are refused. */
-  initAdapter?: string;            // default '' = train from scratch
+   *  dit_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-13);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
   /** Run the post-training DiT calibration job (latent-Frechet eval of
-   *  old-vs-new x scales, strict-win pick, bake, sidecar). Default TRUE. */
+   *  old-vs-new x scales, strict-win pick, bake, sidecar).
+   *  Default FALSE (2026-08-13) — only an explicit `true` runs it. */
   calibrate?: boolean;
   /** Let calibration repoint this artist's album preset(s). Default TRUE. */
   calibrateRepoint?: boolean;

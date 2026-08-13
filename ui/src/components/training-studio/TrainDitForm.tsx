@@ -88,9 +88,11 @@ export interface TrainDitFormState {
   stages: TrainDitStage[];
   overwrite: boolean;
   stopEngine: boolean;
-  /** Resume: continue from the newest non-calibrated run of this adapter name. */
+  /** Resume: continue from the newest non-calibrated run of this adapter name.
+   *  Default ON (Rob, 2026-08-13). */
   resumeFromLatest: boolean;
-  /** Post-training latent-Frechet calibration (default ON, 2026-08-11). */
+  /** Post-training latent-Frechet calibration. Default OFF (Rob, 2026-08-13);
+   *  it was ON from 2026-08-11. */
   calibrate: boolean;
   /** Let calibration repoint this artist's album preset(s). Default ON. */
   calibrateRepoint: boolean;
@@ -103,10 +105,13 @@ export interface TrainDitFormState {
 export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   adapterName: '',
   quality: 'balanced',
-  // 0.2 / 500 (Rob, 2026-07-30). Both are deliberately beyond what a run
-  // typically reaches: the run now always leaves the BEST adapter behind, so an
-  // unreached target costs nothing and simply means "use the whole horizon".
-  targetLoss: 0.2,
+  // 0.1 / 500 (Rob, 2026-08-13) — targetLoss was 0.2 from 2026-07-30. Both are
+  // deliberately beyond what a run typically reaches: the run always leaves the
+  // BEST adapter behind, so an unreached target costs nothing and simply means
+  // "use the whole horizon". The train-dit route's own fallback tracks this
+  // number so a batch-pipeline run (which POSTs an empty option bag) stops at
+  // the same loss a manual run does.
+  targetLoss: 0.1,
   epochs: 500,
   adapterType: 'lora',
   rank: 128,
@@ -171,8 +176,14 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,
-  resumeFromLatest: false,
-  calibrate: true,
+  // Resume ON, calibrate OFF (Rob, 2026-08-13) — the inverse of the 2026-08-11
+  // seed, matching the LM form's 2026-08-12 flip. With target loss at 0.1 a
+  // re-run is almost always "keep going", not "start over", and resume is soft
+  // on the server: an adapter name with no previous run trains from scratch
+  // rather than failing. TRAIN_DIT_LOKR_DEFAULTS spreads this object and
+  // doesn't override either flag, so LoKR inherits both.
+  resumeFromLatest: true,
+  calibrate: false,
   calibrateRepoint: true,
 };
 
@@ -226,7 +237,7 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   // you get the whole cosine decay and still keep the best point on it.
   epochs: 500,
   lossWeighting: 'none',
-  targetLoss: 0.2,
+  targetLoss: 0.1,
   weightDecay: 0.001,
   crop: 0,
 };
@@ -250,10 +261,13 @@ const deriveCropMode = (state: TrainDitFormState): CropMode => {
 // re-spaced around it to keep the dial monotone. milestoneStep stays 0 across
 // all three (2026-07-30): the best adapter is kept regardless, so snapshots are
 // an explicit choice, not something a quality click turns back on.
+// Target-loss ladder re-spaced 2026-08-13 around the new 0.1 default (was
+// 0.3/0.2/0.15): Balanced must equal TRAIN_DIT_DEFAULTS.targetLoss, and
+// Thorough has to stay below it to keep the dial monotone.
 const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
-  fast:     { epochs: 150, cropMax: 750,  milestoneStep: 0, targetLoss: 0.3 },
-  balanced: { epochs: 500, cropMax: 1250, milestoneStep: 0, targetLoss: 0.2 },
-  thorough: { epochs: 900, cropMax: 1250, milestoneStep: 0, targetLoss: 0.15 },
+  fast:     { epochs: 150, cropMax: 750,  milestoneStep: 0, targetLoss: 0.2 },
+  balanced: { epochs: 500, cropMax: 1250, milestoneStep: 0, targetLoss: 0.1 },
+  thorough: { epochs: 900, cropMax: 1250, milestoneStep: 0, targetLoss: 0.05 },
 };
 
 /** LoKR's targets were 0.6/0.6/0.5 — its validated auto-stop under the old
@@ -262,7 +276,7 @@ const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
  *  equal TRAIN_DIT_LOKR_DEFAULTS.targetLoss so the already-highlighted button
  *  is a no-op. */
 const DIT_LOKR_TARGET_LOSS: Record<DitQuality, number> = {
-  fast: 0.3, balanced: 0.2, thorough: 0.15,
+  fast: 0.2, balanced: 0.1, thorough: 0.05,
 };
 
 /** Same reasoning for the epoch counts: the presets above are LoRA's 100/400/800,
@@ -515,7 +529,7 @@ export const TrainDitForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', isLokr ? 'LoKR default 0.6 · 0 = no auto-stop' : 'LoRA default 0.4 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 0.1 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -523,7 +537,7 @@ export const TrainDitForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, isLokr ? 0.2 : 0.2) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.1) })}
             className={FIELD}
           />
         </label>
@@ -569,7 +583,7 @@ export const TrainDitForm: React.FC<Props> = ({
             onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
             className="accent-amber-500"
           />
-          {P('resumeFromLatest', 'Default off', CHECK_LABEL)}
+          {P('resumeFromLatest', 'Default on', CHECK_LABEL)}
         </label>
         <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
           <input
@@ -579,7 +593,7 @@ export const TrainDitForm: React.FC<Props> = ({
             onChange={(e) => onChange({ calibrate: e.target.checked })}
             className="accent-amber-500"
           />
-          {P('calibrate', 'Default on', CHECK_LABEL)}
+          {P('calibrate', 'Default off', CHECK_LABEL)}
         </label>
         {value.calibrate && (
           <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">

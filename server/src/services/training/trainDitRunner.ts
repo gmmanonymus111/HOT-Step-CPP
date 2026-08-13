@@ -463,8 +463,12 @@ export async function runTrainDitJob(job: TrainingJob): Promise<void> {
       }
     }
 
-    // Post-training DiT calibration (default ON, Rob 2026-08-11): same GPU
-    // lane, runs after this job's finally has restarted the engine it needs.
+    // Post-training DiT calibration — OPT-IN since 2026-08-13 (it was default
+    // ON from 2026-08-11). Note the consequence in the branch above: with
+    // calibration off the new run takes this artist's album presets outright,
+    // under the older newest-run-wins rule, with no beat-the-previous guard.
+    // Same GPU lane, runs after this job's finally has restarted the engine it
+    // needs.
     if (opts.calibrate && opts.stages.includes('export')) {
       const { startDitCalibrateJob } = await import('./labelingQueue.js');
       const cal = startDitCalibrateJob(job.datasetId, {

@@ -2098,7 +2098,11 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // measured run stopping at ~50% of peak LR, so the schedule never decayed
     // into the target. 250 cut epochs-to-0.6 from 228 to 203. LoRA keeps 400.
     const epochs = numOpt(body.epochs, 500);
-    const targetLoss = numOpt(body.targetLoss, 0.2);
+    // 0.1 (Rob, 2026-08-13) — was 0.2 from 2026-07-30. Tracks
+    // TRAIN_DIT_DEFAULTS.targetLoss: the batch pipeline POSTs the STORED
+    // per-stage defaults (`{}` in practice), so this fallback IS the number a
+    // bulk run trains to, and it has to be the one the form shows.
+    const targetLoss = numOpt(body.targetLoss, 0.1);
     const rank = numOpt(body.rank, 128);
     const alpha = numOpt(body.alpha, 256);
     const lokrDim = numOpt(body.lokrDim, 512);
@@ -2250,7 +2254,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // 'latest' resolves to the newest non-calibrated run of this adapter name
     // (bakes excluded — their factors carry the baked scale), and any explicit
     // path must hold weights BEFORE the runner stops the engine.
-    let ditInitAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : '';
+    // AN OMITTED initAdapter MEANS 'latest' (Rob, 2026-08-13), matching the
+    // form's now-ticked Continue checkbox and the train-lm route's 2026-08-12
+    // flip. The batch pipeline POSTs `{}`, so without this a bulk re-run over
+    // already-trained datasets would restart every adapter from scratch while
+    // the identical manual run continued it.
+    let ditInitAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : 'latest';
     if (ditInitAdapter === 'latest') {
       const artistDir = path.dirname(adapterDir);
       let newest = '';
@@ -2263,9 +2272,14 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
         if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
       } catch { /* artist dir may not exist yet */ }
       if (!newest && hasWeights(artistDir)) newest = artistDir;
+      // "Nothing to resume" is NOT an error any more — same reasoning as
+      // train-lm: now that resume is the default for both the form and the
+      // pipeline, a first-ever run for an adapter name would fail on the one
+      // thing it cannot possibly satisfy. Fall through to a scratch run and
+      // say so in the log, so a bulk sweep can mix new and existing datasets.
       if (!newest) {
-        res.status(400).json({ error: `Nothing to resume — no previous trained run for "${adapterName}"` });
-        return;
+        console.log(
+          `[Training] train-dit: nothing to resume for "${adapterName}" — training from scratch`);
       }
       ditInitAdapter = newest;
     }
@@ -2350,7 +2364,10 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
       initAdapter: ditInitAdapter,
-      calibrate: body.calibrate !== false,           // default ON (Rob, 2026-08-11)
+      // Calibration is OPT-IN (Rob, 2026-08-13) — it was default ON from
+      // 2026-08-11. Only an explicit `true` runs it, so the batch pipeline's
+      // empty bag no longer appends an eval pass to every adapter in a sweep.
+      calibrate: body.calibrate === true,
       calibrateRepoint: body.calibrateRepoint !== false,
     };
 

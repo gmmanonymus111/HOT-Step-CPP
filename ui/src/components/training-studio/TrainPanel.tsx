@@ -292,8 +292,13 @@ export const TrainPanel: React.FC = () => {
       genreRatio: ditForm.genreRatio,
       seed: ditForm.seed,
       order: ditForm.order,
-      // Resume + post-training calibration (2026-08-11), same shape as train-lm.
-      ...(ditForm.resumeFromLatest ? { initAdapter: 'latest' } : {}),
+      // Resume + post-training calibration, same shape as train-lm.
+      //
+      // ALWAYS SENT, both ways. Since 2026-08-13 an OMITTED initAdapter means
+      // 'latest' on the DiT route too (so the batch pipeline's empty body
+      // resumes), which makes '' the only way to say "from scratch" —
+      // unticking the box would otherwise be a no-op.
+      initAdapter: ditForm.resumeFromLatest ? 'latest' : '',
       calibrate: ditForm.calibrate,
       calibrateRepoint: ditForm.calibrateRepoint,
       milestoneStep: ditForm.milestoneStep,
