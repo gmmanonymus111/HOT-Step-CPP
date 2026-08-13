@@ -75,6 +75,10 @@ export interface AceRequest {
   inference_steps?: number;
   guidance_scale?: number;
   shift?: number;
+  /** Self-attention sliding-window override for the DiT's 16 windowed layers,
+   *  in tokens (tokens run at 12.5 Hz). -1/undefined = the model's own value
+   *  (128 = ±10.2 s), 0 = no window at all (full attention on all 32 layers). */
+  dit_sliding_window?: number;
   audio_cover_strength?: number;
   cover_noise_strength?: number;
   cover_noise_method?: string;

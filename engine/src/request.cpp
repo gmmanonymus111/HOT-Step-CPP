@@ -45,6 +45,7 @@ void request_init(AceRequest * r) {
     r->inference_steps      = 0;     // 0 = auto (turbo: 8, base/sft: 50)
     r->guidance_scale       = 0.0f;  // 0 = auto (1.0 for all models)
     r->shift                = 0.0f;  // 0 = auto (turbo: 3.0, base/sft: 1.0)
+    r->dit_sliding_window   = -1;    // -1 = use the model's own sliding_window
     r->dcw_scaler           = 0.0f;
     r->dcw_high_scaler      = 0.0f;
     r->dcw_mode             = DCW_MODE_LOW;
@@ -269,6 +270,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "shift")) && yyjson_is_num(v)) {
         r->shift = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "dit_sliding_window")) && yyjson_is_num(v)) {
+        r->dit_sliding_window = (int) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "dcw_scaler")) && yyjson_is_num(v)) {
         r->dcw_scaler = (float) yyjson_get_num(v);
@@ -566,6 +570,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->shift != def.shift) {
         yyjson_mut_obj_add_real(doc, root, "shift", r->shift);
+    }
+    if (all || r->dit_sliding_window != def.dit_sliding_window) {
+        yyjson_mut_obj_add_int(doc, root, "dit_sliding_window", r->dit_sliding_window);
     }
     if (all || r->dcw_scaler != def.dcw_scaler) {
         yyjson_mut_obj_add_real(doc, root, "dcw_scaler", r->dcw_scaler);

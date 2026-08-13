@@ -1329,6 +1329,9 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.beat_stability      = sf.beat_stability;
     g_hotstep_params.frequency_damping   = sf.frequency_damping;
     g_hotstep_params.temporal_smoothing  = sf.temporal_smoothing;
+    // Read from the parsed AceRequest, not ServerFields: sideband ServerFields
+    // do not survive the /lm round trip, and this is a synth-side param.
+    g_hotstep_params.dit_sliding_window  = ace_reqs[0].dit_sliding_window;
     g_hotstep_params.adapter_group_scales = sf.group_scales;
     g_hotstep_params.adapter_mode         = sf.adapter_mode;
     g_hotstep_params.adapter_runtime_quant = sf.adapter_runtime_quant.empty() ? "bf16" : sf.adapter_runtime_quant;

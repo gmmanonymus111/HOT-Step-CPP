@@ -112,6 +112,19 @@ struct AceRequest {
     float guidance_scale;   // 0 = auto (1.0 for all models)
     float shift;            // 0 = auto (turbo: 3.0, base/sft: 1.0)
 
+    // Self-attention sliding-window override for the DiT's layer_type=0 layers.
+    // The model alternates 16 windowed / 16 full-attention layers; the windowed
+    // half sees only +/- sliding_window TOKENS, and tokens run at 12.5 Hz
+    // (25 Hz latents / patch_size 2). At the stock 128 that is +/-10.2 s, so a
+    // repeated chorus a minute later is invisible to half the network's depth.
+    //   -1 = use the model's own value (default, bit-identical to before)
+    //    0 = no window at all: every layer runs full attention
+    //   >0 = custom window in tokens (256 = +/-20.5 s, 1024 = +/-82 s)
+    // Widening is OUT OF DISTRIBUTION — those layers were trained windowed —
+    // but it is compute-free: the window is a dense S*S mask handed to
+    // flash_attn_ext, not a sparse kernel, so the O(S^2) cost is already paid.
+    int dit_sliding_window;  // -1 = model default
+
     // Differential Correction in Wavelet domain (CVPR 2026, arXiv:2604.16044).
     // Sampler-side correction for SNR-t bias in flow matching.
     // dcw_mode = "low"|"high"|"double"|"pix". dcw_scaler applies to the low

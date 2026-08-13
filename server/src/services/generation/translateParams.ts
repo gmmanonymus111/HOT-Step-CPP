@@ -122,6 +122,9 @@ export function translateParams(params: any): AceRequest {
   if (params.inferenceSteps) req.inference_steps = params.inferenceSteps;
   if (params.guidanceScale !== undefined) req.guidance_scale = params.guidanceScale;
   if (params.shift !== undefined) req.shift = params.shift;
+  // DiT self-attention window override (chorus-drift investigation).
+  // 0 = full attention on all layers; omit for the model's own 128.
+  if (params.ditSlidingWindow !== undefined) req.dit_sliding_window = params.ditSlidingWindow;
   if (params.inferMethod) req.infer_method = params.inferMethod;
   if (params.scheduler) req.scheduler = params.scheduler;
   if (params.guidanceMode) req.guidance_mode = params.guidanceMode;

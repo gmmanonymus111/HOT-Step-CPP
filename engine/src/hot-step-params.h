@@ -134,6 +134,19 @@ struct HotStepParams {
     std::string guidance_mode = "apg";
     float       shift         = -1.0f;    // -1 = use upstream value (auto or from request)
 
+    // Self-attention sliding-window override for the DiT's layer_type=0 layers
+    // (16 of 32; the others are full attention). Window is in TOKENS, and tokens
+    // run at 12.5 Hz — 25 Hz latents / patch_size 2 — so the stock 128 is a
+    // bidirectional +/-10.2 s. Anything further back is invisible to half the
+    // network's depth, which is the suspected cause of repeated choruses drifting.
+    //   -1 = model's own value (default; bit-identical to pre-override behaviour)
+    //    0 = no window: every layer full attention
+    //   >0 = custom window in tokens
+    // Free to widen: the window is a dense S*S mask fed to flash_attn_ext, not a
+    // sparse kernel, so the O(S^2) cost is paid either way. Widening is OOD
+    // though — these layers were trained windowed.
+    int dit_sliding_window = -1;
+
     // APG tuning
     float apg_momentum       = 0.75f;
     float apg_norm_threshold = 2.5f;

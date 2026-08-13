@@ -284,7 +284,21 @@ static int dit_ggml_generate(DiTGGML *           model,
     // shares one temporal length T so the old padding mask was all-zero (dead).
     struct ggml_tensor * t_sa_mask_sw  = ggml_graph_get_tensor(gf, "sa_mask_sw");
 
-    int                   win = c.sliding_window;
+    // HOT-Step: sideband override. -1 keeps the model's own window (default,
+    // bit-identical to before); 0 removes the window entirely, which the fill
+    // below already handles via `win <= 0` -> every position in-window -> an
+    // all-zero mask, i.e. full attention on all 32 layers.
+    int win = g_hotstep_params.dit_sliding_window >= 0 ? g_hotstep_params.dit_sliding_window : c.sliding_window;
+    if (win != c.sliding_window) {
+        if (win <= 0) {
+            fprintf(stderr, "[HotStep] DiT sliding window override: %d -> off (full attention, all 32 layers)\n",
+                    c.sliding_window);
+        } else {
+            // Tokens run at 12.5 Hz (25 Hz latents / patch_size 2).
+            fprintf(stderr, "[HotStep] DiT sliding window override: %d -> %d tokens (bidirectional +/-%.1f s)\n",
+                    c.sliding_window, win, (double) win / 12.5);
+        }
+    }
     std::vector<uint16_t> sa_sw_data(S * S * N_graph);
 
     // Fill masks for real samples, then duplicate for uncond slots
