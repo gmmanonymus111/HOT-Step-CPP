@@ -31,17 +31,19 @@ import { computeLmCacheKey, getLmCache, setLmCache, getLmCacheSize, type LmCache
 import { loadSourceAudio, loadSourceLatent, applyTempoAndPitch, loadTimbreReference } from '../services/generation/sourceAudio.js';
 import { runPostProcessingChain } from '../services/generation/postProcessing.js';
 import { getCachedLatent, saveCachedLatent } from '../services/generation/sourceLatentCache.js';
+import { getActiveBackendId } from '../services/backends/registry.js';
+import { runMinimaxGeneration, releaseMinimaxVramForAce } from '../services/backends/minimax/generate.js';
 
 const router = Router();
 
 /** Internal job state */
 /** Timing data for a single pipeline stage. */
-interface StageTiming {
+export interface StageTiming {
   name: string;
   ms: number;
 }
 
-interface GenerationJob {
+export interface GenerationJob {
   id: string;
   userId: string;
   status: 'pending' | 'lm_running' | 'synth_running' | 'saving' | 'succeeded' | 'failed' | 'cancelled';
@@ -192,6 +194,19 @@ async function runGeneration(job: GenerationJob): Promise<void> {
 
   // Bail out if cancelled while waiting in the queue
   if (job.status === 'cancelled') return;
+
+  // ── Backend routing ──────────────────────────────────────────
+  // Every backend's jobs flow through the SAME queue above (one GPU); only the
+  // pipeline below the dequeue differs. Non-ACE backends own their whole run,
+  // including error/cancel state, hence the early return.
+  if (getActiveBackendId() === 'minimax-m3') {
+    await runMinimaxGeneration(job, { pollUntilDone });
+    return;
+  }
+  // Defensive residency arbitration (plan §4.4): an MM3 run may have left ~13 GB
+  // parked. Idempotent and cheap when cold; short-fused so a hung engine can
+  // never stall an ACE generation.
+  await releaseMinimaxVramForAce();
 
   const aceReq = translateParams(job.params);
 

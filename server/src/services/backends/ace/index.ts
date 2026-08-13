@@ -7,6 +7,7 @@
 // a later phase migrates them behind this interface (plan §4.1, §5 Phase 1).
 
 import { aceClient } from '../../aceClient.js';
+import { config } from '../../../config.js';
 import { isEngineSuspended, restartAceServer, stopAceServer } from '../../aceEngineProcess.js';
 import { engineReady } from '../../../engineState.js';
 import type {
@@ -104,4 +105,32 @@ export const aceBackend: EngineBackend = {
   },
   capabilities,
   models,
+  /** Model-residency arbitration (plan §4.4). Evicts every resident, not
+   *  in-use ACE module so the other family isn't fighting it for VRAM. Uses
+   *  the same GET /models/loaded + POST /models/unload pair the VRAM
+   *  indicator's manual unload uses (routes/logs.ts:120-145) — one label per
+   *  call is all the engine's endpoint accepts. Best-effort throughout: this
+   *  runs fire-and-forget behind a backend switch and must never throw. */
+  async releaseVram() {
+    let loaded: Array<{ label: string; in_use?: boolean }> = [];
+    try {
+      const res = await fetch(`${config.aceServer.url}/models/loaded`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return;
+      const body = await res.json() as { loaded?: Array<{ label: string; in_use?: boolean }> };
+      loaded = Array.isArray(body.loaded) ? body.loaded : [];
+    } catch {
+      return;   // engine unreachable — nothing resident that we can free anyway
+    }
+
+    const freed: string[] = [];
+    for (const m of loaded) {
+      if (!m?.label || m.in_use) continue;   // in-use modules are skipped engine-side too
+      if (await aceClient.unloadLabel(m.label)) freed.push(m.label);
+    }
+    if (freed.length) {
+      console.log(`[Backends] ACE-Step residency released: ${freed.join(', ')}`);
+    }
+  },
 };

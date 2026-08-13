@@ -41,17 +41,38 @@ router.get('/backends', (_req, res) => {
 });
 
 // POST /api/backends/active { id } — switch the active backend
+//
+// VRAM arbitration (plan §4.4): both families live in the one ace-server
+// process, so switching is model RESIDENCY, not process switching. The
+// outgoing backend's weights are released fire-and-forget — the switch itself
+// is a settings write and must answer instantly, and a slow/hung engine must
+// never be able to wedge the toggle. Nothing here branches on backend id: it
+// calls the optional `releaseVram()` the outgoing backend declares.
 router.post('/backends/active', (req, res) => {
   const id = req.body?.id;
   if (typeof id !== 'string' || !id.trim()) {
     res.status(400).json({ error: 'Missing "id" in request body' });
     return;
   }
+  const previousId = getActiveBackendId();
   const ok = setActiveBackendId(id);
   if (!ok) {
     res.status(404).json({ error: `Unknown backend: ${id}` });
     return;
   }
+
+  if (previousId !== id) {
+    const outgoing = getBackend(previousId);
+    if (outgoing?.releaseVram) {
+      void outgoing.releaseVram().catch(err => {
+        // Log and move on — the user asked to switch backends, not to
+        // guarantee an eviction.
+        console.warn(`[backends] releaseVram failed for outgoing '${previousId}':`, err?.message || err);
+      });
+    }
+    console.log(`[backends] active backend: ${previousId} → ${id}`);
+  }
+
   res.json({ activeId: getActiveBackendId() });
 });
 

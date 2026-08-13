@@ -98,4 +98,14 @@ export interface EngineBackend {
   /** Cached, cheap — safe to call on every UI render. */
   capabilities(): Promise<BackendCapabilities>;
   models(): Promise<BackendModels>;
+  /** Release this backend's GPU residency WITHOUT stopping it (plan §4.4:
+   *  arbitration is model residency, not process switching). Called
+   *  fire-and-forget on the OUTGOING backend when the active backend changes,
+   *  so the two model families never sit in VRAM together.
+   *
+   *  Optional and best-effort: a backend with nothing to free (or no way to
+   *  free it) simply omits it, and shared code must never block on or fail
+   *  because of it. Declared here rather than branching on backend id in
+   *  routes/backends.ts — see plan §2 principle 2. */
+  releaseVram?(): Promise<void>;
 }

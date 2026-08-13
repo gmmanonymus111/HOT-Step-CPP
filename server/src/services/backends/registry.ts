@@ -9,12 +9,17 @@
 import { getSetting, setSetting } from '../../db/lireekDb.js';
 import type { EngineBackend } from './types.js';
 import { aceBackend } from './ace/index.js';
+import { minimaxBackend } from './minimax/index.js';
 
 const SETTING_KEY = 'active_backend_id';
 const DEFAULT_BACKEND_ID = 'ace';
 
+// Registration order is the UI's toggle order. ACE stays first and stays the
+// default — an existing install must behave exactly as before until the user
+// deliberately switches.
 const backends: Record<string, EngineBackend> = {
   ace: aceBackend,
+  'minimax-m3': minimaxBackend,
 };
 
 /** Look up a backend by id, or undefined if unregistered. */
