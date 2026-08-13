@@ -1,0 +1,637 @@
+#pragma once
+// minimax/mm3-pipeline.h — THE ASSEMBLY: the end-to-end MiniMax-Music3 pipeline.
+//
+// HOT-Step file (does not exist upstream). Every module below this file has
+// already been ported and proven against its own fixture in isolation:
+//
+//     mm3-ar-loop.h       stage 1: Qwen3 AR planner + RVQ depth decoder
+//     mm3-cond-graph.h    condition encoder (AR hiddens -> latent-rate conditioning)
+//     mm3-dit-graph.h     flow DiT + the single-window Euler loop
+//     mm3-vocoder-graph.h DAC-style vocoder (latents -> stereo PCM)
+//
+// This header is the ORCHESTRATION that joins them: the chunk-window loop, the
+// overlap arithmetic, and the stitch. It adds exactly one piece of new math —
+// the per-step overlap blend — and otherwise only moves buffers between the
+// proven modules.
+//
+// ── The chunk contract (reference: diffusers @ dafe3733,
+//    modular_pipelines/minimax_music3/{before_denoise,denoise,decoders}.py) ──
+//
+// 1. WINDOWS. The AR stage emits F frames at 25 fps. The flow stage consumes
+//    them in 200-frame windows with a 100-frame hop:
+//
+//        chunk_starts = [0]                         if F <= 200
+//                     = range(0, F - 100, 100)      otherwise
+//
+//    Note the `F - 100` (not `F`): the last window is allowed to run off the
+//    end of the frame array and is simply shorter. 300 frames -> starts
+//    [0, 100] -> 2 windows, both a full 200 frames. This is the 12 s fixture.
+//
+// 2. LATENT LENGTH. Each window's condition encoder output is
+//    L = int(win_frames * 3.4453125) latent frames (86.1328125 Hz against
+//    25 fps). 200 frames -> 689 latents. mm3_cond_latent_length() owns the
+//    exact truncation order.
+//
+// 3. THE OVERLAP. Consecutive windows share 100 AR frames == ~344 latents, but
+//    only the first OVERLAP_LATENTS = 172 of them are spliced. Window k > 0
+//    receives, from window k-1:
+//
+//        prev_latent    = latents_{k-1}[..., L-344 : L-172]     [128, 172]
+//        prev_condition = condition_{k-1}[L-344 : L-172, ...]   [172, 2048]
+//
+//    and then:
+//      (a) BEFORE the flow loop, overwrites its own conditioning over
+//          [0, overlap) with prev_condition — the previous window's view of
+//          those frames wins;
+//      (b) at the TOP OF EVERY EULER STEP, re-blends its latents over
+//          [0, overlap):
+//
+//              x[:, :ov] = (1 - (1 - 1e-6) * t) * noise_prompt + t * prev_latent
+//
+//          where `noise_prompt` is this window's ORIGINAL noise over the
+//          overlap (snapshot before step 0, never re-drawn) and `t` is the
+//          scheduler timestep (0 = pure noise, ->1 = clean). This is the one
+//          genuinely new piece of arithmetic in this increment;
+//      (c) AFTER the last step, overwrites [0, overlap) with prev_latent
+//          outright — the blend was a soft boundary condition for the DiT, the
+//          hard splice is what gets vocoded.
+//
+//    overlap itself is min(prev_latent_len, L), so a short final window
+//    degrades gracefully.
+//
+// 4. THE STITCH. Every window is vocoded WHOLE (L * 512 samples/channel), then
+//    cropped in the sample domain:
+//
+//        left  = 0 if k == 0        else CROP_LEFT_LATENTS  (86)  * 512
+//        right = 0 if k == last     else CROP_RIGHT_LATENTS (258) * 512
+//
+//    86 + 258 = 344 = the full latent overlap, so the kept spans tile the song
+//    exactly once. Two 689-latent windows -> 431*512 + 603*512 = 529,408
+//    samples/channel = 12.005 s at 44.1 kHz, which is exactly the fixture's
+//    `final_audio.bin`. Finally clamp to [-1, 1].
+//
+//    Note the ordering: vocode THEN crop. Cropping the latents first would be
+//    cheaper and wrong — the vocoder's receptive field bleeds across the seam.
+//
+// ── Noise ───────────────────────────────────────────────────────────────────
+//
+// Each window draws its own [128, L] Gaussian noise. In parity mode the caller
+// supplies it (the fixtures' `flow_w{0,1}_noise_latents.bin`). Otherwise it is
+// derived deterministically from `seed` and the window index via a splitmix64
+// stream + Box-Muller — deliberately NOT std::normal_distribution, whose bit
+// pattern is libstdc++/MSVC-dependent. Same seed + same window index => same
+// latents on every platform and every build.
+//
+// This will NOT match torch's noise for the same seed number (torch's Mersenne
+// normal stream is its own thing), so a free-run generation here is not
+// bit-comparable to a diffusers run. Parity is proven by REPLAYING the
+// reference's own noise, not by re-deriving it.
+//
+// ── Concurrency ─────────────────────────────────────────────────────────────
+//
+// Not thread-safe. Every module it drives keeps a process-global graph cache
+// (g_mm3_lm / g_mm3_cond / g_mm3_dit / g_mm3_voc); the caller serialises
+// (mm3-server.h holds g_mm3_mutex for the whole generate).
+
+#include "mm3-ar-loop.h"
+#include "mm3-cond-graph.h"
+#include "mm3-dit-graph.h"
+#include "mm3-model.h"
+#include "mm3-tokenizer.h"
+#include "mm3-vocoder-graph.h"
+
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <string>
+#include <vector>
+
+// Reference constants. `_OVERLAP_LATENT_LENGTH` and `_CROP_LEFT_LATENT` are
+// literals in diffusers too (denoise.py / decoders.py) — they are NOT derived
+// from the window geometry there, so they are not derived here either. The
+// relations 344 = 2*172 and 258 = 344 - 86 hold, and are documented rather
+// than exploited.
+#define MM3_OVERLAP_LATENTS    172
+#define MM3_CARRY_SPAN_LATENTS 344  // = 2 * MM3_OVERLAP_LATENTS
+#define MM3_CROP_LEFT_LATENTS  86
+#define MM3_CROP_RIGHT_LATENTS 258  // = MM3_CARRY_SPAN_LATENTS - MM3_CROP_LEFT_LATENTS
+
+// ── Progress ────────────────────────────────────────────────────────────────
+
+// One callback for every stage transition and every unit of inner work. The
+// job-queue integration point: a future /mm3/synth on the shared GPU worker
+// forwards these straight into the existing job progress channel.
+struct MM3GenProgress {
+    const char * stage     = "";  // "ar" | "cond" | "flow" | "vocode" | "stitch" | "done"
+    int64_t      window    = -1;  // 0-based; -1 for song-wide stages
+    int64_t      n_windows = 0;
+    int64_t      step      = 0;   // AR frame, or Euler step, within this stage
+    int64_t      n_steps   = 0;
+};
+
+using MM3ProgressCb = std::function<void(const MM3GenProgress &)>;
+
+// ── The overlap-aware Euler loop ────────────────────────────────────────────
+//
+// A strict superset of mm3_flow_sample() (mm3-dit-graph.h), which stays exactly
+// as committed and remains the path behind POST /mm3/flow-sample. With
+// overlap == 0 the two are the same arithmetic in the same order; validation
+// ladder step A re-proves that by replaying window 0 through THIS function and
+// comparing against the same fixture the committed one is proven against.
+//
+//   noise        128*L floats, channel-major. Also serves as the overlap
+//                noise prompt: `noise[:, :overlap]` is read at every step, so
+//                it must stay valid for the whole call (it is never mutated —
+//                the loop mutates `out_latents`, its own copy).
+//   cond         2048*L floats, torch [1, L, 2048] order. Uploaded once.
+//   prev_latent  128*prev_stride floats, channel-major, the previous window's
+//                carry. Only [0, overlap) of each channel is read.
+static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const float * cond, int64_t L, int steps,
+                                  float cfg_scale, int64_t overlap, const float * prev_latent, int64_t prev_stride,
+                                  std::vector<float> & out_latents, MM3FlowStats * stats,
+                                  const std::function<void(int, int)> & on_step, std::string * err) {
+    if (L <= 0 || L > MM3_DIT_MAX_FRAMES) {
+        if (err) {
+            *err = "frames must be in 1.." + std::to_string(MM3_DIT_MAX_FRAMES);
+        }
+        return false;
+    }
+    if (steps <= 0 || steps > 1000) {
+        if (err) {
+            *err = "steps must be in 1..1000";
+        }
+        return false;
+    }
+    if (overlap < 0 || overlap > L) {
+        if (err) {
+            *err = "overlap must be in 0..L";
+        }
+        return false;
+    }
+    if (overlap > 0 && (!prev_latent || prev_stride < overlap)) {
+        if (err) {
+            *err = "a positive overlap needs a previous-window carry at least that long";
+        }
+        return false;
+    }
+    if (!mm3_dit_prepare(m, &g_mm3_dit, err)) {
+        return false;
+    }
+
+    const int64_t C = (int64_t) m.synth_cfg.dit.in_channels;
+    const int64_t N = C * L;
+    out_latents.assign((size_t) N, 0.0f);
+    memcpy(out_latents.data(), noise, (size_t) N * sizeof(float));
+
+    std::vector<float> sigmas, timesteps;
+    mm3_flow_sigmas(steps, &sigmas, &timesteps);
+
+    std::vector<float> pred_c((size_t) N);
+    std::vector<float> pred_u((size_t) N);
+
+    const auto t_all  = std::chrono::steady_clock::now();
+    double     fwd_ms = 0.0, first_ms = 0.0, last_ms = 0.0;
+
+    for (int i = 0; i < steps; i++) {
+        const float t = timesteps[(size_t) i];
+
+        // ── the overlap blend (the new logic) ──
+        // x[:, :ov] = (1 - (1-1e-6)*t) * noise_prompt + t * prev_latent.
+        // The (1 - 1e-6) is the reference's, verbatim: at t = 1 it leaves a
+        // 1e-6 sliver of noise rather than a pure copy.
+        if (overlap > 0) {
+            const float a = 1.0f - (1.0f - 1e-6f) * t;
+            for (int64_t c = 0; c < C; c++) {
+                const float * np = noise + c * L;
+                const float * pl = prev_latent + c * prev_stride;
+                float *       x  = out_latents.data() + c * L;
+                for (int64_t j = 0; j < overlap; j++) {
+                    x[j] = a * np[j] + t * pl[j];
+                }
+            }
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+
+        // Conditional. The condition is uploaded on the first pass only; every
+        // later pass reuses the resident copy and toggles the gate.
+        if (!mm3_dit_run(m, &g_mm3_dit, out_latents.data(), i == 0 ? cond : nullptr, 1.0f, t, L, pred_c.data(), err)) {
+            return false;
+        }
+        // Unconditional: same tensor, gate 0 == zeros_like(condition).
+        if (!mm3_dit_run(m, &g_mm3_dit, out_latents.data(), nullptr, 0.0f, t, L, pred_u.data(), err)) {
+            return false;
+        }
+
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        fwd_ms += ms;
+        if (i == 0) {
+            first_ms = ms;
+        }
+        last_ms = ms;
+
+        const float dsigma = sigmas[(size_t) i + 1] - sigmas[(size_t) i];
+        for (int64_t j = 0; j < N; j++) {
+            const float u = pred_u[(size_t) j];
+            const float v = u + cfg_scale * (pred_c[(size_t) j] - u);
+            out_latents[(size_t) j] += dsigma * v;
+        }
+
+        if (on_step) {
+            on_step(i + 1, steps);
+        }
+    }
+
+    // The hard splice: the blend was a boundary condition for the DiT, this is
+    // what actually leaves the window.
+    if (overlap > 0) {
+        for (int64_t c = 0; c < C; c++) {
+            memcpy(out_latents.data() + c * L, prev_latent + c * prev_stride, (size_t) overlap * sizeof(float));
+        }
+    }
+
+    const double total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_all).count();
+    if (stats) {
+        stats->steps         = steps;
+        stats->forwards      = steps * 2;
+        stats->total_ms      = total_ms;
+        stats->forward_ms    = fwd_ms;
+        stats->first_ms      = first_ms;
+        stats->last_ms       = last_ms;
+        stats->compute_bytes = g_mm3_dit.compute_bytes;
+    }
+    fprintf(stderr,
+            "[MM3-Flow] Window: L=%lld, ov=%lld, %d steps, cfg %.2f -> %.0f ms (%.0f ms/step, %.0f ms/forward)\n",
+            (long long) L, (long long) overlap, steps, (double) cfg_scale, total_ms, total_ms / (double) steps,
+            fwd_ms / (double) (steps * 2));
+    return true;
+}
+
+// ── Deterministic per-window noise ──────────────────────────────────────────
+
+static inline uint64_t mm3_splitmix64(uint64_t & s) {
+    uint64_t z = (s += 0x9E3779B97F4A7C15ULL);
+    z          = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z          = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+// N(0,1) via Box-Muller over splitmix64 doubles. Explicitly hand-rolled so the
+// bytes are identical on every toolchain (see the header note on noise).
+static void mm3_fill_noise(uint64_t seed, int64_t window, std::vector<float> & out, int64_t n) {
+    out.assign((size_t) n, 0.0f);
+    uint64_t s = seed ^ (0xA24BAED4963EE407ULL * (uint64_t) (window + 1));
+    mm3_splitmix64(s);  // discard one, so window 0 does not start on the raw seed
+    for (int64_t i = 0; i < n; i += 2) {
+        double u1, u2;
+        do {
+            u1 = (double) (mm3_splitmix64(s) >> 11) * (1.0 / 9007199254740992.0);
+        } while (u1 <= 1e-300);
+        u2                = (double) (mm3_splitmix64(s) >> 11) * (1.0 / 9007199254740992.0);
+        const double r    = std::sqrt(-2.0 * std::log(u1));
+        const double th   = 6.283185307179586476925286766559 * u2;
+        out[(size_t) i]   = (float) (r * std::cos(th));
+        if (i + 1 < n) {
+            out[(size_t) (i + 1)] = (float) (r * std::sin(th));
+        }
+    }
+}
+
+// ── Request / result ────────────────────────────────────────────────────────
+
+struct MM3GenRequest {
+    // Either an assembled prompt template (tokenised here) or explicit ids.
+    // `ids_cond` wins when both are given; `ids_uncond` may be left empty and
+    // is then derived by the 3-token CFG mask rule.
+    std::string          prompt;
+    std::vector<int32_t> ids_cond;
+    std::vector<int32_t> ids_uncond;
+
+    int64_t  max_frames = 300;
+    uint64_t seed       = 42;
+    int      steps      = 30;
+    float    cfg_flow   = 1.7f;
+
+    // Parity mode: replay the reference's own AR codes instead of sampling.
+    // Iteration-indexed, entry 0 is the un-emitted iteration (see mm3-ar-loop.h).
+    std::vector<int32_t> forced_semantic;  // [I]
+    std::vector<int32_t> forced_acoustic;  // [I * 7], flat, iteration-major
+
+    // Parity mode: per-window initial noise, 128*L floats channel-major. Entry
+    // k applies to window k; an empty entry (or a short vector) falls back to
+    // the seeded derivation for that window, so supplying window 0 alone is
+    // legal.
+    std::vector<std::vector<float>> forced_noise;
+
+    bool keep_window_latents = false;  // populate MM3GenResult::window_latents
+};
+
+struct MM3GenResult {
+    std::vector<float> audio;        // planar stereo: [ch0 T][ch1 T]
+    int64_t            n_samples = 0;  // T, per channel
+    int                sample_rate = 0;
+
+    int64_t              frames    = 0;
+    int64_t              n_windows = 0;
+    std::vector<int64_t> chunk_starts;
+    std::vector<int64_t> chunk_frames;
+    std::vector<int64_t> window_L;
+    std::vector<int64_t> window_overlap;
+    std::vector<int64_t> forced_noise_used;  // 1 = replayed, 0 = seed-derived
+
+    std::vector<std::vector<float>> window_latents;  // only when keep_window_latents
+
+    // AR stage detail (codes + timings). frame_hiddens are moved in and are
+    // ~39 MB at 300 frames — the caller owns them.
+    MM3ArResult ar;
+
+    double  ar_ms    = 0.0;
+    double  cond_ms  = 0.0;
+    double  flow_ms  = 0.0;
+    double  voc_ms   = 0.0;
+    double  total_ms = 0.0;
+    int64_t flow_forwards = 0;
+
+    // The vocoder graph does not expose its compute size (mm3-vocoder-graph.h
+    // logs it instead), so only the DiT's is reported here.
+    size_t dit_compute_bytes = 0;
+
+    bool  has_nan = false;
+    float peak    = 0.0f;
+    double rms    = 0.0;
+};
+
+// ── The assembly ────────────────────────────────────────────────────────────
+
+// Plan, condition, denoise, vocode and stitch one song.
+//
+// `tok` is loaded on demand and only when the request carries a prompt rather
+// than explicit ids.
+static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Tokenizer * tok,
+                         const MM3ProgressCb & progress, MM3GenResult * out, std::string * err) {
+    const auto t_all = std::chrono::steady_clock::now();
+
+    const MM3LmConfig &   lc = m.lm_cfg;
+    const MM3CondConfig & cc = m.synth_cfg.cond;
+    const MM3VocConfig &  vc = m.synth_cfg.voc;
+
+    const int64_t NCB = (int64_t) lc.num_codebooks - 1;         // 7 acoustic
+    const int64_t H   = (int64_t) lc.embedding_length;          // 4096
+    const int64_t LAY = (int64_t) lc.num_codebooks;             // 8 mixed layers
+    const int64_t CH  = (int64_t) m.synth_cfg.dit.in_channels;  // 128
+    const int64_t UP  = (int64_t) vc.total_upsample;            // 512
+
+    const int64_t win_frames = m.synth_cfg.dit.window_frames ? (int64_t) m.synth_cfg.dit.window_frames : 200;
+    const int64_t hop_frames = m.synth_cfg.dit.hop_frames ? (int64_t) m.synth_cfg.dit.hop_frames : 100;
+
+    *out = MM3GenResult{};
+    out->sample_rate = (int) vc.sampling_rate;
+
+    // ── token ids ──
+    std::vector<int32_t> ids_cond = req.ids_cond, ids_uncond = req.ids_uncond;
+    if (ids_cond.empty()) {
+        if (req.prompt.empty()) {
+            if (err) {
+                *err = "need either a prompt or ids_cond";
+            }
+            return false;
+        }
+        if (!tok || !mm3_tokenizer_load(m, tok, err)) {
+            return false;
+        }
+        mm3_tokenizer_encode(*tok, req.prompt, &ids_cond);
+    }
+    if (ids_cond.size() < 3) {
+        if (err) {
+            *err = "the prompt must tokenise to at least 3 tokens";
+        }
+        return false;
+    }
+    if (ids_uncond.empty()) {
+        mm3_tokenizer_uncond(lc, ids_cond, &ids_uncond);
+    }
+    if (ids_uncond.size() != ids_cond.size()) {
+        if (err) {
+            *err = "ids_uncond must be the same length as ids_cond";
+        }
+        return false;
+    }
+
+    // ── stage 1: AR plan ──
+    MM3ArOptions aopt;
+    aopt.max_frames      = req.max_frames;
+    aopt.seed            = req.seed;
+    aopt.collect_hiddens = true;  // the whole point: the condition encoder eats these
+    if (!req.forced_semantic.empty()) {
+        if ((int64_t) req.forced_acoustic.size() != (int64_t) req.forced_semantic.size() * NCB) {
+            if (err) {
+                *err = "forced_acoustic must be forced_semantic.size() * 7 entries";
+            }
+            return false;
+        }
+        aopt.forced_semantic = req.forced_semantic.data();
+        aopt.forced_acoustic = req.forced_acoustic.data();
+        aopt.forced_len      = (int64_t) req.forced_semantic.size();
+    }
+    if (progress) {
+        aopt.on_frame = [&](int64_t f, int64_t total) {
+            progress(MM3GenProgress{ "ar", -1, 0, f, total });
+        };
+    }
+
+    const auto t_ar = std::chrono::steady_clock::now();
+    if (!mm3_ar_plan(m, ids_cond.data(), ids_uncond.data(), (int64_t) ids_cond.size(), aopt, &out->ar, err)) {
+        return false;
+    }
+    out->ar_ms  = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_ar).count();
+    out->frames = out->ar.n_frames;
+
+    const int64_t F = out->ar.n_frames;
+    if (F <= 0) {
+        if (err) {
+            *err = "the AR stage emitted zero frames";
+        }
+        return false;
+    }
+    if ((int64_t) out->ar.frame_hiddens.size() != F * LAY * H) {
+        if (err) {
+            *err = "the AR stage returned a frame-hidden block of the wrong size";
+        }
+        return false;
+    }
+
+    // ── window plan (fact 1) ──
+    std::vector<int64_t> starts;
+    if (F <= win_frames) {
+        starts.push_back(0);
+    } else {
+        for (int64_t s = 0; s < F - hop_frames; s += hop_frames) {
+            starts.push_back(s);
+        }
+    }
+    const int64_t NW = (int64_t) starts.size();
+    out->n_windows   = NW;
+    out->chunk_starts = starts;
+
+    // ── stage 2: per-window condition -> flow ──
+    std::vector<std::vector<float>> chunk_latents((size_t) NW);
+    std::vector<float>              prev_latent;  // [128, 172] channel-major
+    int64_t                         prev_len = 0;
+    std::vector<float>              prev_cond;    // [172, 2048] row-major (rows = latent frames)
+
+    std::vector<float> cond;
+    std::vector<float> noise;
+
+    for (int64_t k = 0; k < NW; k++) {
+        const int64_t cs  = starts[(size_t) k];
+        const int64_t ce  = (cs + win_frames < F) ? cs + win_frames : F;
+        const int64_t wf  = ce - cs;
+        out->chunk_frames.push_back(wf);
+
+        if (progress) {
+            progress(MM3GenProgress{ "cond", k, NW, 0, 1 });
+        }
+        const auto t_c = std::chrono::steady_clock::now();
+        int64_t    L   = 0;
+        if (!mm3_cond_encode(m, out->ar.frame_hiddens.data() + (size_t) (cs * LAY * H), wf, cond, &L, err)) {
+            return false;
+        }
+        out->cond_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_c).count();
+        out->window_L.push_back(L);
+
+        // (3a) the previous window's conditioning wins over the overlap.
+        const int64_t overlap = prev_len > 0 ? (prev_len < L ? prev_len : L) : 0;
+        if (overlap > 0) {
+            memcpy(cond.data(), prev_cond.data(), (size_t) (overlap * (int64_t) cc.out_dim) * sizeof(float));
+        }
+        out->window_overlap.push_back(overlap);
+
+        // noise: replayed or seed-derived.
+        const int64_t NN = CH * L;
+        bool          forced = false;
+        if ((int64_t) req.forced_noise.size() > k && (int64_t) req.forced_noise[(size_t) k].size() == NN) {
+            noise  = req.forced_noise[(size_t) k];
+            forced = true;
+        } else {
+            mm3_fill_noise(req.seed, k, noise, NN);
+        }
+        out->forced_noise_used.push_back(forced ? 1 : 0);
+
+        if (progress) {
+            progress(MM3GenProgress{ "flow", k, NW, 0, req.steps });
+        }
+        MM3FlowStats fstats;
+        std::vector<float> lat;
+        auto on_step = [&](int i, int n) {
+            if (progress) {
+                progress(MM3GenProgress{ "flow", k, NW, i, n });
+            }
+        };
+        if (!mm3_flow_sample_chunk(m, noise.data(), cond.data(), L, req.steps, req.cfg_flow, overlap,
+                                   overlap > 0 ? prev_latent.data() : nullptr, prev_len, lat, &fstats, on_step, err)) {
+            return false;
+        }
+        out->flow_ms += fstats.total_ms;
+        out->flow_forwards += fstats.forwards;
+        out->dit_compute_bytes = fstats.compute_bytes;
+
+        // (3) carry: latents[L-344 : L-172] and the matching condition rows.
+        const int64_t ostart = L - MM3_CARRY_SPAN_LATENTS > 0 ? L - MM3_CARRY_SPAN_LATENTS : 0;
+        const int64_t oend   = L - MM3_OVERLAP_LATENTS > ostart ? L - MM3_OVERLAP_LATENTS : ostart;
+        prev_len             = oend - ostart;
+        prev_latent.assign((size_t) (CH * prev_len), 0.0f);
+        for (int64_t c = 0; c < CH; c++) {
+            memcpy(prev_latent.data() + c * prev_len, lat.data() + c * L + ostart, (size_t) prev_len * sizeof(float));
+        }
+        prev_cond.assign((size_t) (prev_len * (int64_t) cc.out_dim), 0.0f);
+        memcpy(prev_cond.data(), cond.data() + ostart * (int64_t) cc.out_dim,
+               (size_t) (prev_len * (int64_t) cc.out_dim) * sizeof(float));
+
+        chunk_latents[(size_t) k] = std::move(lat);
+    }
+
+    // ── stage 3: vocode + stitch (fact 4) ──
+    std::vector<std::vector<float>> wavs((size_t) NW);
+    const auto t_v = std::chrono::steady_clock::now();
+    for (int64_t k = 0; k < NW; k++) {
+        if (progress) {
+            progress(MM3GenProgress{ "vocode", k, NW, 0, 1 });
+        }
+        if (!mm3_vocoder_decode(m, chunk_latents[(size_t) k].data(), out->window_L[(size_t) k], wavs[(size_t) k],
+                                err)) {
+            return false;
+        }
+    }
+    out->voc_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_v).count();
+
+    if (progress) {
+        progress(MM3GenProgress{ "stitch", -1, NW, 0, 1 });
+    }
+
+    std::vector<int64_t> keep_left((size_t) NW), keep_len((size_t) NW);
+    int64_t              total = 0;
+    for (int64_t k = 0; k < NW; k++) {
+        const int64_t T     = out->window_L[(size_t) k] * UP;
+        const int64_t left  = k == 0 ? 0 : (int64_t) MM3_CROP_LEFT_LATENTS * UP;
+        const int64_t right = k == NW - 1 ? 0 : (int64_t) MM3_CROP_RIGHT_LATENTS * UP;
+        int64_t       len   = T - left - right;
+        if (len < 0) {
+            len = 0;
+        }
+        keep_left[(size_t) k] = left;
+        keep_len[(size_t) k]  = len;
+        total += len;
+    }
+
+    out->audio.assign((size_t) (2 * total), 0.0f);
+    out->n_samples = total;
+    int64_t at = 0;
+    for (int64_t k = 0; k < NW; k++) {
+        const int64_t T = out->window_L[(size_t) k] * UP;
+        for (int ch = 0; ch < 2; ch++) {
+            memcpy(out->audio.data() + (int64_t) ch * total + at,
+                   wavs[(size_t) k].data() + (int64_t) ch * T + keep_left[(size_t) k],
+                   (size_t) keep_len[(size_t) k] * sizeof(float));
+        }
+        at += keep_len[(size_t) k];
+    }
+
+    double sum_sq = 0.0;
+    for (float & v : out->audio) {
+        if (std::isnan(v) || std::isinf(v)) {
+            out->has_nan = true;
+            v            = 0.0f;
+            continue;
+        }
+        if (v > 1.0f) {
+            v = 1.0f;
+        } else if (v < -1.0f) {
+            v = -1.0f;
+        }
+        const float a = std::fabs(v);
+        if (a > out->peak) {
+            out->peak = a;
+        }
+        sum_sq += (double) v * (double) v;
+    }
+    out->rms = out->audio.empty() ? 0.0 : std::sqrt(sum_sq / (double) out->audio.size());
+
+    if (req.keep_window_latents) {
+        out->window_latents = std::move(chunk_latents);
+    }
+
+    out->total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_all).count();
+    if (progress) {
+        progress(MM3GenProgress{ "done", -1, NW, NW, NW });
+    }
+
+    fprintf(stderr,
+            "[MM3-Pipe] %lld frames -> %lld window(s) -> %lld samples/ch (%.2fs @ %d Hz) | "
+            "AR %.0f ms, cond %.0f ms, flow %.0f ms, voc %.0f ms, total %.0f ms\n",
+            (long long) F, (long long) NW, (long long) total,
+            (double) total / (double) (out->sample_rate > 0 ? out->sample_rate : 1), out->sample_rate, out->ar_ms,
+            out->cond_ms, out->flow_ms, out->voc_ms, out->total_ms);
+    return true;
+}

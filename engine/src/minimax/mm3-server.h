@@ -26,11 +26,15 @@
 //                         latent-rate DiT conditioning out
 //   POST /mm3/lm-plan     the AR planning stage end to end: prompt (or token ids)
 //                         in -> RVQ codes + the [F, 8, 4096] conditioning block
+//   POST /mm3/synth-e2e   BRING-UP: the WHOLE pipeline — prompt in, WAV out.
+//                         AR plan -> per-window (condition -> flow with overlap
+//                         blending) -> vocode -> stitch (mm3-pipeline.h).
 //
-// SCOPE: residency, metadata, the standalone vocoder, the standalone flow stage,
-// and stage 1 (the AR planner) end to end. There is no /mm3/synth yet — the
-// chunk-overlap orchestration that joins stage 1 to stage 2 arrives in a later
-// increment.
+// SCOPE: residency, metadata, the standalone modules, and now the assembled
+// pipeline. /mm3/synth-e2e is a BRING-UP endpoint, not the production path: it
+// does minutes of GPU work on an httplib thread. The production /mm3/synth must
+// go through the existing job queue like /synth does, so MM3 compute shares the
+// one GPU worker rather than racing the ACE pipeline.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
 // these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
@@ -46,6 +50,7 @@
 #include "mm3-dit-graph.h"
 #include "mm3-lm-graph.h"
 #include "mm3-model.h"
+#include "mm3-pipeline.h"
 #include "mm3-tokenizer.h"
 #include "mm3-vocoder-graph.h"
 
@@ -54,7 +59,10 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <vector>
 
@@ -1187,6 +1195,319 @@ static void mm3_handle_lm_plan(const httplib::Request & req, httplib::Response &
     }
 }
 
+static std::string mm3_json_str(yyjson_val * root, const char * key) {
+    yyjson_val * v = root ? yyjson_obj_get(root, key) : nullptr;
+    return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v), yyjson_get_len(v)) : std::string();
+}
+
+static double mm3_json_f64(yyjson_val * root, const char * key, double dflt) {
+    yyjson_val * v = root ? yyjson_obj_get(root, key) : nullptr;
+    return (v && yyjson_is_num(v)) ? yyjson_get_real(v) : dflt;
+}
+
+// Slurp a raw little-endian binary blob. Used only by the parity-replay path of
+// /mm3/synth-e2e: the fixture noise blocks are 352 kB each, which is 470 kB of
+// base64 per window in a JSON body — a path is the sane wire format for a
+// bring-up endpoint that only ever runs against local files.
+static bool mm3_read_blob(const std::string & path, std::vector<char> * out, std::string * err) {
+    FILE * f = fopen(path.c_str(), "rb");
+    if (!f) {
+        if (err) {
+            *err = "cannot open " + path;
+        }
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    const long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) {
+        fclose(f);
+        if (err) {
+            *err = "cannot size " + path;
+        }
+        return false;
+    }
+    out->resize((size_t) n);
+    const size_t got = n > 0 ? fread(out->data(), 1, (size_t) n, f) : 0;
+    fclose(f);
+    if (got != (size_t) n) {
+        if (err) {
+            *err = "short read on " + path;
+        }
+        return false;
+    }
+    return true;
+}
+
+// POST /mm3/synth-e2e[?dump_latents=1]
+//
+// THE ASSEMBLY, end to end: prompt -> AR plan -> per-window (condition encode ->
+// overlap-blended flow sampling) -> vocode -> stitch -> 16-bit stereo WAV.
+//
+// BODY (JSON):
+//   prompt          the FULLY ASSEMBLED prompt template (as /mm3/lm-plan).
+//   ids_cond,       explicit token id rows; win over `prompt`. `ids_uncond` may
+//   ids_uncond      be omitted and is derived by the 3-token CFG mask rule.
+//   max_frames      emitted AR frames (default 300 = 12 s at 25 fps).
+//   seed            noise + sampling seed (default 42).
+//   steps           Euler steps per window (default: the checkpoint's 30).
+//   cfg_flow        flow CFG scale (default: the checkpoint's 1.7).
+//
+//   PARITY REPLAY (all optional; any subset):
+//   forced_semantic / forced_acoustic          inline int arrays, as /mm3/lm-plan
+//   forced_semantic_file / forced_acoustic_file  raw i32 blobs instead
+//                                              (fixtures codes_{semantic,acoustic}_all.bin)
+//   forced_noise_files  array of paths, one per window, each a raw f32
+//                       [128, L] channel-major block. An empty string (or a
+//                       missing/short entry) falls back to the seeded
+//                       derivation for that window, so window 0 alone is legal.
+//   dump_dir            where ?dump_latents=1 writes (default %TEMP%/mm3-e2e).
+//
+// QUERY:
+//   dump_latents=1  ALSO write, into dump_dir: `w{k}_latents_final.bin`
+//                   ([128, L] f32 channel-major, per window, post overlap
+//                   restore — directly comparable to the fixtures'
+//                   flow_w{k}_latents_final.bin) and `audio_f32.bin`
+//                   ([2, T] planar f32 — comparable to final_audio.bin without
+//                   the WAV's 16-bit quantisation).
+//
+// RESPONSE: audio/wav (16-bit stereo at mm3.voc.sampling_rate), with the run's
+// shape and timings in X-MM3-* headers.
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_synth_e2e(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return;
+    }
+
+    yyjson_doc * doc  = req.body.empty() ? nullptr : yyjson_read(req.body.data(), req.body.size(), 0);
+    yyjson_val * root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!req.body.empty() && (!root || !yyjson_is_obj(root))) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        mm3_json_error(res, 400, "body must be a JSON object");
+        return;
+    }
+    struct DocGuard {
+        yyjson_doc * d;
+        ~DocGuard() {
+            if (d) {
+                yyjson_doc_free(d);
+            }
+        }
+    } guard{ doc };
+
+    const MM3LmConfig & lc  = g_mm3.lm_cfg;
+    const int64_t       NCB = (int64_t) lc.num_codebooks - 1;
+
+    MM3GenRequest gr;
+    gr.prompt     = mm3_json_str(root, "prompt");
+    gr.max_frames = mm3_json_i64(root, "max_frames", 300);
+    gr.seed       = (uint64_t) mm3_json_i64(root, "seed", 42);
+    gr.steps      = (int) mm3_json_i64(root, "steps", g_mm3.synth_cfg.flow.steps ? g_mm3.synth_cfg.flow.steps : 30);
+    gr.cfg_flow   = (float) mm3_json_f64(root, "cfg_flow", g_mm3.synth_cfg.flow.cfg_scale > 0.0f
+                                                               ? (double) g_mm3.synth_cfg.flow.cfg_scale
+                                                               : 1.7);
+    gr.keep_window_latents = req.has_param("dump_latents") && req.get_param_value("dump_latents") != "0";
+
+    bool have_cond = false, have_uncond = false;
+    if (!mm3_json_int_array(root, "ids_cond", &gr.ids_cond, &have_cond) ||
+        !mm3_json_int_array(root, "ids_uncond", &gr.ids_uncond, &have_uncond)) {
+        mm3_json_error(res, 400, "ids_cond / ids_uncond must be arrays of integers");
+        return;
+    }
+
+    // ── forced codes: inline arrays or raw i32 blobs ──
+    bool has_sem = false, has_ac = false;
+    if (!mm3_json_int_array(root, "forced_semantic", &gr.forced_semantic, &has_sem) ||
+        !mm3_json_int_array(root, "forced_acoustic", &gr.forced_acoustic, &has_ac)) {
+        mm3_json_error(res, 400, "forced_semantic / forced_acoustic must be arrays of integers");
+        return;
+    }
+    const std::string sem_file = mm3_json_str(root, "forced_semantic_file");
+    const std::string ac_file  = mm3_json_str(root, "forced_acoustic_file");
+    std::string       ferr;
+    if (!sem_file.empty()) {
+        std::vector<char> blob;
+        if (!mm3_read_blob(sem_file, &blob, &ferr)) {
+            mm3_json_error(res, 400, ferr);
+            return;
+        }
+        gr.forced_semantic.assign((const int32_t *) blob.data(),
+                                  (const int32_t *) (blob.data() + (blob.size() / 4) * 4));
+        has_sem = true;
+    }
+    if (!ac_file.empty()) {
+        std::vector<char> blob;
+        if (!mm3_read_blob(ac_file, &blob, &ferr)) {
+            mm3_json_error(res, 400, ferr);
+            return;
+        }
+        gr.forced_acoustic.assign((const int32_t *) blob.data(),
+                                  (const int32_t *) (blob.data() + (blob.size() / 4) * 4));
+        has_ac = true;
+    }
+    if (has_sem != has_ac) {
+        mm3_json_error(res, 400, "forced replay needs BOTH the semantic and the acoustic codes");
+        return;
+    }
+    if (has_sem && (int64_t) gr.forced_acoustic.size() != (int64_t) gr.forced_semantic.size() * NCB) {
+        char buf[192];
+        snprintf(buf, sizeof(buf), "forced_acoustic has %zu entries, expected %lld (= %zu iterations * %lld)",
+                 gr.forced_acoustic.size(), (long long) ((int64_t) gr.forced_semantic.size() * NCB),
+                 gr.forced_semantic.size(), (long long) NCB);
+        mm3_json_error(res, 400, buf);
+        return;
+    }
+
+    // ── forced noise: one raw f32 blob per window ──
+    yyjson_val * nf = root ? yyjson_obj_get(root, "forced_noise_files") : nullptr;
+    if (nf) {
+        if (!yyjson_is_arr(nf)) {
+            mm3_json_error(res, 400, "forced_noise_files must be an array of paths");
+            return;
+        }
+        yyjson_val *    v;
+        yyjson_arr_iter it;
+        yyjson_arr_iter_init(nf, &it);
+        while ((v = yyjson_arr_iter_next(&it))) {
+            if (!yyjson_is_str(v)) {
+                mm3_json_error(res, 400, "forced_noise_files must be an array of paths");
+                return;
+            }
+            const std::string p(yyjson_get_str(v), yyjson_get_len(v));
+            if (p.empty()) {
+                gr.forced_noise.emplace_back();  // this window derives its own
+                continue;
+            }
+            std::vector<char> blob;
+            if (!mm3_read_blob(p, &blob, &ferr)) {
+                mm3_json_error(res, 400, ferr);
+                return;
+            }
+            gr.forced_noise.emplace_back((const float *) blob.data(),
+                                         (const float *) (blob.data() + (blob.size() / 4) * 4));
+        }
+    }
+
+    // The job-queue integration point, exercised here as a stderr trace. A
+    // production /mm3/synth forwards these into the job progress channel
+    // instead; this endpoint has nowhere to send them but the engine log, and
+    // an unexercised callback is an unproven callback.
+    int64_t       last_pct = -1;
+    std::string   last_key;
+    MM3ProgressCb progress = [&](const MM3GenProgress & p) {
+        const std::string key = std::string(p.stage) + "/" + std::to_string((long long) p.window);
+        const int64_t     pct = p.n_steps > 0 ? (p.step * 100 / p.n_steps) : 0;
+        if (key != last_key) {
+            last_key = key;
+            last_pct = -1;
+        } else if (pct / 10 == last_pct / 10) {
+            return;
+        }
+        last_pct = pct;
+        char where[48] = "";
+        if (p.window >= 0) {
+            snprintf(where, sizeof(where), " window %lld/%lld", (long long) (p.window + 1), (long long) p.n_windows);
+        }
+        fprintf(stderr, "[MM3-Pipe] %s%s %lld/%lld\n", p.stage, where, (long long) p.step, (long long) p.n_steps);
+    };
+
+    MM3GenResult r;
+    std::string  err;
+    if (!mm3_generate(g_mm3, gr, &g_mm3_tokenizer, progress, &r, &err)) {
+        mm3_json_error(res, 500, err.empty() ? "MM3 generation failed" : err);
+        return;
+    }
+
+    // ── optional debugging dump ──
+    std::string dump_dir;
+    if (gr.keep_window_latents) {
+        dump_dir = mm3_json_str(root, "dump_dir");
+        if (dump_dir.empty()) {
+            const char * tmp = std::getenv("TEMP");
+            dump_dir         = std::string(tmp ? tmp : ".") + "/mm3-e2e";
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(dump_dir, ec);
+        auto write_f32 = [&](const std::string & name, const std::vector<float> & v) {
+            const std::string path = dump_dir + "/" + name;
+            FILE *            f    = fopen(path.c_str(), "wb");
+            if (!f) {
+                fprintf(stderr, "[MM3-Pipe] dump: cannot write %s\n", path.c_str());
+                return;
+            }
+            fwrite(v.data(), sizeof(float), v.size(), f);
+            fclose(f);
+        };
+        for (size_t k = 0; k < r.window_latents.size(); k++) {
+            char name[64];
+            snprintf(name, sizeof(name), "w%zu_latents_final.bin", k);
+            write_f32(name, r.window_latents[k]);
+        }
+        write_f32("audio_f32.bin", r.audio);
+        fprintf(stderr, "[MM3-Pipe] dump: %zu window latent blocks + audio_f32.bin -> %s\n", r.window_latents.size(),
+                dump_dir.c_str());
+    }
+
+    char hdr[128];
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.frames);
+    res.set_header("X-MM3-Frames", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.n_windows);
+    res.set_header("X-MM3-Windows", hdr);
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) r.n_samples);
+    res.set_header("X-MM3-Samples", hdr);
+    snprintf(hdr, sizeof(hdr), "%d", r.sample_rate);
+    res.set_header("X-MM3-Sample-Rate", hdr);
+    snprintf(hdr, sizeof(hdr), "%.4f", r.rms);
+    res.set_header("X-MM3-Rms", hdr);
+    snprintf(hdr, sizeof(hdr), "%.4f", (double) r.peak);
+    res.set_header("X-MM3-Peak", hdr);
+    res.set_header("X-MM3-Nan", r.has_nan ? "1" : "0");
+    res.set_header("X-MM3-Eos", r.ar.eos_hit ? "1" : "0");
+    snprintf(hdr, sizeof(hdr), "%.1f", r.total_ms);
+    res.set_header("X-MM3-Ms", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.ar_ms);
+    res.set_header("X-MM3-Ms-Ar", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.cond_ms);
+    res.set_header("X-MM3-Ms-Cond", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.flow_ms);
+    res.set_header("X-MM3-Ms-Flow", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", r.voc_ms);
+    res.set_header("X-MM3-Ms-Voc", hdr);
+    snprintf(hdr, sizeof(hdr), "%.3f", r.frames ? (r.ar_ms / (double) r.frames) : 0.0);
+    res.set_header("X-MM3-Ms-Ar-Frame", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", (double) r.dit_compute_bytes / (1024.0 * 1024.0));
+    res.set_header("X-MM3-Dit-Compute-MB", hdr);
+    if (!dump_dir.empty()) {
+        res.set_header("X-MM3-Dump-Dir", dump_dir.c_str());
+    }
+    {
+        std::string ov;
+        for (size_t k = 0; k < r.window_overlap.size(); k++) {
+            ov += (k ? "," : "") + std::to_string((long long) r.window_overlap[k]);
+        }
+        res.set_header("X-MM3-Overlaps", ov.c_str());
+        std::string ls;
+        for (size_t k = 0; k < r.window_L.size(); k++) {
+            ls += (k ? "," : "") + std::to_string((long long) r.window_L[k]);
+        }
+        res.set_header("X-MM3-Window-Latents", ls.c_str());
+        std::string fn;
+        for (size_t k = 0; k < r.forced_noise_used.size(); k++) {
+            fn += (k ? "," : "") + std::to_string((long long) r.forced_noise_used[k]);
+        }
+        res.set_header("X-MM3-Forced-Noise", fn.c_str());
+    }
+
+    std::string wav = audio_encode_wav_s16(r.audio.data(), (int) r.n_samples, r.sample_rate);
+    res.set_content(wav, "audio/wav");
+}
+
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
@@ -1201,4 +1522,5 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Post("/mm3/depth-frame", mm3_handle_depth_frame);
     svr.Post("/mm3/cond-encode", mm3_handle_cond_encode);
     svr.Post("/mm3/lm-plan", mm3_handle_lm_plan);
+    svr.Post("/mm3/synth-e2e", mm3_handle_synth_e2e);
 }
