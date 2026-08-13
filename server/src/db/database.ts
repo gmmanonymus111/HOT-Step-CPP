@@ -66,6 +66,7 @@ export function initDb(): void {
       dit_model TEXT DEFAULT '',
       generation_params TEXT DEFAULT '{}',
       mastered_audio_url TEXT DEFAULT '',
+      backend TEXT DEFAULT 'ace',
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -310,6 +311,12 @@ export function initDb(): void {
       // no post-processing) for A/B-ing what the DiT adapter contributes.
       check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='noadapter_audio_url'`,
       alter: `ALTER TABLE songs ADD COLUMN noadapter_audio_url TEXT DEFAULT ''`,
+    },
+    {
+      // Which generation backend produced this song ('ace', future: 'minimax-m3', ...).
+      // See docs/plans/multi-backend-architecture.md §3.5.
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='backend'`,
+      alter: `ALTER TABLE songs ADD COLUMN backend TEXT DEFAULT 'ace'`,
     },
   ];
   for (const m of songsMigrations) {

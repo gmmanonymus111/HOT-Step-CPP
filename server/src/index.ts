@@ -43,6 +43,7 @@ import profilesRoutes from './routes/profiles.js';
 import songBuilderRoutes from './routes/songBuilder.js';
 import midiStudioRoutes from './routes/midiStudio.js';
 import trainingRoutes from './routes/training.js';
+import backendsRoutes from './routes/backends.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,6 +98,10 @@ app.use('/api/profiles', profilesRoutes);
 app.use('/api/builder', songBuilderRoutes);
 app.use('/api/midi-studio', midiStudioRoutes);
 app.use('/api/training', trainingRoutes);
+// Mounted at '/api' (not '/api/backends') — the router spells its own full
+// sub-paths (/backends, /backends/active, /capabilities) per the plan's
+// top-level /api/capabilities path (docs/plans/multi-backend-architecture.md §4.2).
+app.use('/api', backendsRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {

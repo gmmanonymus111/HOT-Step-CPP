@@ -1363,14 +1363,14 @@ async function runGeneration(job: GenerationJob): Promise<void> {
         INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
                            duration, bpm, key_scale, time_signature, tags, dit_model,
                            generation_params, mastered_audio_url, latent_url, quality_scores,
-                           noadapter_audio_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           noadapter_audio_url, backend)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         songId, job.userId, title, trackLyrics, style, trackCaption,
         audioUrl, trackDuration, bpm, keyScale, timeSignature,
         JSON.stringify([]), aceReq.synth_model || '', JSON.stringify(trackParams),
         trackMastered, trackLatent, qualityJson,
-        noAdapterUrls[i] || '',
+        noAdapterUrls[i] || '', 'ace',
       );
       songIds.push(songId);
 

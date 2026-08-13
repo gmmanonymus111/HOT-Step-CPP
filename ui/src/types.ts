@@ -55,6 +55,8 @@ export interface Song {
   quality_scores?: string;
   // Cover art subject — custom prompt stored for "Regenerate Cover"
   cover_art_subject?: string;
+  // Generation backend that produced this song ('ace', future: 'minimax-m3', ...)
+  backend?: string;
 }
 
 /** Normalized recent song returned by /api/songs/recent — unified across all modes */

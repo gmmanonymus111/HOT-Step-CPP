@@ -1,0 +1,101 @@
+// backends/types.ts — EngineBackend interface + capability manifest shapes
+//
+// Phase 1 scaffolding (docs/plans/multi-backend-architecture.md §4.1/§4.2).
+// ADDITIVE ONLY: nothing in this file is wired into the generation path yet.
+// The ACE backend module (backends/ace/index.ts) wraps the existing
+// aceClient/aceEngineProcess/engineState modules by delegation — zero
+// behavior change to the live generation flow.
+//
+// `translate()` / `generate()` / `cancel()` are DELIBERATELY NOT part of this
+// interface yet. Per the plan, Phase 1 wraps lifecycle + capabilities +
+// models only; the generation path itself keeps flowing through the existing
+// routes/generate.ts → aceClient chain until a later phase moves it behind
+// this abstraction. Adding them here now would be a same-file no-op that
+// invites someone to half-wire the hot path before the plan calls for it.
+
+import type { PluginParamSchema } from '../aceClient.js';
+
+/** Which job queue a backend's generations serialize against (plan §3.2/§4.4). */
+export type ResourcePool = 'gpu' | 'remote';
+
+export type BackendLifecycleStatus = 'down' | 'starting' | 'ready' | 'suspended' | 'crashed';
+
+export interface EngineBackendLifecycle {
+  start(): Promise<void>;
+  /** Clean shutdown (frees VRAM/resources). */
+  stop(): Promise<void>;
+  status(): BackendLifecycleStatus;
+}
+
+/** Which core (model-agnostic) params the active backend honors, and their
+ *  ranges. Mirrors the "~15 field" core inventory in plan §3.3. Left open
+ *  (index signature) so a backend can report extra core-ish knobs without a
+ *  type churn every time the set grows. */
+export interface BackendCoreCapabilities {
+  duration: { max: number };
+  bpm: boolean;
+  keyscale: boolean;
+  negativePrompt: boolean;
+  batch: { max: number };
+  seed: boolean;
+  [key: string]: unknown;
+}
+
+/** Gates whole UI regions/studios. Mirrors plan §4.2's feature list. Left
+ *  open (index signature) so new studios/features don't require editing this
+ *  type in lockstep with every backend that gains or lacks them. */
+export interface BackendFeatureCapabilities {
+  lm: boolean;
+  plugins: boolean;
+  adapters: boolean;
+  cover: boolean;
+  repaint: boolean;
+  lego: boolean;
+  extract: boolean;
+  streaming: boolean;
+  training: boolean;
+  midi: boolean;
+  stems: boolean;
+  understand: boolean;
+  conceptSteering: boolean;
+  [key: string]: boolean;
+}
+
+/** GET /api/capabilities response shape (plan §4.2). Shared code must only
+ *  branch on these flags, never on `backend` id, outside this backend's own
+ *  module. */
+export interface BackendCapabilities {
+  backend: string;
+  up: boolean;
+  core: BackendCoreCapabilities;
+  features: BackendFeatureCapabilities;
+  /** Backend-specific knobs, rendered generically by the existing
+   *  PluginControls schema renderer (reuses the Lua plugin param schema —
+   *  plan §4.2, §3.6). */
+  extensions: PluginParamSchema[];
+}
+
+/** Backend-shaped model catalogue. ACE has an {lm,dit,vae,embedding} split;
+ *  other backends may not (plan §4.5: "Music 3 has no lm/dit/vae split to
+ *  show") — hence a generic bucket map rather than a fixed shape. */
+export interface BackendModels {
+  /** e.g. { lm: [...], dit: [...], vae: [...], embedding: [...] } for ACE */
+  buckets: Record<string, string[]>;
+  adapters?: string[];
+  lmAdapters?: string[];
+  defaults?: Record<string, unknown>;
+}
+
+/** A registered generation backend. See file header for what's intentionally
+ *  missing (translate/generate/cancel — later phase). */
+export interface EngineBackend {
+  /** 'ace' | 'minimax-m3' | ... */
+  id: string;
+  displayName: string;
+  /** Which job queue this backend's generations share (plan §3.2). */
+  resourcePool: ResourcePool;
+  lifecycle: EngineBackendLifecycle;
+  /** Cached, cheap — safe to call on every UI render. */
+  capabilities(): Promise<BackendCapabilities>;
+  models(): Promise<BackendModels>;
+}
