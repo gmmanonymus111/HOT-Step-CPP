@@ -20,10 +20,14 @@
 //   POST /mm3/voc-decode  DEBUG: vocoder-only decode, latents in -> WAV out
 //   POST /mm3/dit-forward DEBUG: one flow-DiT forward, latents+cond in -> velocity out
 //   POST /mm3/flow-sample DEBUG: the Euler loop, noise+cond in -> final latents out
+//   POST /mm3/depth-frame DEBUG: one frame of RVQ depth decoding, LM hidden in ->
+//                         7 codes + 7 hiddens + both pre-CFG logit rows out
+//   POST /mm3/cond-encode DEBUG: the condition encoder, fused AR hiddens in ->
+//                         latent-rate DiT conditioning out
 //
-// SCOPE: residency, metadata, the standalone vocoder, and the standalone flow
-// stage. There is no /mm3/synth yet — the LM / depth / cond stages and the
-// chunk-overlap orchestration arrive in later increments.
+// SCOPE: residency, metadata, the standalone vocoder, the standalone flow stage,
+// and the two AR-side modules that feed it. There is no /mm3/synth yet — the LM
+// itself and the chunk-overlap orchestration arrive in later increments.
 //
 // Concurrency: the ACE pipeline runs GPU work on a single worker thread while
 // these handlers run on httplib threads. g_mm3_mutex serialises MM3 load,
@@ -33,6 +37,8 @@
 // /mm3/synth lands it must go through the existing job queue like /synth does,
 // so MM3 compute shares the one GPU worker rather than racing it.
 
+#include "mm3-cond-graph.h"
+#include "mm3-depth-graph.h"
 #include "mm3-dit-graph.h"
 #include "mm3-model.h"
 #include "mm3-vocoder-graph.h"
@@ -352,6 +358,8 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
     // buffers and hold backend references — tear them down first.
     mm3_vocoder_free(&g_mm3_voc);
     mm3_dit_free(&g_mm3_dit);
+    mm3_depth_free(&g_mm3_depth);
+    mm3_cond_free(&g_mm3_cond);
     mm3_unload(&g_mm3);
 
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
@@ -639,6 +647,211 @@ static void mm3_handle_flow_sample(const httplib::Request & req, httplib::Respon
     res.set_content((const char *) latents.data(), latents.size() * sizeof(float), "application/octet-stream");
 }
 
+// Parse a comma-separated int list. Returns false on any malformed entry so a
+// typo in `?forced=` fails loudly instead of silently decoding codebook 0.
+static bool mm3_parse_int_list(const std::string & s, std::vector<int32_t> * out) {
+    out->clear();
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find(',', i);
+        if (j == std::string::npos) {
+            j = s.size();
+        }
+        const std::string tok = s.substr(i, j - i);
+        if (tok.empty()) {
+            return false;
+        }
+        char *          end = nullptr;
+        const long long v   = strtoll(tok.c_str(), &end, 10);
+        if (!end || *end != '\0') {
+            return false;
+        }
+        out->push_back((int32_t) v);
+        if (j == s.size()) {
+            break;
+        }
+        i = j + 1;
+    }
+    return !out->empty();
+}
+
+// POST /mm3/depth-frame?semantic=<code>[&forced=c1,...,c7]
+//
+// One frame of RVQ depth decoding — the AR loop's inner stage, minus the AR loop.
+//
+//   body     2 * 4096 little-endian F32, no framing: the global LM's
+//            last_hidden_state for this iteration, CONDITIONAL row first then
+//            unconditional (the manifest's `cfg_row_order`).
+//   semantic the frame's codebook-0 code in [0, 16384) — the code, NOT the token
+//            id; the vocab offset is applied inside.
+//   forced   optional 7 comma-separated codes. With it the sampler is bypassed
+//            and the graph sees exactly the reference's token sequence, which is
+//            what makes logit parity meaningful (the reference's multinomial draw
+//            is not reproducible outside torch). Without it, greedy argmax.
+//
+// RESPONSE: raw little-endian F32, no framing, three blocks back to back —
+//
+//     [        0 ..  7*1024 )   logits_cond    (7, 1024)  pre-CFG
+//     [   7*1024 .. 14*1024 )   logits_uncond  (7, 1024)  pre-CFG
+//     [  14*1024 .. 14*1024 + 7*4096 )   hidden_states (7, 4096)  cond row
+//
+// = 43008 floats = 172032 bytes at the reference geometry. numpy:
+//
+//     a = np.frombuffer(body, "<f4")
+//     lc, lu, hs = a[:7168].reshape(7,1024), a[7168:14336].reshape(7,1024), a[14336:].reshape(7,4096)
+//
+// The sampled codes come back in the `X-MM3-Codes` header (comma-separated) —
+// a header rather than a JSON envelope so the body stays a bare float array that
+// np.frombuffer can take with no parsing at all.
+//
+// Parity targets: `depth_i0_logits_cond` / `_uncond` / `_hidden_states`, fed with
+// `lm_i0_last_hidden`, semantic = `depth_i0_codes[0]`, forced =
+// `depth_i0_acoustic_codes`. NOTE the AR off-by-one: depth iteration i pairs with
+// `lm_i<i>_last_hidden`, but EMITTED frame 0 is iteration 1 — iteration 0's codes
+// are generated and fed back, yet its hiddens are discarded.
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_depth_frame(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return;
+    }
+
+    const int64_t H  = (int64_t) g_mm3.synth_cfg.depth.embedding_length;
+    const int     NC = (int) g_mm3.synth_cfg.depth.num_codebooks - 1;
+
+    if (!req.has_param("semantic")) {
+        mm3_json_error(res, 400, "missing ?semantic=<codebook-0 code>");
+        return;
+    }
+    const int32_t semantic = (int32_t) strtol(req.get_param_value("semantic").c_str(), nullptr, 10);
+
+    std::vector<int32_t> forced;
+    if (req.has_param("forced")) {
+        if (!mm3_parse_int_list(req.get_param_value("forced"), &forced)) {
+            mm3_json_error(res, 400, "?forced= must be a comma-separated list of integers");
+            return;
+        }
+        if ((int) forced.size() != NC) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "?forced= has %zu codes, expected %d", forced.size(), NC);
+            mm3_json_error(res, 400, buf);
+            return;
+        }
+    }
+
+    const size_t want = (size_t) (2 * H) * sizeof(float);
+    if (req.body.size() != want) {
+        char buf[176];
+        snprintf(buf, sizeof(buf), "body is %zu bytes, expected %zu (= 2 CFG rows * %lld hidden * 4)",
+                 req.body.size(), want, (long long) H);
+        mm3_json_error(res, 400, buf);
+        return;
+    }
+    const float * hid_cond   = (const float *) req.body.data();
+    const float * hid_uncond = hid_cond + H;
+
+    MM3DepthFrame frame;
+    std::string   err;
+    if (!mm3_depth_decode_frame(g_mm3, hid_cond, hid_uncond, semantic, forced.empty() ? nullptr : forced.data(),
+                                &frame, &err)) {
+        mm3_json_error(res, 500, err.empty() ? "depth decode failed" : err);
+        return;
+    }
+
+    std::string codes;
+    for (int i = 0; i < frame.n_codes; i++) {
+        if (i) {
+            codes += ",";
+        }
+        codes += std::to_string(frame.codes[i]);
+    }
+    fprintf(stderr, "[MM3-Depth] Frame: semantic=%d %s -> codes [%s] in %.1f ms\n", semantic,
+            forced.empty() ? "greedy" : "forced", codes.c_str(), frame.ms);
+
+    std::string body;
+    body.reserve((frame.logits_cond.size() + frame.logits_uncond.size() + frame.hiddens.size()) * sizeof(float));
+    body.append((const char *) frame.logits_cond.data(), frame.logits_cond.size() * sizeof(float));
+    body.append((const char *) frame.logits_uncond.data(), frame.logits_uncond.size() * sizeof(float));
+    body.append((const char *) frame.hiddens.data(), frame.hiddens.size() * sizeof(float));
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%.2f", frame.ms);
+    res.set_header("X-MM3-Ms", hdr);
+    res.set_header("X-MM3-Codes", codes);
+    snprintf(hdr, sizeof(hdr), "%d", frame.n_codes);
+    res.set_header("X-MM3-Codebooks", hdr);
+    res.set_content(body, "application/octet-stream");
+}
+
+// POST /mm3/cond-encode?frames=F
+//
+// The condition encoder for one window.
+//
+//   body  F * 8 * 4096 little-endian F32 in torch [1, F, 8*4096] order: frame
+//         slowest, then LAYER, then feature. Layer 0 is the LM's last_hidden,
+//         layers 1..7 the depth decoder's — exactly `cond_in_w0.bin`.
+//
+// RESPONSE: raw little-endian F32, 2048 * L values in torch [1, L, 2048] order —
+// exactly `cond_out_w0.bin`, and exactly what /mm3/dit-forward and
+// /mm3/flow-sample take as their condition block. `X-MM3-Latents` carries L
+// (= int(F * 3.4453125)); the body length determines it too, so the header is a
+// convenience, not the protocol.
+//
+// 503 unless MM3 is warm.
+static void mm3_handle_cond_encode(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    if (!g_mm3.loaded) {
+        mm3_json_error(res, 503, "MiniMax-Music3 is not warm — POST /mm3/warm first");
+        return;
+    }
+    if (!req.has_param("frames")) {
+        mm3_json_error(res, 400, "missing ?frames=<AR frame count>");
+        return;
+    }
+    const int64_t F = strtoll(req.get_param_value("frames").c_str(), nullptr, 10);
+    if (F <= 0 || F > MM3_COND_MAX_FRAMES) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "frames must be in 1..%d", MM3_COND_MAX_FRAMES);
+        mm3_json_error(res, 400, buf);
+        return;
+    }
+
+    const MM3CondConfig & cc   = g_mm3.synth_cfg.cond;
+    const size_t          want = (size_t) ((int64_t) cc.num_layers * (int64_t) cc.hidden_dim * F) * sizeof(float);
+    if (req.body.size() != want) {
+        char buf[208];
+        snprintf(buf, sizeof(buf), "body is %zu bytes, expected %zu (= %lld frames * %u layers * %u hidden * 4)",
+                 req.body.size(), want, (long long) F, cc.num_layers, cc.hidden_dim);
+        mm3_json_error(res, 400, buf);
+        return;
+    }
+
+    std::vector<float> out;
+    int64_t            L = 0;
+    std::string        err;
+    const auto         t0 = std::chrono::steady_clock::now();
+    const bool         ok = mm3_cond_encode(g_mm3, (const float *) req.body.data(), F, out, &L, &err);
+    const double       ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!ok) {
+        mm3_json_error(res, 500, err.empty() ? "condition encode failed" : err);
+        return;
+    }
+
+    fprintf(stderr, "[MM3-Cond] Encoded %lld frames -> %lld latent positions in %.1f ms\n", (long long) F,
+            (long long) L, ms);
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%lld", (long long) L);
+    res.set_header("X-MM3-Latents", hdr);
+    snprintf(hdr, sizeof(hdr), "%.1f", ms);
+    res.set_header("X-MM3-Ms", hdr);
+    res.set_content((const char *) out.data(), out.size() * sizeof(float), "application/octet-stream");
+}
+
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
@@ -650,4 +863,6 @@ static void mm3_register_routes(httplib::Server & svr, const char * models_dir) 
     svr.Post("/mm3/voc-decode", mm3_handle_voc_decode);
     svr.Post("/mm3/dit-forward", mm3_handle_dit_forward);
     svr.Post("/mm3/flow-sample", mm3_handle_flow_sample);
+    svr.Post("/mm3/depth-frame", mm3_handle_depth_frame);
+    svr.Post("/mm3/cond-encode", mm3_handle_cond_encode);
 }
