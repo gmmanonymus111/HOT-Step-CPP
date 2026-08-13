@@ -79,6 +79,12 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 #    pragma GCC diagnostic pop
 #endif
 
+// ── HOT-Step hook: MiniMax-Music3 backend ─────────────────────────────
+// Single include wiring engine/src/minimax/ (mm3-server.h -> mm3-model.h)
+// into the server. Everything MM3 lives in that subtree; the only call site
+// is mm3_register_routes(svr, models_dir) below. Checked by verify-hooks.ps1.
+#include "minimax/mm3-server.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <csignal>
@@ -3360,6 +3366,11 @@ int main(int argc, char ** argv) {
         std::string json = PluginRegistry::instance().to_json();
         res.set_content(json, "application/json");
     });
+
+    // HOT-STEP: MiniMax-Music3 backend — GET /mm3/props, POST /mm3/warm,
+    // POST /mm3/unload. Discovers <models>/mm3/*.gguf and probes their headers.
+    // No-op (routes report available:false) when no MM3 weights are present.
+    mm3_register_routes(svr, models_dir);
 
     // HOT-STEP: GET /vram — GPU memory usage (CUDA only)
     svr.Get("/vram", [](const httplib::Request &, httplib::Response & res) {
