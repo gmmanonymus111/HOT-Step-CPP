@@ -108,12 +108,21 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     endif()
 endif()
 
-list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
-find_package(hip CONFIG QUIET)
+# AMD ROCm/HIP (community-contributed, no CI coverage — see engine/buildhip.sh).
+#
+# GATED ON GGML_HIP DELIBERATELY. The probe must not run on a CUDA build: a
+# Linux box with both SDKs installed would set hip_FOUND, and the global
+# __HIP_PLATFORM_AMD__ then makes src/gpu.h rewrite cudaMemGetInfo ->
+# hipMemGetInfo and link hip::host into a CUDA binary. GGML_HIP is the flag
+# that actually selects the backend, so it is the one to key off.
+if(GGML_HIP)
+    list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+    find_package(hip CONFIG QUIET)
 
-if(hip_FOUND)
-    message(STATUS "building with AMD ROCm support")
-    add_compile_definitions(__HIP_PLATFORM_AMD__)
+    if(hip_FOUND)
+        message(STATUS "building with AMD ROCm support")
+        add_compile_definitions(__HIP_PLATFORM_AMD__)
+    endif()
 endif()
 
 # Disable flash attention (cuda12-volta variant). ggml's mma flash-attention has
