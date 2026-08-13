@@ -115,6 +115,12 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmCfgCutoffRatio: readKey("hs-lmCfgCutoffRatio", 1.0),
   cacheRatio: readKey("hs-cacheRatio", 0),
   shift: readKey("hs-shift", 3.0),
+  // DiT self-attention reach override. PARKED — the UI control is removed and
+  // this is pinned to -1 (= the model's own 128). Deliberately NOT read from
+  // localStorage: anyone who moved the slider while it was exposed still has a
+  // value stored, and reading it back would keep silently applying an override
+  // with no UI left to show or undo it. See docs/plans/attention-drift/.
+  ditSlidingWindow: -1,
   inferMethod: readKey("hs-inferMethod", 'euler'),
   scheduler: readKey("hs-scheduler", 'linear'),
   guidanceMode: readKey("hs-guidanceMode", 'apg'),
@@ -302,6 +308,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setLmCfgCutoffRatio: (v: any) => { set({ lmCfgCutoffRatio: v }); writeKey("hs-lmCfgCutoffRatio", v); },
   setCacheRatio: (v: any) => { set({ cacheRatio: v }); writeKey("hs-cacheRatio", v); },
   setShift: (v: any) => { set({ shift: v }); writeKey("hs-shift", v); },
+  setDitSlidingWindow: (v: any) => { set({ ditSlidingWindow: v }); writeKey("hs-ditSlidingWindow", v); },
   setInferMethod: (v: any) => { set({ inferMethod: v }); writeKey("hs-inferMethod", v); },
   setScheduler: (v: any) => { set({ scheduler: v }); writeKey("hs-scheduler", v); },
   setGuidanceMode: (v: any) => { set({ guidanceMode: v }); writeKey("hs-guidanceMode", v); },
@@ -547,6 +554,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       // placement — which silently dropped trigger words on Create/custom-gen.
       triggerPlacement: triggerWords.length ? triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,
+      // ditSlidingWindow deliberately not sent while the feature is parked, so
+      // requests are byte-identical to pre-feature generations.
       cfgCutoffRatio: s.cfgCutoffRatio < 1.0 ? s.cfgCutoffRatio : undefined,
       lmCfgCutoffRatio: s.lmCfgCutoffRatio < 1.0 ? s.lmCfgCutoffRatio : undefined,
       cacheRatio: s.cacheRatio > 0 ? s.cacheRatio : undefined,

@@ -69,6 +69,7 @@ export interface GlobalParams {
   lmCfgCutoffRatio: number; setLmCfgCutoffRatio: (v: number) => void;
   cacheRatio: number; setCacheRatio: (v: number) => void;
   shift: number; setShift: (v: number) => void;
+  ditSlidingWindow: number; setDitSlidingWindow: (v: number) => void;
   inferMethod: string; setInferMethod: (v: string) => void;
   scheduler: string; setScheduler: (v: string) => void;
   guidanceMode: string; setGuidanceMode: (v: string) => void;

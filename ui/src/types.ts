@@ -128,6 +128,9 @@ export interface GenerationParams {
   lmCfgCutoffRatio?: number;
   cacheRatio?: number;
   shift: number;
+  /** DiT self-attention window in tokens for the 16 windowed layers.
+   *  Omitted/-1 = the model's own 128 (±10.2 s); 0 = full attention. */
+  ditSlidingWindow?: number;
   inferMethod: string;
   scheduler: string;
   guidanceMode: string;

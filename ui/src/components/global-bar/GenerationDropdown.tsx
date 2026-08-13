@@ -168,6 +168,14 @@ export const GenerationDropdown: React.FC = () => {
         )}
       </div>
 
+      {/* Attention Reach (DiT sliding-window override) — UI REMOVED, PARKED.
+          The engine parameter still exists and still defaults to the model's own
+          128; it is simply not exposed. Widening it broke every generation that
+          used a heavily-converged LM planner adapter, and the cause was never
+          identified. Investigation, rig and full results:
+          docs/plans/attention-drift/. To resume, restore this control — the
+          store field, context type and translateParams mapping are all intact. */}
+
       {/* Solver */}
       <div>
         <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">{t('gen.solver')}</label>
