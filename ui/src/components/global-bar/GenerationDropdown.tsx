@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 // Seed input uses local string state to avoid parseInt("-") → NaN → -1 snap-back
 import { useTranslation } from 'react-i18next';
-import { RotateCcw, ChevronDown, Music2, Upload, Trash2, Zap, Save } from 'lucide-react';
+import { RotateCcw, ChevronDown, Music2, Upload, Trash2, Zap } from 'lucide-react';
 import { useGlobalParams, useGlobalParamsStore } from '../../context/GlobalParamsContext';
 import { Slider } from '../shared/Slider';
 import { ToggleSwitch } from './BarSection';
@@ -16,7 +16,7 @@ import { masteringApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { usePluginRegistry } from '../../hooks/usePluginRegistry';
 import { PluginControls } from './PluginControls';
-import { SeedManagerDrawer } from './SeedManagerDrawer';
+import { SeedControl } from './SeedControl';
 
 const selectClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors cursor-pointer";
 const inputClasses = "w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-zinc-800 dark:text-zinc-200 focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20 outline-none transition-colors";
@@ -47,7 +47,6 @@ export const GenerationDropdown: React.FC = () => {
   interface ReferenceTrack { name: string; size: number; url: string; }
   const [timbreRefs, setTimbreRefs] = useState<ReferenceTrack[]>([]);
   const [timbreUploading, setTimbreUploading] = useState(false);
-  const [seedDrawerOpen, setSeedDrawerOpen] = useState(false);
 
   useEffect(() => {
     masteringApi.listReferences()
@@ -798,54 +797,14 @@ export const GenerationDropdown: React.FC = () => {
         )}
       </div>
 
-      {/* Seed */}
-      <div className="relative">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
-            <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Generation Seed</label>
-            <button onClick={() => setSeedDrawerOpen(true)} title="Seed Manager"
-              className="text-zinc-500 hover:text-amber-400 transition-colors">
-              <Save size={12} />
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-zinc-500">Random</span>
-            <ToggleSwitch checked={gp.randomSeed} onChange={gp.setRandomSeed} accentColor="sky" />
-          </div>
-        </div>
-        {!gp.randomSeed && (
-          <SeedInput value={gp.seed} onChange={gp.setSeed} className={inputClasses} />
-        )}
-        <p className="text-[10px] text-zinc-500 mt-1">
-          Drives audio synthesis (DiT). Varies per track during batch generation. See LM Seed for caption/lyrics/code sampling.
-        </p>
-        <SeedManagerDrawer
-          isOpen={seedDrawerOpen}
-          onClose={() => setSeedDrawerOpen(false)}
-          currentSeed={gp.seed}
-          onLoad={(seed) => { gp.setSeed(seed); gp.setRandomSeed(false); setSeedDrawerOpen(false); }}
-          onLoadRandom={(seed) => { gp.setSeed(seed); gp.setRandomSeed(false); }}
-        />
-      </div>
+      {/* Seed — shared with the generic backend cluster (SeedControl.tsx) so
+          the two can never drift apart. */}
+      <SeedControl inputClasses={inputClasses} />
 
       {/* Batch */}
       <Slider label="Batch Size" value={gp.batchSize}
         onChange={gp.setBatchSize} min={1} max={9} step={1} />
     </div>
-  );
-};
-
-/** Seed input with local string buffer — prevents parseInt("-") snap-back */
-const SeedInput: React.FC<{ value: number; onChange: (v: number) => void; className: string }> = ({ value, onChange, className }) => {
-  const [local, setLocal] = useState(String(value));
-  useEffect(() => { setLocal(String(value)); }, [value]);
-  const commit = () => { onChange(parseInt(local) || 42); };
-  return (
-    <input type="number" className={className} value={local}
-      onChange={e => setLocal(e.target.value)}
-      onBlur={commit}
-      onKeyDown={e => { if (e.key === 'Enter') commit(); }}
-    />
   );
 };
 

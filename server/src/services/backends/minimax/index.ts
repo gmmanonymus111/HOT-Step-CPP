@@ -166,9 +166,36 @@ async function capabilities(): Promise<BackendCapabilities> {
       understand: false,
       conceptSteering: false,
     },
-    // cfg_flow / steps exist on the wire but are checkpoint-fixed sampling
-    // contract, not user knobs (plan §1.5). Nothing to render yet.
-    extensions: [],
+    // cfg_flow / steps were held back as "checkpoint-fixed sampling contract".
+    // That was the right call for a bring-up, but the flow stage is ~56% of
+    // wall time on a full-length track, and `steps` is a direct linear dial on
+    // it — the single most useful speed/quality control MM3 has. Rendered
+    // generically by the existing PluginControls schema renderer.
+    extensions: [
+      {
+        key: 'mm3Steps',
+        type: 'slider',
+        label: 'Flow Steps',
+        hint: 'Euler steps per window. The checkpoint default is 30; lower is '
+            + 'proportionally faster (the flow stage dominates long renders) at '
+            + 'some cost in detail.',
+        default: 30,
+        min: 8,
+        max: 60,
+        step: 1,
+      },
+      {
+        key: 'mm3CfgFlow',
+        type: 'slider',
+        label: 'Flow Guidance (CFG)',
+        hint: 'Checkpoint default 1.7. Higher follows the caption harder; '
+            + 'lower is looser. 1.0 disables guidance.',
+        default: 1.7,
+        min: 1.0,
+        max: 5.0,
+        step: 0.1,
+      },
+    ],
   };
 }
 

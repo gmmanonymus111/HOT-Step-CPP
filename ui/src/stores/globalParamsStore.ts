@@ -127,6 +127,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   guidanceMode: readKey("hs-guidanceMode", 'apg'),
   seed: readKey("hs-seed", 42),
   randomSeed: readKey("hs-randomSeed", true),
+  // Backend-declared knobs (capabilities().extensions), keyed by the schema's
+  // `key`. One persisted bag rather than a named field per knob: the whole
+  // point of the extension mechanism is that a backend can add a control
+  // WITHOUT a matching edit here. Spread into the request payload below.
+  backendParams: readKey("hs-backendParams", {} as Record<string, unknown>),
   // LM Seed — independent of the DiT/generation seed above, unless tied
   // via lmSeedFollowsDit (default true = original tied behavior).
   lmSeed: readKey("hs-lmSeed", 42),
@@ -314,6 +319,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setScheduler: (v: any) => { set({ scheduler: v }); writeKey("hs-scheduler", v); },
   setGuidanceMode: (v: any) => { set({ guidanceMode: v }); writeKey("hs-guidanceMode", v); },
   setSeed: (v: any) => { set({ seed: v }); writeKey("hs-seed", v); },
+  setBackendParam: (key: string, v: any) => {
+    const next = { ...(get().backendParams || {}), [key]: v };
+    set({ backendParams: next });
+    writeKey("hs-backendParams", next);
+  },
   setRandomSeed: (v: any) => {
     set({ randomSeed: v }); writeKey("hs-randomSeed", v);
     // When disabling random, snap seed away from -1 (the random sentinel)
@@ -510,6 +520,11 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       : s.lmCodesStrength;
 
     return {
+      // Backend-declared knobs (capabilities().extensions), flattened alongside
+      // the core params. Spread FIRST on purpose: later properties win in an
+      // object literal, so a backend can never shadow a core field by picking a
+      // colliding key.
+      ...(s.backendParams || {}),
       // Multi-backend: which engine backend this request targets. Read directly
       // from backendStore (not a globalParamsStore field) so it's always the
       // live active id; defaults to 'ace' for installs with no second backend

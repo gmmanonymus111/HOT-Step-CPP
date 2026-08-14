@@ -128,8 +128,20 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
       lyrics,
       duration: Math.round(duration * 1000) / 1000,
       seed,
-      // cfg_flow / steps deliberately omitted: checkpoint-fixed sampling
-      // contract (1.7 / 30), not user knobs in v1.
+      // Surfaced as capability `extensions` (backends/minimax/index.ts) rather
+      // than left checkpoint-fixed: the flow stage is the majority of wall time
+      // on a full-length render and `steps` is a linear dial on it. Both are
+      // omitted from the wire when unset so the engine keeps applying the
+      // checkpoint defaults (30 / 1.7) — an out-of-range value is dropped here
+      // rather than sent for the engine to reject mid-job.
+      ...(Number.isFinite(Number(params.mm3Steps)) && Number(params.mm3Steps) >= 8 &&
+          Number(params.mm3Steps) <= 60
+            ? { steps: Math.round(Number(params.mm3Steps)) }
+            : {}),
+      ...(Number.isFinite(Number(params.mm3CfgFlow)) && Number(params.mm3CfgFlow) >= 1.0 &&
+          Number(params.mm3CfgFlow) <= 5.0
+            ? { cfg_flow: Number(params.mm3CfgFlow) }
+            : {}),
       get_wav_bits: 16,
     },
     notes,

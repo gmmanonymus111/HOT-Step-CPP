@@ -17,6 +17,7 @@ import { BackendModelsDropdown, BackendModelsBadge } from './BackendModelsDropdo
 import { BackendToggle } from './BackendToggle';
 import { AdaptersDropdown, AdaptersBadge } from './AdaptersDropdown';
 import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
+import { BackendGenerationDropdown, BackendGenerationBadge } from './BackendGenerationDropdown';
 import { LmThinkingDropdown, LmThinkingBadge } from './LmThinkingDropdown';
 import { PostProcessingDropdown, PostProcessingBadge } from './PostProcessingDropdown';
 import { VramIndicator } from '../shared/VramIndicator';
@@ -90,7 +91,18 @@ export const GlobalParamBar: React.FC = () => {
   const adaptersSupported = !capabilities || capabilities.features.adapters;
   const postProcessingSupported = !capabilities || capabilities.features.plugins;
 
-  const showGeneration = !capabilities || capabilities.features.plugins;
+  // Generation is NOT only plugins — the seed lives here, and seed is
+  // backend-agnostic. Gating the whole cluster on `plugins` left MiniMax-Music3
+  // with no way to change the seed, so every render of a given prompt came back
+  // identical. Show it whenever the backend has plugins, a seed, or any
+  // declared extension knob; the contents pick themselves below.
+  const backendHasGenControls = !!capabilities &&
+    (capabilities.core?.seed !== false || (capabilities.extensions?.length ?? 0) > 0);
+  const showGeneration = !capabilities || capabilities.features.plugins || backendHasGenControls;
+  // ACE's dropdown is built around the Lua plugin registry; a backend without
+  // it gets the generic seed + declared-extensions cluster instead.
+  const useBackendGenPicker = !!capabilities && !capabilities.features.plugins;
+
   const showLm = !capabilities || capabilities.features.lm;
 
   // ── Auto-select models when engine becomes ready ────────────────
@@ -254,13 +266,13 @@ export const GlobalParamBar: React.FC = () => {
             id="generation"
             label={t('globalBar.generation')}
             icon={<Sliders size={14} />}
-            badge={<GenerationBadge />}
+            badge={useBackendGenPicker ? <BackendGenerationBadge /> : <GenerationBadge />}
             accentColor="sky"
             isOpen={openSection === 'generation'}
             onOpen={() => handleOpen('generation')}
             onClose={() => handleClose('generation')}
           >
-            <GenerationDropdown />
+            {useBackendGenPicker ? <BackendGenerationDropdown /> : <GenerationDropdown />}
           </BarSection>
           </DiscoPulseWrapper>
           )}
