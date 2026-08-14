@@ -63,6 +63,15 @@ export interface BackendFeatureCapabilities {
    *  is natively 44.1 kHz and rate-transparent on its whole-mix path, so it is
    *  not tied to ACE's 48 kHz pipeline. */
   stableStep: boolean;
+  /** Whisper transcription of the rendered audio. Backend-agnostic: whisper-cli
+   *  takes a file path and resamples internally, so it depends on nothing but
+   *  the output existing. */
+  whisper: boolean;
+  /** Lyric timestamps (LRC) derived from the model's own attention during
+   *  generation. ACE reads its DiT's lyric cross-attention; MiniMax-Music3's
+   *  DiT has no cross-attention and never sees lyrics, so this is false there
+   *  until the LM-attention route (MM3_ALIGN_DUMP findings) is wired up. */
+  lyricTimestamps: boolean;
   cover: boolean;
   repaint: boolean;
   lego: boolean;

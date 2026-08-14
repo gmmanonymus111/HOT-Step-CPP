@@ -166,7 +166,7 @@ router.get('/capabilities', async (req, res) => {
       core: { duration: { max: 0 }, bpm: false, keyscale: false, negativePrompt: false, batch: { max: 1 }, seed: false },
       features: {
         models: false, lm: false, plugins: false, adapters: false, postProcess: false,
-        stableStep: false, cover: false, repaint: false,
+        stableStep: false, whisper: false, lyricTimestamps: false, cover: false, repaint: false,
         lego: false, extract: false, streaming: false, training: false, midi: false,
         stems: false, understand: false, conceptSteering: false,
       },

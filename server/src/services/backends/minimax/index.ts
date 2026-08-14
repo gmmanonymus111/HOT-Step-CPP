@@ -161,6 +161,13 @@ async function capabilities(): Promise<BackendCapabilities> {
       // excluded (ACE-VAE coupled) and ride the `plugins` flag above.
       postProcess: true,
       stableStep: true,
+      // Whisper needs nothing but a rendered file — whisper-cli resamples
+      // internally, so it is as valid here as on ACE.
+      whisper: true,
+      // LRC timestamps come from ACE's DiT lyric cross-attention. MM3's DiT
+      // has none and never sees lyrics; the LM-attention route exists (see
+      // MM3_ALIGN_DUMP) but is not wired to lrc_align() yet.
+      lyricTimestamps: false,
       cover: false,
       repaint: false,
       lego: false,

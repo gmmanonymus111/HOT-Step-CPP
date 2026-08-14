@@ -277,6 +277,11 @@ export const PostProcessingDropdown: React.FC = () => {
   // stay. `!capabilities` (still loading) shows everything — ACE's behaviour.
   const aceCoupledOk = !capabilities || capabilities.features.plugins;
   const stableStepOk = !capabilities || capabilities.features.stableStep !== false;
+  // Whisper reads the rendered file and nothing else, so it is valid for any
+  // backend. LRC timestamps are NOT: they come from ACE's DiT lyric
+  // cross-attention, which MiniMax-Music3's DiT does not have.
+  const whisperOk = !capabilities || capabilities.features.whisper !== false;
+  const lrcOk = !capabilities || capabilities.features.lyricTimestamps !== false;
 
   // PP-VAE availability — auto-detect from models directory
   const [ppVaeAvailable, setPpVaeAvailable] = useState(false);
@@ -345,7 +350,8 @@ export const PostProcessingDropdown: React.FC = () => {
 
   return (
     <div className="space-y-2">
-      {/* LRC Subtitle Generation Toggle */}
+      {/* LRC Subtitle Generation Toggle — needs generation-time lyric attention */}
+      {lrcOk && (
       <div className="flex items-center justify-between px-1 py-1.5">
         <div className="flex items-center gap-2">
           <AudioWaveform size={14} className={gp.skipLrc ? 'text-zinc-500' : 'text-sky-400'} />
@@ -356,8 +362,11 @@ export const PostProcessingDropdown: React.FC = () => {
         </div>
         <ToggleSwitch checked={!gp.skipLrc} onChange={v => gp.setSkipLrc(!v)} accentColor="sky" />
       </div>
+      )}
 
-      {/* Whisper Lyrics Transcription */}
+      {/* Whisper Lyrics Transcription — backend-agnostic (whisper-cli reads the
+          rendered file and resamples internally). */}
+      {whisperOk && (
       <Accordion
         icon={<Mic2 size={14} />}
         label="Whisper Lyrics"
@@ -439,9 +448,13 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
-      {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline */}
-      {postprocessPlugins.length > 0 && (
+      {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline.
+          These are Lua plugins that hook ACE's VAE DECODE (md_audio_tiled.lua =
+          "Tiled VAE decode"), so they have nothing to hook on a backend that
+          does not use that VAE. */}
+      {postprocessPlugins.length > 0 && aceCoupledOk && (
         <Accordion
           icon={<Zap size={14} />}
           label="Tiled Decoder"

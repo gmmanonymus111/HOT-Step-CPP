@@ -417,6 +417,54 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       log('WARNING', `[MM3] Post-processing chain failed (non-fatal): ${ppErr?.message || ppErr}`);
     }
 
+    // ── Whisper transcription ────────────────────────────────────────────
+    //
+    // Backend-agnostic: whisper-cli takes a file path and resamples internally,
+    // so it needs nothing from ACE. Runs on the RAW render rather than the
+    // post-processed copy — VST/mastering colour the mix without adding any
+    // information, and StableStep remixes the original vocal stem untouched, so
+    // the raw file is the cleanest input for ASR.
+    //
+    // This is also, for now, MM3's only route to word timings: the LRC path
+    // reads ACE's DiT lyric cross-attention, which MM3's DiT does not have.
+    if (job.params.whisperLyricsEnabled && !sub.instrumental) {
+      const wStart = performance.now();
+      try {
+        const { ensureWhisperCli, findWhisperModel, transcribeWithWhisper } =
+          await import('../../whisperTranscribe.js');
+        const { reconcileLyrics } = await import('../../lyricsReconcile.js');
+
+        if (!(await ensureWhisperCli())) {
+          log('WARNING', '[Whisper] whisper-cli unavailable and auto-download failed — skipping');
+        } else if (!findWhisperModel(job.params.whisperModel)) {
+          log('WARNING', '[Whisper] no Whisper model installed — skipping');
+        } else {
+          log('INFO', '[Whisper] transcribing MiniMax-Music3 render...');
+          const wr = await transcribeWithWhisper(filepath, req.lyrics || '', {
+            model: job.params.whisperModel,
+            language: job.params.whisperLanguage || 'auto',
+            beamSize: job.params.whisperBeamSize || 5,
+          });
+          if (wr && wr.segments?.length > 0) {
+            const lyricsJson = reconcileLyrics(wr, req.lyrics || '', job.params.whisperModel || 'auto', false);
+            const lyricsPath = path.join(config.data.audioDir,
+                                         filename.replace(/\.[^.]+$/, '.lyrics.json'));
+            fs.writeFileSync(lyricsPath, JSON.stringify(lyricsJson, null, 2));
+            const words = lyricsJson.lines.reduce((n: number, l: any) => n + l.words.length, 0);
+            log('INFO', `[Whisper] saved ${path.basename(lyricsPath)} `
+              + `(${lyricsJson.lines.length} lines, ${words} words, ${Math.round(performance.now() - wStart)} ms)`);
+          } else {
+            log('WARNING', '[Whisper] no segments returned');
+          }
+        }
+      } catch (wErr: any) {
+        // Non-fatal, like every other post stage: a failed transcription must
+        // not cost the render.
+        log('WARNING', `[Whisper] failed (non-fatal): ${wErr?.message || wErr}`);
+      }
+      timing.push({ name: 'Whisper', ms: Math.round(performance.now() - wStart) });
+    }
+
     const songId = uuidv4();
     getDb().prepare(`
       INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,

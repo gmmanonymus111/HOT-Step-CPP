@@ -47,6 +47,10 @@ export interface BackendFeatureCapabilities {
   postProcess: boolean;
   /** StableStep / SA3 refinement is available for this backend's output. */
   stableStep: boolean;
+  /** Whisper transcription of the rendered audio (backend-agnostic). */
+  whisper: boolean;
+  /** LRC timestamps from the model's own generation-time attention. */
+  lyricTimestamps: boolean;
   cover: boolean;
   repaint: boolean;
   lego: boolean;

@@ -45,6 +45,8 @@ async function capabilities(): Promise<BackendCapabilities> {
       adapters: true,
       postProcess: true,
       stableStep: true,
+      whisper: true,
+      lyricTimestamps: true,
       cover: true,
       repaint: true,
       lego: true,
