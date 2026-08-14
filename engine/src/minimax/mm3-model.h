@@ -926,19 +926,14 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
 
     for (int r = 0; r < MM3_R_COUNT; r++) {
         mm3_enumerate(*m, MM3_SYNTH_ROLE[r], &m->role_variants[r]);
-        // A bundle can stand in for any role it carries — offered only where no
-        // split file already provides that quant token.
-        for (const auto & b : bundles) {
-            bool covered = false;
-            for (const auto & v : m->role_variants[r]) {
-                if (v.quant == b.quant) {
-                    covered = true;
-                    break;
-                }
-            }
-            if (!covered) {
-                m->role_variants[r].push_back(b);
-            }
+        // A bundle can stand in for a role — but ONLY when that role has no
+        // split files at all (a pure pre-split install). Merging bundles into
+        // a role that IS split would put every bundle quant in the UI's
+        // dropdown, inviting a Q2_K condition encoder — the near-native-only
+        // policy the split exists to enforce. All-or-nothing per role keeps
+        // legacy installs working and split installs clean.
+        if (m->role_variants[r].empty()) {
+            m->role_variants[r] = bundles;
         }
         std::sort(m->role_variants[r].begin(), m->role_variants[r].end(),
                   [](const MM3Variant & a, const MM3Variant & b) {
