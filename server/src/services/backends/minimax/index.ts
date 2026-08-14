@@ -12,7 +12,9 @@
 
 import { engineReady } from '../../../engineState.js';
 import { isEngineSuspended } from '../../aceEngineProcess.js';
+import { getSetting, setSetting } from '../../../db/lireekDb.js';
 import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
+import type { Mm3Props } from './client.js';
 import type {
   EngineBackend,
   BackendCapabilities,
@@ -25,6 +27,70 @@ import type {
  *  user-facing limit for v1 (the model card's "5 minutes"). */
 const MM3_MAX_DURATION_SEC = 300;
 
+// ── Persisted quant selection ───────────────────────────────────────────────
+//
+// The engine holds the chosen quant in memory only, so a restart (or a
+// crash-respawn) silently reverts to best-first — f16 — and the user's pick is
+// lost. ACE doesn't have this problem because its model names ride on every
+// generate call; MM3's selection is engine STATE, so somebody has to remember
+// it and put it back.
+//
+// Stored in the same generic settings table backends/registry.ts uses for the
+// active backend id: no new mechanism, no schema change. Server-side rather
+// than in localStorage deliberately — the engine must be restored even when no
+// browser has been opened.
+const LM_SETTING    = 'mm3_lm_quant';
+const SYNTH_SETTING = 'mm3_synth_quant';
+
+/** Push the persisted selection back into the engine if it has drifted.
+ *
+ *  `variants.<role>.requested` is the engine's own record of what it was last
+ *  asked for, and it resets to '' when the process restarts — which makes it an
+ *  exact drift signal rather than a guess. Idempotent and self-healing: safe to
+ *  call on a timer, and it repairs a crash-respawn as well as a cold boot. */
+async function reconcileSelection(props: Mm3Props | null, stale: boolean): Promise<void> {
+  // A stale manifest means the props probe timed out, which nearly always means
+  // a generation is holding the engine mutex. Re-selecting then would block and
+  // then evict weights out from under the very next job — never reconcile on a
+  // guess.
+  if (stale || !props?.variants) return;
+
+  const wantLm    = getSetting(LM_SETTING, '');
+  const wantSynth = getSetting(SYNTH_SETTING, '');
+  if (!wantLm && !wantSynth) return;   // never chosen — engine default is right
+
+  const lm    = props.variants.lm;
+  const synth = props.variants.synth;
+  if (!lm || !synth) return;
+
+  // Only ask for a quant the engine can actually see; a file deleted since the
+  // choice was made must fall back, not wedge every capability poll on a 400.
+  const has = (v: typeof lm, q: string) => !q || v.available?.some(f => f.quant === q);
+  const lmTarget    = has(lm, wantLm) ? wantLm : '';
+  const synthTarget = has(synth, wantSynth) ? wantSynth : '';
+
+  if (lmTarget === (lm.requested ?? '') && synthTarget === (synth.requested ?? '')) return;
+
+  try {
+    const r = await mm3SelectModel({ lm: lmTarget, synth: synthTarget });
+    if (r.changed) {
+      console.log(`[Backends] MiniMax-Music3 restored persisted models: ${r.lm} + ${r.synth}`);
+    }
+  } catch (err: any) {
+    // Advisory: a failed restore leaves the engine on its default, which still
+    // generates. Logging beats throwing out of a capability poll.
+    console.warn('[Backends] MiniMax-Music3 selection restore failed:', err?.message || err);
+  }
+}
+
+/** Called once when the engine reports ready (server/src/index.ts), so the
+ *  persisted choice is in force before the first generation rather than after
+ *  the UI happens to poll. */
+export async function restoreMm3Selection(): Promise<void> {
+  const { props, stale } = await mm3Props();
+  await reconcileSelection(props, stale);
+}
+
 function status(): BackendLifecycleStatus {
   if (isEngineSuspended()) return 'suspended';
   if (!engineReady) return 'down';
@@ -36,6 +102,11 @@ function status(): BackendLifecycleStatus {
 
 async function capabilities(): Promise<BackendCapabilities> {
   const { props, stale } = await mm3Props();
+  // Self-healing restore: the UI polls this, so an engine crash-respawn (which
+  // resets the in-memory selection) is repaired without anyone touching the
+  // dropdown. Fire-and-forget — capabilities must stay fast and never fail
+  // because of a residency concern.
+  void reconcileSelection(props, stale);
   // stale === true means the props probe timed out — nearly always "an MM3
   // generation is running and holds the engine mutex", which is the opposite
   // of down. Keep the last-known-good answer rather than flapping to false.
@@ -137,10 +208,13 @@ async function models(): Promise<BackendModels> {
  *  (the resident weights ARE the outgoing quant), so the next generation pays
  *  a warm — that is the honest cost of the switch, not a bug. */
 async function selectModel(selection: Record<string, string>) {
-  const result = await mm3SelectModel({
-    lm: selection.lm ?? '',
-    synth: selection.synth ?? '',
-  });
+  const lm    = selection.lm ?? '';
+  const synth = selection.synth ?? '';
+  const result = await mm3SelectModel({ lm, synth });
+  // Persist only after the engine accepted it, so a rejected quant can never
+  // be written back and then replayed on every subsequent boot.
+  setSetting(LM_SETTING, lm);
+  setSetting(SYNTH_SETTING, synth);
   if (result.changed) {
     console.log(`[Backends] MiniMax-Music3 models: ${result.lm} + ${result.synth}` +
                 (result.unloaded ? ' (evicted previous weights)' : ''));
