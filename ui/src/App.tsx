@@ -7,8 +7,11 @@
 // DOM hosts and wires their callbacks to the store.
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
-import { useAuth } from './context/AuthContext';
+import { AuthProvider, useAuth, ProtectedRoute } from './context/AuthContext';
+import { LoginPage } from './components/auth/LoginPage';
 import { GlobalParamsProvider, useGlobalParams } from './context/GlobalParamsContext';
 import { usePersistedState } from './hooks/usePersistedState';
 import { useTheme } from './hooks/useTheme';
@@ -232,7 +235,7 @@ function getSongSource(song: Song): string {
 /** Inner app content — must be rendered inside GlobalParamsProvider */
 const AppContent: React.FC = () => {
   const { t } = useTranslation();
-  const { token, isLoading } = useAuth();
+  const { token, isLoading, user, isAdmin, logout } = useAuth();
   const [activeView, setActiveView] = useState(() => viewFromUrl());
   const [songs, setSongs] = useState<Song[]>([]);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
@@ -1153,6 +1156,9 @@ const AppContent: React.FC = () => {
         <Sidebar
           activeView={activeView}
           onViewChange={navigateTo}
+          username={user?.username}
+          isAdmin={isAdmin}
+          onLogout={logout}
           onQuit={() => {
             setConfirmDialog({
               title: t('app.quitDialog.title'),
@@ -1469,13 +1475,28 @@ const AppContent: React.FC = () => {
   );
 };
 
-/** Root App — wraps content in GlobalParamsProvider + DisguiseModeProvider */
+/** Root App — wraps content in providers + router */
 const App: React.FC = () => (
-  <GlobalParamsProvider>
-    <DisguiseModeProvider>
-      <AppContent />
-    </DisguiseModeProvider>
-  </GlobalParamsProvider>
+  <BrowserRouter>
+    <AuthProvider>
+      <Toaster position="bottom-right" toastOptions={{ duration: 3000 }} />
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/*"
+          element={
+            <ProtectedRoute>
+              <GlobalParamsProvider>
+                <DisguiseModeProvider>
+                  <AppContent />
+                </DisguiseModeProvider>
+              </GlobalParamsProvider>
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </AuthProvider>
+  </BrowserRouter>
 );
 
 export default App;

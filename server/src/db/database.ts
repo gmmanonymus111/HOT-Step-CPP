@@ -35,10 +35,13 @@ export function initDb(): void {
 
   // ── Core HOT-Step tables ──────────────────────────────────────────────────
   db.exec(`
-    -- Users (simplified: single-user local app)
+    -- Users
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
+      password_hash TEXT,
+      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+      settings TEXT DEFAULT '{}',
       bio TEXT DEFAULT '',
       avatar_url TEXT DEFAULT '',
       banner_url TEXT DEFAULT '',
@@ -247,6 +250,29 @@ export function initDb(): void {
   for (const m of trainingMigrations) {
     const row = db.prepare(m.check).get() as { c: number };
     if (row.c === 0) db.exec(m.alter);
+  }
+
+  // Users table migrations
+  const usersMigrations: Array<{ check: string; alter: string }> = [
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('users') WHERE name='password_hash'`,
+      alter: `ALTER TABLE users ADD COLUMN password_hash TEXT`,
+    },
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('users') WHERE name='role'`,
+      alter: `ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
+    },
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('users') WHERE name='settings'`,
+      alter: `ALTER TABLE users ADD COLUMN settings TEXT DEFAULT '{}'`,
+    },
+  ];
+  for (const m of usersMigrations) {
+    const row = db.prepare(m.check).get() as any;
+    if (row.c === 0) {
+      db.exec(m.alter);
+      console.log(`[DB] Migration: ${m.alter}`);
+    }
   }
 
   // Songs table migrations

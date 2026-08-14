@@ -65,10 +65,21 @@ async function del<T>(path: string, token?: string | null): Promise<T> {
 
 // ── Auth ────────────────────────────────────────────────────
 export const authApi = {
-  autoLogin: () => get<AuthState>('/auth/auto'),
-  getMe: (token: string) => get<{ user: AuthState['user'] }>('/auth/me', token),
+  login: (username: string, password: string) =>
+    post<{ user: AuthState['user']; token: string }>('/auth/login', { username, password }),
+  logout: () => post<{ success: boolean }>('/auth/logout'),
+  getMe: () => get<{ user: AuthState['user'] }>('/auth/me'),
   updateUsername: (username: string, token: string) =>
-    patch<AuthState>('/auth/username', { username }, token),
+    patch<{ user: AuthState['user']; token: string }>('/auth/username', { username }, token),
+  updateSettings: (settings: Record<string, unknown>, token: string) =>
+    patch<{ settings: Record<string, unknown> }>('/auth/settings', { settings }, token),
+  // Admin-only
+  listUsers: (token: string) => get<{ users: Array<{ id: string; username: string; role: string; created_at: string }> }>('/auth/users', token),
+  createUser: (username: string, password: string, role: 'admin' | 'user', token: string) =>
+    post<{ user: { id: string; username: string; role: string } }>('/auth/users', { username, password, role }, token),
+  updateUser: (id: string, data: { username?: string; password?: string; role?: string }, token: string) =>
+    patch<{ user: { id: string; username: string; role: string } }>(`/auth/users/${id}`, data, token),
+  deleteUser: (id: string, token: string) => del<{ success: boolean }>(`/auth/users/${id}`, token),
 };
 
 // ── Song Normalizer ─────────────────────────────────────────

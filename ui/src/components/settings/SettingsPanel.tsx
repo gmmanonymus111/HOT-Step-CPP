@@ -7,13 +7,13 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Zap, Download, Tag, AlertTriangle, Loader2, Settings2,
   ChevronRight, Save, Scissors,
-  Key, Database, Globe, Gauge
+  Key, Database, Globe, Gauge, Users, UserPlus, Trash2, Shield
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
 import { getStemStats, deleteAllJobs, formatBytes, type StemStats } from '../../services/stemStudioApi';
 import { useAuth } from '../../context/AuthContext';
-import { songApi, settingsApi } from '../../services/api';
+import { songApi, settingsApi, authApi } from '../../services/api';
 import { lireekApi } from '../../services/lireekApi';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
 import {
@@ -87,6 +87,86 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [stemStats, setStemStats] = useState<StemStats | null>(null);
   const [stemClearConfirm, setStemClearConfirm] = useState(false);
   const [stemClearing, setStemClearing] = useState(false);
+
+  // User management state
+  const [users, setUsers] = useState<Array<{ id: string; username: string; role: string; created_at: string }>>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newRole, setNewRole] = useState<'admin' | 'user'>('user');
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [editingUser, setEditingUser] = useState<{ id: string; username: string; role: string } | null>(null);
+  const [editPassword, setEditPassword] = useState('');
+  const [savingUser, setSavingUser] = useState(false);
+  const [userError, setUserError] = useState('');
+
+  const loadUsers = useCallback(async () => {
+    if (!token) return;
+    setLoadingUsers(true);
+    setUserError('');
+    try {
+      const { users } = await authApi.listUsers(token);
+      setUsers(users);
+    } catch (err: any) {
+      setUserError(err.message || 'Failed to load users');
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, [token]);
+
+  const handleCreateUser = async () => {
+    if (!token || !newUsername.trim() || !newPassword) {
+      setUserError('Username and password are required');
+      return;
+    }
+    setCreatingUser(true);
+    setUserError('');
+    try {
+      await authApi.createUser(newUsername.trim(), newPassword, newRole, token);
+      setShowCreateUser(false);
+      setNewUsername('');
+      setNewPassword('');
+      setNewRole('user');
+      await loadUsers();
+    } catch (err: any) {
+      setUserError(err.message || 'Failed to create user');
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleSaveUser = async () => {
+    if (!token || !editingUser) return;
+    setSavingUser(true);
+    setUserError('');
+    try {
+      const data: { username?: string; role?: string; password?: string } = {
+        username: editingUser.username,
+        role: editingUser.role,
+      };
+      if (editPassword) data.password = editPassword;
+      await authApi.updateUser(editingUser.id, data, token);
+      setEditingUser(null);
+      setEditPassword('');
+      await loadUsers();
+    } catch (err: any) {
+      setUserError(err.message || 'Failed to update user');
+    } finally {
+      setSavingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    if (!token || !window.confirm('Delete this user? This cannot be undone.')) return;
+    setUserError('');
+    try {
+      await authApi.deleteUser(id, token);
+      await loadUsers();
+    } catch (err: any) {
+      setUserError(err.message || 'Failed to delete user');
+    }
+  };
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     onSettingsChange({ ...settings, [key]: value });
@@ -242,8 +322,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     setBrowseKey(null);
   };
 
-  type TabId = 'general' | 'environment' | 'ai' | 'storage' | 'performance';
+  type TabId = 'general' | 'environment' | 'ai' | 'storage' | 'performance' | 'users';
   const [activeTab, setActiveTab] = useState<TabId>('general');
+
+  // Load users when Users tab is opened
+  useEffect(() => {
+    if (activeTab === 'users') {
+      loadUsers();
+    }
+  }, [activeTab, loadUsers]);
 
   const tabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
     { id: 'general',     label: t('settings.tabs.general'),        icon: <Zap size={15} className="settings-tab-icon" /> },
@@ -251,6 +338,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     { id: 'ai',          label: t('settings.tabs.ai'),     icon: <Key size={15} className="settings-tab-icon" /> },
     { id: 'storage',     label: t('settings.tabs.storage'),  icon: <Database size={15} className="settings-tab-icon" /> },
     { id: 'performance', label: 'Performance', icon: <Gauge size={15} className="settings-tab-icon" /> },
+    { id: 'users',       label: 'Users', icon: <Users size={15} className="settings-tab-icon" /> },
   ];
 
   return (
@@ -1067,6 +1155,205 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         )}
       </div>
       </>
+      )}
+
+      {/* ─── USERS TAB ─── */}
+      {activeTab === 'users' && (
+        <>
+          <div className="settings-section">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="settings-section-title">User Management</h2>
+              <button
+                onClick={() => setShowCreateUser(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-pink-600 hover:bg-pink-500 text-white transition-colors"
+              >
+                <UserPlus size={14} />
+                Add User
+              </button>
+            </div>
+
+            {userError && (
+              <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+                {userError}
+              </div>
+            )}
+
+            {loadingUsers ? (
+              <div className="flex items-center gap-2 text-zinc-400 text-sm">
+                <Loader2 size={14} className="animate-spin" />
+                Loading users...
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {users.map((u) => (
+                  <div
+                    key={u.id}
+                    className="flex items-center justify-between p-3 rounded-lg bg-zinc-900/50 border border-zinc-700/50"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center">
+                        <Users size={14} className="text-zinc-400" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-white">{u.username}</span>
+                          {u.role === 'admin' ? (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400 text-[10px] font-semibold">
+                              <Shield size={9} />
+                              admin
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-zinc-700/50 text-zinc-400 text-[10px] font-semibold">
+                              user
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">
+                          Created {new Date(u.created_at).toLocaleDateString()}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setEditingUser({ id: u.id, username: u.username, role: u.role });
+                          setEditPassword('');
+                        }}
+                        className="px-2 py-1 rounded-md text-xs text-zinc-400 hover:text-white hover:bg-zinc-700/50 transition-colors"
+                      >
+                        Edit
+                      </button>
+                      {u.role !== 'admin' && (
+                        <button
+                          onClick={() => handleDeleteUser(u.id)}
+                          className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                        >
+                          <Trash2 size={10} />
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Create User Modal */}
+          {showCreateUser && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+              <div className="w-full max-w-md p-6 rounded-xl bg-zinc-900 border border-zinc-700">
+                <h3 className="text-lg font-semibold text-white mb-4">Create New User</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Username</label>
+                    <input
+                      type="text"
+                      value={newUsername}
+                      onChange={(e) => setNewUsername(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                      placeholder="Enter username"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Password</label>
+                    <input
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                      placeholder="Enter password"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Role</label>
+                    <select
+                      value={newRole}
+                      onChange={(e) => setNewRole(e.target.value as 'admin' | 'user')}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                    >
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 mt-4">
+                  <button
+                    onClick={() => { setShowCreateUser(false); setNewUsername(''); setNewPassword(''); setUserError(''); }}
+                    className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateUser}
+                    disabled={creatingUser}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-pink-600 hover:bg-pink-500 disabled:bg-pink-800 text-white transition-colors"
+                  >
+                    {creatingUser ? <Loader2 size={14} className="animate-spin" /> : null}
+                    {creatingUser ? 'Creating...' : 'Create User'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Edit User Modal */}
+          {editingUser && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+              <div className="w-full max-w-md p-6 rounded-xl bg-zinc-900 border border-zinc-700">
+                <h3 className="text-lg font-semibold text-white mb-4">Edit User</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Username</label>
+                    <input
+                      type="text"
+                      value={editingUser.username}
+                      onChange={(e) => setEditingUser({ ...editingUser, username: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">New Password (leave empty to keep current)</label>
+                    <input
+                      type="password"
+                      value={editPassword}
+                      onChange={(e) => setEditPassword(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                      placeholder="Enter new password"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Role</label>
+                    <select
+                      value={editingUser.role}
+                      onChange={(e) => setEditingUser({ ...editingUser, role: e.target.value as string })}
+                      className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-white text-sm focus:outline-none focus:border-pink-500"
+                    >
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 mt-4">
+                  <button
+                    onClick={() => { setEditingUser(null); setEditPassword(''); setUserError(''); }}
+                    className="px-3 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveUser}
+                    disabled={savingUser}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-pink-600 hover:bg-pink-500 disabled:bg-pink-800 text-white transition-colors"
+                  >
+                    {savingUser ? <Loader2 size={14} className="animate-spin" /> : null}
+                    {savingUser ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

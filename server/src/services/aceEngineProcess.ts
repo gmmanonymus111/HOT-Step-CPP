@@ -133,37 +133,35 @@ export function startAceServer(): ChildProcess | null {
     stdio: ['ignore', 'pipe', 'pipe'] as any,
   };
 
-  const needsCustomEnv = (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs))
-    || config.aceServer.cudaVisibleDevices;
+  // Engine dir must always be first in PATH so bundled CUDA DLLs are found
+  // before system CUDA Toolkit DLLs (avoids version mismatch crashes).
+  const engineDir = path.dirname(exe);
+  const pathSep = process.platform === 'win32' ? ';' : ':';
 
-  if (needsCustomEnv) {
-    const env = { ...process.env };
+  const env = { ...process.env };
+  const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
 
-    // GPU device selection (e.g. "0", "1", "0,1")
-    if (config.aceServer.cudaVisibleDevices) {
-      env.CUDA_VISIBLE_DEVICES = config.aceServer.cudaVisibleDevices;
-      console.log(`[Server] GPU selection: CUDA_VISIBLE_DEVICES=${config.aceServer.cudaVisibleDevices}`);
-    }
-
-    if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
-      // Find the actual PATH key (case-insensitive on Windows)
-      const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
-      const pathSep = process.platform === 'win32' ? ';' : ':';
-      env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
-
-      // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
-      // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
-      const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
-      if (fs.existsSync(trtllmLibs)) {
-        env[pathKey] = trtllmLibs + pathSep + env[pathKey];
-        console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
-      }
-
-      console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
-    }
-
-    spawnOpts.env = env;
+  // GPU device selection (e.g. "0", "1", "0,1")
+  if (config.aceServer.cudaVisibleDevices) {
+    env.CUDA_VISIBLE_DEVICES = config.aceServer.cudaVisibleDevices;
+    console.log(`[Server] GPU selection: CUDA_VISIBLE_DEVICES=${config.aceServer.cudaVisibleDevices}`);
   }
+
+  // Build PATH prefix: engine dir (bundled CUDA DLLs) + TRT libs + TRT-LLM libs
+  let pathPrefix = engineDir;
+  if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
+    pathPrefix += pathSep + config.aceServer.trtLibs;
+    console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
+  }
+  // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
+  const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
+  if (fs.existsSync(trtllmLibs)) {
+    pathPrefix += pathSep + trtllmLibs;
+    console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
+  }
+
+  env[pathKey] = pathPrefix + pathSep + (env[pathKey] || '');
+  spawnOpts.env = env;
 
   const child = spawn(exe, args, spawnOpts);
 
