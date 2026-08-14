@@ -14,22 +14,34 @@
 // graphs from.
 //
 // The contract this consumes is docs/plans/mm3-gguf-layout.md, produced by
-// engine/tools/convert-mm3.py. Two files:
+// engine/tools/convert-mm3.py (+ engine/tools/split-mm3.py). Five files:
 //
-//   mm3-lm-<quant>.gguf     arch "qwen3"  399 tensors  llama.cpp tensor names
-//   mm3-synth-<quant>.gguf  arch "mm3"    512 tensors  depth./cond./dit./voc.
+//   mm3-lm-<quant>.gguf     arch "qwen3"      399 tensors  llama.cpp tensor names
+//   mm3-depth-<quant>.gguf  arch "mm3-depth"   47 tensors  depth.*
+//   mm3-cond-<quant>.gguf   arch "mm3-cond"     4 tensors  cond.*
+//   mm3-dit-<quant>.gguf    arch "mm3-dit"    370 tensors  dit.*  (+ mm3.flow.* KVs)
+//   mm3-voc-<quant>.gguf    arch "mm3-voc"     91 tensors  voc.*
+//
+// LEGACY: the original two-file layout bundled depth/cond/dit/voc into one
+//   mm3-synth-<quant>.gguf  arch "mm3"        512 tensors
+// and it still loads: a bundle enters every non-LM role's variant list, and in
+// bundle mode all four role files simply point at the same path. Split files
+// win over a bundle offering the same quant token. The point of the split
+// (ported from ServeurpersoCom/minimaxmusic.cpp, which validated the policy):
+// per-role quant mixing — LM Q5_K_M + DiT Q4_K_M with depth/cond/voc near
+// native — and a DiT quant/adapter change that reloads ~300 MB of cond/voc
+// alongside the DiT instead of re-reading a 6 GB bundle.
 //
 // Discovery scans <models>/mm3/*.gguf first (the canonical home — keeps 24 GB
 // of Music-3 weights out of the flat ACE model scan, which classifies by
 // general.architecture and would just warn "unknown architecture"), then falls
 // back to <models>/mm3-*.gguf for a flat layout.
 //
-// Residency is deliberately split into two independent WeightCtx allocations
-// (LM and synth) because the module→file split is NOT the residency split:
-// per the layout doc §2.1, stage 1 needs the LM *and* the depth./cond. half of
-// the synth file simultaneously, while dit./voc. are cleanly stage 2. Keeping
-// two buffers today costs nothing and is the seam a later `--split` conversion
-// or finer eviction policy would grow into.
+// Residency stays THREE parts (lm | depth | rest = cond+dit+voc), not five:
+// stage 1 needs the LM *and* depth resident at once, stage 2 needs the rest,
+// and cond/voc are too small (~300 MB) for finer eviction to buy anything.
+// The file split is orthogonal to the residency split — each part just loads
+// its tensors from whichever file(s) its roles resolved to.
 
 #include "backend.h"
 #include "gguf-weights.h"
@@ -314,16 +326,26 @@ struct MM3FileInfo {
     std::string probe_error;
 };
 
+// ── Roles ───────────────────────────────────────────────────────────────────
+
+// The four non-LM components, each its own file in the split layout. The LM
+// stays a named member: different arch, different config struct, and the
+// tokenizer is coupled to its path.
+enum MM3SynthRole { MM3_R_DEPTH = 0, MM3_R_COND, MM3_R_DIT, MM3_R_VOC, MM3_R_COUNT };
+
+static const char * const MM3_SYNTH_ROLE[MM3_R_COUNT] = { "depth", "cond", "dit", "voc" };
+
 // ── Quant variants ──────────────────────────────────────────────────────────
 
-// One mm3-{lm,synth}-<quant>.gguf found on disk. The quant token is taken from
+// One mm3-<role>-<quant>.gguf found on disk. The quant token is taken from
 // the filename verbatim -- it is the authoritative label (general.file_type is
 // a display-only u32, and has no assigned value for some quants).
 struct MM3Variant {
     std::string quant;   // "f16" | "q8_0" | "Q4_K_M" | ...
     std::string path;
     std::string name;    // basename
-    uint64_t    bytes = 0;
+    uint64_t    bytes  = 0;
+    bool        bundle = false;  // true when this is a legacy mm3-synth bundle
 };
 
 // ── The model ───────────────────────────────────────────────────────────────
@@ -333,16 +355,19 @@ struct MM3Model {
     std::string              models_dir;
     std::vector<std::string> search_dirs;
     MM3FileInfo              lm_file;
-    MM3FileInfo              synth_file;
+    // One resolved file per non-LM role. In legacy bundle mode several (or all
+    // four) entries share one path; loading dedupes by path, but the byte
+    // accounting must too — use mm3_total_tensor_bytes(), never a plain sum.
+    MM3FileInfo              role_file[MM3_R_COUNT];
     // Every quant found on disk, best-first. The UI's model dropdown is built
-    // from these; lm_file/synth_file point at whichever is currently selected.
+    // from these; lm_file/role_file point at whichever is currently selected.
     std::vector<MM3Variant>  lm_variants;
-    std::vector<MM3Variant>  synth_variants;
+    std::vector<MM3Variant>  role_variants[MM3_R_COUNT];
     // User's explicit quant choice, "" = auto (best-first). Kept separate from
     // lm_file so a re-scan that no longer sees the chosen file falls back
     // gracefully instead of leaving MM3 unavailable.
     std::string              want_lm_quant;
-    std::string              want_synth_quant;
+    std::string              want_role_quant[MM3_R_COUNT];
     MM3LmConfig              lm_cfg;
     MM3SynthConfig           synth_cfg;
     std::vector<std::string> meta_errors;
@@ -584,9 +609,10 @@ static void mm3_parse_lm_config(const GGUFModel & gf, MM3LmConfig * c) {
     c->tok_lyrics_end    = gf_get_u32(gf, "mm3.token.lyrics_end");
 }
 
-static void mm3_parse_synth_config(const GGUFModel & gf, MM3SynthConfig * c) {
-    c->components = mm3_get_str_arr(gf, "mm3.synth.components");
-
+// Per-section parsers: a split file carries exactly one section's KVs, a
+// legacy bundle carries all four. The probe applies whichever sections the
+// file is expected to provide.
+static void mm3_parse_depth_config(const GGUFModel & gf, MM3SynthConfig * c) {
     MM3DepthConfig & d     = c->depth;
     d.block_count          = gf_get_u32(gf, "mm3.depth.block_count");
     d.embedding_length     = gf_get_u32(gf, "mm3.depth.embedding_length");
@@ -600,7 +626,9 @@ static void mm3_parse_synth_config(const GGUFModel & gf, MM3SynthConfig * c) {
     d.audio_embd_rows      = gf_get_u32(gf, "mm3.depth.audio_embd_rows");
     d.causal               = gf_get_bool(gf, "mm3.depth.causal");
     d.rope                 = gf_get_bool(gf, "mm3.depth.rope");
+}
 
+static void mm3_parse_cond_config(const GGUFModel & gf, MM3SynthConfig * c) {
     MM3CondConfig & e        = c->cond;
     e.num_layers             = gf_get_u32(gf, "mm3.cond.num_layers");
     e.hidden_dim             = gf_get_u32(gf, "mm3.cond.hidden_dim");
@@ -613,7 +641,10 @@ static void mm3_parse_synth_config(const GGUFModel & gf, MM3SynthConfig * c) {
     e.output_hop_length      = gf_get_u32(gf, "mm3.cond.output_hop_length");
     e.interpolation          = gf_get_str(gf, "mm3.cond.interpolation");
     e.layer_mix              = gf_get_str(gf, "mm3.cond.layer_mix");
+}
 
+// The flow schedule KVs ride with the DiT file: they drive its Euler loop.
+static void mm3_parse_dit_config(const GGUFModel & gf, MM3SynthConfig * c) {
     MM3DitConfig & t             = c->dit;
     t.block_count                = gf_get_u32(gf, "mm3.dit.block_count");
     t.embedding_length           = gf_get_u32(gf, "mm3.dit.embedding_length");
@@ -645,7 +676,9 @@ static void mm3_parse_synth_config(const GGUFModel & gf, MM3SynthConfig * c) {
     f.invert_sigmas        = gf_get_bool(gf, "mm3.flow.invert_sigmas");
     f.shift                = gf_get_f32(gf, "mm3.flow.shift");
     f.num_train_timesteps  = gf_get_u32(gf, "mm3.flow.num_train_timesteps");
+}
 
+static void mm3_parse_voc_config(const GGUFModel & gf, MM3SynthConfig * c) {
     MM3VocConfig & v      = c->voc;
     v.latent_channels     = gf_get_u32(gf, "mm3.voc.latent_channels");
     v.fold_channels       = gf_get_u32(gf, "mm3.voc.fold_channels");
@@ -685,36 +718,53 @@ static void mm3_validate_lm_config(const MM3LmConfig & c, std::vector<std::strin
          "head_count * key_length != embedding_length");
 }
 
-static void mm3_validate_synth_config(const MM3SynthConfig & c, std::vector<std::string> * errs) {
+// Per-section validators, applied only to the sections a file provides.
+static void mm3_validate_section(const MM3SynthConfig & c, MM3SynthRole role, std::vector<std::string> * errs) {
     auto need = [&](bool ok, const char * what) {
         if (!ok && errs->size() < 24) {
-            errs->push_back(std::string("synth config: ") + what);
+            errs->push_back(std::string(MM3_SYNTH_ROLE[role]) + " config: " + what);
         }
     };
-    need(c.depth.block_count > 0, "mm3.depth.block_count is 0 or missing");
-    need(c.depth.embedding_length > 0, "mm3.depth.embedding_length is 0 or missing");
-    need(c.depth.num_codebooks > 1, "mm3.depth.num_codebooks must be > 1");
-    need(c.depth.head_count * c.depth.head_dim == c.depth.embedding_length,
-         "depth head_count * head_dim != embedding_length");
-    need(c.depth.audio_embd_rows == (c.depth.num_codebooks - 1) * c.depth.audio_vocab_size,
-         "depth audio_embd_rows != (num_codebooks-1) * audio_vocab_size");
-    need(c.cond.num_layers > 0 && c.cond.hidden_dim > 0, "cond dims are 0 or missing");
-    need(c.dit.block_count > 0 && c.dit.embedding_length > 0, "dit dims are 0 or missing");
-    need(c.dit.head_count * c.dit.head_dim == c.dit.embedding_length,
-         "dit head_count * head_dim != embedding_length");
-    need(c.dit.concat_channels == c.dit.in_channels * 2 + c.dit.condition_dim,
-         "dit concat_channels != 2*in_channels + condition_dim");
-    need(c.voc.upsample_rates.size() == 4, "mm3.voc.upsample_rates is not 4 entries");
-    need(c.voc.res_dilations.size() == 3, "mm3.voc.res_dilations is not 3 entries");
-    need(c.voc.hidden_dim > 0 && c.voc.dec_in_dim > 0, "voc dims are 0 or missing");
-    need(c.voc.latent_channels == c.voc.fold_channels * 2,
-         "voc latent_channels != 2 * fold_channels (stereo fold)");
+    switch (role) {
+        case MM3_R_DEPTH:
+            need(c.depth.block_count > 0, "mm3.depth.block_count is 0 or missing");
+            need(c.depth.embedding_length > 0, "mm3.depth.embedding_length is 0 or missing");
+            need(c.depth.num_codebooks > 1, "mm3.depth.num_codebooks must be > 1");
+            need(c.depth.head_count * c.depth.head_dim == c.depth.embedding_length,
+                 "depth head_count * head_dim != embedding_length");
+            need(c.depth.audio_embd_rows == (c.depth.num_codebooks - 1) * c.depth.audio_vocab_size,
+                 "depth audio_embd_rows != (num_codebooks-1) * audio_vocab_size");
+            break;
+        case MM3_R_COND:
+            need(c.cond.num_layers > 0 && c.cond.hidden_dim > 0, "cond dims are 0 or missing");
+            break;
+        case MM3_R_DIT:
+            need(c.dit.block_count > 0 && c.dit.embedding_length > 0, "dit dims are 0 or missing");
+            need(c.dit.head_count * c.dit.head_dim == c.dit.embedding_length,
+                 "dit head_count * head_dim != embedding_length");
+            need(c.dit.concat_channels == c.dit.in_channels * 2 + c.dit.condition_dim,
+                 "dit concat_channels != 2*in_channels + condition_dim");
+            break;
+        case MM3_R_VOC:
+            need(c.voc.upsample_rates.size() == 4, "mm3.voc.upsample_rates is not 4 entries");
+            need(c.voc.res_dilations.size() == 3, "mm3.voc.res_dilations is not 3 entries");
+            need(c.voc.hidden_dim > 0 && c.voc.dec_in_dim > 0, "voc dims are 0 or missing");
+            need(c.voc.latent_channels == c.voc.fold_channels * 2,
+                 "voc latent_channels != 2 * fold_channels (stereo fold)");
+            break;
+        default:
+            break;
+    }
 }
 
 // ── Probe: read a file's header only, no weights ─────────────────────────────
 
+// Probe one file's header. `lm_cfg` non-null = this is the LM file. Otherwise
+// `role_mask` says which sections (bit per MM3SynthRole) this file provides —
+// one bit for a split file, all four for a legacy bundle — and those sections
+// are parsed into `synth_cfg` and validated.
 static void mm3_probe_file(const std::string & path, MM3FileInfo * fi, MM3LmConfig * lm_cfg,
-                           MM3SynthConfig * synth_cfg, std::vector<std::string> * errs) {
+                           MM3SynthConfig * synth_cfg, uint32_t role_mask, std::vector<std::string> * errs) {
     fi->found = true;
     fi->path  = path;
     fi->name  = mm3_basename(path);
@@ -760,9 +810,23 @@ static void mm3_probe_file(const std::string & path, MM3FileInfo * fi, MM3LmConf
         mm3_parse_lm_config(gf, lm_cfg);
         mm3_validate_lm_config(*lm_cfg, errs);
     }
-    if (synth_cfg) {
-        mm3_parse_synth_config(gf, synth_cfg);
-        mm3_validate_synth_config(*synth_cfg, errs);
+    if (synth_cfg && role_mask) {
+        if (role_mask & (1u << MM3_R_DEPTH)) {
+            mm3_parse_depth_config(gf, synth_cfg);
+            mm3_validate_section(*synth_cfg, MM3_R_DEPTH, errs);
+        }
+        if (role_mask & (1u << MM3_R_COND)) {
+            mm3_parse_cond_config(gf, synth_cfg);
+            mm3_validate_section(*synth_cfg, MM3_R_COND, errs);
+        }
+        if (role_mask & (1u << MM3_R_DIT)) {
+            mm3_parse_dit_config(gf, synth_cfg);
+            mm3_validate_section(*synth_cfg, MM3_R_DIT, errs);
+        }
+        if (role_mask & (1u << MM3_R_VOC)) {
+            mm3_parse_voc_config(gf, synth_cfg);
+            mm3_validate_section(*synth_cfg, MM3_R_VOC, errs);
+        }
     }
 
     fi->probe_ok = true;
@@ -826,19 +890,23 @@ static void mm3_enumerate(const MM3Model & m, const char * role, std::vector<MM3
     });
 }
 
-// Locate the two GGUFs and probe them. Called once at server start; cheap
+// Locate the GGUFs and probe them. Called once at server start; cheap
 // (mmap + header parse, no weight reads). Safe to call when nothing is there —
 // MM3 is simply reported unavailable.
 //
-// want_lm/want_synth name a quant token to prefer (from the UI's model
-// dropdown). Empty, or not present on disk, falls back to best-first.
+// `want_lm` / `want_roles[]` name a quant token to prefer per role (from the
+// UI's model dropdown). Empty, or not present on disk, falls back to
+// best-first. Legacy mm3-synth bundles enter every role's variant list (marked
+// `bundle`); a split file wins over a bundle at the same quant token.
 static void mm3_discover(MM3Model * m, const char * models_dir, const std::string & want_lm = std::string(),
-                         const std::string & want_synth = std::string()) {
+                         const std::string * want_roles = nullptr) {
     m->models_dir = models_dir ? models_dir : "";
     m->search_dirs.clear();
     m->meta_errors.clear();
-    m->lm_file  = MM3FileInfo{};
-    m->synth_file = MM3FileInfo{};
+    m->lm_file = MM3FileInfo{};
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        m->role_file[r] = MM3FileInfo{};
+    }
 
     if (m->models_dir.empty()) {
         return;
@@ -849,7 +917,35 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
     m->search_dirs.push_back(m->models_dir);
 
     mm3_enumerate(*m, "lm", &m->lm_variants);
-    mm3_enumerate(*m, "synth", &m->synth_variants);
+
+    std::vector<MM3Variant> bundles;
+    mm3_enumerate(*m, "synth", &bundles);
+    for (auto & b : bundles) {
+        b.bundle = true;
+    }
+
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        mm3_enumerate(*m, MM3_SYNTH_ROLE[r], &m->role_variants[r]);
+        // A bundle can stand in for any role it carries — offered only where no
+        // split file already provides that quant token.
+        for (const auto & b : bundles) {
+            bool covered = false;
+            for (const auto & v : m->role_variants[r]) {
+                if (v.quant == b.quant) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) {
+                m->role_variants[r].push_back(b);
+            }
+        }
+        std::sort(m->role_variants[r].begin(), m->role_variants[r].end(),
+                  [](const MM3Variant & a, const MM3Variant & b) {
+                      const int ra = mm3_quant_rank(a.quant), rb = mm3_quant_rank(b.quant);
+                      return ra != rb ? ra < rb : a.quant < b.quant;
+                  });
+    }
 
     auto pick = [](const std::vector<MM3Variant> & vars, const std::string & want, MM3FileInfo * fi) {
         if (vars.empty()) {
@@ -870,30 +966,73 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
     };
 
     pick(m->lm_variants, want_lm, &m->lm_file);
-    pick(m->synth_variants, want_synth, &m->synth_file);
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        pick(m->role_variants[r], want_roles ? want_roles[r] : std::string(), &m->role_file[r]);
+    }
 
     if (m->lm_file.found) {
-        mm3_probe_file(m->lm_file.path, &m->lm_file, &m->lm_cfg, nullptr, &m->meta_errors);
+        mm3_probe_file(m->lm_file.path, &m->lm_file, &m->lm_cfg, nullptr, 0, &m->meta_errors);
         if (m->lm_file.probe_ok && m->lm_file.arch != "qwen3") {
             m->meta_errors.push_back(m->lm_file.name + ": general.architecture is '" + m->lm_file.arch +
                                      "', expected 'qwen3'");
         }
     }
-    if (m->synth_file.found) {
-        mm3_probe_file(m->synth_file.path, &m->synth_file, nullptr, &m->synth_cfg, &m->meta_errors);
-        if (m->synth_file.probe_ok && m->synth_file.arch != "mm3") {
-            m->meta_errors.push_back(m->synth_file.name + ": general.architecture is '" + m->synth_file.arch +
-                                     "', expected 'mm3'");
+
+    // Probe each DISTINCT non-LM path once, with the union of the roles it
+    // serves, then stamp the result onto every role that resolved to it.
+    m->synth_cfg = MM3SynthConfig{};
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        if (!m->role_file[r].found || m->role_file[r].probe_ok || !m->role_file[r].probe_error.empty()) {
+            continue;  // absent, or already stamped by an earlier role's probe
+        }
+        uint32_t mask = 0;
+        for (int r2 = 0; r2 < MM3_R_COUNT; r2++) {
+            if (m->role_file[r2].found && m->role_file[r2].path == m->role_file[r].path) {
+                mask |= 1u << r2;
+            }
+        }
+        MM3FileInfo probed = m->role_file[r];
+        mm3_probe_file(probed.path, &probed, nullptr, &m->synth_cfg, mask, &m->meta_errors);
+        if (probed.probe_ok) {
+            const bool is_bundle = probed.arch == "mm3";
+            for (int r2 = 0; r2 < MM3_R_COUNT; r2++) {
+                if (mask & (1u << r2)) {
+                    const std::string want_arch = std::string("mm3-") + MM3_SYNTH_ROLE[r2];
+                    if (!is_bundle && probed.arch != want_arch) {
+                        m->meta_errors.push_back(probed.name + ": general.architecture is '" + probed.arch +
+                                                 "', expected '" + want_arch + "' or 'mm3'");
+                    }
+                }
+            }
+        }
+        for (int r2 = 0; r2 < MM3_R_COUNT; r2++) {
+            if (mask & (1u << r2)) {
+                m->role_file[r2] = probed;
+            }
+        }
+    }
+    // Informational: which components resolved (props reports this).
+    m->synth_cfg.components.clear();
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        if (m->role_file[r].probe_ok) {
+            m->synth_cfg.components.push_back(r == MM3_R_VOC ? "vocoder" : MM3_SYNTH_ROLE[r]);
         }
     }
 
-    if (!m->lm_file.found && !m->synth_file.found) {
+    bool any_role = false;
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        any_role = any_role || m->role_file[r].found;
+    }
+    if (!m->lm_file.found && !any_role) {
         fprintf(stderr, "[MM3] No MiniMax-Music3 GGUFs found (looked in %s and %s)\n", sub.c_str(),
                 m->models_dir.c_str());
         return;
     }
     fprintf(stderr, "[MM3] LM:    %s\n", m->lm_file.found ? m->lm_file.path.c_str() : "(not found)");
-    fprintf(stderr, "[MM3] Synth: %s\n", m->synth_file.found ? m->synth_file.path.c_str() : "(not found)");
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        fprintf(stderr, "[MM3] %-5s: %s\n", MM3_SYNTH_ROLE[r],
+                m->role_file[r].found ? m->role_file[r].name.c_str() : "(not found)");
+    }
     {
         auto log_variants = [](const char * role, const std::vector<MM3Variant> & vars) {
             if (vars.size() < 2) {
@@ -901,12 +1040,14 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
             }
             std::string line;
             for (const auto & v : vars) {
-                line += (line.empty() ? "" : ", ") + v.quant;
+                line += (line.empty() ? "" : ", ") + v.quant + (v.bundle ? "(bundle)" : "");
             }
             fprintf(stderr, "[MM3] %s quants available: %s\n", role, line.c_str());
         };
         log_variants("LM", m->lm_variants);
-        log_variants("Synth", m->synth_variants);
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            log_variants(MM3_SYNTH_ROLE[r], m->role_variants[r]);
+        }
     }
     if (m->lm_file.probe_ok) {
         fprintf(stderr, "[MM3] LM cfg: %uL H=%u V=%u heads=%u/%u codebooks=%u sem@%u+%u fps=%u\n",
@@ -914,7 +1055,8 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
                 m->lm_cfg.head_count_kv, m->lm_cfg.num_codebooks, m->lm_cfg.semantic_vocab_offset,
                 m->lm_cfg.semantic_vocab_size, m->lm_cfg.frame_rate);
     }
-    if (m->synth_file.probe_ok) {
+    if (m->role_file[MM3_R_DEPTH].probe_ok && m->role_file[MM3_R_COND].probe_ok &&
+        m->role_file[MM3_R_DIT].probe_ok && m->role_file[MM3_R_VOC].probe_ok) {
         fprintf(stderr, "[MM3] Synth cfg: depth %uL/%u  cond %u->%u  dit %uL/%u  voc %u->%u Hz x%u\n",
                 m->synth_cfg.depth.block_count, m->synth_cfg.depth.embedding_length, m->synth_cfg.cond.hidden_dim,
                 m->synth_cfg.cond.out_dim, m->synth_cfg.dit.block_count, m->synth_cfg.dit.embedding_length,
@@ -926,7 +1068,33 @@ static void mm3_discover(MM3Model * m, const char * models_dir, const std::strin
 }
 
 static bool mm3_available(const MM3Model & m) {
-    return m.lm_file.probe_ok && m.synth_file.probe_ok && m.meta_errors.empty();
+    bool ok = m.lm_file.probe_ok && m.meta_errors.empty();
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        ok = ok && m.role_file[r].probe_ok;
+    }
+    return ok;
+}
+
+// Weight bytes on disk across all resolved files, counting each DISTINCT path
+// once — in bundle mode all four role files point at the same GGUF.
+static uint64_t mm3_total_tensor_bytes(const MM3Model & m) {
+    uint64_t total = m.lm_file.found ? m.lm_file.tensor_bytes : 0;
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        if (!m.role_file[r].found) {
+            continue;
+        }
+        bool seen = false;
+        for (int r2 = 0; r2 < r; r2++) {
+            if (m.role_file[r2].found && m.role_file[r2].path == m.role_file[r].path) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            total += m.role_file[r].tensor_bytes;
+        }
+    }
+    return total;
 }
 
 // ── Tensor loading ──────────────────────────────────────────────────────────
@@ -1026,9 +1194,13 @@ static bool mm3_load_depth_tensors(MM3Model * m, const GGUFModel & gf, std::vect
     return errs->empty();
 }
 
-// The stage-2 half of the synth file: condition encoder + flow DiT + vocoder.
-// Loaded separately from depth so it can be absent while the AR loop runs.
-static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf, std::vector<std::string> * errs) {
+// The stage-2 parts: condition encoder + flow DiT + vocoder, one shared
+// backend buffer (they load and evict together), each read from its own
+// resolved file. In legacy bundle mode all three GGUFModel refs alias the same
+// open handle. Loaded separately from depth so it can be absent while the AR
+// loop runs.
+static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf_cond, const GGUFModel & gf_dit,
+                                  const GGUFModel & gf_voc, std::vector<std::string> * errs) {
     const MM3SynthConfig & c = m->synth_cfg;
 
     // Tensor budget from the layout doc: cond 4 + dit 370 + voc 91.
@@ -1037,7 +1209,7 @@ static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf, std::vecto
     const int n_voc  = 7 + (int) c.voc.upsample_rates.size() * (3 + (int) c.voc.res_dilations.size() * 6);
     wctx_init(&m->wctx_synth, n_cond + n_dit + n_voc);
 
-    MM3Loader ld{ &m->wctx_synth, &gf, &m->tmap_synth, errs };
+    MM3Loader ld{ &m->wctx_synth, &gf_cond, &m->tmap_synth, errs };
 
     // ── cond ──
     {
@@ -1049,6 +1221,7 @@ static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf, std::vecto
     }
 
     // ── dit ──
+    ld.gf = &gf_dit;
     {
         const MM3DitConfig & t  = c.dit;
         const int64_t        E  = t.embedding_length;
@@ -1085,6 +1258,7 @@ static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf, std::vecto
     }
 
     // ── voc ── channel ladder hidden_dim >> B, strides from upsample_rates
+    ld.gf = &gf_voc;
     {
         const MM3VocConfig & v  = c.voc;
         const int            NB = (int) v.upsample_rates.size();
@@ -1163,13 +1337,20 @@ static void mm3_unload(MM3Model * m) {
     fprintf(stderr, "[MM3] Unloaded\n");
 }
 
+// Forward decls for the targeted residency drops select uses.
+static size_t mm3_free_lm(MM3Model * m);
+static void   mm3_free_depth(MM3Model * m);
+static void   mm3_free_rest(MM3Model * m);
+
 // Choose which quant of each role to run. Empty string = auto (best-first);
 // unchanged values are a no-op so the UI can post the full selection every time.
+// `role_quants` is indexed by MM3SynthRole; null means "leave all four alone".
 //
-// Selecting a different file must drop residency: the loaded weights ARE the
-// old quant, and the tokenizer caches by LM path (mm3-tokenizer.h reloads when
+// Selecting a different file must drop the residency it feeds — but ONLY that:
+// swapping the DiT quant frees cond+dit+voc (~300 MB of company) and leaves the
+// 17 GB LM warm. The tokenizer caches by LM path (mm3-tokenizer.h reloads when
 // the path changes). Callers must hold the MM3 mutex — this unloads.
-static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const std::string & synth_quant,
+static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const std::string * role_quants,
                                std::string * err_out) {
     auto known = [](const std::vector<MM3Variant> & vars, const std::string & q) {
         if (q.empty()) {
@@ -1188,24 +1369,56 @@ static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const
         }
         return false;
     }
-    if (!known(m->synth_variants, synth_quant)) {
-        if (err_out) {
-            *err_out = "no mm3-synth-" + synth_quant + ".gguf on disk";
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        if (role_quants && !known(m->role_variants[r], role_quants[r])) {
+            if (err_out) {
+                *err_out = "no mm3-" + std::string(MM3_SYNTH_ROLE[r]) + "-" + role_quants[r] +
+                           ".gguf (or matching bundle) on disk";
+            }
+            return false;
         }
-        return false;
     }
-    if (lm_quant == m->want_lm_quant && synth_quant == m->want_synth_quant) {
+
+    const bool lm_changed = lm_quant != m->want_lm_quant;
+    bool       role_changed[MM3_R_COUNT] = { false, false, false, false };
+    bool       any_role_changed          = false;
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        role_changed[r] = role_quants && role_quants[r] != m->want_role_quant[r];
+        any_role_changed = any_role_changed || role_changed[r];
+    }
+    if (!lm_changed && !any_role_changed) {
         return true;
     }
 
-    m->want_lm_quant    = lm_quant;
-    m->want_synth_quant = synth_quant;
-    mm3_unload(m);
+    m->want_lm_quant = lm_quant;
+    if (role_quants) {
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            m->want_role_quant[r] = role_quants[r];
+        }
+    }
+
+    // Drop only the parts whose weights are the outgoing files. In bundle mode
+    // a change to any bundled role swaps the file under every role it serves,
+    // so the depth/rest distinction still holds: depth rides wctx_depth, the
+    // other three ride wctx_synth.
+    if (lm_changed) {
+        mm3_free_lm(m);
+    }
+    if (role_changed[MM3_R_DEPTH]) {
+        mm3_free_depth(m);
+    }
+    if (role_changed[MM3_R_COND] || role_changed[MM3_R_DIT] || role_changed[MM3_R_VOC]) {
+        mm3_free_rest(m);
+    }
+
     const std::string dir = m->models_dir;
-    mm3_discover(m, dir.c_str(), m->want_lm_quant, m->want_synth_quant);
-    fprintf(stderr, "[MM3] Selected quants: lm=%s synth=%s\n",
+    mm3_discover(m, dir.c_str(), m->want_lm_quant, m->want_role_quant);
+    fprintf(stderr, "[MM3] Selected quants: lm=%s depth=%s cond=%s dit=%s voc=%s\n",
             m->lm_file.found ? m->lm_file.name.c_str() : "(none)",
-            m->synth_file.found ? m->synth_file.name.c_str() : "(none)");
+            m->role_file[MM3_R_DEPTH].found ? m->role_file[MM3_R_DEPTH].name.c_str() : "(none)",
+            m->role_file[MM3_R_COND].found ? m->role_file[MM3_R_COND].name.c_str() : "(none)",
+            m->role_file[MM3_R_DIT].found ? m->role_file[MM3_R_DIT].name.c_str() : "(none)",
+            m->role_file[MM3_R_VOC].found ? m->role_file[MM3_R_VOC].name.c_str() : "(none)");
     return true;
 }
 
@@ -1221,6 +1434,8 @@ static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const
 // entirely while the merge maths is being validated. Increment 1b moves this to
 // a request field and reloads `rest` when the set changes (rest_adapter_desc is
 // the comparison key it will use).
+// `gf_dit` is the file carrying the dit.* tensors (the split DiT file, or the
+// legacy bundle) — the only file the adapter merge needs.
 static void mm3_apply_adapters(MM3Model * m, const GGUFModel & gf_sy) {
     m->rest_adapter_desc.clear();
 
@@ -1278,8 +1493,10 @@ static void mm3_apply_adapters(MM3Model * m, const GGUFModel & gf_sy) {
 // On any failure NOTHING stays resident — a half-loaded model is never a state
 // the pipeline has to reason about.
 //
-// The two GGUFs are opened only when a part that lives in them is actually
-// wanted, so a stage-2 top-up never re-reads the 17 GB LM header.
+// Files are opened only when a part that lives in them is actually wanted, so
+// a stage-2 top-up never re-reads the 17 GB LM header. Distinct paths are
+// opened once: in legacy bundle mode depth/cond/dit/voc all resolve to the
+// same GGUF and share one handle.
 static bool mm3_load_parts(MM3Model * m, bool want_lm, bool want_depth, bool want_rest, std::string * err_out) {
     const bool need_lm    = want_lm && !m->lm_resident;
     const bool need_depth = want_depth && !m->depth_resident;
@@ -1287,13 +1504,20 @@ static bool mm3_load_parts(MM3Model * m, bool want_lm, bool want_depth, bool wan
     if (!need_lm && !need_depth && !need_rest) {
         return true;
     }
-    if (!m->lm_file.found || !m->synth_file.found) {
-        if (err_out) {
-            *err_out = "MiniMax-Music3 GGUFs not found (need mm3-lm-*.gguf and mm3-synth-*.gguf)";
+    {
+        bool all_found = m->lm_file.found;
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            all_found = all_found && m->role_file[r].found;
         }
-        return false;
+        if (!all_found) {
+            if (err_out) {
+                *err_out = "MiniMax-Music3 GGUFs not found (need mm3-lm plus depth/cond/dit/voc files or an "
+                           "mm3-synth bundle)";
+            }
+            return false;
+        }
     }
-    if (!m->lm_file.probe_ok || !m->synth_file.probe_ok || !m->meta_errors.empty()) {
+    if (!mm3_available(*m)) {
         if (err_out) {
             *err_out = m->meta_errors.empty() ? "MiniMax-Music3 GGUF metadata probe failed; see /mm3/props errors"
                                               : m->meta_errors[0];
@@ -1314,56 +1538,77 @@ static bool mm3_load_parts(MM3Model * m, bool want_lm, bool want_depth, bool wan
     std::vector<std::string> errs;
     bool                     ok = true;
 
+    // One open handle per distinct path (map nodes are pointer-stable).
+    std::map<std::string, GGUFModel> handles;
+    auto open = [&](const std::string & path) -> const GGUFModel * {
+        auto it = handles.find(path);
+        if (it != handles.end()) {
+            return &it->second;
+        }
+        GGUFModel gf = {};
+        if (!gf_load(&gf, path.c_str())) {
+            errs.push_back("cannot open " + path);
+            return nullptr;
+        }
+        return &handles.emplace(path, gf).first->second;
+    };
+    auto close_all = [&]() {
+        for (auto & kv : handles) {
+            gf_close(&kv.second);
+        }
+        handles.clear();
+    };
+
     if (need_lm) {
-        GGUFModel gf_lm = {};
-        if (!gf_load(&gf_lm, m->lm_file.path.c_str())) {
-            errs.push_back("cannot open " + m->lm_file.path);
-            ok = false;
-        } else {
-            ok = mm3_load_lm_tensors(m, gf_lm, &errs);
-            if (ok) {
-                ok = wctx_alloc(&m->wctx_lm, m->backend);
-                if (!ok) {
-                    errs.push_back("backend buffer allocation failed for the LM (out of VRAM?)");
-                }
+        const GGUFModel * gf_lm = open(m->lm_file.path);
+        ok                      = gf_lm != nullptr;
+        if (ok) {
+            ok = mm3_load_lm_tensors(m, *gf_lm, &errs);
+        }
+        if (ok) {
+            ok = wctx_alloc(&m->wctx_lm, m->backend);
+            if (!ok) {
+                errs.push_back("backend buffer allocation failed for the LM (out of VRAM?)");
             }
-            gf_close(&gf_lm);
         }
     }
 
-    if (ok && (need_depth || need_rest)) {
-        GGUFModel gf_sy = {};
-        if (!gf_load(&gf_sy, m->synth_file.path.c_str())) {
-            errs.push_back("cannot open " + m->synth_file.path);
-            ok = false;
-        } else {
-            if (ok && need_depth) {
-                ok = mm3_load_depth_tensors(m, gf_sy, &errs);
-                if (ok) {
-                    ok = wctx_alloc(&m->wctx_depth, m->backend);
-                    if (!ok) {
-                        errs.push_back("backend buffer allocation failed for the depth decoder (out of VRAM?)");
-                    }
-                }
+    if (ok && need_depth) {
+        const GGUFModel * gf_depth = open(m->role_file[MM3_R_DEPTH].path);
+        ok                         = gf_depth != nullptr;
+        if (ok) {
+            ok = mm3_load_depth_tensors(m, *gf_depth, &errs);
+        }
+        if (ok) {
+            ok = wctx_alloc(&m->wctx_depth, m->backend);
+            if (!ok) {
+                errs.push_back("backend buffer allocation failed for the depth decoder (out of VRAM?)");
             }
-            if (ok && need_rest) {
-                ok = mm3_load_rest_tensors(m, gf_sy, &errs);
-                if (ok) {
-                    // Adapter merge goes HERE — after the tensors are staged in
-                    // wctx_synth but before they are uploaded, the same seam ACE
-                    // uses in dit.h. Merging patches the PendingCopy sources, so
-                    // wctx_alloc then uploads already-adapted weights and no
-                    // extra VRAM or second pass is needed.
-                    mm3_apply_adapters(m, gf_sy);
-                    ok = wctx_alloc(&m->wctx_synth, m->backend);
-                    if (!ok) {
-                        errs.push_back("backend buffer allocation failed for the synth stack (out of VRAM?)");
-                    }
-                }
-            }
-            gf_close(&gf_sy);
         }
     }
+
+    if (ok && need_rest) {
+        const GGUFModel * gf_cond = open(m->role_file[MM3_R_COND].path);
+        const GGUFModel * gf_dit  = gf_cond ? open(m->role_file[MM3_R_DIT].path) : nullptr;
+        const GGUFModel * gf_voc  = gf_dit ? open(m->role_file[MM3_R_VOC].path) : nullptr;
+        ok                        = gf_voc != nullptr;
+        if (ok) {
+            ok = mm3_load_rest_tensors(m, *gf_cond, *gf_dit, *gf_voc, &errs);
+        }
+        if (ok) {
+            // Adapter merge goes HERE — after the tensors are staged in
+            // wctx_synth but before they are uploaded, the same seam ACE
+            // uses in dit.h. Merging patches the PendingCopy sources, so
+            // wctx_alloc then uploads already-adapted weights and no
+            // extra VRAM or second pass is needed. It reads the DiT's file.
+            mm3_apply_adapters(m, *gf_dit);
+            ok = wctx_alloc(&m->wctx_synth, m->backend);
+            if (!ok) {
+                errs.push_back("backend buffer allocation failed for the synth stack (out of VRAM?)");
+            }
+        }
+    }
+    close_all();
 
     if (!ok) {
         std::string msg = errs.empty() ? "MM3 load failed" : errs[0];
@@ -1422,4 +1667,38 @@ static size_t mm3_free_lm(MM3Model * m) {
     m->lm_resident = false;
     m->loaded      = false;
     return freed;
+}
+
+// Drop ONLY the depth decoder. Used by a per-role quant swap; the LM graph
+// reads depth.audio_embd out of this buffer, but its prepare keys on the
+// buffer identity and rebuilds on the next call. tmap_synth entries pointing
+// into this buffer die with it — the map is introspection-only and rebuilt on
+// the next load.
+static void mm3_free_depth(MM3Model * m) {
+    if (!m->depth_resident) {
+        return;
+    }
+    wctx_free(&m->wctx_depth);
+    m->synth.depth = MM3DepthWeights{};
+    m->tmap_synth.clear();
+    m->vram_depth     = 0;
+    m->depth_resident = false;
+    m->loaded         = false;
+}
+
+// Drop ONLY cond+dit+voc (the stage-2 buffer). The cheap reload path behind a
+// DiT quant or adapter change: LM and depth stay warm.
+static void mm3_free_rest(MM3Model * m) {
+    if (!m->rest_resident) {
+        return;
+    }
+    wctx_free(&m->wctx_synth);
+    m->synth.cond = MM3CondWeights{};
+    m->synth.dit  = MM3DitWeights{};
+    m->synth.voc  = MM3VocWeights{};
+    m->tmap_synth.clear();
+    m->rest_adapter_desc.clear();
+    m->vram_synth    = 0;
+    m->rest_resident = false;
+    m->loaded        = false;
 }

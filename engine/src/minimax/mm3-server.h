@@ -298,12 +298,11 @@ static void mm3_handle_props(const httplib::Request &, httplib::Response & res) 
     yyjson_mut_obj_add_bool(doc, root, "loaded", g_mm3.loaded);
     yyjson_mut_obj_add_strcpy(doc, root, "models_dir", g_mm3.models_dir.c_str());
 
-    // synth_ready: both GGUFs found AND their headers parsed clean, i.e.
+    // synth_ready: every role's GGUF found AND its header parsed clean, i.e.
     // POST /mm3/synth will get as far as loading weights. Deliberately NOT a
     // VRAM or residency claim — `loaded` above is residency, and the job's own
     // arbitration decides whether the weights fit.
-    const bool synth_ready = g_mm3.lm_file.found && g_mm3.lm_file.probe_ok && g_mm3.synth_file.found &&
-                             g_mm3.synth_file.probe_ok && g_mm3.meta_errors.empty();
+    const bool synth_ready = mm3_available(g_mm3);
     yyjson_mut_obj_add_bool(doc, root, "synth_ready", synth_ready);
     yyjson_mut_obj_add_uint(doc, root, "prompt_token_limit", MM3_MAX_PROMPT_TOKENS);
     yyjson_mut_obj_add_uint(doc, root, "max_audio_frames_limit", MM3_MAX_AUDIO_FRAMES);
@@ -317,7 +316,12 @@ static void mm3_handle_props(const httplib::Request &, httplib::Response & res) 
     yyjson_mut_val * files = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "files", files);
     mm3_json_add_file(doc, files, "lm", g_mm3.lm_file);
-    mm3_json_add_file(doc, files, "synth", g_mm3.synth_file);
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        mm3_json_add_file(doc, files, MM3_SYNTH_ROLE[r], g_mm3.role_file[r]);
+    }
+    // Legacy key: pre-split clients gate on files.synth.found; the DiT file is
+    // the honest stand-in (largest non-LM component, always required).
+    mm3_json_add_file(doc, files, "synth", g_mm3.role_file[MM3_R_DIT]);
 
     // Quant catalogue — what the UI's model dropdowns are built from. "selected"
     // is the quant actually in force (the resolved pick, not the request), so a
@@ -346,7 +350,13 @@ static void mm3_handle_props(const httplib::Request &, httplib::Response & res) 
             yyjson_mut_obj_add_strcpy(doc, o, "requested", want.c_str());
         };
         add_role("lm", g_mm3.lm_variants, g_mm3.lm_file, g_mm3.want_lm_quant);
-        add_role("synth", g_mm3.synth_variants, g_mm3.synth_file, g_mm3.want_synth_quant);
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            add_role(MM3_SYNTH_ROLE[r], g_mm3.role_variants[r], g_mm3.role_file[r], g_mm3.want_role_quant[r]);
+        }
+        // Legacy key: pre-split clients drive one "synth" dropdown; alias the
+        // DiT role so they keep working (a bundle appears in its list too).
+        add_role("synth", g_mm3.role_variants[MM3_R_DIT], g_mm3.role_file[MM3_R_DIT],
+                 g_mm3.want_role_quant[MM3_R_DIT]);
     }
 
     mm3_json_add_config(doc, root);
@@ -1651,30 +1661,74 @@ static void mm3_handle_synth_e2e(const httplib::Request & req, httplib::Response
 
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
-// POST /mm3/select-model — body {"lm":"<quant>","synth":"<quant>"}.
+// POST /mm3/select-model — body {"lm":"<q>","depth":"<q>","cond":"<q>","dit":"<q>","voc":"<q>"}.
+// Legacy alias: {"synth":"<q>"} sets all four non-LM roles at once (the
+// pre-split contract; a bundle at that quant satisfies it).
 //
-// "" (or a missing key) means auto/best-first. Switching quants drops residency:
-// the resident weights ARE the outgoing quant. Idempotent — posting the current
+// "" (or a missing key) means auto/best-first. Switching a quant drops ONLY the
+// residency it feeds (a DiT swap keeps the LM warm); the graph caches key on
+// buffer identity and rebuild lazily, but they are torn down here anyway so no
+// stale scheduler ever holds a dead buffer. Idempotent — posting the current
 // selection is a no-op, so the UI can send the whole selection on every change.
 static void mm3_handle_select_model(const httplib::Request & req, httplib::Response & res) {
     std::lock_guard<std::mutex> lock(g_mm3_mutex);
 
     yyjson_doc * in = req.body.empty() ? nullptr : yyjson_read(req.body.c_str(), req.body.size(), 0);
     yyjson_val * root_in = in ? yyjson_doc_get_root(in) : nullptr;
-    auto         get_str = [&](const char * key) -> std::string {
+    auto         has_key = [&](const char * key) {
+        yyjson_val * v = root_in ? yyjson_obj_get(root_in, key) : nullptr;
+        return v && yyjson_is_str(v);
+    };
+    auto get_str = [&](const char * key) -> std::string {
         yyjson_val * v = root_in ? yyjson_obj_get(root_in, key) : nullptr;
         return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
     };
-    const std::string want_lm    = get_str("lm");
-    const std::string want_synth = get_str("synth");
+    const std::string want_lm = get_str("lm");
+    std::string       want_roles[MM3_R_COUNT];
+    if (has_key("synth") && !has_key("dit")) {
+        // Legacy caller: one quant token for the whole non-LM stack.
+        const std::string synth = get_str("synth");
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            want_roles[r] = synth;
+        }
+        // cond/voc exist only near-native; an auto pick keeps a legacy Q-token
+        // request loadable on a split install (the bundle covers it otherwise).
+        if (!synth.empty()) {
+            auto offered = [&](MM3SynthRole r) {
+                for (const auto & v : g_mm3.role_variants[r]) {
+                    if (v.quant == synth) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (!offered(MM3_R_COND)) {
+                want_roles[MM3_R_COND] = "";
+            }
+            if (!offered(MM3_R_VOC)) {
+                want_roles[MM3_R_VOC] = "";
+            }
+            if (!offered(MM3_R_DEPTH)) {
+                want_roles[MM3_R_DEPTH] = "";
+            }
+        }
+    } else {
+        for (int r = 0; r < MM3_R_COUNT; r++) {
+            want_roles[r] = get_str(MM3_SYNTH_ROLE[r]);
+        }
+    }
     if (in) {
         yyjson_doc_free(in);
     }
 
     const bool was_loaded = g_mm3.loaded;
-    // Graph state points into the model's buffers; mm3_select_variant unloads
-    // those, so tear the graphs down first (same order as /mm3/unload).
-    const bool changes = (want_lm != g_mm3.want_lm_quant) || (want_synth != g_mm3.want_synth_quant);
+    // Graph state points into the model's buffers; mm3_select_variant drops
+    // (some of) those, so tear the graphs down first (same order as
+    // /mm3/unload). They rebuild lazily against whatever is resident.
+    bool changes = want_lm != g_mm3.want_lm_quant;
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        changes = changes || want_roles[r] != g_mm3.want_role_quant[r];
+    }
     if (changes) {
         mm3_vocoder_free(&g_mm3_voc);
         mm3_dit_free(&g_mm3_dit);
@@ -1684,7 +1738,7 @@ static void mm3_handle_select_model(const httplib::Request & req, httplib::Respo
     }
 
     std::string err;
-    if (!mm3_select_variant(&g_mm3, want_lm, want_synth, &err)) {
+    if (!mm3_select_variant(&g_mm3, want_lm, want_roles, &err)) {
         mm3_json_error(res, 400, err);
         return;
     }
@@ -1695,7 +1749,13 @@ static void mm3_handle_select_model(const httplib::Request & req, httplib::Respo
     yyjson_mut_obj_add_bool(doc, root, "changed", changes);
     yyjson_mut_obj_add_bool(doc, root, "unloaded", changes && was_loaded);
     yyjson_mut_obj_add_strcpy(doc, root, "lm", g_mm3.lm_file.found ? g_mm3.lm_file.name.c_str() : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "synth", g_mm3.synth_file.found ? g_mm3.synth_file.name.c_str() : "");
+    for (int r = 0; r < MM3_R_COUNT; r++) {
+        yyjson_mut_obj_add_strcpy(doc, root, MM3_SYNTH_ROLE[r],
+                                  g_mm3.role_file[r].found ? g_mm3.role_file[r].name.c_str() : "");
+    }
+    // Legacy key: pre-split clients read back "synth"; the DiT stands in.
+    yyjson_mut_obj_add_strcpy(doc, root, "synth",
+                              g_mm3.role_file[MM3_R_DIT].found ? g_mm3.role_file[MM3_R_DIT].name.c_str() : "");
     yyjson_mut_obj_add_bool(doc, root, "available", mm3_available(g_mm3));
     for (const auto & e : g_mm3.meta_errors) {
         yyjson_mut_obj_add_strcpy(doc, root, "error", e.c_str());

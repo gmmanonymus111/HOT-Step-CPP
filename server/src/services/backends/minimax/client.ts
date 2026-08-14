@@ -73,8 +73,16 @@ export interface Mm3Props {
   max_audio_frames_limit: number;  // 9000 (= 360 s @ 25 fps)
   models_dir?: string;
   search_dirs?: string[];
-  files?: { lm?: Mm3PropsFile; synth?: Mm3PropsFile };
-  variants?: { lm?: Mm3RoleVariants; synth?: Mm3RoleVariants };
+  /** Since the 5-way split: per-role entries (depth/cond/dit/voc). `synth` is
+   *  a legacy alias the engine still emits — it mirrors the DiT role. */
+  files?: {
+    lm?: Mm3PropsFile; depth?: Mm3PropsFile; cond?: Mm3PropsFile;
+    dit?: Mm3PropsFile; voc?: Mm3PropsFile; synth?: Mm3PropsFile;
+  };
+  variants?: {
+    lm?: Mm3RoleVariants; depth?: Mm3RoleVariants; cond?: Mm3RoleVariants;
+    dit?: Mm3RoleVariants; voc?: Mm3RoleVariants; synth?: Mm3RoleVariants;
+  };
   vram?: Record<string, number>;
   errors?: string[];
   [k: string]: unknown;
@@ -82,12 +90,31 @@ export interface Mm3Props {
 
 export interface Mm3SelectModelResult {
   changed: boolean;
-  /** True when the switch evicted resident weights (a re-warm will follow). */
+  /** True when the switch evicted resident weights (a re-warm will follow).
+   *  Since the split, only the affected parts are evicted — a DiT swap keeps
+   *  the 17 GB LM warm. */
   unloaded: boolean;
-  lm: string;                 // resolved filename
+  lm: string;                 // resolved filenames
+  depth?: string;
+  cond?: string;
+  dit?: string;
+  voc?: string;
+  /** Legacy alias — mirrors `dit`. */
   synth: string;
   available: boolean;
   error?: string;
+}
+
+/** Per-role quant selection. '' (or omitted) = auto/best-first. */
+export interface Mm3Selection {
+  lm?: string;
+  depth?: string;
+  cond?: string;
+  dit?: string;
+  voc?: string;
+  /** Legacy: one token for the whole non-LM stack (pre-split contract). Only
+   *  sent when `dit` is absent; the engine maps it onto all four roles. */
+  synth?: string;
 }
 
 export interface Mm3PropsResult {
@@ -294,10 +321,19 @@ export async function mm3TokenizeCheck(
  *  quant (400) — unlike the residency helpers below, a failed model switch must
  *  be visible, not swallowed, or the user silently keeps generating on the old
  *  weights. */
-export async function mm3SelectModel(sel: { lm?: string; synth?: string }): Promise<Mm3SelectModelResult> {
-  return mm3Post<Mm3SelectModelResult>(
-    '/mm3/select-model', { lm: sel.lm ?? '', synth: sel.synth ?? '' }, TIMEOUT_QUICK,
-  );
+export async function mm3SelectModel(sel: Mm3Selection): Promise<Mm3SelectModelResult> {
+  // Per-role when any split key is present; otherwise the legacy synth shape.
+  const body: Record<string, string> =
+    sel.dit !== undefined || sel.depth !== undefined || sel.cond !== undefined || sel.voc !== undefined
+      ? {
+          lm:    sel.lm ?? '',
+          depth: sel.depth ?? '',
+          cond:  sel.cond ?? '',
+          dit:   sel.dit ?? '',
+          voc:   sel.voc ?? '',
+        }
+      : { lm: sel.lm ?? '', synth: sel.synth ?? '' };
+  return mm3Post<Mm3SelectModelResult>('/mm3/select-model', body, TIMEOUT_QUICK);
 }
 
 // ── Residency ──

@@ -141,9 +141,10 @@ static size_t mm3_kv_bytes_estimate(const MM3Model & m, int64_t n_ctx_needed) {
            (size_t) n;
 }
 
-// Weights + KV + compute headroom.
+// Weights + KV + compute headroom. Distinct files only — in bundle mode the
+// four role files alias one GGUF and must not be counted four times.
 static size_t mm3_vram_need(const MM3Model & m, int64_t n_ctx_needed) {
-    return (size_t) m.lm_file.tensor_bytes + (size_t) m.synth_file.tensor_bytes +
+    return (size_t) mm3_total_tensor_bytes(m) +
            mm3_kv_bytes_estimate(m, n_ctx_needed) + MM3_VRAM_COMPUTE_HEADROOM;
 }
 

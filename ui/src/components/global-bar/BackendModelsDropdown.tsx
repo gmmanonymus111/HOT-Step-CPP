@@ -25,7 +25,10 @@ import { ModelSelect } from './ModelSelect';
 const BUCKET_LABELS: Record<string, string> = {
   lm: 'Language Model',
   synth: 'Synth / Flow Model',
-  dit: 'DiT Model',
+  dit: 'Flow DiT',
+  depth: 'Depth Decoder',
+  cond: 'Condition Encoder',
+  voc: 'Vocoder',
   vae: 'VAE Decoder',
   embedding: 'Text Encoder',
 };

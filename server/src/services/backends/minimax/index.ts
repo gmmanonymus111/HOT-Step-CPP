@@ -14,7 +14,7 @@ import { engineReady } from '../../../engineState.js';
 import { isEngineSuspended } from '../../aceEngineProcess.js';
 import { getSetting, setSetting } from '../../../db/lireekDb.js';
 import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
-import type { Mm3Props } from './client.js';
+import type { Mm3Props, Mm3RoleVariants } from './client.js';
 import type {
   EngineBackend,
   BackendCapabilities,
@@ -39,8 +39,40 @@ const MM3_MAX_DURATION_SEC = 300;
 // active backend id: no new mechanism, no schema change. Server-side rather
 // than in localStorage deliberately — the engine must be restored even when no
 // browser has been opened.
-const LM_SETTING    = 'mm3_lm_quant';
-const SYNTH_SETTING = 'mm3_synth_quant';
+// One setting per role since the 5-way model split. The legacy
+// 'mm3_synth_quant' key seeds the dit/depth roles on first boot after the
+// upgrade (cond/voc stay auto: they are near-native-only), then per-role
+// settings take over.
+const LM_SETTING           = 'mm3_lm_quant';
+const LEGACY_SYNTH_SETTING = 'mm3_synth_quant';
+const MM3_ROLES = ['depth', 'cond', 'dit', 'voc'] as const;
+type Mm3Role = (typeof MM3_ROLES)[number];
+const ROLE_SETTING: Record<Mm3Role, string> = {
+  depth: 'mm3_depth_quant',
+  cond:  'mm3_cond_quant',
+  dit:   'mm3_dit_quant',
+  voc:   'mm3_voc_quant',
+};
+
+/** The persisted per-role selection, with one-time migration from the legacy
+ *  single-synth setting. */
+function persistedSelection(): { lm: string } & Record<Mm3Role, string> {
+  const legacy = getSetting(LEGACY_SYNTH_SETTING, '');
+  const roleOf = (role: Mm3Role): string => {
+    const v = getSetting(ROLE_SETTING[role], '');
+    if (v) return v;
+    // Legacy seed: the old bundle token maps to the two roles that ship a
+    // matching quant ladder. cond/voc stay '' (auto → their near-native file).
+    return legacy && (role === 'dit' || role === 'depth') ? legacy : '';
+  };
+  return {
+    lm:    getSetting(LM_SETTING, ''),
+    depth: roleOf('depth'),
+    cond:  roleOf('cond'),
+    dit:   roleOf('dit'),
+    voc:   roleOf('voc'),
+  };
+}
 
 /** Push the persisted selection back into the engine if it has drifted.
  *
@@ -55,26 +87,35 @@ async function reconcileSelection(props: Mm3Props | null, stale: boolean): Promi
   // guess.
   if (stale || !props?.variants) return;
 
-  const wantLm    = getSetting(LM_SETTING, '');
-  const wantSynth = getSetting(SYNTH_SETTING, '');
-  if (!wantLm && !wantSynth) return;   // never chosen — engine default is right
-
-  const lm    = props.variants.lm;
-  const synth = props.variants.synth;
-  if (!lm || !synth) return;
+  const want = persistedSelection();
+  if (!want.lm && MM3_ROLES.every(r => !want[r])) return;  // never chosen — engine default is right
 
   // Only ask for a quant the engine can actually see; a file deleted since the
   // choice was made must fall back, not wedge every capability poll on a 400.
-  const has = (v: typeof lm, q: string) => !q || v.available?.some(f => f.quant === q);
-  const lmTarget    = has(lm, wantLm) ? wantLm : '';
-  const synthTarget = has(synth, wantSynth) ? wantSynth : '';
+  const variantsOf = (key: 'lm' | Mm3Role) => props.variants?.[key];
+  const has = (key: 'lm' | Mm3Role, q: string) =>
+    !q || (variantsOf(key)?.available?.some(f => f.quant === q) ?? false);
 
-  if (lmTarget === (lm.requested ?? '') && synthTarget === (synth.requested ?? '')) return;
+  const target = {
+    lm:    has('lm', want.lm) ? want.lm : '',
+    depth: has('depth', want.depth) ? want.depth : '',
+    cond:  has('cond', want.cond) ? want.cond : '',
+    dit:   has('dit', want.dit) ? want.dit : '',
+    voc:   has('voc', want.voc) ? want.voc : '',
+  };
+
+  // Engines predating the split have no per-role variants; skip rather than
+  // send a per-role body they would misread.
+  if (!props.variants.dit) return;
+
+  const drifted = (['lm', ...MM3_ROLES] as const)
+    .some(k => target[k] !== (variantsOf(k)?.requested ?? ''));
+  if (!drifted) return;
 
   try {
-    const r = await mm3SelectModel({ lm: lmTarget, synth: synthTarget });
+    const r = await mm3SelectModel(target);
     if (r.changed) {
-      console.log(`[Backends] MiniMax-Music3 restored persisted models: ${r.lm} + ${r.synth}`);
+      console.log(`[Backends] MiniMax-Music3 restored persisted models: ${r.lm} + ${r.dit ?? r.synth}`);
     }
   } catch (err: any) {
     // Advisory: a failed restore leaves the engine on its default, which still
@@ -121,7 +162,9 @@ async function capabilities(): Promise<BackendCapabilities> {
   // fail open (false) on a stale/never-fetched manifest — a probe timeout
   // must never be misread as "go nag the user to download 24 GB again".
   const modelsMissing = !stale && props != null && !synthReady &&
-    (props.files?.lm?.found === false || props.files?.synth?.found === false);
+    (props.files?.lm?.found === false || props.files?.synth?.found === false ||
+     props.files?.depth?.found === false || props.files?.cond?.found === false ||
+     props.files?.dit?.found === false || props.files?.voc?.found === false);
 
   return {
     backend: 'minimax-m3',
@@ -214,51 +257,82 @@ async function capabilities(): Promise<BackendCapabilities> {
 }
 
 async function models(): Promise<BackendModels> {
-  // MM3 ships as exactly two GGUFs (mm3-lm + mm3-synth), so there is no
-  // lm/dit/vae split to show (plan §4.5) — but each of the two exists at
-  // several quant levels, and THAT is the user-facing choice. Buckets are
-  // therefore the two roles, with the quant tokens as options.
+  // Since the 5-way split MM3 ships one GGUF per component, each at several
+  // quant levels — the roles are the buckets and the quant tokens the options.
+  // cond/voc exist only near-native, so their buckets are usually one entry;
+  // the UI's dropdowns degrade to a fixed label there. A pre-split engine
+  // (variants.dit absent) still gets the legacy lm+synth pair.
   const { props } = await mm3Props();
-  const lm = props?.variants?.lm;
-  const synth = props?.variants?.synth;
+  const v = props?.variants;
 
   const meta: NonNullable<BackendModels['meta']> = {};
-  const bucketOf = (v: typeof lm, key: string): string[] => {
-    if (!v?.available?.length) return [];
+  const bucketOf = (variants: Mm3RoleVariants | undefined, key: string): string[] => {
+    if (!variants?.available?.length) return [];
     meta[key] = {};
-    for (const f of v.available) {
+    for (const f of variants.available) {
       meta[key][f.quant] = { label: f.filename, bytes: f.bytes };
     }
-    return v.available.map(f => f.quant);
+    return variants.available.map(f => f.quant);
   };
 
+  if (!v?.dit) {
+    // Legacy engine: two-bucket shape, untouched.
+    return {
+      buckets: { lm: bucketOf(v?.lm, 'lm'), synth: bucketOf(v?.synth, 'synth') },
+      adapters: [],
+      lmAdapters: [],
+      defaults: { lm: v?.lm?.selected ?? '', synth: v?.synth?.selected ?? '' },
+      meta,
+    };
+  }
+
   return {
-    buckets: { lm: bucketOf(lm, 'lm'), synth: bucketOf(synth, 'synth') },
+    buckets: {
+      lm:    bucketOf(v.lm, 'lm'),
+      dit:   bucketOf(v.dit, 'dit'),
+      depth: bucketOf(v.depth, 'depth'),
+      cond:  bucketOf(v.cond, 'cond'),
+      voc:   bucketOf(v.voc, 'voc'),
+    },
     // No adapter or planner-adapter subsystem for MM3 yet — the UI renders
     // these clusters as empty placeholders (features.adapters is false).
     adapters: [],
     lmAdapters: [],
     // The quant actually in force, not what was requested: if a selected file
     // is deleted the engine falls back and the UI must show the truth.
-    defaults: { lm: lm?.selected ?? '', synth: synth?.selected ?? '' },
+    defaults: {
+      lm:    v.lm?.selected ?? '',
+      dit:   v.dit?.selected ?? '',
+      depth: v.depth?.selected ?? '',
+      cond:  v.cond?.selected ?? '',
+      voc:   v.voc?.selected ?? '',
+    },
     meta,
   };
 }
 
-/** Switch which quant of each role runs. The engine unloads on a real change
- *  (the resident weights ARE the outgoing quant), so the next generation pays
- *  a warm — that is the honest cost of the switch, not a bug. */
+/** Switch which quant of each role runs. The engine drops only the residency
+ *  the change feeds (a DiT swap keeps the 17 GB LM warm), so the next
+ *  generation pays a partial warm — that is the honest cost of the switch. */
 async function selectModel(selection: Record<string, string>) {
-  const lm    = selection.lm ?? '';
-  const synth = selection.synth ?? '';
-  const result = await mm3SelectModel({ lm, synth });
+  const sel = {
+    lm:    selection.lm ?? '',
+    depth: selection.depth ?? '',
+    cond:  selection.cond ?? '',
+    dit:   selection.dit ?? selection.synth ?? '',
+    voc:   selection.voc ?? '',
+  };
+  const result = await mm3SelectModel(sel);
   // Persist only after the engine accepted it, so a rejected quant can never
   // be written back and then replayed on every subsequent boot.
-  setSetting(LM_SETTING, lm);
-  setSetting(SYNTH_SETTING, synth);
+  setSetting(LM_SETTING, sel.lm);
+  for (const role of MM3_ROLES) {
+    setSetting(ROLE_SETTING[role], sel[role]);
+  }
   if (result.changed) {
-    console.log(`[Backends] MiniMax-Music3 models: ${result.lm} + ${result.synth}` +
-                (result.unloaded ? ' (evicted previous weights)' : ''));
+    console.log(
+      `[Backends] MiniMax-Music3 models: lm=${result.lm} dit=${result.dit ?? result.synth}` +
+      ` depth=${result.depth ?? ''}` + (result.unloaded ? ' (evicted affected weights)' : ''));
   }
   return { ...result };
 }
