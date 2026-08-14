@@ -7,6 +7,7 @@
 //
 // docs/plans/2026-07-27-preprocess-implementation.md §3.1
 
+#include "minimax/mm3-dav-encode.h"  // MM3 DAV encoder (training-only; not in ace-server)
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
 #include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
@@ -104,6 +105,10 @@ static void print_usage(void) {
             "  preprocess    Build per-song tensor caches from a dataset.\n"
             "  train-lm      Train a planner-LM LoRA from a preprocessed tensor cache.\n"
             "  train-dit     Train a DiT LoRA from a preprocessed tensor cache.\n"
+            "  mm3-encode    MiniMax-Music3 DAV encode: raw f32 audio -> flow latents.\n"
+            "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
+            "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
+            "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -972,6 +977,164 @@ static void bwd_apply(const std::string & v) {
 //
 // docs/plans/2026-07-27-lm-trainer-implementation.md §2.1, §3.1
 
+// ─── mm3-encode ─────────────────────────────────────────────────────────────
+//
+// Bring-up + parity driver for the MM3 DAV encoder (training path step 2).
+// Reads raw f32 planar audio (as dumped by mm3-weights/encode_ref.py) and
+// writes raw f32 latents [128][L], so the two can be compared directly.
+//
+//   ace-train mm3-encode --enc <mm3-enc-*.gguf> --audio <in.f32> --out <out.f32>
+//                        [--channels 2] [--ref <latents.f32>]
+//
+// With --ref it does the comparison itself and exits non-zero if the parity
+// floor is missed, so it can be used as a gate and not just a dumper.
+static int cmd_mm3_encode(int argc, char ** argv) {
+    std::string enc_path, audio_path, out_path, ref_path;
+    int         channels = 2;
+    bool        tf32     = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--enc"))      enc_path   = next("--enc");
+        else if (!strcmp(argv[i], "--audio"))    audio_path = next("--audio");
+        else if (!strcmp(argv[i], "--out"))      out_path   = next("--out");
+        else if (!strcmp(argv[i], "--ref"))      ref_path   = next("--ref");
+        else if (!strcmp(argv[i], "--channels")) channels   = atoi(next("--channels"));
+        else if (!strcmp(argv[i], "--tf32"))     tf32       = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+
+    // TF32 is OFF by default here, which is the opposite of the engine's usual
+    // preference, and the reason is measured rather than assumed:
+    //
+    //   TF32 on : corr 0.999988843  rel-RMSE 4.725e-03  max-abs-diff 1.70e-01
+    //   TF32 off: corr 1.000000000  rel-RMSE 7.493e-07  max-abs-diff 4.49e-05
+    //
+    // cuBLAS uses TF32 tensor cores for F32 GEMMs on Ampere+, and TF32 carries
+    // 10 explicit mantissa bits (~1e-3 relative), which compounds over ~30
+    // convolutions into ~5e-3 on the latents. These latents are the flow DiT's
+    // TRAINING TARGETS: they are computed once and then re-read for hundreds of
+    // epochs, so a systematic 0.5% error would be baked into every gradient for
+    // the life of the dataset. Preprocessing is not the place to trade accuracy
+    // for speed — and the speed it buys is a few seconds per dataset.
+    //
+    // Must be set BEFORE the CUDA backend initialises (mm3_enc_load ->
+    // backend_init), since cuBLAS reads it at context creation. Same lever
+    // dit-selftest.h uses for its finite-difference child process.
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+    if (enc_path.empty() || audio_path.empty()) {
+        fprintf(stderr, "ace-train mm3-encode: --enc and --audio are required\n");
+        return 2;
+    }
+    if (channels != 1 && channels != 2) {
+        fprintf(stderr, "ace-train mm3-encode: --channels must be 1 or 2\n");
+        return 2;
+    }
+
+    // Planar f32: channel 0 in full, then channel 1.
+    FILE * f = fopen(audio_path.c_str(), "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", audio_path.c_str()); return 1; }
+    fseek(f, 0, SEEK_END);
+    const long   bytes = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    const int64_t total = (int64_t) (bytes / (long) sizeof(float));
+    const int64_t n     = total / channels;
+    std::vector<float> raw((size_t) total);
+    if (fread(raw.data(), sizeof(float), (size_t) total, f) != (size_t) total) {
+        fclose(f); fprintf(stderr, "short read on %s\n", audio_path.c_str()); return 1;
+    }
+    fclose(f);
+    fprintf(stderr, "[mm3-encode] %s: %lld samples x %d ch\n", audio_path.c_str(), (long long) n, channels);
+
+    // Mono is duplicated, matching the reference's _prepare_waveform.
+    const float * chans[2] = { raw.data(), channels == 2 ? raw.data() + n : raw.data() };
+
+    MM3Enc      enc = {};
+    std::string err;
+    if (!mm3_enc_load(&enc, enc_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-encode] load failed: %s\n", err.c_str());
+        return 1;
+    }
+
+    std::vector<float> lat;
+    int64_t            L = 0;
+    const int64_t      t0 = ggml_time_ms();
+    if (!mm3_enc_encode(&enc, chans, n, &lat, &L, &err)) {
+        fprintf(stderr, "[mm3-encode] encode failed: %s\n", err.c_str());
+        mm3_enc_free(&enc);
+        return 1;
+    }
+    const int64_t ms = ggml_time_ms() - t0;
+    fprintf(stderr, "[mm3-encode] -> [%u, %lld] in %lld ms\n", enc.cfg.latent_channels, (long long) L,
+            (long long) ms);
+
+    int rc = 0;
+
+    if (!out_path.empty()) {
+        FILE * o = fopen(out_path.c_str(), "wb");
+        if (!o) { fprintf(stderr, "cannot write %s\n", out_path.c_str()); rc = 1; }
+        else {
+            fwrite(lat.data(), sizeof(float), lat.size(), o);
+            fclose(o);
+            fprintf(stderr, "[mm3-encode] wrote %s (%zu floats)\n", out_path.c_str(), lat.size());
+        }
+    }
+
+    if (!ref_path.empty()) {
+        FILE * r = fopen(ref_path.c_str(), "rb");
+        if (!r) { fprintf(stderr, "cannot open ref %s\n", ref_path.c_str()); mm3_enc_free(&enc); return 1; }
+        fseek(r, 0, SEEK_END);
+        const size_t rn = (size_t) (ftell(r) / (long) sizeof(float));
+        fseek(r, 0, SEEK_SET);
+        std::vector<float> ref(rn);
+        if (fread(ref.data(), sizeof(float), rn, r) != rn) {
+            fclose(r); fprintf(stderr, "short read on ref\n"); mm3_enc_free(&enc); return 1;
+        }
+        fclose(r);
+        if (rn != lat.size()) {
+            fprintf(stderr, "[mm3-encode] PARITY FAIL: ref has %zu floats, ours %zu\n", rn, lat.size());
+            mm3_enc_free(&enc);
+            return 1;
+        }
+        // Correlation + relative RMSE, the standing MM3 per-module bar.
+        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, sd = 0, sr = 0, amax = 0;
+        for (size_t i = 0; i < rn; i++) {
+            const double a = ref[i], b = lat[i], d = b - a;
+            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+            sd += d * d; sr += a * a;
+            amax = std::max(amax, std::abs(d));
+        }
+        const double nn   = (double) rn;
+        const double cov  = sab / nn - (sa / nn) * (sb / nn);
+        const double va   = saa / nn - (sa / nn) * (sa / nn);
+        const double vb   = sbb / nn - (sb / nn) * (sb / nn);
+        const double corr = cov / std::sqrt(va * vb);
+        const double rel  = std::sqrt(sd / sr);
+        fprintf(stderr, "[mm3-encode] PARITY corr=%.9f rel-RMSE=%.3e max-abs-diff=%.4e\n", corr, rel, amax);
+        // The bar for an fp32-vs-fp32 module port: this is not a bf16 dump
+        // comparison, both sides are f32, so it should be tight.
+        if (!(corr >= 0.9999 && rel <= 1e-3)) {
+            fprintf(stderr, "[mm3-encode] PARITY FAIL (want corr >= 0.9999 and rel-RMSE <= 1e-3)\n");
+            rc = 1;
+        } else {
+            fprintf(stderr, "[mm3-encode] PARITY OK\n");
+        }
+    }
+
+    mm3_enc_free(&enc);
+    return rc;
+}
+
 static int cmd_train_lm(int argc, char ** argv) {
     LmTrainArgs      a;
     LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
@@ -1540,6 +1703,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "train-dit")) {
         return cmd_train_dit(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-encode")) {
+        return cmd_mm3_encode(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);
