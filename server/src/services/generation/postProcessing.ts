@@ -58,6 +58,10 @@ function leapXeInstalled(): boolean {
 const SEP_LEVEL_VOCALS_ONLY = 4;  // single 6-stem pass, instrumental = mix − vocals
 const SEP_LEVEL_STABLESTEP  = 5;  // dual Leap Xe pass, both stems neural
 
+// SA3's native sample rate (engine/src/sa3-refine.h: SA3_SR 44100). A source
+// already at this rate needs no resampling anywhere in the StableStep path.
+const SA3_NATIVE_SR = 44100;
+
 export interface PostProcessParams {
   postProcessingEnabled?: boolean;
   ppVaeReencode?: boolean;
@@ -121,13 +125,6 @@ export interface PostProcessParams {
   natTransitionSmooth?: number;
   // Context — used to skip naturalizer on instrumentals
   instrumental?: boolean;
-  /** Force StableStep to refine the whole mix instead of splitting vocals out
-   *  and re-mixing. The split path resamples the vocal stem to 48 kHz (via
-   *  PP-VAE) and asks SA3 for 48 kHz output so the two agree — plumbing shaped
-   *  around ACE's 48 kHz pipeline. A 44.1 kHz backend (MiniMax-Music3) sets
-   *  this so it stays on the rate-transparent whole-mix path, which is SA3's
-   *  native rate anyway (SA3_SR 44100). */
-  disableStemSplit?: boolean;
   // Pre-VST gain offset (dB)
   gainOffsetDb?: number;
   // Audio Quality Evaluator
@@ -278,10 +275,11 @@ export async function runPostProcessingChain(
     // Deliberately NOT gated on ppMasterOn: the split is a service for
     // Whisper, not an audio-modifying PP stage (anyStageRan untouched).
     const sa3Available = sa3ModelsInstalled() || sa3GgufInstalled();
-    const stableStepWantsStems = stableStepOn && sa3Available && !params.instrumental
-      && !params.disableStemSplit;
-    const whisperWantsStems = !!onVocalStem && !!params.whisperIsolateVocals && !params.instrumental
-      && !params.disableStemSplit;
+    // The split is NOT optional for a vocal track: SA3 refines instrumental
+    // only, so handing it a full mix makes it hallucinate replacement vocals.
+    // It is a correctness requirement, not a quality nicety.
+    const stableStepWantsStems = stableStepOn && sa3Available && !params.instrumental;
+    const whisperWantsStems = !!onVocalStem && !!params.whisperIsolateVocals && !params.instrumental;
     let vocalSep: VocalSeparation | null = null;
 
     if (stableStepWantsStems || whisperWantsStems) {
@@ -385,14 +383,30 @@ export async function runPostProcessingChain(
             });
             fs.writeFileSync(processedPath, refined);
           } else {
-            // Stems from the shared split above (44.1 kHz). The refined
-            // instrumental is requested at 48 kHz (out_sr) to match the vocal
-            // path's fixed 48 kHz output so the final mix rates agree.
+            // Stems from the shared split above come back at 44.1 kHz, which is
+            // also SA3's native rate (sa3-refine.h SA3_SR 44100).
+            //
+            // The 48 kHz round-trip below exists only because ACE's own output
+            // is 48 kHz and the final mix has to match it. When the SOURCE is
+            // already 44.1 kHz (MiniMax-Music3), every rate in this branch
+            // agrees natively: SA3 in and out, both stems, and the mix. That
+            // path needs no out_sr override and no vocal resample at all —
+            // which also means it never touches PP-VAE, an ACE-only model.
             const vs = vocalSep;
+            const srcRate = parseWavToFloat(fs.readFileSync(processedPath)).sampleRate;
+            const nativeRate = srcRate === SA3_NATIVE_SR;
+            if (nativeRate) {
+              log('INFO', `[StableStep] Source is ${srcRate} Hz — SA3 native; `
+                + 'stems, refine and mix all stay at that rate (no resample)');
+            }
 
             setStage(`StableStep: refining instrumental${suffix}...`);
             const refinedInst = await aceClient.submitSa3Refine(vs.instBuf, {
-              tokens: ids, nTokens, strength, outSr: 48000, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed,
+              // Omitted on the native path: the engine defaults out_sr to the
+              // input rate, so asking for anything would force a resample.
+              ...(nativeRate ? {} : { outSr: 48000 }),
+              ...blendOpts,
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);
@@ -420,7 +434,17 @@ export async function runPostProcessingChain(
             };
 
             let cleanVocals: Buffer;
-            if (params.stableStepVocalPpVae) {
+            if (nativeRate) {
+              // Both stems and the refined instrumental are already at the
+              // source rate — the vocal stem goes back in untouched. PP-VAE
+              // vocal cleanup is deliberately skipped here even when asked for:
+              // it is an ACE VAE round-trip that would also force 48 kHz.
+              if (params.stableStepVocalPpVae) {
+                log('INFO', '[StableStep] Vocal PP-VAE skipped — ACE-only model, and the '
+                  + 'native-rate path needs no resample');
+              }
+              cleanVocals = vs.vocalBuf;
+            } else if (params.stableStepVocalPpVae) {
               try {
                 cleanVocals = await aceClient.submitPpVaeReencode(vs.vocalBuf, 0.0); // 48 kHz out
               } catch (vErr: any) {

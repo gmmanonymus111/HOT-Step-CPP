@@ -387,9 +387,12 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
         // Model-coupled stages: off regardless of what the UI persisted.
         ppVaeReencode: false,
         spectralLifterEnabled: false,
-        // Keep StableStep on its rate-transparent whole-mix path.
-        disableStemSplit: true,
-        whisperIsolateVocals: false,
+        // The vocal split MUST run for a vocal track: SA3 refines instrumental
+        // only, and handing it a full mix makes it hallucinate replacement
+        // vocals. SuperSep is a plain audio separator with no ACE coupling, and
+        // at 44.1 kHz the whole StableStep path is resample-free (see the
+        // native-rate branch in postProcessing.ts), so nothing here needs the
+        // 48 kHz plumbing.
         instrumental: sub.instrumental,
       };
       // No "is anything actually on?" pre-check needed: the chain copies the
