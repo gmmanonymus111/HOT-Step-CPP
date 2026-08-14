@@ -109,6 +109,10 @@ static void print_usage(void) {
             "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-preprocess  MiniMax-Music3 dataset -> flow-DiT target latents.\n"
+            "                --dataset <dataset.json> --enc <mm3-enc-*.gguf> --out <dir>\n"
+            "                [--ffmpeg <path>] [--max-duration <sec>] [--tf32 on|off]\n"
+            "                Audio is transcoded at 44100 Hz (NOT the ACE path's 48000).\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -1135,6 +1139,254 @@ static int cmd_mm3_encode(int argc, char ** argv) {
     return rc;
 }
 
+// ─── mm3-preprocess ─────────────────────────────────────────────────────────
+//
+// Training path step 3a: dataset -> flow-DiT TARGET latents, one file per song.
+//
+//   ace-train mm3-preprocess --dataset <dataset.json> --enc <mm3-enc-*.gguf>
+//                            --out <dir> [--ffmpeg <path>] [--max-duration <s>]
+//
+// Consumes the EXISTING Training Studio dataset format unchanged — the same
+// dataset.json + `<stem>.txt` sidecars the ACE path uses. MM3 needs only three
+// fields per sample (audio, caption, lyrics); duration comes from the audio.
+// Caption and lyrics are copied into the manifest for step 3b (the AR
+// conditioning rollout), which is the other half of a preprocessed sample.
+//
+// Audio goes through ffmpeg at **44100 Hz**, not the ACE path's 48000: the DAV
+// hop is 512 samples and 44100/512 = 86.1328125 Hz is the latent rate the flow
+// DiT and the condition resampler are both built around. Resampling in ffmpeg
+// rather than in-engine keeps the one high-quality resampler we already depend
+// on, and means read_wav_buf can take the result verbatim.
+static int cmd_mm3_preprocess(int argc, char ** argv) {
+    std::string ds_path, enc_path, out_dir, ffmpeg = "ffmpeg";
+    int         max_duration = 0;
+    bool        tf32         = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--dataset"))      ds_path      = next("--dataset");
+        else if (!strcmp(argv[i], "--enc"))          enc_path     = next("--enc");
+        else if (!strcmp(argv[i], "--out"))          out_dir      = next("--out");
+        else if (!strcmp(argv[i], "--ffmpeg"))       ffmpeg       = next("--ffmpeg");
+        else if (!strcmp(argv[i], "--max-duration")) max_duration = atoi(next("--max-duration"));
+        else if (!strcmp(argv[i], "--tf32"))         tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (ds_path.empty() || enc_path.empty() || out_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-preprocess: --dataset, --enc and --out are required\n");
+        return 2;
+    }
+    // Same reasoning as mm3-encode: these are training targets, computed once
+    // and re-read for hundreds of epochs. See cmd_mm3_encode for the numbers.
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+
+    // ── read dataset.json ──
+    FILE * df = hs_fopen(ds_path, "rb");
+    if (!df) { fprintf(stderr, "cannot open %s\n", ds_path.c_str()); return 1; }
+    fseek(df, 0, SEEK_END);
+    const long dsz = ftell(df);
+    fseek(df, 0, SEEK_SET);
+    std::string dbuf((size_t) dsz, '\0');
+    if (fread(&dbuf[0], 1, (size_t) dsz, df) != (size_t) dsz) {
+        fclose(df); fprintf(stderr, "short read on %s\n", ds_path.c_str()); return 1;
+    }
+    fclose(df);
+
+    yyjson_doc * doc = yyjson_read(dbuf.c_str(), dbuf.size(), 0);
+    if (!doc) { fprintf(stderr, "%s is not valid JSON\n", ds_path.c_str()); return 1; }
+    yyjson_val * root    = yyjson_doc_get_root(doc);
+    yyjson_val * samples = yyjson_obj_get(root, "samples");
+    if (!samples || !yyjson_is_arr(samples)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "%s has no `samples` array\n", ds_path.c_str());
+        return 1;
+    }
+    auto jstr = [](yyjson_val * o, const char * k) -> std::string {
+        yyjson_val * v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+    };
+    auto jnum = [](yyjson_val * o, const char * k) -> double {
+        yyjson_val * v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_num(v)) ? yyjson_get_num(v) : 0.0;
+    };
+
+    if (!pm_mkdir_p(out_dir) || !pm_mkdir_p(out_dir + "/latents")) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "cannot create %s\n", out_dir.c_str());
+        return 1;
+    }
+
+    MM3Enc      enc = {};
+    std::string err;
+    if (!mm3_enc_load(&enc, enc_path.c_str(), &err)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "[mm3-preprocess] encoder load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const int64_t hop = (int64_t) enc.cfg.total_downsample;
+    const int64_t SR  = (int64_t) enc.cfg.sampling_rate;
+
+    yyjson_mut_doc * mdoc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * mroot = yyjson_mut_obj(mdoc);
+    yyjson_mut_doc_set_root(mdoc, mroot);
+    yyjson_mut_obj_add_str(mdoc, mroot, "kind", "mm3_preprocess");
+    yyjson_mut_obj_add_int(mdoc, mroot, "version", 1);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "sample_rate", (uint64_t) SR);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "hop", (uint64_t) hop);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "latent_channels", enc.cfg.latent_channels);
+    yyjson_mut_obj_add_real(mdoc, mroot, "latent_rate_hz", (double) SR / (double) hop);
+    yyjson_mut_obj_add_strcpy(mdoc, mroot, "dataset", ds_path.c_str());
+    yyjson_mut_val * marr = yyjson_mut_arr(mdoc);
+    yyjson_mut_obj_add_val(mdoc, mroot, "samples", marr);
+
+    const std::string tmp_wav = out_dir + "/_mm3_tmp.wav";
+    size_t            idx = 0, ok_n = 0, fail_n = 0;
+    double            total_sec = 0.0;
+    const size_t      n_samples = yyjson_arr_size(samples);
+
+    yyjson_val * s;
+    yyjson_arr_iter it = yyjson_arr_iter_with(samples);
+    while ((s = yyjson_arr_iter_next(&it))) {
+        idx++;
+        const std::string id       = jstr(s, "id");
+        const std::string filename = jstr(s, "filename");
+        const std::string audio    = jstr(s, "audio_path");
+        if (audio.empty()) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu SKIP %s: no audio_path\n", idx, n_samples, filename.c_str());
+            fail_n++;
+            continue;
+        }
+
+        char cmd[4096];
+        if (max_duration > 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -t %d -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, max_duration, tmp_wav.c_str());
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, tmp_wav.c_str());
+        }
+#ifdef _WIN32
+        const std::string wrapped = "\"" + std::string(cmd) + "\"";  // cmd.exe strips the outer pair
+        const int         rc      = hs_system(wrapped);
+#else
+        const int rc = hs_system(cmd);
+#endif
+        if (rc != 0 || !pm_file_exists(tmp_wav)) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: ffmpeg exit %d\n", idx, n_samples,
+                    filename.c_str(), rc);
+            fail_n++;
+            continue;
+        }
+
+        // Read the transcode back. It is already 44.1 kHz stereo f32, so
+        // read_wav_buf takes it verbatim — no in-engine resample.
+        FILE * wf = hs_fopen(tmp_wav, "rb");
+        if (!wf) { fprintf(stderr, "[mm3-preprocess] cannot reopen temp wav\n"); fail_n++; continue; }
+        fseek(wf, 0, SEEK_END);
+        const long wsz = ftell(wf);
+        fseek(wf, 0, SEEK_SET);
+        std::vector<uint8_t> wbuf((size_t) wsz);
+        const bool           wread = fread(wbuf.data(), 1, (size_t) wsz, wf) == (size_t) wsz;
+        fclose(wf);
+        int      T = 0, got_sr = 0;
+        float *  planar = wread ? read_wav_buf(wbuf.data(), wbuf.size(), &T, &got_sr) : nullptr;
+        if (!planar || T <= 0) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: cannot decode transcode\n", idx, n_samples,
+                    filename.c_str());
+            free(planar);
+            fail_n++;
+            continue;
+        }
+        if (got_sr != (int) SR) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: ffmpeg produced %d Hz, wanted %lld\n", idx,
+                    n_samples, filename.c_str(), got_sr, (long long) SR);
+            free(planar);
+            fail_n++;
+            continue;
+        }
+
+        const float * chans[2] = { planar, planar + T };
+        std::vector<float> lat;
+        int64_t            L = 0;
+        if (!mm3_enc_encode(&enc, chans, (int64_t) T, &lat, &L, &err)) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: %s\n", idx, n_samples, filename.c_str(),
+                    err.c_str());
+            free(planar);
+            fail_n++;
+            continue;
+        }
+        free(planar);
+
+        const std::string stem = id.empty() ? std::to_string(idx) : id;
+        const std::string lp   = out_dir + "/latents/" + stem + ".f32";
+        FILE *            lf   = hs_fopen(lp, "wb");
+        if (!lf) { fprintf(stderr, "[mm3-preprocess] cannot write %s\n", lp.c_str()); fail_n++; continue; }
+        fwrite(lat.data(), sizeof(float), lat.size(), lf);
+        fclose(lf);
+
+        const double secs = (double) T / (double) SR;
+        total_sec += secs;
+        ok_n++;
+
+        yyjson_mut_val * m = yyjson_mut_obj(mdoc);
+        yyjson_mut_obj_add_strcpy(mdoc, m, "id", stem.c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "filename", filename.c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "latents", ("latents/" + stem + ".f32").c_str());
+        yyjson_mut_obj_add_int(mdoc, m, "latent_frames", (int64_t) L);
+        yyjson_mut_obj_add_int(mdoc, m, "n_samples", (int64_t) T);
+        yyjson_mut_obj_add_real(mdoc, m, "duration_sec", secs);
+        // Carried for step 3b (the AR conditioning rollout), so that stage does
+        // not have to re-open the dataset or re-resolve sidecars.
+        yyjson_mut_obj_add_strcpy(mdoc, m, "caption", jstr(s, "caption").c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "lyrics", jstr(s, "lyrics").c_str());
+        yyjson_mut_obj_add_real(mdoc, m, "bpm", jnum(s, "bpm"));
+        yyjson_mut_obj_add_strcpy(mdoc, m, "keyscale", jstr(s, "keyscale").c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "timesignature", jstr(s, "timesignature").c_str());
+        yyjson_mut_arr_append(marr, m);
+
+        fprintf(stderr, "[mm3-preprocess] %zu/%zu ok %-44s %6.1fs -> [%u, %lld]\n", idx, n_samples,
+                filename.c_str(), secs, enc.cfg.latent_channels, (long long) L);
+    }
+
+    hs_remove(tmp_wav);
+    yyjson_doc_free(doc);
+    mm3_enc_free(&enc);
+
+    yyjson_mut_obj_add_uint(mdoc, mroot, "n_ok", (uint64_t) ok_n);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "n_failed", (uint64_t) fail_n);
+    yyjson_mut_obj_add_real(mdoc, mroot, "total_audio_sec", total_sec);
+
+    const std::string mpath = out_dir + "/mm3_preprocess.json";
+    size_t            mlen  = 0;
+    char *            mjson = yyjson_mut_write(mdoc, YYJSON_WRITE_PRETTY, &mlen);
+    int               rc    = 0;
+    if (mjson) {
+        FILE * mf = hs_fopen(mpath, "wb");
+        if (mf) { fwrite(mjson, 1, mlen, mf); fclose(mf); }
+        else    { fprintf(stderr, "cannot write %s\n", mpath.c_str()); rc = 1; }
+        free(mjson);
+    } else {
+        rc = 1;
+    }
+    yyjson_mut_doc_free(mdoc);
+
+    fprintf(stderr, "[mm3-preprocess] done: %zu ok, %zu failed, %.1f min of audio -> %s\n", ok_n, fail_n,
+            total_sec / 60.0, mpath.c_str());
+    return (fail_n && !ok_n) ? 1 : rc;
+}
+
 static int cmd_train_lm(int argc, char ** argv) {
     LmTrainArgs      a;
     LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
@@ -1706,6 +1958,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-encode")) {
         return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-preprocess")) {
+        return cmd_mm3_preprocess(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);
