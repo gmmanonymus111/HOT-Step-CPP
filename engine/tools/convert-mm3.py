@@ -150,6 +150,21 @@ DIT_STEPS = 30
 DIT_CFG_SCALE = 1.7
 
 # -- vocoder (DAC-style decoder) --------------------------------------------
+# -- DAV encoder (audio -> latents; TRAINING ONLY) --------------------------
+# The mirror of the vocoder. Published ONLY in the original dav.pth: the
+# diffusers layout exposes the decoder half as vocoder/ and drops the encoder,
+# because inference never needs it. Training does — these are the flow DiT's
+# target latents. Written to its own small mm3-enc-*.gguf rather than into
+# mm3-synth-*.gguf, so an existing 6.4 GB synth file stays valid and ace-server
+# never loads a tensor it cannot use.
+ENC_IN_DIM = 64                     # channels after the stem conv
+ENC_RATES = (2, 4, 8, 8)            # product 512 -> 44100/512 = 86.13 latent fps
+ENC_RES_DILATIONS = (1, 3, 9)
+ENC_LATENT_DIM = 1024               # encoder trunk output width
+ENC_FOLD_CH = 64                    # per audio channel; 2 x 64 = 128 latent ch
+ENC_SR = 44100
+ENC_SNAKE_EPS = 1e-9
+
 VOC_LATENT_CH = 128
 VOC_FOLD_CH = 64                    # stereo folded as 2 x 64ch through shared weights
 VOC_DEC_IN_DIM = 1024
@@ -981,10 +996,100 @@ def build_vocoder(src, b):
 
 
 # ---------------------------------------------------------------------------
+# Component: DAV encoder  ->  enc.*      (source: dav.pth ONLY)
+# ---------------------------------------------------------------------------
+
+def build_enc(src, b):
+    """Audio -> 128-channel latents at 86.13 Hz, the flow DiT's target space.
+
+    Structure (transcribed from the only public implementation, SimpleTuner's
+    helpers/models/minimaxmusic/vocoder.py, whose from_original_dav loads this
+    exact checkpoint):
+
+        encoder.block.0                Conv1d(1 -> 64, k7, p3)
+        encoder.block.{1..4}           EncoderBlock, strides (2,4,8,8)
+            .block.{0,1,2}                 ResidualUnit, dilations (1,3,9)
+                .block.0.alpha                 snake1
+                .block.1                       Conv1d(c,c,k7,dil,p=3*dil)
+                .block.2.alpha                 snake2
+                .block.3                       Conv1d(c,c,k1)
+            .block.3.alpha                 snake
+            .block.4                       Conv1d(c -> 2c, k=2s, stride=s, p=ceil(s/2))
+        encoder.block.5.alpha          snake_out
+        encoder.block.6                Conv1d(1024 -> 1024, k3, p1)
+        mean_proj                      Conv1d(1024 -> 64, k1)   [NO weight-norm]
+
+    Two traps worth stating:
+      - The checkpoint names the two halves INCONSISTENTLY: `encoder.block.*`
+        but `decoder.model.*`. build_vocoder above reads the latter.
+      - `logs_proj` is deliberately NOT converted. encode() returns the
+        posterior MEAN, so a training target carries no sampling noise. Loading
+        logs_proj would imply a reparameterised sample that the reference does
+        not take.
+    """
+    b.meta("add_uint32", "mm3.enc.in_dim", ENC_IN_DIM)
+    b.meta("add_array", "mm3.enc.rates", list(ENC_RATES))
+    b.meta("add_array", "mm3.enc.res_dilations", list(ENC_RES_DILATIONS))
+    b.meta("add_uint32", "mm3.enc.total_downsample", int(np.prod(ENC_RATES)))
+    b.meta("add_uint32", "mm3.enc.latent_dim", ENC_LATENT_DIM)
+    b.meta("add_uint32", "mm3.enc.fold_channels", ENC_FOLD_CH)
+    b.meta("add_uint32", "mm3.enc.latent_channels", ENC_FOLD_CH * 2)
+    b.meta("add_uint32", "mm3.enc.sampling_rate", ENC_SR)
+    b.meta("add_uint32", "mm3.enc.channels", 2)
+    b.meta("add_float32", "mm3.enc.snake_eps", ENC_SNAKE_EPS)
+    b.meta("add_bool", "mm3.enc.weight_norm_folded", True)
+    b.meta("add_bool", "mm3.enc.posterior_mean_only", True)
+    b.meta("add_string", "mm3.enc.snake", "x + 1/(alpha+eps) * sin(alpha*x)^2")
+
+    def wn(dst, key, expect_v, expect_bias):
+        g = src.get(f"{key}.weight_g", expect=(expect_v[0], 1, 1))
+        v = src.get(f"{key}.weight_v", expect=expect_v)
+        b.put(f"{dst}.weight", fold_weight_norm(g, v, dst), F32)
+        b.put(f"{dst}.bias", src.get(f"{key}.bias", expect=(expect_bias,)), F32)
+
+    def alpha(dst, key, ch):
+        b.put(dst, src.get(key, expect=(1, ch, 1)), F32)
+
+    wn("enc.conv_in", "encoder.block.0", (ENC_IN_DIM, 1, 7), ENC_IN_DIM)
+
+    ch = ENC_IN_DIM
+    for bi, stride in enumerate(ENC_RATES):
+        out_ch = ch * 2
+        m      = bi + 1
+        for ri, dil in enumerate(ENC_RES_DILATIONS):
+            u = f"encoder.block.{m}.block.{ri}"
+            alpha(f"enc.blk.{bi}.res.{ri}.snake1.alpha", f"{u}.block.0.alpha", ch)
+            wn(f"enc.blk.{bi}.res.{ri}.conv1", f"{u}.block.1", (ch, ch, 7), ch)
+            alpha(f"enc.blk.{bi}.res.{ri}.snake2.alpha", f"{u}.block.2.alpha", ch)
+            wn(f"enc.blk.{bi}.res.{ri}.conv2", f"{u}.block.3", (ch, ch, 1), ch)
+        alpha(f"enc.blk.{bi}.snake.alpha", f"encoder.block.{m}.block.3.alpha", ch)
+        wn(f"enc.blk.{bi}.conv", f"encoder.block.{m}.block.4",
+           (out_ch, ch, 2 * stride), out_ch)
+        ch = out_ch
+
+    n_blk = len(ENC_RATES)
+    alpha("enc.snake_out.alpha", f"encoder.block.{n_blk + 1}.alpha", ch)
+    wn("enc.conv_out", f"encoder.block.{n_blk + 2}", (ENC_LATENT_DIM, ch, 3), ENC_LATENT_DIM)
+
+    # mean_proj is a bare Conv1d — no weight_g/weight_v to fold.
+    b.put("enc.mean_proj.weight",
+          src.get("mean_proj.weight", expect=(ENC_FOLD_CH, ENC_LATENT_DIM, 1)), F32)
+    b.put("enc.mean_proj.bias",
+          src.get("mean_proj.bias", expect=(ENC_FOLD_CH,)), F32)
+
+    def belongs(n):
+        # logs_proj and the decoder/flow halves of dav.pth are intentionally
+        # unconsumed, so they must not be claimed here or the leftover report
+        # will flag them.
+        return n.startswith("encoder.") or n.startswith("mean_proj.")
+    return belongs
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
-ALL_COMPONENTS = ("lm", "depth", "cond", "dit", "vocoder")
+ALL_COMPONENTS = ("lm", "depth", "cond", "dit", "vocoder", "enc")
 SYNTH_COMPONENTS = ("depth", "cond", "dit", "vocoder")
 
 EPILOG = """\
@@ -1047,16 +1152,21 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     lm_path = os.path.join(args.out, f"mm3-lm-{args.quant}.gguf")
     synth_path = os.path.join(args.out, f"mm3-synth-{args.quant}.gguf")
+    enc_path = os.path.join(args.out, f"mm3-enc-{args.quant}.gguf")
 
     want_lm = "lm" in want
     want_synth = [c for c in SYNTH_COMPONENTS if c in want]
+    want_enc = "enc" in want
     if want_lm and os.path.exists(lm_path) and not args.force:
         log(f"skip (exists): {lm_path} -- pass --force to overwrite")
         want_lm = False
     if want_synth and os.path.exists(synth_path) and not args.force:
         log(f"skip (exists): {synth_path} -- pass --force to overwrite")
         want_synth = []
-    if not want_lm and not want_synth:
+    if want_enc and os.path.exists(enc_path) and not args.force:
+        log(f"skip (exists): {enc_path} -- pass --force to overwrite")
+        want_enc = False
+    if not want_lm and not want_synth and not want_enc:
         log("nothing to do")
         return
 
@@ -1088,6 +1198,18 @@ def main():
             for c in want_synth:
                 predicates.append((c, builders[c](src, b)))
             b.write(synth_path, args.quant)
+
+        if want_enc:
+            # Training-only, and its own file: ace-train loads it for preprocess,
+            # ace-server never does.
+            b = Bundle("mm3enc")
+            b.meta("add_name", "MiniMax-Music3 DAV encoder")
+            b.meta("add_description",
+                   "MiniMax-Music3 DAV audio encoder: 44.1 kHz stereo -> 128-channel "
+                   "flow latents at 86.13 Hz. Training only; source is dav.pth.")
+            common_meta(b, src, args, ["enc"])
+            predicates.append(("enc", build_enc(src, b)))
+            b.write(enc_path, args.quant)
 
         # -- leftover report: source tensors that look like they belong to a
         #    converted component but were never consumed.
