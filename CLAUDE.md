@@ -10,7 +10,7 @@ A desktop app for **local AI music generation** — a heavily-extended superset 
 
 | Tier | Stack | Location | Role |
 |------|-------|----------|------|
-| **Engine** | C++17 / CUDA / GGML | [engine/](engine/) | Inference binaries: `ace-lm`, `ace-synth`, `ace-server`, `ace-understand`, `neural-codec`, `mp3-codec`, `quantize`. Pipeline: LM → DiT → VAE |
+| **Engine** | C++17 / CUDA / GGML | [engine/](engine/) | Inference binaries: `ace-lm`, `ace-synth`, `ace-server`, `ace-understand`, `neural-codec`, `mp3-codec`, `quantize`. Pipeline: LM → DiT → VAE. Also hosts the **MiniMax-Music3 backend** ([engine/src/minimax/](engine/src/minimax/), `/mm3/*` endpoints) |
 | **Server** | Node / TypeScript / Express / better-sqlite3 | [server/src/](server/src/) | Orchestrates the engine, manages songs/jobs/SQLite, serves UI. Per-feature [routes/](server/src/routes/) + [services/](server/src/services/) |
 | **UI** | React 19 / Vite / Zustand / Tailwind | [ui/src/](ui/src/) | Browser frontend. Component folder per "studio" |
 
@@ -88,7 +88,9 @@ Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable
 
 | For… | Read |
 |------|------|
-| **Any maintenance task — start here** (per-domain procedures, gotchas, distilled institutional knowledge) | [.claude/skills/README.md](.claude/skills/README.md) — 13 fact-checked skills |
+| **Any maintenance task — start here** (per-domain procedures, gotchas, distilled institutional knowledge) | [.claude/skills/README.md](.claude/skills/README.md) — 15 skills (13 fact-checked + 2 MM3) |
+| **MiniMax-Music3 backend** (second generation backend: engine port, /mm3 endpoints, backend registry/toggle, trap list) | [.claude/skills/mm3-backend/SKILL.md](.claude/skills/mm3-backend/SKILL.md) |
+| MM3 caption/prompt format (genre adherence) | [.claude/skills/mm3-captioning/SKILL.md](.claude/skills/mm3-captioning/SKILL.md) |
 | Full feature catalogue (100+) | [FEATURES.md](FEATURES.md) |
 | Engine internals, CLI, request JSON, generation modes | [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) |
 | **Training system** (dataset→preprocess→LM/DiT training→audition; ace-train, FSQ, ggml training gotchas) | [docs/TRAINING.md](docs/TRAINING.md) |

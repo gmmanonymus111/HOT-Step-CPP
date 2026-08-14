@@ -28,6 +28,7 @@ file/function/string over the exact line.
 | Know when a change is actually "done" | [validating-changes](validating-changes/SKILL.md) |
 | Model files, GGUF, quantization, model manager | [model-management](model-management/SKILL.md) |
 | Speed: TensorRT paths, profiling, quality/speed knobs | [engine-performance](engine-performance/SKILL.md) |
+| Anything MiniMax-Music3: engine port, /mm3 endpoints, backend toggle, MM3 debugging | [mm3-backend](mm3-backend/SKILL.md)* |
 | Format a MiniMax-Music3 caption; MM3 genre drift/adherence | [mm3-captioning](mm3-captioning/SKILL.md)* |
 
 Feature-specific work (Stem Studio, Lyric Studio/lireek, mastering, cover art,
