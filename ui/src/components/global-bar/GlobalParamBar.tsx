@@ -42,6 +42,17 @@ const UnsupportedBadge: React.FC = () => (
   <span className="text-[10px] text-zinc-600 dark:text-zinc-500 italic truncate">not available</span>
 );
 
+/** Holds a hidden cluster's slot in the bar.
+ *
+ *  Every section is `flex-1`, so simply omitting one makes the survivors share
+ *  the freed width and the whole bar re-flows — the tabs end up noticeably
+ *  wider and in different places than in ACE mode. Rendering an inert slot of
+ *  the same width keeps section size and position identical across backends,
+ *  leaving a gap where the missing cluster would be. */
+const SectionSpacer: React.FC = () => (
+  <div className="flex-1 min-w-0" aria-hidden="true" />
+);
+
 export const GlobalParamBar: React.FC = () => {
   const { t } = useTranslation();
   const [openSection, setOpenSection] = useState<SectionId>(null);
@@ -214,6 +225,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
           )}
+          {!showModels && <SectionSpacer />}
 
           <BackendToggle />
 
@@ -252,6 +264,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
           )}
+          {!showGeneration && <SectionSpacer />}
 
           {showLm && (
           <DiscoPulseWrapper hue={216} stem="snare" className="flex-1 min-w-0">
@@ -276,6 +289,7 @@ export const GlobalParamBar: React.FC = () => {
           </BarSection>
           </DiscoPulseWrapper>
           )}
+          {!showLm && <SectionSpacer />}
 
           {showPostProcessing && (
           <DiscoPulseWrapper hue={288} stem="snare" className="flex-1 min-w-0">

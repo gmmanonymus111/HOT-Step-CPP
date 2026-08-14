@@ -14,9 +14,10 @@
 // here hardcodes a bucket name beyond a label lookup with a sane fallback.
 
 import React, { useEffect, useState } from 'react';
-import { Download, Loader2 } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { useBackendStore } from '../../stores/backendStore';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
+import { ModelSelect } from './ModelSelect';
 
 /** Friendly names for the buckets we know about. Unknown buckets fall back to
  *  their raw key rather than being hidden — a backend that grows a bucket
@@ -108,29 +109,21 @@ export const BackendModelsDropdown: React.FC = () => {
             >
               {BUCKET_LABELS[bucket] ?? bucket}
             </label>
-            <div className="relative">
-              <select
-                id={`backend-model-${bucket}`}
-                value={current}
-                disabled={busy !== null || !catalogue.selectable}
-                onChange={(e) => void onPick(bucket, e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-white dark:bg-white/5 border
-                           border-zinc-300 dark:border-white/10 text-sm text-zinc-900 dark:text-zinc-100
-                           focus:outline-none focus:border-pink-500/50 disabled:opacity-50"
-              >
-                {options.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}{meta[opt]?.bytes ? ` — ${formatBytes(meta[opt].bytes)}` : ''}
-                  </option>
-                ))}
-              </select>
-              {busy === bucket && (
-                <Loader2
-                  size={14}
-                  className="animate-spin absolute right-8 top-1/2 -translate-y-1/2 text-pink-400"
-                />
-              )}
-            </div>
+            <ModelSelect
+              id={`backend-model-${bucket}`}
+              value={current}
+              onChange={(v) => void onPick(bucket, v)}
+              options={options}
+              // Every MM3 weight file is a GGUF; the default sniffer reads the
+              // option string as a file name and these are quant tokens.
+              formatOf={() => 'gguf'}
+              // Short, fixed list — a filter box would be furniture.
+              filterable={false}
+              disabled={busy !== null || !catalogue.selectable}
+              formatLabel={(opt) =>
+                `${opt}${meta[opt]?.bytes ? ` — ${formatBytes(meta[opt].bytes)}` : ''}`}
+              placeholder={busy === bucket ? 'Switching…' : 'Select model…'}
+            />
             {meta[current]?.label && (
               <p className="text-[10px] text-zinc-500 mt-1.5 font-mono truncate">{meta[current].label}</p>
             )}
