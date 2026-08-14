@@ -224,6 +224,25 @@ static void mm3_arbitrate_vram(const MM3Model & m, int64_t n_ctx_needed, MM3JobS
     }
 }
 
+// Base64 for the x-lrc-text response header. Same encoding the ACE /synth path
+// uses (hot-step-server.cpp) — an LRC body is UTF-8 with newlines, neither of
+// which survives a raw HTTP header.
+static std::string mm3_b64_encode(const std::string & in) {
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string       out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < in.size(); i += 3) {
+        uint32_t v = (uint32_t) (uint8_t) in[i] << 16;
+        if (i + 1 < in.size()) v |= (uint32_t) (uint8_t) in[i + 1] << 8;
+        if (i + 2 < in.size()) v |= (uint32_t) (uint8_t) in[i + 2];
+        out += T[(v >> 18) & 0x3F];
+        out += T[(v >> 12) & 0x3F];
+        out += (i + 1 < in.size()) ? T[(v >> 6) & 0x3F] : '=';
+        out += (i + 2 < in.size()) ? T[v & 0x3F] : '=';
+    }
+    return out;
+}
+
 // ── The worker ──────────────────────────────────────────────────────────────
 
 static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobState> st, MM3SynthRequest req) {
@@ -362,6 +381,9 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
         set_stage(p.stage, p.window, p.n_windows, p.step, p.n_steps);
     };
 
+    // Lyric timestamps: only meaningful when there are lyrics to align, so an
+    // instrumental never pays the capture cost.
+    req.gen.want_lrc      = req.want_lrc && !req.instrumental;
     req.gen.should_cancel = [&job]() { return job->cancel.load(); };
 
     // The stage-1 -> stage-2 handover (see mm3-pipeline.h). Runs on the worker
@@ -403,6 +425,13 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     const WavFormat fmt = req.wav_bits == 32 ? WAV_F32 : (req.wav_bits == 24 ? WAV_S24 : WAV_S16);
     job->result_body = audio_encode_wav(r.audio.data(), (int) r.n_samples, r.sample_rate, fmt);
     job->result_mime = "audio/wav";
+    // LRC rides the SAME transport ACE uses: Job::result_lrc is base64 and
+    // the shared /job?result=1 handler emits it as x-lrc-text, so the Node
+    // side needs no MM3-specific parsing.
+    if (!r.ar.lrc.empty()) {
+        job->result_lrc = mm3_b64_encode(r.ar.lrc);
+        fprintf(stderr, "[MM3-Job] %s: LRC %zu bytes\n", job->id.c_str(), r.ar.lrc.size());
+    }
 
     {
         std::lock_guard<std::mutex> lock(st->mtx);

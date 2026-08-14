@@ -145,6 +145,9 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
             ? { cfg_flow: Number(params.mm3CfgFlow) }
             : {}),
       get_wav_bits: 16,
+      // LRC timestamps ride the same toggle ACE uses (skipLrc inverted).
+      // Instrumentals are filtered engine-side, so no check is needed here.
+      get_lrc: params.skipLrc !== true,
     },
     notes,
   };
@@ -311,6 +314,21 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
     const filepath = path.join(config.data.audioDir, filename);
     fs.writeFileSync(filepath, audioBuffer);
     const audioUrl = `/audio/${filename}`;
+
+    // LRC lyric timestamps, if the engine produced them. Same transport the ACE
+    // path uses (base64 in x-lrc-text on the job result), so this is the same
+    // six lines and the same <uuid>.lrc convention downstream consumers expect.
+    const lrcHeader = audioRes.headers.get('x-lrc-text');
+    if (lrcHeader) {
+      try {
+        const lrcText = Buffer.from(lrcHeader, 'base64').toString('utf-8');
+        const lrcPath = path.join(config.data.audioDir, filename.replace(/\.[^.]+$/, '.lrc'));
+        fs.writeFileSync(lrcPath, lrcText);
+        log('INFO', `[LRC] saved ${path.basename(lrcPath)} (${lrcText.length} bytes)`);
+      } catch (lErr: any) {
+        log('WARNING', `[LRC] failed to save: ${lErr?.message || lErr}`);
+      }
+    }
 
     // Final MM3 detail: shape + per-stage timings, straight from the engine.
     const finalDetail = await mm3JobDetail(sub.job_id);

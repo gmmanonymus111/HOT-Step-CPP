@@ -164,10 +164,11 @@ async function capabilities(): Promise<BackendCapabilities> {
       // Whisper needs nothing but a rendered file — whisper-cli resamples
       // internally, so it is as valid here as on ACE.
       whisper: true,
-      // LRC timestamps come from ACE's DiT lyric cross-attention. MM3's DiT
-      // has none and never sees lyrics; the LM-attention route exists (see
-      // MM3_ALIGN_DUMP) but is not wired to lrc_align() yet.
-      lyricTimestamps: false,
+      // LRC timestamps. ACE reads these from its DiT's lyric cross-attention;
+      // MM3's DiT has none and never sees lyrics, so they come instead from
+      // the LM's own decode attention over the lyric span (engine
+      // minimax/mm3-align.h). Line-level, ~1 s — the granularity ACE ships.
+      lyricTimestamps: true,
       cover: false,
       repaint: false,
       lego: false,

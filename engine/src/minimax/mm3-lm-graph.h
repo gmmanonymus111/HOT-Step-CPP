@@ -185,10 +185,13 @@ struct MM3LmGraph {
     ggml_backend_t cpu_backend    = nullptr;
     bool           backend_ref    = false;
     bool           use_flash_attn = false;
-    // MM3_ALIGN_DUMP=1 — capture per-layer attention for lyric alignment
-    // discovery. Forces the manual F32 attention path (flash fuses the softmax
-    // and never produces a score tensor to read).
+    // MM3_ALIGN_DUMP=1 — capture EVERY layer's attention for lyric alignment
+    // discovery. Forces the manual F32 attention path on all 36 layers (flash
+    // fuses the softmax and never produces a score tensor to read).
     bool           dump_attn      = false;
+    // Production alignment: capture only the layers in MM3_ALIGN_HEADS. The
+    // other 33 keep flash attention, so this costs a fraction of dump_attn.
+    bool           align_capture  = false;
 
     // Identity of the weights this prep was derived from. BOTH buffers matter:
     // the feedback embedding reads token_embd from the LM file and audio_embd
@@ -443,12 +446,17 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
     // the AR loop can slice the lyric columns out of it. Costs nothing when off,
     // and cannot work under flash attention (which never materialises them) —
     // mm3_lm_prepare forces the manual path when the probe is enabled.
-    s->attn_scores.assign(g->dump_attn ? m.lm.blk.size() : 0, nullptr);
+    const bool any_scores = g->dump_attn || g->align_capture;
+    s->attn_scores.assign(any_scores ? m.lm.blk.size() : 0, nullptr);
     for (size_t i = 0; i < m.lm.blk.size(); i++) {
         ggml_tensor * sc = nullptr;
+        // Which layers must materialise their softmax. The discovery dump wants
+        // all of them; production alignment wants only the three that carry the
+        // signal, so the other 33 keep flash attention and its speed.
+        const bool want = g->dump_attn || (g->align_capture && mm3_align_layer_needed((int) i));
         h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn, g->dump_attn ? &sc : nullptr);
-        if (g->dump_attn && sc) {
+                         n_kv_pad, g->use_flash_attn && !want, want ? &sc : nullptr);
+        if (want && sc) {
             ggml_set_name(sc, ("mm3_lm_attn_" + std::to_string(i)).c_str());
             ggml_set_output(sc);
             ggml_build_forward_expand(gf, sc);
@@ -559,14 +567,25 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         const char * no_fa = std::getenv("MM3_LM_NO_FLASH");
         const char * dump  = std::getenv("MM3_ALIGN_DUMP");
         g->dump_attn       = dump && dump[0] && dump[0] != '0';
-        // The probe reads the softmax output, which flash attention fuses away —
-        // so enabling it implies the manual path, and says so rather than
-        // silently producing an empty dump.
-        g->use_flash_attn  = bp.has_gpu && !HOT_STEP_FA_DISABLED && !g->dump_attn &&
+        // Alignment capture forces the manual path on EVERY layer, not just the
+        // three whose scores are read.
+        //
+        // That is not the obvious choice and it was not the first one: capturing
+        // only layers 12/19/24 and leaving the other 33 on flash costs far less
+        // (9.8 vs 11.2 ms/step) and produces the right audio — but it produces
+        // WRONG alignment. Measured on the same seed, selective capture stamped
+        // the four lyric lines at 0.9/3.6/7.5/10.3 s where the vocal actually
+        // sits at 0.1/10.2/15.1/19.4; all-manual gives 2.2/9.9/16.5/19.5. The
+        // captured layers' attention evidently depends on whether the layers
+        // FEEDING them ran flash or manual, by more than the numerical noise
+        // that difference is supposed to be. Until that is understood, the mixed
+        // graph is not a safe optimisation — a silently mistimed LRC is worse
+        // than a slower one.
+        g->use_flash_attn  = bp.has_gpu && !HOT_STEP_FA_DISABLED && !g->dump_attn && !g->align_capture &&
                              !(no_fa && no_fa[0] && no_fa[0] != '0');
         if (g->dump_attn) {
-            fprintf(stderr, "[MM3-Align] Attention dump ON — forcing the manual F32 attention path "
-                            "(slower; discovery build only)\n");
+            fprintf(stderr, "[MM3-Align] Attention DUMP on — manual F32 attention for all %d layers "
+                            "(discovery only, slow)\n", (int) m.lm.blk.size());
         }
         g->lm_token        = lt;
         g->synth_token     = st;

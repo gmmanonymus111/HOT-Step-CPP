@@ -118,6 +118,10 @@ export interface Mm3SynthRequest {
   steps?: number;
   /** 16 | 24 | 32, default 16. */
   get_wav_bits?: number;
+  /** Emit LRC lyric timestamps from the LM's alignment heads. Adds ~50%
+   *  to the AR stage (forces the manual attention path) and is ignored
+   *  for instrumentals. */
+  get_lrc?: boolean;
 }
 
 export interface Mm3SynthResponse {

@@ -135,22 +135,33 @@ Traps, each of which produced a wrong answer first:
 3. **Whisper `base` is not adequate ground truth for sung vocals** — it returned
    11 word timings for a folk clip `large-v3-turbo` transcribes as one 10-word
    line, which made attention look 7 s wrong. Validate against `large-v3-turbo`.
-4. Capturing attention costs ~60 % on the LM step (11.6 vs 7.2 ms) because it
-   forces non-flash. Only layers 12/19/24 actually need it, so a production path
-   can keep flash on the other 33 and pay roughly a twelfth of that. Still far
-   cheaper than Whisper, which needs a whole extra ASR pass over the audio —
-   the reason this route is worth having at all.
+4. **Capture requires the manual attention path on EVERY layer, not just the
+   three that are read.** This is the expensive, counter-intuitive one. Leaving
+   the other 33 layers on flash is cheaper (9.8 vs 11.2 ms/step) and produces
+   identical audio — but WRONG alignment: same seed, selective capture stamped
+   the lines at 0.9/3.6/7.5/10.3 s where the vocal sits at 0.1/10.2/15.1/19.4,
+   while all-manual gave 2.2/9.9/16.5/19.5. The captured layers' attention
+   depends on whether the layers feeding them ran flash or manual by far more
+   than that difference is supposed to matter. Not understood; do not "optimise"
+   it back without re-validating against Whisper.
+   Net cost is ~+49 % on the LM step, so roughly +20 % on a long render, and
+   only when the LRC toggle is on. Still cheaper than a full Whisper pass.
 5. The dump is **MM3ALIGN2**: an ASCII header line, then `tokens` × int32 lyric
    token ids, then f32 in `[frame][layer][head][token]` order. v1 omitted the
    ids, which is what forced the bogus token-progress-vs-word-progress
    comparison. Resolve ids to text via `tokenizer.ggml.tokens` in the LM GGUF.
 
-`lrc_align()` (engine/src/lrc-alignment.h) is generic over
-`[n_heads][n_tokens][n_frames]` and takes this input unchanged, so the wiring is
-mostly plumbing: build the score matrix from the chosen heads, pass the lyric
-token ids + texts, apply the lead offset. `features.lyricTimestamps` is false
-for MM3 until that lands — and it must NOT be pointed at Whisper instead, which
-would make the toggle lie about where its timings come from.
+**SHIPPED** (`features.lyricTimestamps: true`, request field `get_lrc`). The
+engine emits LRC on `Job::result_lrc` → the existing `x-lrc-text` header → the
+server writes `<uuid>.lrc`, same contract ACE uses. Measured against Whisper:
+median line error **0.39 s** over the matched lines of two clips (synth
++0.20/+0.52/+0.62/−0.02, indie +2.12/−0.26/+1.36/+0.14).
+
+`lrc_align()` is NOT used, and that was measured rather than assumed: fed the
+same captured attention it stamps every line in the first half of the song, and
+sweeping violence_level 2.0 → 0.0 changes nothing. A plain monotonic DTW over
+the head-averaged matrix, grouped on newline tokens, is what works — see
+`mm3-align.h`. `lrc_align()` stays untouched for ACE.
 
 ## Watch items
 

@@ -548,6 +548,9 @@ struct MM3SynthRequest {
     int64_t max_frames = 0;    // = min(round(duration * frame_rate), 9000)
     int64_t seed_in    = -1;   // as asked (-1 = random)
     int     wav_bits   = 16;
+    // Emit LRC lyric timestamps from the LM's alignment heads (mm3-align.h).
+    // Ignored for instrumentals — there is nothing to align.
+    bool    want_lrc   = false;
 
     std::string prompt;  // the assembled template
     int64_t     n_tokens = 0;
@@ -606,6 +609,9 @@ static bool mm3_req_str(yyjson_val * root, const char * key, std::string * out, 
 //   cfg_flow   number, default = the checkpoint's flow.cfg_scale (1.7)
 //   steps      integer, default = the checkpoint's flow.steps (30)
 //   get_wav_bits integer in {16, 24, 32}, default 16
+//   get_lrc      bool, default false — lyric timestamps (LRC) from the
+//                alignment heads; costs the manual attention path on 3 of
+//                36 LM layers, and is a no-op on an instrumental
 static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3SynthRequest * out, std::string * err) {
     *out = MM3SynthRequest{};
 
@@ -711,6 +717,20 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
             *err = "\"get_wav_bits\" must be 16, 24 or 32";
         }
         return false;
+    }
+
+    // get_lrc — optional bool. Absent/false keeps the cheaper all-flash path.
+    {
+        yyjson_val * v = yyjson_obj_get(root, "get_lrc");
+        if (v && !yyjson_is_null(v)) {
+            if (!yyjson_is_bool(v)) {
+                if (err) {
+                    *err = "\"get_lrc\" must be a boolean";
+                }
+                return false;
+            }
+            out->want_lrc = yyjson_get_bool(v);
+        }
     }
 
     out->prompt = mm3_assemble_prompt(out->caption, out->lyrics, &out->instrumental);

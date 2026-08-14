@@ -342,6 +342,9 @@ struct MM3GenRequest {
     // at every stage boundary. On abort mm3_generate() returns false with
     // *err == MM3_ERR_CANCELLED, which the job worker turns into job status 3
     // (cancelled) rather than 2 (failed).
+    /** Emit LRC lyric timestamps from the LM's alignment heads. Costs the
+     *  manual attention path on 3 of 36 layers; see mm3-align.h. */
+    bool want_lrc = false;
     std::function<bool()> should_cancel;
     /** Called once, after the AR stage and before the condition encoder — the
      *  only point where the LM is finished but the flow stack is not yet
@@ -476,6 +479,9 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
         }
         return false;
     };
+
+    aopt.want_lrc = req.want_lrc;
+    aopt.tok      = tok;
 
     const auto t_ar = std::chrono::steady_clock::now();
     if (!mm3_ar_plan(m, ids_cond.data(), ids_uncond.data(), (int64_t) ids_cond.size(), aopt, &out->ar, err)) {

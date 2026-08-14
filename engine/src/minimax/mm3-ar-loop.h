@@ -112,6 +112,7 @@
 // reason its own header gives: seven sweeps of 0.6 B weights over <=8 tokens is
 // launch-bound, not bandwidth-bound. That is where the next speed lever is.
 
+#include "mm3-align.h"
 #include "mm3-depth-graph.h"
 #include "mm3-lm-graph.h"
 #include "mm3-model.h"
@@ -144,6 +145,10 @@ struct MM3ArResult {
     int64_t n_codebooks  = 0;  // 8 = 1 semantic + 7 acoustic
     int64_t sem_vocab    = 0;  // SV
     bool    eos_hit      = false;
+    // LRC text derived from the LM's own decode attention (mm3-align.h). Empty
+    // when alignment was off, the track was instrumental, or alignment failed —
+    // never a reason to fail the run.
+    std::string lrc;
 
     std::vector<int32_t> semantic_all;    // [I]        includes the un-emitted iteration 0
     std::vector<int32_t> acoustic_all;    // [I, NC]
@@ -173,6 +178,13 @@ struct MM3ArOptions {
 
     int64_t dump_iters      = 0;
     bool    collect_hiddens = true;
+
+    // Lyric timestamps: capture the alignment heads' decode attention and emit
+    // LRC into MM3ArResult::lrc. Needs the tokenizer to turn the lyric token
+    // ids back into the text lrc_align() groups into lines, so both are set
+    // together or not at all.
+    bool                  want_lrc = false;
+    const MM3Tokenizer *  tok      = nullptr;
 
     // Called after every emitted frame. Cheap; used for server-side progress.
     std::function<void(int64_t /*frames*/, int64_t /*max_frames*/)> on_frame;
@@ -258,6 +270,15 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
 
     // KV budget: prompt + one iteration per emitted frame + the un-emitted first
     // one, plus slack so the last decode step never sits exactly on the boundary.
+    // Must be set BEFORE prepare: the graph builder decides per layer
+    // whether to materialise attention, and a cached graph is reused.
+    {
+        const bool want = opt.want_lrc && opt.tok != nullptr;
+        if (g_mm3_lm.align_capture != want) {
+            g_mm3_lm.align_capture = want;
+            mm3_lm_free(&g_mm3_lm);   // graphs encode the choice — rebuild them
+        }
+    }
     if (!mm3_lm_prepare(m, &g_mm3_lm, n_prompt + max_frames + 2, err)) {
         return false;
     }
@@ -278,13 +299,15 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
     // of them for offline scoring. Discovery only — never on in a normal run.
     const bool align_dump = g_mm3_lm.dump_attn;
     int64_t    lyr0 = -1, lyr1 = -1;
-    if (align_dump) {
+    // The span is needed by BOTH consumers — the discovery dump and production
+    // LRC — so it is located whenever either is active.
+    if (align_dump || g_mm3_lm.align_capture) {
         for (int64_t i = 0; i < n_prompt; i++) {
             if (cond_ids[i] == (int32_t) m.lm_cfg.tok_lyrics_start) lyr0 = i + 1;
             if (cond_ids[i] == (int32_t) m.lm_cfg.tok_lyrics_end)   lyr1 = i;
         }
         if (lyr0 < 0 || lyr1 <= lyr0) {
-            fprintf(stderr, "[MM3-Align] No lyric span in the prompt (instrumental?) — dump disabled\n");
+            fprintf(stderr, "[MM3-Align] No lyric span in the prompt (instrumental?) — alignment disabled\n");
         } else {
             fprintf(stderr, "[MM3-Align] Lyric span = prompt tokens [%lld, %lld) = %lld tokens\n",
                     (long long) lyr0, (long long) lyr1, (long long) (lyr1 - lyr0));
@@ -292,6 +315,24 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
     }
     std::vector<float> align_acc;    // [layer][head][token] per frame, appended
     int64_t            align_frames = 0;
+
+    // ── Production alignment capture ─────────────────────────────────────────
+    //
+    // Same signal as the probe, but only the three heads that carry it, and
+    // accumulated straight into lrc_align()'s [head][token][frame] layout so no
+    // transpose is needed at the end. Off for instrumentals (nothing to align)
+    // and while the discovery dump runs (that owns the graph).
+    const bool    lrc_on  = g_mm3_lm.align_capture && !align_dump && lyr0 >= 0 && lyr1 > lyr0;
+    const int64_t lrc_tok = lrc_on ? (lyr1 - lyr0) : 0;
+    std::vector<std::vector<float>> lrc_rows;   // [head*token] -> per-frame series
+    if (lrc_on) {
+        lrc_rows.assign((size_t) (MM3_ALIGN_N_HEADS * lrc_tok), std::vector<float>());
+        for (auto & r : lrc_rows) {
+            r.reserve((size_t) max_frames);
+        }
+        fprintf(stderr, "[MM3-LRC] Capturing %d head(s) over %lld lyric tokens\n", MM3_ALIGN_N_HEADS,
+                (long long) lrc_tok);
+    }
 
 
     *out             = MM3ArResult{};
@@ -472,6 +513,23 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
             out->lm_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             out->lm_steps++;
         }
+        if (lrc_on) {
+            std::vector<float> slice;
+            for (int hh = 0; hh < MM3_ALIGN_N_HEADS; hh++) {
+                const MM3AlignHead & ah = MM3_ALIGN_HEADS[hh];
+                if (!mm3_lm_read_attn_slice(m.lm_cfg, g_mm3_lm.decode, (size_t) ah.layer, lyr0, lyr1, slice)) {
+                    continue;
+                }
+                // slice is [Nh, n_cols] — take this head's row out of it.
+                const size_t base = (size_t) ah.head * (size_t) lrc_tok;
+                if (base + (size_t) lrc_tok > slice.size()) {
+                    continue;
+                }
+                for (int64_t t = 0; t < lrc_tok; t++) {
+                    lrc_rows[(size_t) (hh * lrc_tok + t)].push_back(slice[base + (size_t) t]);
+                }
+            }
+        }
         if (align_dump && lyr0 >= 0 && lyr1 > lyr0) {
             std::vector<float> slice;
             for (size_t L = 0; L < g_mm3_lm.decode.attn_scores.size(); L++) {
@@ -498,6 +556,35 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
                                 : "zero audio frames were generated";
         }
         return false;
+    }
+
+    if (lrc_on && out->n_frames > 1 && !lrc_rows.empty() && !lrc_rows[0].empty()) {
+        const int   n_fr = (int) lrc_rows[0].size();
+        const float dur =
+            m.lm_cfg.frame_rate > 0 ? (float) out->n_frames / (float) m.lm_cfg.frame_rate : 0.0f;
+        std::vector<float> flat;
+        flat.reserve(lrc_rows.size() * (size_t) n_fr);
+        bool ragged = false;
+        for (const auto & r : lrc_rows) {
+            if ((int) r.size() != n_fr) {
+                ragged = true;
+                break;
+            }
+            flat.insert(flat.end(), r.begin(), r.end());
+        }
+        if (ragged) {
+            // One head short of a frame would silently skew the whole matrix;
+            // refuse rather than align against a misshapen one.
+            fprintf(stderr, "[MM3-LRC] Ragged capture — skipping alignment\n");
+        } else {
+            const std::vector<int> ids(cond_ids + lyr0, cond_ids + lyr1);
+            const auto             t_lrc = std::chrono::steady_clock::now();
+            out->lrc = mm3_align_build_lrc(flat, ids, opt.tok->bpe, n_fr, dur);
+            const double lrc_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_lrc).count();
+            fprintf(stderr, "[MM3-LRC] %s (%d frames, %.1f s, %.0f ms)\n",
+                    out->lrc.empty() ? "no alignment produced" : "LRC built", n_fr, dur, lrc_ms);
+        }
     }
 
     if (align_dump && align_frames > 0 && !align_acc.empty()) {
