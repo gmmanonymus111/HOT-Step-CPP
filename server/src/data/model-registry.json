@@ -122,6 +122,15 @@
       ]
     },
     {
+      "id": "minimax-music3-nvfp4",
+      "name": "MiniMax-Music3 (NVFP4)",
+      "description": "Both MiniMax-Music3 GGUFs at NVFP4 — the fastest flow stage on Blackwell (RTX 50-series) native FP4 kernels. Experimental: quality is unproven by ear. ~8 GB download.",
+      "fileIds": [
+        "mm3-lm-NVFP4",
+        "mm3-synth-NVFP4"
+      ]
+    },
+    {
       "id": "stem-separation",
       "name": "Stem Separation",
       "description": "All 4 models for multi-stem audio separation in Cover Studio. Required for the SuperSep pipeline.",
@@ -2421,6 +2430,126 @@
       "sizeBytes": 5286685024,
       "repo": "scragnog/MiniMax-Music3-GGUF",
       "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Smaller than Q4_K_M with a little more quality loss. Both mm3-lm and mm3-synth are required; this file is ~5.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-NVFP4",
+      "filename": "mm3-lm-NVFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (NVFP4)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "NVFP4",
+      "sizeBytes": 5656222048,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. 4-bit float, fastest on Blackwell (RTX 50-series) native FP4 kernels. Experimental. Both mm3-lm and mm3-synth are required; this file is ~5.7 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-MXFP4",
+      "filename": "mm3-lm-MXFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (MXFP4)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "MXFP4",
+      "sizeBytes": 5439166816,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. 4-bit float, portable variant. Experimental. Both mm3-lm and mm3-synth are required; this file is ~5.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_L",
+      "filename": "mm3-lm-Q3_K_L.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_L)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_L",
+      "sizeBytes": 4998719840,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Aggressive. Quality loss is audible; verify before relying on it. Both mm3-lm and mm3-synth are required; this file is ~5.0 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_M",
+      "filename": "mm3-lm-Q3_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_M)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_M",
+      "sizeBytes": 4589971808,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Aggressive. Quality loss is audible; verify before relying on it. Both mm3-lm and mm3-synth are required; this file is ~4.6 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_S",
+      "filename": "mm3-lm-Q3_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_S)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_S",
+      "sizeBytes": 4336937312,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Very aggressive. Expect noticeable degradation. Both mm3-lm and mm3-synth are required; this file is ~4.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q2_K",
+      "filename": "mm3-lm-Q2_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q2_K)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q2_K",
+      "sizeBytes": 3682625888,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Smallest and lowest quality. Experimental — the flow model may not hold up. Both mm3-lm and mm3-synth are required; this file is ~3.7 GB.",
       "tags": [],
       "companions": [
         {
