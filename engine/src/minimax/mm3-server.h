@@ -15,8 +15,10 @@
 // ACE-Step surface):
 //
 //   GET  /mm3/props       discovery + per-component config summary + residency + VRAM
+//                         (+ the quant catalogue under "variants")
 //   POST /mm3/warm        load both GGUFs into VRAM (idempotent)
 //   POST /mm3/unload      free them (idempotent)
+//   POST /mm3/select-model  choose the lm/synth quant to run; unloads on change
 //   POST /mm3/voc-decode  DEBUG: vocoder-only decode, latents in -> WAV out
 //   POST /mm3/dit-forward DEBUG: one flow-DiT forward, latents+cond in -> velocity out
 //   POST /mm3/flow-sample DEBUG: the Euler loop, noise+cond in -> final latents out
@@ -316,6 +318,36 @@ static void mm3_handle_props(const httplib::Request &, httplib::Response & res) 
     yyjson_mut_obj_add_val(doc, root, "files", files);
     mm3_json_add_file(doc, files, "lm", g_mm3.lm_file);
     mm3_json_add_file(doc, files, "synth", g_mm3.synth_file);
+
+    // Quant catalogue — what the UI's model dropdowns are built from. "selected"
+    // is the quant actually in force (the resolved pick, not the request), so a
+    // fallback from a deleted file is visible rather than silent.
+    {
+        yyjson_mut_val * variants = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "variants", variants);
+        auto add_role = [&](const char * key, const std::vector<MM3Variant> & vars, const MM3FileInfo & fi,
+                            const std::string & want) {
+            yyjson_mut_val * o = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, variants, key, o);
+            yyjson_mut_val * arr = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, o, "available", arr);
+            std::string selected;
+            for (const auto & v : vars) {
+                yyjson_mut_val * e = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_strcpy(doc, e, "quant", v.quant.c_str());
+                yyjson_mut_obj_add_strcpy(doc, e, "filename", v.name.c_str());
+                yyjson_mut_obj_add_uint(doc, e, "bytes", v.bytes);
+                yyjson_mut_arr_add_val(arr, e);
+                if (v.name == fi.name) {
+                    selected = v.quant;
+                }
+            }
+            yyjson_mut_obj_add_strcpy(doc, o, "selected", selected.c_str());
+            yyjson_mut_obj_add_strcpy(doc, o, "requested", want.c_str());
+        };
+        add_role("lm", g_mm3.lm_variants, g_mm3.lm_file, g_mm3.want_lm_quant);
+        add_role("synth", g_mm3.synth_variants, g_mm3.synth_file, g_mm3.want_synth_quant);
+    }
 
     mm3_json_add_config(doc, root);
 
@@ -1619,12 +1651,71 @@ static void mm3_handle_synth_e2e(const httplib::Request & req, httplib::Response
 
 // The single entry point the server calls. Discovers + probes the GGUFs (cheap:
 // mmap + header parse, no weight reads) and registers the /mm3/* routes.
+// POST /mm3/select-model — body {"lm":"<quant>","synth":"<quant>"}.
+//
+// "" (or a missing key) means auto/best-first. Switching quants drops residency:
+// the resident weights ARE the outgoing quant. Idempotent — posting the current
+// selection is a no-op, so the UI can send the whole selection on every change.
+static void mm3_handle_select_model(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_mm3_mutex);
+
+    yyjson_doc * in = req.body.empty() ? nullptr : yyjson_read(req.body.c_str(), req.body.size(), 0);
+    yyjson_val * root_in = in ? yyjson_doc_get_root(in) : nullptr;
+    auto         get_str = [&](const char * key) -> std::string {
+        yyjson_val * v = root_in ? yyjson_obj_get(root_in, key) : nullptr;
+        return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+    };
+    const std::string want_lm    = get_str("lm");
+    const std::string want_synth = get_str("synth");
+    if (in) {
+        yyjson_doc_free(in);
+    }
+
+    const bool was_loaded = g_mm3.loaded;
+    // Graph state points into the model's buffers; mm3_select_variant unloads
+    // those, so tear the graphs down first (same order as /mm3/unload).
+    const bool changes = (want_lm != g_mm3.want_lm_quant) || (want_synth != g_mm3.want_synth_quant);
+    if (changes) {
+        mm3_vocoder_free(&g_mm3_voc);
+        mm3_dit_free(&g_mm3_dit);
+        mm3_depth_free(&g_mm3_depth);
+        mm3_cond_free(&g_mm3_cond);
+        mm3_lm_free(&g_mm3_lm);
+    }
+
+    std::string err;
+    if (!mm3_select_variant(&g_mm3, want_lm, want_synth, &err)) {
+        mm3_json_error(res, 400, err);
+        return;
+    }
+
+    yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_bool(doc, root, "changed", changes);
+    yyjson_mut_obj_add_bool(doc, root, "unloaded", changes && was_loaded);
+    yyjson_mut_obj_add_strcpy(doc, root, "lm", g_mm3.lm_file.found ? g_mm3.lm_file.name.c_str() : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "synth", g_mm3.synth_file.found ? g_mm3.synth_file.name.c_str() : "");
+    yyjson_mut_obj_add_bool(doc, root, "available", mm3_available(g_mm3));
+    for (const auto & e : g_mm3.meta_errors) {
+        yyjson_mut_obj_add_strcpy(doc, root, "error", e.c_str());
+        break;
+    }
+    char * json = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    res.set_content(json ? json : "{}", "application/json");
+    if (json) {
+        free(json);
+    }
+}
+
 static void mm3_register_routes(httplib::Server & svr, const char * models_dir) {
     mm3_discover(&g_mm3, models_dir);
 
     svr.Get("/mm3/props", mm3_handle_props);
     svr.Post("/mm3/warm", mm3_handle_warm);
     svr.Post("/mm3/unload", mm3_handle_unload);
+    svr.Post("/mm3/select-model", mm3_handle_select_model);
     svr.Post("/mm3/voc-decode", mm3_handle_voc_decode);
     svr.Post("/mm3/dit-forward", mm3_handle_dit_forward);
     svr.Post("/mm3/flow-sample", mm3_handle_flow_sample);

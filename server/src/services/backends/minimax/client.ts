@@ -43,6 +43,24 @@ export interface Mm3PropsFile {
   [k: string]: unknown;
 }
 
+/** One mm3-{lm,synth}-<quant>.gguf found on disk. `quant` is the filename
+ *  token verbatim ('f16' | 'q8_0' | 'Q4_K_M' | ...) and is the authoritative
+ *  label — general.file_type is display-only and unassigned for some quants. */
+export interface Mm3VariantFile {
+  quant: string;
+  filename: string;
+  bytes: number;
+}
+
+export interface Mm3RoleVariants {
+  available: Mm3VariantFile[];
+  /** The quant actually in force. Differs from `requested` when the requested
+   *  file has gone missing and the engine fell back to best-first. */
+  selected: string;
+  /** What was last asked for; '' means auto. */
+  requested: string;
+}
+
 export interface Mm3Props {
   backend: string;                 // 'minimax-m3'
   model: string;                   // 'MiniMax-Music3'
@@ -56,9 +74,20 @@ export interface Mm3Props {
   models_dir?: string;
   search_dirs?: string[];
   files?: { lm?: Mm3PropsFile; synth?: Mm3PropsFile };
+  variants?: { lm?: Mm3RoleVariants; synth?: Mm3RoleVariants };
   vram?: Record<string, number>;
   errors?: string[];
   [k: string]: unknown;
+}
+
+export interface Mm3SelectModelResult {
+  changed: boolean;
+  /** True when the switch evicted resident weights (a re-warm will follow). */
+  unloaded: boolean;
+  lm: string;                 // resolved filename
+  synth: string;
+  available: boolean;
+  error?: string;
 }
 
 export interface Mm3PropsResult {
@@ -248,6 +277,22 @@ export async function mm3TokenizeCheck(
 ): Promise<Mm3TokenizeCheck> {
   return mm3Post<Mm3TokenizeCheck>(
     '/mm3/tokenize-check', { caption, lyrics, prompt: echoPrompt }, TIMEOUT_TOKENIZE,
+  );
+}
+
+// ── Model selection ──
+
+/** POST /mm3/select-model — choose the quant of each role to run.
+ *
+ *  '' means auto (engine picks best-first). Idempotent: posting the current
+ *  selection returns changed:false and touches nothing. A real change evicts
+ *  the resident weights, so the next generation re-warms. Throws on an unknown
+ *  quant (400) — unlike the residency helpers below, a failed model switch must
+ *  be visible, not swallowed, or the user silently keeps generating on the old
+ *  weights. */
+export async function mm3SelectModel(sel: { lm?: string; synth?: string }): Promise<Mm3SelectModelResult> {
+  return mm3Post<Mm3SelectModelResult>(
+    '/mm3/select-model', { lm: sel.lm ?? '', synth: sel.synth ?? '' }, TIMEOUT_QUICK,
   );
 }
 

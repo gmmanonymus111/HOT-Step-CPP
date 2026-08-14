@@ -35,12 +35,20 @@
 #include "gguf-weights.h"
 #include "weight-ctx.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
+
+// For mm3_list_dir (quant-variant enumeration).
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <dirent.h>
+#endif
 
 // ── Config structs ──────────────────────────────────────────────────────────
 
@@ -305,6 +313,18 @@ struct MM3FileInfo {
     std::string probe_error;
 };
 
+// ── Quant variants ──────────────────────────────────────────────────────────
+
+// One mm3-{lm,synth}-<quant>.gguf found on disk. The quant token is taken from
+// the filename verbatim -- it is the authoritative label (general.file_type is
+// a display-only u32, and has no assigned value for some quants).
+struct MM3Variant {
+    std::string quant;   // "f16" | "q8_0" | "Q4_K_M" | ...
+    std::string path;
+    std::string name;    // basename
+    uint64_t    bytes = 0;
+};
+
 // ── The model ───────────────────────────────────────────────────────────────
 
 struct MM3Model {
@@ -313,6 +333,15 @@ struct MM3Model {
     std::vector<std::string> search_dirs;
     MM3FileInfo              lm_file;
     MM3FileInfo              synth_file;
+    // Every quant found on disk, best-first. The UI's model dropdown is built
+    // from these; lm_file/synth_file point at whichever is currently selected.
+    std::vector<MM3Variant>  lm_variants;
+    std::vector<MM3Variant>  synth_variants;
+    // User's explicit quant choice, "" = auto (best-first). Kept separate from
+    // lm_file so a re-scan that no longer sees the chosen file falls back
+    // gracefully instead of leaving MM3 unavailable.
+    std::string              want_lm_quant;
+    std::string              want_synth_quant;
     MM3LmConfig              lm_cfg;
     MM3SynthConfig           synth_cfg;
     std::vector<std::string> meta_errors;
@@ -356,6 +385,52 @@ static bool mm3_file_exists(const std::string & path) {
 static std::string mm3_basename(const std::string & path) {
     size_t p = path.find_last_of("/\\");
     return p == std::string::npos ? path : path.substr(p + 1);
+}
+
+static uint64_t mm3_file_size(const std::string & path) {
+    FILE * f = fopen(path.c_str(), "rb");
+    if (!f) {
+        return 0;
+    }
+#ifdef _WIN32
+    _fseeki64(f, 0, SEEK_END);
+    const uint64_t n = (uint64_t) _ftelli64(f);
+#else
+    fseeko(f, 0, SEEK_END);
+    const uint64_t n = (uint64_t) ftello(f);
+#endif
+    fclose(f);
+    return n;
+}
+
+// List plain files in a directory. Deliberately local rather than reusing
+// model-registry.h's registry_list_dir: this module is self-contained by
+// design (see the file header) and the whole helper is a dozen lines.
+static void mm3_list_dir(const std::string & dir, std::vector<std::string> * names) {
+#ifdef _WIN32
+    WIN32_FIND_DATAA fd;
+    HANDLE           h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            names->push_back(fd.cFileName);
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR * d = opendir(dir.c_str());
+    if (!d) {
+        return;
+    }
+    while (struct dirent * e = readdir(d)) {
+        if (e->d_type != DT_DIR) {
+            names->push_back(e->d_name);
+        }
+    }
+    closedir(d);
+#endif
 }
 
 // Read a GGUF int array as int32. Accepts INT32/UINT32 element types.
@@ -678,13 +753,74 @@ static void mm3_probe_file(const std::string & path, MM3FileInfo * fi, MM3LmConf
 
 // ── Discovery ───────────────────────────────────────────────────────────────
 
+// Rank a quant token for "best first" ordering. Lower is better. This is a
+// fidelity ordering, not a size ordering: f16 stays first so that adding a
+// quantized file next to an existing f16 install never silently changes which
+// weights a user's generations run on. Explicit selection overrides it.
+static int mm3_quant_rank(const std::string & q) {
+    static const char * order[] = { "f16",   "F16",   "bf16",  "BF16",  "q8_0",  "Q8_0",
+                                    "Q6_K",  "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S",
+                                    "NVFP4", "MXFP4", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K" };
+    for (int i = 0; i < (int) (sizeof(order) / sizeof(order[0])); i++) {
+        if (q == order[i]) {
+            return i;
+        }
+    }
+    return 1000;   // unknown quant: offered, but never auto-selected over a known one
+}
+
+// Enumerate every mm3-<role>-<quant>.gguf across the search dirs, best-first.
+// The mm3/ subdir wins over the models root for the same quant token.
+static void mm3_enumerate(const MM3Model & m, const char * role, std::vector<MM3Variant> * out) {
+    out->clear();
+    const std::string prefix = std::string("mm3-") + role + "-";
+    for (const auto & dir : m.search_dirs) {
+        std::vector<std::string> names;
+        mm3_list_dir(dir, &names);
+        for (const auto & n : names) {
+            if (n.size() <= prefix.size() + 5 || n.compare(0, prefix.size(), prefix) != 0) {
+                continue;
+            }
+            if (n.compare(n.size() - 5, 5, ".gguf") != 0) {
+                continue;
+            }
+            MM3Variant v;
+            v.quant = n.substr(prefix.size(), n.size() - prefix.size() - 5);
+            bool dup = false;
+            for (const auto & e : *out) {
+                if (e.quant == v.quant) {
+                    dup = true;   // earlier search dir already supplied this quant
+                    break;
+                }
+            }
+            if (dup) {
+                continue;
+            }
+            v.path  = dir + MM3_SEP + n;
+            v.name  = n;
+            v.bytes = mm3_file_size(v.path);
+            out->push_back(v);
+        }
+    }
+    std::sort(out->begin(), out->end(), [](const MM3Variant & a, const MM3Variant & b) {
+        const int ra = mm3_quant_rank(a.quant), rb = mm3_quant_rank(b.quant);
+        return ra != rb ? ra < rb : a.quant < b.quant;
+    });
+}
+
 // Locate the two GGUFs and probe them. Called once at server start; cheap
 // (mmap + header parse, no weight reads). Safe to call when nothing is there —
 // MM3 is simply reported unavailable.
-static void mm3_discover(MM3Model * m, const char * models_dir) {
+//
+// want_lm/want_synth name a quant token to prefer (from the UI's model
+// dropdown). Empty, or not present on disk, falls back to best-first.
+static void mm3_discover(MM3Model * m, const char * models_dir, const std::string & want_lm = std::string(),
+                         const std::string & want_synth = std::string()) {
     m->models_dir = models_dir ? models_dir : "";
     m->search_dirs.clear();
     m->meta_errors.clear();
+    m->lm_file  = MM3FileInfo{};
+    m->synth_file = MM3FileInfo{};
 
     if (m->models_dir.empty()) {
         return;
@@ -694,26 +830,29 @@ static void mm3_discover(MM3Model * m, const char * models_dir) {
     m->search_dirs.push_back(sub);
     m->search_dirs.push_back(m->models_dir);
 
-    // Candidate quant suffixes, best-first. The layout doc names the file
-    // mm3-{lm,synth}-<quant>.gguf where <quant> is the literal --quant value.
-    const char * quants[] = { "f16", "q8_0", "BF16", "Q8_0" };
+    mm3_enumerate(*m, "lm", &m->lm_variants);
+    mm3_enumerate(*m, "synth", &m->synth_variants);
 
-    auto find_one = [&](const char * role, MM3FileInfo * fi) {
-        for (const auto & dir : m->search_dirs) {
-            for (const char * q : quants) {
-                std::string cand = dir + MM3_SEP "mm3-" + role + "-" + q + ".gguf";
-                if (mm3_file_exists(cand)) {
-                    fi->found = true;
-                    fi->path  = cand;
-                    fi->name  = mm3_basename(cand);
-                    return;
+    auto pick = [](const std::vector<MM3Variant> & vars, const std::string & want, MM3FileInfo * fi) {
+        if (vars.empty()) {
+            return;
+        }
+        const MM3Variant * chosen = &vars[0];
+        if (!want.empty()) {
+            for (const auto & v : vars) {
+                if (v.quant == want) {
+                    chosen = &v;
+                    break;
                 }
             }
         }
+        fi->found = true;
+        fi->path  = chosen->path;
+        fi->name  = chosen->name;
     };
 
-    find_one("lm", &m->lm_file);
-    find_one("synth", &m->synth_file);
+    pick(m->lm_variants, want_lm, &m->lm_file);
+    pick(m->synth_variants, want_synth, &m->synth_file);
 
     if (m->lm_file.found) {
         mm3_probe_file(m->lm_file.path, &m->lm_file, &m->lm_cfg, nullptr, &m->meta_errors);
@@ -737,6 +876,20 @@ static void mm3_discover(MM3Model * m, const char * models_dir) {
     }
     fprintf(stderr, "[MM3] LM:    %s\n", m->lm_file.found ? m->lm_file.path.c_str() : "(not found)");
     fprintf(stderr, "[MM3] Synth: %s\n", m->synth_file.found ? m->synth_file.path.c_str() : "(not found)");
+    {
+        auto log_variants = [](const char * role, const std::vector<MM3Variant> & vars) {
+            if (vars.size() < 2) {
+                return;
+            }
+            std::string line;
+            for (const auto & v : vars) {
+                line += (line.empty() ? "" : ", ") + v.quant;
+            }
+            fprintf(stderr, "[MM3] %s quants available: %s\n", role, line.c_str());
+        };
+        log_variants("LM", m->lm_variants);
+        log_variants("Synth", m->synth_variants);
+    }
     if (m->lm_file.probe_ok) {
         fprintf(stderr, "[MM3] LM cfg: %uL H=%u V=%u heads=%u/%u codebooks=%u sem@%u+%u fps=%u\n",
                 m->lm_cfg.block_count, m->lm_cfg.embedding_length, m->lm_cfg.vocab_size, m->lm_cfg.head_count,
@@ -954,6 +1107,52 @@ static void mm3_unload(MM3Model * m) {
         m->backend_ref = false;
     }
     fprintf(stderr, "[MM3] Unloaded\n");
+}
+
+// Choose which quant of each role to run. Empty string = auto (best-first);
+// unchanged values are a no-op so the UI can post the full selection every time.
+//
+// Selecting a different file must drop residency: the loaded weights ARE the
+// old quant, and the tokenizer caches by LM path (mm3-tokenizer.h reloads when
+// the path changes). Callers must hold the MM3 mutex — this unloads.
+static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const std::string & synth_quant,
+                               std::string * err_out) {
+    auto known = [](const std::vector<MM3Variant> & vars, const std::string & q) {
+        if (q.empty()) {
+            return true;   // auto
+        }
+        for (const auto & v : vars) {
+            if (v.quant == q) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!known(m->lm_variants, lm_quant)) {
+        if (err_out) {
+            *err_out = "no mm3-lm-" + lm_quant + ".gguf on disk";
+        }
+        return false;
+    }
+    if (!known(m->synth_variants, synth_quant)) {
+        if (err_out) {
+            *err_out = "no mm3-synth-" + synth_quant + ".gguf on disk";
+        }
+        return false;
+    }
+    if (lm_quant == m->want_lm_quant && synth_quant == m->want_synth_quant) {
+        return true;
+    }
+
+    m->want_lm_quant    = lm_quant;
+    m->want_synth_quant = synth_quant;
+    mm3_unload(m);
+    const std::string dir = m->models_dir;
+    mm3_discover(m, dir.c_str(), m->want_lm_quant, m->want_synth_quant);
+    fprintf(stderr, "[MM3] Selected quants: lm=%s synth=%s\n",
+            m->lm_file.found ? m->lm_file.name.c_str() : "(none)",
+            m->synth_file.found ? m->synth_file.name.c_str() : "(none)");
+    return true;
 }
 
 // Load both files into backend buffers. Idempotent: a second call while loaded

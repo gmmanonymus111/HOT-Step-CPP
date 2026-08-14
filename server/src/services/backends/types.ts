@@ -45,6 +45,11 @@ export interface BackendCoreCapabilities {
  *  open (index signature) so new studios/features don't require editing this
  *  type in lockstep with every backend that gains or lacks them. */
 export interface BackendFeatureCapabilities {
+  /** The backend exposes a user-selectable model catalogue (models() returns
+   *  non-empty buckets). Deliberately separate from `lm`: MM3 has selectable
+   *  weights but no ACE-style LM/CoT stage, and gating the Models cluster on
+   *  `lm` hid the model picker for it. */
+  models: boolean;
   lm: boolean;
   plugins: boolean;
   adapters: boolean;
@@ -79,12 +84,21 @@ export interface BackendCapabilities {
  *  other backends may not (plan §4.5: "Music 3 has no lm/dit/vae split to
  *  show") — hence a generic bucket map rather than a fixed shape. */
 export interface BackendModels {
-  /** e.g. { lm: [...], dit: [...], vae: [...], embedding: [...] } for ACE */
+  /** e.g. { lm: [...], dit: [...], vae: [...], embedding: [...] } for ACE,
+   *  { lm: [...quants], synth: [...quants] } for MiniMax-Music3. */
   buckets: Record<string, string[]>;
   adapters?: string[];
   lmAdapters?: string[];
   defaults?: Record<string, unknown>;
+  /** Optional per-bucket display metadata (size on disk, filename), keyed
+   *  bucket -> option value. Purely cosmetic; the UI renders the bare option
+   *  when absent. */
+  meta?: Record<string, Record<string, { label?: string; bytes?: number }>>;
 }
+
+/** Which model each bucket should use, e.g. { lm: 'q8_0', synth: 'Q4_K_M' }.
+ *  An empty-string value means "auto / backend default". */
+export type BackendModelSelection = Record<string, string>;
 
 /** A registered generation backend. See file header for what's intentionally
  *  missing (translate/generate/cancel — later phase). */
@@ -98,6 +112,12 @@ export interface EngineBackend {
   /** Cached, cheap — safe to call on every UI render. */
   capabilities(): Promise<BackendCapabilities>;
   models(): Promise<BackendModels>;
+  /** Choose which model each bucket runs. Optional: a backend whose model set
+   *  is fixed, or which is selected per-request rather than as engine state
+   *  (ACE passes model names on each generate call), simply omits it and the
+   *  route answers 501. Implementations must be idempotent — the UI posts the
+   *  whole selection on every change. */
+  selectModel?(selection: BackendModelSelection): Promise<{ changed: boolean; [k: string]: unknown }>;
   /** Release this backend's GPU residency WITHOUT stopping it (plan §4.4:
    *  arbitration is model residency, not process switching). Called
    *  fire-and-forget on the OUTGOING backend when the active backend changes,

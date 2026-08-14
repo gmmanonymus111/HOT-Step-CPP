@@ -13,6 +13,7 @@ import { useCapabilities } from '../../hooks/useCapabilities';
 import { modelApi } from '../../services/api';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
+import { BackendModelsDropdown, BackendModelsBadge } from './BackendModelsDropdown';
 import { BackendToggle } from './BackendToggle';
 import { AdaptersDropdown, AdaptersBadge } from './AdaptersDropdown';
 import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
@@ -25,6 +26,21 @@ import { useVstChainStore } from '../../stores/vstChainStore';
 import { ProfilesModal } from './ProfilesModal';
 
 type SectionId = 'models' | 'adapters' | 'generation' | 'lm' | 'postprocessing' | null;
+
+/** Placeholder body for a cluster whose subsystem the ACTIVE backend doesn't
+ *  have yet. The section stays in the bar (its absence reads as a bug) but says
+ *  plainly that there is nothing to configure, rather than showing ACE's
+ *  controls where they would do nothing. */
+const NotYetPanel: React.FC<{ feature: string }> = ({ feature }) => (
+  <p className="text-[11px] text-zinc-500 leading-relaxed">
+    {feature} isn’t supported by the active backend yet. This section will fill in
+    as the capability lands.
+  </p>
+);
+
+const UnsupportedBadge: React.FC = () => (
+  <span className="text-[10px] text-zinc-600 dark:text-zinc-500 italic truncate">not available</span>
+);
 
 export const GlobalParamBar: React.FC = () => {
   const { t } = useTranslation();
@@ -44,11 +60,27 @@ export const GlobalParamBar: React.FC = () => {
   // backend-agnostic ones (Mastering, VST chain, per §3.4 of the plan doc).
   // Gated behind `plugins` as the closest existing flag per the task brief;
   // a future finer-grained pass could split the agnostic sub-panels out.
-  const showModels = !capabilities || capabilities.features.lm;
-  const showAdapters = !capabilities || capabilities.features.adapters;
+  // Models is gated on its own `models` flag, not on `lm`: MiniMax-Music3 has
+  // a selectable quant ladder but no ACE-style LM stage, and the old
+  // `features.lm` gate hid its model picker entirely.
+  const showModels = !capabilities || capabilities.features.models !== false;
+  // Which picker: backends that hold model choice as engine state (MM3 loads
+  // and pins one quant) get the generic bucket-driven one; ACE keeps its own,
+  // which writes per-request globalParams. Keyed on the capability, not on the
+  // backend id (plan §2 principle 2).
+  const useBackendModelPicker = !!capabilities && capabilities.features.lm === false;
+
+  // Adapters / Post-Processing stay VISIBLE for every backend and render an
+  // empty placeholder when the subsystem doesn't exist yet, rather than
+  // vanishing — the clusters are part of the app's shape, and a missing
+  // section reads as a bug. Their contents are still capability-gated inside.
+  const showAdapters = true;
+  const showPostProcessing = true;
+  const adaptersSupported = !capabilities || capabilities.features.adapters;
+  const postProcessingSupported = !capabilities || capabilities.features.plugins;
+
   const showGeneration = !capabilities || capabilities.features.plugins;
   const showLm = !capabilities || capabilities.features.lm;
-  const showPostProcessing = !capabilities || capabilities.features.plugins;
 
   // ── Auto-select models when engine becomes ready ────────────────
   // Polls the engine until it returns a model list, then auto-selects
@@ -172,13 +204,13 @@ export const GlobalParamBar: React.FC = () => {
             id="models"
             label={t('globalBar.models')}
             icon={<Cpu size={14} />}
-            badge={<ModelsBadge />}
+            badge={useBackendModelPicker ? <BackendModelsBadge /> : <ModelsBadge />}
             accentColor="pink"
             isOpen={openSection === 'models'}
             onOpen={() => handleOpen('models')}
             onClose={() => handleClose('models')}
           >
-            <ModelsDropdown />
+            {useBackendModelPicker ? <BackendModelsDropdown /> : <ModelsDropdown />}
           </BarSection>
           </DiscoPulseWrapper>
           )}
@@ -191,13 +223,15 @@ export const GlobalParamBar: React.FC = () => {
             id="adapters"
             label={t('globalBar.adapters')}
             icon={<Plug size={14} />}
-            badge={<AdaptersBadge />}
+            badge={adaptersSupported ? <AdaptersBadge /> : <UnsupportedBadge />}
             accentColor="emerald"
             isOpen={openSection === 'adapters'}
             onOpen={() => handleOpen('adapters')}
             onClose={() => handleClose('adapters')}
           >
-            <AdaptersDropdown />
+            {adaptersSupported
+              ? <AdaptersDropdown />
+              : <NotYetPanel feature="Adapters" />}
           </BarSection>
           </DiscoPulseWrapper>
           )}
@@ -249,20 +283,22 @@ export const GlobalParamBar: React.FC = () => {
             id="postprocessing"
             label={t('globalBar.postProcessing')}
             icon={<AudioWaveform size={14} />}
-            badge={<PostProcessingBadge />}
+            badge={postProcessingSupported ? <PostProcessingBadge /> : <UnsupportedBadge />}
             accentColor="amber"
             isOpen={openSection === 'postprocessing'}
             onOpen={() => handleOpen('postprocessing')}
             onClose={() => handleClose('postprocessing')}
-            headerToggle={
+            headerToggle={postProcessingSupported ? (
               <ToggleSwitch
                 checked={gp.postProcessingEnabled}
                 onChange={(on) => gp.setPostProcessingEnabled(on)}
                 accentColor="amber"
               />
-            }
+            ) : undefined}
           >
-            <PostProcessingDropdown />
+            {postProcessingSupported
+              ? <PostProcessingDropdown />
+              : <NotYetPanel feature="Post-processing" />}
           </BarSection>
           </DiscoPulseWrapper>
           )}

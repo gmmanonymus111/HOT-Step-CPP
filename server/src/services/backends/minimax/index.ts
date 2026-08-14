@@ -12,7 +12,7 @@
 
 import { engineReady } from '../../../engineState.js';
 import { isEngineSuspended } from '../../aceEngineProcess.js';
-import { mm3Props, mm3PropsCached, mm3Unload } from './client.js';
+import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
 import type {
   EngineBackend,
   BackendCapabilities,
@@ -75,9 +75,12 @@ async function capabilities(): Promise<BackendCapabilities> {
       propsStale: stale,
       modelsMissing,
     },
-    // ALL false. This is the honest v1 manifest: none of these subsystems
-    // exist for MM3 — they are not "coming soon" flags, they gate UI regions.
+    // Everything except `models` is false. This is the honest v1 manifest:
+    // none of these subsystems exist for MM3 — they are not "coming soon"
+    // flags, they gate UI regions. `models` IS true: MM3 ships a quant ladder
+    // (mm3-{lm,synth}-<quant>.gguf) and the picker is live.
     features: {
+      models: true,
       lm: false,
       plugins: false,
       adapters: false,
@@ -99,10 +102,50 @@ async function capabilities(): Promise<BackendCapabilities> {
 }
 
 async function models(): Promise<BackendModels> {
-  // MM3 ships as exactly two GGUFs (mm3-lm + mm3-synth) with no user-facing
-  // model split — plan §4.5: "Music 3 has no lm/dit/vae split to show".
-  // Reporting empty buckets is the honest answer, not a degraded one.
-  return { buckets: {}, adapters: [], lmAdapters: [], defaults: {} };
+  // MM3 ships as exactly two GGUFs (mm3-lm + mm3-synth), so there is no
+  // lm/dit/vae split to show (plan §4.5) — but each of the two exists at
+  // several quant levels, and THAT is the user-facing choice. Buckets are
+  // therefore the two roles, with the quant tokens as options.
+  const { props } = await mm3Props();
+  const lm = props?.variants?.lm;
+  const synth = props?.variants?.synth;
+
+  const meta: NonNullable<BackendModels['meta']> = {};
+  const bucketOf = (v: typeof lm, key: string): string[] => {
+    if (!v?.available?.length) return [];
+    meta[key] = {};
+    for (const f of v.available) {
+      meta[key][f.quant] = { label: f.filename, bytes: f.bytes };
+    }
+    return v.available.map(f => f.quant);
+  };
+
+  return {
+    buckets: { lm: bucketOf(lm, 'lm'), synth: bucketOf(synth, 'synth') },
+    // No adapter or planner-adapter subsystem for MM3 yet — the UI renders
+    // these clusters as empty placeholders (features.adapters is false).
+    adapters: [],
+    lmAdapters: [],
+    // The quant actually in force, not what was requested: if a selected file
+    // is deleted the engine falls back and the UI must show the truth.
+    defaults: { lm: lm?.selected ?? '', synth: synth?.selected ?? '' },
+    meta,
+  };
+}
+
+/** Switch which quant of each role runs. The engine unloads on a real change
+ *  (the resident weights ARE the outgoing quant), so the next generation pays
+ *  a warm — that is the honest cost of the switch, not a bug. */
+async function selectModel(selection: Record<string, string>) {
+  const result = await mm3SelectModel({
+    lm: selection.lm ?? '',
+    synth: selection.synth ?? '',
+  });
+  if (result.changed) {
+    console.log(`[Backends] MiniMax-Music3 models: ${result.lm} + ${result.synth}` +
+                (result.unloaded ? ' (evicted previous weights)' : ''));
+  }
+  return { ...result };
 }
 
 export const minimaxBackend: EngineBackend = {
@@ -122,6 +165,7 @@ export const minimaxBackend: EngineBackend = {
   },
   capabilities,
   models,
+  selectModel,
   /** Model-residency arbitration (plan §4.4): switching away from MM3 frees
    *  its ~13 GB rather than leaving it parked next to the ACE pipeline. */
   async releaseVram() {

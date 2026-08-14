@@ -39,6 +39,7 @@ async function capabilities(): Promise<BackendCapabilities> {
       seed: true,
     },
     features: {
+      models: true,
       lm: true,
       plugins: true,
       adapters: true,

@@ -76,6 +76,62 @@ router.post('/backends/active', (req, res) => {
   res.json({ activeId: getActiveBackendId() });
 });
 
+// GET /api/backends/models?backend=<id> — the backend's model catalogue.
+//
+// Backend-shaped by design: ACE reports {lm,dit,vae,embedding} name lists,
+// MiniMax-Music3 reports {lm,synth} quant ladders. The UI renders whatever
+// buckets it is given rather than branching on backend id (plan §2 principle 2).
+router.get('/backends/models', async (req, res) => {
+  const id = (req.query.backend as string) || getActiveBackendId();
+  const backend = getBackend(id);
+  if (!backend) {
+    res.status(404).json({ error: `Unknown backend: ${id}` });
+    return;
+  }
+  try {
+    const models = await backend.models();
+    res.json({ backend: id, selectable: typeof backend.selectModel === 'function', ...models });
+  } catch (err: any) {
+    console.error(`[backends] models probe failed for '${id}':`, err?.message || err);
+    // Same never-throw-upward contract as /capabilities: an empty catalogue is
+    // an honest degrade, a 500 would blank the UI's whole Models cluster.
+    res.json({ backend: id, selectable: false, buckets: {}, adapters: [], lmAdapters: [], defaults: {} });
+  }
+});
+
+// POST /api/backends/models { backend?, selection: { bucket: value } }
+//
+// Only meaningful for backends that hold model choice as engine STATE (MM3
+// picks a quant and loads it). ACE passes model names per generate call and
+// declares no selectModel, so it answers 501 rather than pretending.
+router.post('/backends/models', async (req, res) => {
+  const id = (req.body?.backend as string) || getActiveBackendId();
+  const backend = getBackend(id);
+  if (!backend) {
+    res.status(404).json({ error: `Unknown backend: ${id}` });
+    return;
+  }
+  if (typeof backend.selectModel !== 'function') {
+    res.status(501).json({ error: `Backend '${id}' does not support model selection` });
+    return;
+  }
+  const selection = req.body?.selection;
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)) {
+    res.status(400).json({ error: 'Missing "selection" object in request body' });
+    return;
+  }
+  try {
+    const result = await backend.selectModel(selection as Record<string, string>);
+    // The catalogue's `defaults` (what is actually in force) just changed.
+    cache.delete(id);
+    res.json(result);
+  } catch (err: any) {
+    // Unlike the probes above this DOES surface as an error — silently keeping
+    // the old weights while the UI shows the new pick is the worst outcome.
+    res.status(400).json({ error: err?.message || String(err) });
+  }
+});
+
 // GET /api/capabilities?backend=<id> — defaults to the active backend.
 // Cached ~10s per backend id (mirrors the 60s /api/plugins cache, shorter
 // because `up` should track engine state fairly closely).
@@ -109,7 +165,7 @@ router.get('/capabilities', async (req, res) => {
       up: false,
       core: { duration: { max: 0 }, bpm: false, keyscale: false, negativePrompt: false, batch: { max: 1 }, seed: false },
       features: {
-        lm: false, plugins: false, adapters: false, cover: false, repaint: false,
+        models: false, lm: false, plugins: false, adapters: false, cover: false, repaint: false,
         lego: false, extract: false, streaming: false, training: false, midi: false,
         stems: false, understand: false, conceptSteering: false,
       },

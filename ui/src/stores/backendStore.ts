@@ -34,6 +34,10 @@ export interface BackendCoreCapabilities {
 }
 
 export interface BackendFeatureCapabilities {
+  /** Backend exposes a selectable model catalogue. Separate from `lm` —
+   *  MiniMax-Music3 has selectable weights (a quant ladder) but no ACE-style
+   *  LM/CoT stage, and gating the Models cluster on `lm` hid its picker. */
+  models: boolean;
   lm: boolean;
   plugins: boolean;
   adapters: boolean;
@@ -73,16 +77,41 @@ export interface BackendCapabilities {
   extensions: BackendExtensionParam[];
 }
 
+/** Backend-shaped model catalogue (GET /api/backends/models). Buckets differ
+ *  per backend — ACE reports {lm,dit,vae,embedding} file names, MiniMax-Music3
+ *  reports {lm,synth} quant ladders — so consumers render what they are given
+ *  rather than branching on backend id. */
+export interface BackendModelCatalogue {
+  backend: string;
+  /** True when the backend holds model choice as engine state and accepts
+   *  POST /api/backends/models. False (e.g. ACE) means the picker is owned
+   *  elsewhere — per-request model names on generate. */
+  selectable: boolean;
+  buckets: Record<string, string[]>;
+  adapters?: string[];
+  lmAdapters?: string[];
+  /** What is actually in force right now, per bucket. */
+  defaults?: Record<string, unknown>;
+  /** Optional cosmetic per-option metadata, bucket -> option -> {label,bytes}. */
+  meta?: Record<string, Record<string, { label?: string; bytes?: number }>>;
+}
+
 interface BackendState {
   backends: BackendInfo[];
   activeBackendId: string;
   /** Per-backend capability manifest, keyed by backend id. */
   capabilities: Record<string, BackendCapabilities>;
+  /** Per-backend model catalogue, keyed by backend id. */
+  models: Record<string, BackendModelCatalogue>;
   loading: boolean;
   error: string | null;
 
   fetchBackends: () => Promise<void>;
   fetchCapabilities: (id?: string) => Promise<void>;
+  fetchModels: (id?: string) => Promise<void>;
+  /** Post a bucket->value selection. Returns true on success. Refetches the
+   *  catalogue so `defaults` reflects what the engine actually resolved. */
+  selectModels: (selection: Record<string, string>, id?: string) => Promise<boolean>;
   switchBackend: (id: string) => Promise<void>;
 }
 
@@ -92,6 +121,7 @@ export const useBackendStore = create<BackendState>((set, get) => ({
   // install; overwritten by fetchBackends() once the registry responds.
   activeBackendId: 'ace',
   capabilities: {},
+  models: {},
   loading: false,
   error: null,
 
@@ -128,6 +158,45 @@ export const useBackendStore = create<BackendState>((set, get) => ({
     }
   },
 
+  fetchModels: async (id) => {
+    const backendId = id || get().activeBackendId;
+    if (!backendId) return;
+    try {
+      const res = await fetch(`/api/backends/models?backend=${encodeURIComponent(backendId)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: BackendModelCatalogue = await res.json();
+      set({ models: { ...get().models, [backendId]: data } });
+    } catch (err) {
+      // Advisory, like fetchCapabilities: an empty catalogue renders as
+      // "no models found", which is the honest degrade.
+      console.warn(`[Backends] models fetch failed for "${backendId}":`, err instanceof Error ? err.message : String(err));
+    }
+  },
+
+  selectModels: async (selection, id) => {
+    const backendId = id || get().activeBackendId;
+    if (!backendId) return false;
+    try {
+      const res = await fetch('/api/backends/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend: backendId, selection }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      // Re-read rather than trusting the request: the engine may fall back to
+      // a different quant if the requested file vanished.
+      await get().fetchModels(backendId);
+      return true;
+    } catch (err) {
+      console.warn('[Backends] model selection failed:', err instanceof Error ? err.message : String(err));
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
   switchBackend: async (id) => {
     set({ error: null });
     try {
@@ -145,6 +214,7 @@ export const useBackendStore = create<BackendState>((set, get) => ({
       // Refetch on success — the new active backend's manifest may not be
       // cached yet (or may be stale from a previous session).
       await get().fetchCapabilities(data.activeId);
+      await get().fetchModels(data.activeId);
     } catch (err) {
       console.warn('[Backends] switch failed:', err instanceof Error ? err.message : String(err));
       set({ error: err instanceof Error ? err.message : String(err) });
