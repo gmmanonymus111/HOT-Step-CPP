@@ -203,7 +203,9 @@ static bool mm3_cond_readback_f32(const ggml_tensor * t, std::vector<float> * ou
 
 // Fold softmax(layer_logits) * layer_scale into one staged 8-vector (note A).
 static bool mm3_cond_prepare(const MM3Model & m, MM3CondGraph * g, std::string * err) {
-    if (!m.loaded) {
+    // Staged residency: a stage-2 graph needs only the cond/dit/voc buffer.
+    // The LM is deliberately gone by this point.
+    if (!m.rest_resident) {
         if (err) {
             *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
         }

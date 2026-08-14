@@ -343,6 +343,12 @@ struct MM3GenRequest {
     // *err == MM3_ERR_CANCELLED, which the job worker turns into job status 3
     // (cancelled) rather than 2 (failed).
     std::function<bool()> should_cancel;
+    /** Called once, after the AR stage and before the condition encoder — the
+     *  only point where the LM is finished but the flow stack is not yet
+     *  needed. Lets the caller swap residency (drop the LM, load cond/dit/voc)
+     *  without this file owning a VRAM policy. Return false (setting *err) to
+     *  abort the run. Optional: unset means "everything stays resident". */
+    std::function<bool(std::string * err)> after_ar;
 };
 
 struct MM3GenResult {
@@ -504,6 +510,20 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
     const int64_t NW = (int64_t) starts.size();
     out->n_windows   = NW;
     out->chunk_starts = starts;
+
+    // ── stage-1 -> stage-2 residency handover ──
+    //
+    // The AR stage is finished with the LM and the depth decoder: everything
+    // stage 2 needs from them is `out->ar.frame_hiddens`, which is a host-side
+    // block. This is the one point where the caller can drop the 8.59B LM and
+    // bring in the flow stack, so the two never have to be resident together.
+    //
+    // Policy lives in the caller (mm3-job.h), not here — this file stays a pure
+    // compute path. An absent hook means "keep everything resident", which is
+    // exactly what the bring-up endpoints want.
+    if (req.after_ar && !req.after_ar(err)) {
+        return false;
+    }
 
     // ── stage 2: per-window condition -> flow ──
     std::vector<std::vector<float>> chunk_latents((size_t) NW);

@@ -484,7 +484,11 @@ static int64_t mm3_lm_bucket(int64_t n) {
 // Acquire the backend and make sure the KV cache covers `n_ctx_needed` positions.
 // Grows only; a shrink would throw away a valid allocation for nothing.
 static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_needed, std::string * err) {
-    if (!m.loaded) {
+    // Residency is staged (mm3-model.h): check the parts this graph actually
+    // reads, not the all-three `loaded` flag. During stage 2 the LM is gone by
+    // design and `loaded` is false, so the old check would have refused a
+    // perfectly valid model.
+    if (!m.lm_resident || !m.depth_resident) {
         if (err) {
             *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
         }
@@ -511,7 +515,10 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
     }
 
     const void * lt = (const void *) m.wctx_lm.buffer;
-    const void * st = (const void *) m.wctx_synth.buffer;
+    // The only non-LM weight this graph touches is depth.audio_embd (the AR
+    // feedback embedding), which lives in the DEPTH buffer — so that is the
+    // buffer whose identity must invalidate the cached graph.
+    const void * st = (const void *) m.wctx_depth.buffer;
     if (g->lm_token != lt || g->synth_token != st) {
         mm3_lm_free(g);
     }

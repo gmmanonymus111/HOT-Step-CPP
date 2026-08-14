@@ -347,15 +347,25 @@ struct MM3Model {
     std::vector<std::string> meta_errors;
 
     // residency
-    bool           loaded      = false;
-    bool           backend_ref = false;
-    ggml_backend_t backend     = nullptr;
-    ggml_backend_t cpu_backend = nullptr;
-    WeightCtx      wctx_lm     = {};
-    WeightCtx      wctx_synth  = {};
-    size_t         vram_lm     = 0;
-    size_t         vram_synth  = 0;
-    double         load_ms     = 0.0;
+    //
+    // Three independently-loadable parts, because the pipeline needs them at
+    // different times: stage 1 (AR) uses lm + depth, stage 2 (cond/flow/vocode)
+    // uses rest. `loaded` means ALL THREE are resident — the precondition the
+    // bring-up endpoints and a keep-loaded warm still expect.
+    bool           loaded         = false;
+    bool           lm_resident    = false;
+    bool           depth_resident = false;
+    bool           rest_resident  = false;
+    bool           backend_ref    = false;
+    ggml_backend_t backend        = nullptr;
+    ggml_backend_t cpu_backend    = nullptr;
+    WeightCtx      wctx_lm        = {};
+    WeightCtx      wctx_depth     = {};
+    WeightCtx      wctx_synth     = {};   // cond + dit + voc
+    size_t         vram_lm        = 0;
+    size_t         vram_depth     = 0;
+    size_t         vram_synth     = 0;
+    double         load_ms        = 0.0;
 
     MM3LmWeights    lm;
     MM3SynthWeights synth;
@@ -951,17 +961,26 @@ static bool mm3_load_lm_tensors(MM3Model * m, const GGUFModel & gf, std::vector<
     return errs->empty();
 }
 
-static bool mm3_load_synth_tensors(MM3Model * m, const GGUFModel & gf, std::vector<std::string> * errs) {
+// The depth decoder gets its OWN backend buffer, separate from the rest of the
+// synth stack, even though both come from the same GGUF.
+//
+// Why: depth runs INSIDE the AR loop (it consumes the LM's hidden state every
+// frame), so stage 1 needs LM + depth. The condition encoder, flow DiT and
+// vocoder are not touched until stage 2, by which time the LM is finished. One
+// combined synth buffer forced all of it resident for the whole run, making the
+// peak LM + everything. Splitting here lets stage 1 hold LM + depth (~0.65 GB)
+// and stage 2 hold only cond/dit/voc — the peak drops by roughly the size of
+// the flow stack. This is a load-time split only: no change to the GGUF, which
+// is why it needs no re-conversion (see docs/plans/mm3-gguf-layout.md, which
+// calls this out as the intended seam).
+static bool mm3_load_depth_tensors(MM3Model * m, const GGUFModel & gf, std::vector<std::string> * errs) {
     const MM3SynthConfig & c = m->synth_cfg;
 
-    // Tensor budget from the layout doc: depth 47 + cond 4 + dit 370 + voc 91.
+    // Tensor budget from the layout doc: depth 47.
     const int n_depth = 4 + (int) (c.depth.num_codebooks - 1) + (int) c.depth.block_count * 9;
-    const int n_cond  = 4;
-    const int n_dit   = 10 + (int) c.dit.block_count * 10;
-    const int n_voc   = 7 + (int) c.voc.upsample_rates.size() * (3 + (int) c.voc.res_dilations.size() * 6);
-    wctx_init(&m->wctx_synth, n_depth + n_cond + n_dit + n_voc);
+    wctx_init(&m->wctx_depth, n_depth);
 
-    MM3Loader ld{ &m->wctx_synth, &gf, &m->tmap_synth, errs };
+    MM3Loader ld{ &m->wctx_depth, &gf, &m->tmap_synth, errs };
 
     // ── depth ──
     {
@@ -995,6 +1014,22 @@ static bool mm3_load_synth_tensors(MM3Model * m, const GGUFModel & gf, std::vect
             b.ffn_down        = ld.req(mm3_fmt("depth.blk.%d.ffn_down.weight", i), F, H);
         }
     }
+
+    return errs->empty();
+}
+
+// The stage-2 half of the synth file: condition encoder + flow DiT + vocoder.
+// Loaded separately from depth so it can be absent while the AR loop runs.
+static bool mm3_load_rest_tensors(MM3Model * m, const GGUFModel & gf, std::vector<std::string> * errs) {
+    const MM3SynthConfig & c = m->synth_cfg;
+
+    // Tensor budget from the layout doc: cond 4 + dit 370 + voc 91.
+    const int n_cond = 4;
+    const int n_dit  = 10 + (int) c.dit.block_count * 10;
+    const int n_voc  = 7 + (int) c.voc.upsample_rates.size() * (3 + (int) c.voc.res_dilations.size() * 6);
+    wctx_init(&m->wctx_synth, n_cond + n_dit + n_voc);
+
+    MM3Loader ld{ &m->wctx_synth, &gf, &m->tmap_synth, errs };
 
     // ── cond ──
     {
@@ -1086,20 +1121,31 @@ static bool mm3_load_synth_tensors(MM3Model * m, const GGUFModel & gf, std::vect
 
 // ── Load / unload ───────────────────────────────────────────────────────────
 
+// Weight bytes currently resident across all three parts. Excludes the AR KV
+// cache, which is a separate allocation owned by the LM graph state.
+static size_t mm3_vram_bytes(const MM3Model & m) {
+    return m.vram_lm + m.vram_depth + m.vram_synth;
+}
+
 static void mm3_unload(MM3Model * m) {
-    if (!m->loaded && !m->wctx_lm.ctx && !m->wctx_synth.ctx) {
+    if (!m->loaded && !m->wctx_lm.ctx && !m->wctx_depth.ctx && !m->wctx_synth.ctx) {
         return;
     }
     wctx_free(&m->wctx_lm);
+    wctx_free(&m->wctx_depth);
     wctx_free(&m->wctx_synth);
     m->lm    = MM3LmWeights{};
     m->synth = MM3SynthWeights{};
     m->tmap_lm.clear();
     m->tmap_synth.clear();
-    m->vram_lm    = 0;
-    m->vram_synth = 0;
-    m->load_ms    = 0.0;
-    m->loaded     = false;
+    m->vram_lm        = 0;
+    m->vram_depth     = 0;
+    m->vram_synth     = 0;
+    m->load_ms        = 0.0;
+    m->loaded         = false;
+    m->lm_resident    = false;
+    m->depth_resident = false;
+    m->rest_resident  = false;
     if (m->backend_ref) {
         backend_release(m->backend, m->cpu_backend);
         m->backend     = nullptr;
@@ -1155,10 +1201,18 @@ static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const
     return true;
 }
 
-// Load both files into backend buffers. Idempotent: a second call while loaded
-// is a no-op returning true. On any failure nothing stays resident.
-static bool mm3_load(MM3Model * m, std::string * err_out) {
-    if (m->loaded) {
+// Load a chosen subset of the three parts into backend buffers. Parts already
+// resident are left alone, so this is idempotent and safe to call repeatedly.
+// On any failure NOTHING stays resident — a half-loaded model is never a state
+// the pipeline has to reason about.
+//
+// The two GGUFs are opened only when a part that lives in them is actually
+// wanted, so a stage-2 top-up never re-reads the 17 GB LM header.
+static bool mm3_load_parts(MM3Model * m, bool want_lm, bool want_depth, bool want_rest, std::string * err_out) {
+    const bool need_lm    = want_lm && !m->lm_resident;
+    const bool need_depth = want_depth && !m->depth_resident;
+    const bool need_rest  = want_rest && !m->rest_resident;
+    if (!need_lm && !need_depth && !need_rest) {
         return true;
     }
     if (!m->lm_file.found || !m->synth_file.found) {
@@ -1177,41 +1231,56 @@ static bool mm3_load(MM3Model * m, std::string * err_out) {
 
     const auto t0 = std::chrono::steady_clock::now();
 
-    BackendPair bp = backend_init("MM3");
-    m->backend     = bp.backend;
-    m->cpu_backend = bp.cpu_backend;
-    m->backend_ref = true;
+    // The backend reference is shared by all three parts and taken once.
+    if (!m->backend_ref) {
+        BackendPair bp = backend_init("MM3");
+        m->backend     = bp.backend;
+        m->cpu_backend = bp.cpu_backend;
+        m->backend_ref = true;
+    }
 
     std::vector<std::string> errs;
+    bool                     ok = true;
 
-    GGUFModel gf_lm = {};
-    if (!gf_load(&gf_lm, m->lm_file.path.c_str())) {
-        if (err_out) {
-            *err_out = "cannot open " + m->lm_file.path;
+    if (need_lm) {
+        GGUFModel gf_lm = {};
+        if (!gf_load(&gf_lm, m->lm_file.path.c_str())) {
+            errs.push_back("cannot open " + m->lm_file.path);
+            ok = false;
+        } else {
+            ok = mm3_load_lm_tensors(m, gf_lm, &errs);
+            if (ok) {
+                ok = wctx_alloc(&m->wctx_lm, m->backend);
+                if (!ok) {
+                    errs.push_back("backend buffer allocation failed for the LM (out of VRAM?)");
+                }
+            }
+            gf_close(&gf_lm);
         }
-        mm3_unload(m);
-        return false;
     }
-    bool ok = mm3_load_lm_tensors(m, gf_lm, &errs);
-    if (ok) {
-        ok = wctx_alloc(&m->wctx_lm, m->backend);
-        if (!ok) {
-            errs.push_back("backend buffer allocation failed for the LM (out of VRAM?)");
-        }
-    }
-    gf_close(&gf_lm);
 
-    if (ok) {
+    if (ok && (need_depth || need_rest)) {
         GGUFModel gf_sy = {};
         if (!gf_load(&gf_sy, m->synth_file.path.c_str())) {
             errs.push_back("cannot open " + m->synth_file.path);
             ok = false;
         } else {
-            ok = mm3_load_synth_tensors(m, gf_sy, &errs);
-            if (ok) {
-                ok = wctx_alloc(&m->wctx_synth, m->backend);
-                if (!ok) {
-                    errs.push_back("backend buffer allocation failed for the synth stack (out of VRAM?)");
+            if (ok && need_depth) {
+                ok = mm3_load_depth_tensors(m, gf_sy, &errs);
+                if (ok) {
+                    ok = wctx_alloc(&m->wctx_depth, m->backend);
+                    if (!ok) {
+                        errs.push_back("backend buffer allocation failed for the depth decoder (out of VRAM?)");
+                    }
+                }
+            }
+            if (ok && need_rest) {
+                ok = mm3_load_rest_tensors(m, gf_sy, &errs);
+                if (ok) {
+                    ok = wctx_alloc(&m->wctx_synth, m->backend);
+                    if (!ok) {
+                        errs.push_back("backend buffer allocation failed for the synth stack (out of VRAM?)");
+                    }
                 }
             }
             gf_close(&gf_sy);
@@ -1231,19 +1300,48 @@ static bool mm3_load(MM3Model * m, std::string * err_out) {
         return false;
     }
 
-    m->vram_lm    = m->wctx_lm.buffer ? ggml_backend_buffer_get_size(m->wctx_lm.buffer) : 0;
-    m->vram_synth = m->wctx_synth.buffer ? ggml_backend_buffer_get_size(m->wctx_synth.buffer) : 0;
-    m->loaded     = true;
-    m->load_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (need_lm) {
+        m->vram_lm     = m->wctx_lm.buffer ? ggml_backend_buffer_get_size(m->wctx_lm.buffer) : 0;
+        m->lm_resident = true;
+    }
+    if (need_depth) {
+        m->vram_depth     = m->wctx_depth.buffer ? ggml_backend_buffer_get_size(m->wctx_depth.buffer) : 0;
+        m->depth_resident = true;
+    }
+    if (need_rest) {
+        m->vram_synth    = m->wctx_synth.buffer ? ggml_backend_buffer_get_size(m->wctx_synth.buffer) : 0;
+        m->rest_resident = true;
+    }
+    m->loaded  = m->lm_resident && m->depth_resident && m->rest_resident;
+    m->load_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
-    fprintf(stderr, "[MM3] Loaded: LM %.2f GB (%zu tensors) + synth %.2f GB (%zu tensors) = %.2f GB in %.0f ms\n",
-            (double) m->vram_lm / (1024.0 * 1024.0 * 1024.0), m->tmap_lm.size(),
-            (double) m->vram_synth / (1024.0 * 1024.0 * 1024.0), m->tmap_synth.size(),
-            (double) (m->vram_lm + m->vram_synth) / (1024.0 * 1024.0 * 1024.0), m->load_ms);
+    fprintf(stderr, "[MM3] Loaded%s%s%s: LM %.2f + depth %.2f + synth %.2f = %.2f GB in %.0f ms\n",
+            need_lm ? " lm" : "", need_depth ? " depth" : "", need_rest ? " cond/dit/voc" : "",
+            (double) m->vram_lm / 1073741824.0, (double) m->vram_depth / 1073741824.0,
+            (double) m->vram_synth / 1073741824.0, (double) mm3_vram_bytes(*m) / 1073741824.0, m->load_ms);
     return true;
 }
 
-static size_t mm3_vram_bytes(const MM3Model & m) {
-    return m.vram_lm + m.vram_synth;
+// Load everything. The contract every existing caller (POST /mm3/warm, the
+// bring-up endpoints) was written against.
+static bool mm3_load(MM3Model * m, std::string * err_out) {
+    return mm3_load_parts(m, true, true, true, err_out);
+}
+
+// Drop ONLY the global LM (the 8.59B half). Valid the moment the AR loop is
+// done: its output is a CPU-side hidden-state block, and nothing downstream
+// reads LM weights again. Callers must have already torn down the LM graph
+// state (mm3_lm_free), which holds pointers into this buffer.
+static size_t mm3_free_lm(MM3Model * m) {
+    if (!m->lm_resident) {
+        return 0;
+    }
+    const size_t freed = m->vram_lm;
+    wctx_free(&m->wctx_lm);
+    m->lm = MM3LmWeights{};
+    m->tmap_lm.clear();
+    m->vram_lm     = 0;
+    m->lm_resident = false;
+    m->loaded      = false;
+    return freed;
 }

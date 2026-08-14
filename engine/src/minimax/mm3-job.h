@@ -235,6 +235,40 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
         st->step      = step;
         st->n_steps   = n_steps;
     };
+    // Post-run residency, mirroring the ACE side's EVICT_STRICT default.
+    //
+    // MM3 keeps its weights in its own buffers rather than in the ModelStore, so
+    // the store's eviction policy never reaches them — without this an MM3 job
+    // left ~12-23 GB resident for the rest of the process even with "keep models
+    // loaded" switched OFF, which is exactly what that setting exists to avoid.
+    // `g_keep_loaded` is the same flag ACE's store is built from (and that the
+    // audition flow latches), so the two backends now agree on the policy.
+    //
+    // Guarded by `holds_mm3_lock`: the early-cancel path below runs BEFORE the
+    // worker takes g_mm3_mutex, and touching g_mm3 unlocked would race the
+    // bring-up endpoints. Nothing of ours is resident that early anyway.
+    // Graph state points into the model's buffers and holds backend references,
+    // so it goes first — same order as POST /mm3/unload.
+    bool holds_mm3_lock       = false;
+    auto release_if_transient = [&]() {
+        // Tested on resident BYTES, not on `loaded`: after a staged run the LM
+        // has already been dropped, so `loaded` is false while the depth and
+        // flow buffers are still holding gigabytes. Keying off the flag would
+        // silently skip exactly the case this exists for.
+        if (!holds_mm3_lock || g_keep_loaded || mm3_vram_bytes(g_mm3) == 0) {
+            return;
+        }
+        const size_t freed = mm3_vram_bytes(g_mm3) + g_mm3_lm.kv_bytes;
+        mm3_vocoder_free(&g_mm3_voc);
+        mm3_dit_free(&g_mm3_dit);
+        mm3_depth_free(&g_mm3_depth);
+        mm3_cond_free(&g_mm3_cond);
+        mm3_lm_free(&g_mm3_lm);
+        mm3_unload(&g_mm3);
+        fprintf(stderr, "[MM3-Job] %s: released %.2f GB (keep-loaded off)\n", job->id.c_str(),
+                (double) freed / 1073741824.0);
+    };
+
     auto fail = [&](int status, const char * stage, const std::string & msg) {
         {
             std::lock_guard<std::mutex> lock(st->mtx);
@@ -243,6 +277,9 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
         }
         job_set_phase(*job, status == 3 ? JobPhase::CANCELLED : JobPhase::FAILED);
         job->status.store(status);
+        // A failed or cancelled run must not leave the weights parked either —
+        // a cancel is the most likely moment for a user to be reclaiming VRAM.
+        release_if_transient();
     };
 
     if (job->cancel.load()) {
@@ -254,6 +291,7 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     // httplib threads. Two MM3 jobs can never contend here — they are both on
     // the one worker thread.
     std::lock_guard<std::mutex> mm3_lock(g_mm3_mutex);
+    holds_mm3_lock = true;
 
     // ── VRAM arbitration + warm ──
     job_set_phase(*job, JobPhase::LOADING_DIT);
@@ -272,11 +310,22 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
         return;
     }
 
+    // Staged residency, mirroring how the ACE pipeline swaps DiT and VAE.
+    //
+    // Stage 1 (AR) needs the LM and the depth decoder; stage 2 (cond/flow/
+    // vocode) needs neither. Loading only what stage 1 uses drops the peak by
+    // the size of the flow stack — the difference between "needs a 24 GB card"
+    // and "runs on 12". The cost is one mid-run load of cond/dit/voc, the same
+    // trade the ACE side already makes.
+    //
+    // Under keep-loaded the staging is skipped entirely: the whole point of
+    // that setting is to pay VRAM to avoid reload latency.
+    const bool staged   = !g_keep_loaded;
     const bool was_warm = g_mm3.loaded;
     set_stage(was_warm ? "warm" : "warming", -1, 0, 0, 0);
     const auto  t_warm = std::chrono::steady_clock::now();
     std::string err;
-    if (!mm3_load(&g_mm3, &err)) {
+    if (!mm3_load_parts(&g_mm3, /*lm=*/true, /*depth=*/true, /*rest=*/!staged, &err)) {
         fail(2, "failed", err.empty() ? "MiniMax-Music3 load failed" : err);
         fprintf(stderr, "[MM3-Job] %s: load failed: %s\n", job->id.c_str(), err.c_str());
         return;
@@ -314,6 +363,26 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     };
 
     req.gen.should_cancel = [&job]() { return job->cancel.load(); };
+
+    // The stage-1 -> stage-2 handover (see mm3-pipeline.h). Runs on the worker
+    // thread with g_mm3_mutex still held.
+    if (staged) {
+        req.gen.after_ar = [&](std::string * e) {
+            // The LM graph state holds the KV cache and pointers into the LM
+            // weight buffer, so it has to go before the buffer does.
+            const size_t kv = g_mm3_lm.kv_bytes;
+            mm3_lm_free(&g_mm3_lm);
+            const size_t freed = mm3_free_lm(&g_mm3) + kv;
+            set_stage("swapping", -1, 0, 0, 0);
+            if (!mm3_load_parts(&g_mm3, /*lm=*/false, /*depth=*/true, /*rest=*/true, e)) {
+                return false;
+            }
+            fprintf(stderr, "[MM3-Job] %s: staged handover - freed %.2f GB (LM+KV), flow stack in, %.2f GB resident\n",
+                    job->id.c_str(), (double) freed / 1073741824.0,
+                    (double) mm3_vram_bytes(g_mm3) / 1073741824.0);
+            return true;
+        };
+    }
 
     MM3GenResult r;
     const bool   ok = mm3_generate(g_mm3, req.gen, &g_mm3_tokenizer, progress, &r, &err);
@@ -366,6 +435,10 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     fprintf(stderr, "[MM3-Job] %s: done - %lld frames, %lld samples/ch (%.2f s @ %d Hz), rms %.4f, %.0f ms\n",
             job->id.c_str(), (long long) r.frames, (long long) r.n_samples,
             r.sample_rate > 0 ? (double) r.n_samples / (double) r.sample_rate : 0.0, r.sample_rate, r.rms, r.total_ms);
+
+    // Result is already encoded into job->result_body, so dropping the weights
+    // here cannot affect delivery.
+    release_if_transient();
 }
 
 // ── POST /mm3/synth ─────────────────────────────────────────────────────────

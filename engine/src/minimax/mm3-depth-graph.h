@@ -369,13 +369,15 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
 // Cheap after the first call: returns immediately when both model buffers are
 // the ones the current graphs were derived from.
 static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string * err) {
-    if (!m.loaded) {
+    // Staged residency: depth runs inside the AR loop, so it needs the LM and
+    // depth buffers — never the flow stack, which is not resident yet.
+    if (!m.lm_resident || !m.depth_resident) {
         if (err) {
             *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
         }
         return false;
     }
-    const void * st = (const void *) m.wctx_synth.buffer;
+    const void * st = (const void *) m.wctx_depth.buffer;
     const void * lt = (const void *) m.wctx_lm.buffer;
     if (g->synth_token == st && g->lm_token == lt && g->n_steps > 0) {
         return true;

@@ -262,7 +262,8 @@ static void mm3_dit_free(MM3DitGraph * g) {
 // the first call: returns immediately when the model's synth buffer is the same
 // one the current prep was derived from.
 static bool mm3_dit_prepare(const MM3Model & m, MM3DitGraph * g, std::string * err) {
-    if (!m.loaded) {
+    // Staged residency: a stage-2 graph needs only the cond/dit/voc buffer.
+    if (!m.rest_resident) {
         if (err) {
             *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
         }
