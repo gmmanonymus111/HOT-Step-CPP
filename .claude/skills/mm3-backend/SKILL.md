@@ -108,11 +108,23 @@ and audio frames coexist is the **LM decode loop**, so that was probed
 (`MM3_ALIGN_DUMP=1`, `MM3_ALIGN_FILE=<path>`; forces the manual F32 attention
 path because flash fuses the softmax away).
 
-Result: **the signal is real but too coarse to ship.** Three heads track the
-lyric across every test clip — **L12/H27, L19/H7, L24/H29** — but DTW over their
-consensus lands **0.8–1.4 s median** off Whisper (indie 1.25, folk 0.80,
-synth 1.42). Karaoke word-level needs ~0.2–0.3 s. Whisper is already wired for
-MM3, is word-accurate, and wins outright.
+Result: **viable at LINE level, which is the granularity that matters.**
+`lrc_align()` emits lines ("consensus → DTW → sentence grouping → LRC text"),
+not words, so line onset is the bar. Three heads track the lyric across every
+test clip — **L12/H27, L19/H7, L24/H29** — and a naive DTW over their consensus
+gives median line-onset error **0.83 s (indie)** and **0.71 s (synth)**, all
+lines within 2 s. Folk was inconclusive (only 2 lines matched, and Whisper
+itself renders that clip as a single 20 s segment).
+
+Errors skew consistently NEGATIVE — attention leads the audio by ~0.6–0.8 s,
+which is expected (the LM attends to a token as it begins generating that
+content) and is a constant offset worth calibrating out, not noise.
+
+Do NOT judge this at word level. An earlier pass did, called it unusable, and
+was wrong twice over: it compared "fraction through BPE tokens" against
+"fraction through words" — curves that differ even for a PERFECT alignment,
+because tokens-per-word varies — and it used a naive DTW over 3 heads rather
+than `lrc_align()`'s consensus denoising with ACE's 7-head-scale config.
 
 Traps, each of which produced a wrong answer first:
 1. **55 % of all 1152 heads sit permanently on one structural token.** Any head
@@ -125,14 +137,20 @@ Traps, each of which produced a wrong answer first:
    line, which made attention look 7 s wrong. Validate against `large-v3-turbo`.
 4. Capturing attention costs ~60 % on the LM step (11.6 vs 7.2 ms) because it
    forces non-flash. Only layers 12/19/24 actually need it, so a production path
-   could keep flash on the other 33 — but that optimisation is only worth doing
-   if the accuracy problem is solved first.
+   can keep flash on the other 33 and pay roughly a twelfth of that. Still far
+   cheaper than Whisper, which needs a whole extra ASR pass over the audio —
+   the reason this route is worth having at all.
+5. The dump is **MM3ALIGN2**: an ASCII header line, then `tokens` × int32 lyric
+   token ids, then f32 in `[frame][layer][head][token]` order. v1 omitted the
+   ids, which is what forced the bogus token-progress-vs-word-progress
+   comparison. Resolve ids to text via `tokenizer.ggml.tokens` in the LM GGUF.
 
 `lrc_align()` (engine/src/lrc-alignment.h) is generic over
-`[n_heads][n_tokens][n_frames]` and would take this input unchanged, so the
-wiring is easy whenever accuracy improves. `features.lyricTimestamps` stays
-false for MM3 until then — pointing that toggle at Whisper would make it lie
-about where the timings come from.
+`[n_heads][n_tokens][n_frames]` and takes this input unchanged, so the wiring is
+mostly plumbing: build the score matrix from the chosen heads, pass the lyric
+token ids + texts, apply the lead offset. `features.lyricTimestamps` is false
+for MM3 until that lands — and it must NOT be pointed at Whisper instead, which
+would make the toggle lie about where its timings come from.
 
 ## Watch items
 

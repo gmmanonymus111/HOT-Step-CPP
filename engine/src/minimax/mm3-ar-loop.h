@@ -514,13 +514,22 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
         if (!f) {
             fprintf(stderr, "[MM3-Align] Could not open %s for writing\n", out_path.c_str());
         } else {
+            // v2 adds the lyric token IDs, written as int32 immediately after
+            // the header and before the float payload. Without them the dump
+            // can only be scored on TOKEN index, and comparing "fraction
+            // through tokens" against a reference's "fraction through words" is
+            // not a like-for-like test — BPE tokens per word vary, so the two
+            // curves differ even for a perfect alignment. The ids let a token
+            // be resolved to its text (via tokenizer.ggml.tokens in the LM
+            // GGUF) and lined up with real words.
             char hdr[256];
             const int n = snprintf(hdr, sizeof(hdr),
-                                   "MM3ALIGN1 frames=%lld layers=%lld heads=%lld tokens=%lld "
-                                   "order=frame,layer,head,token fps=%u\n",
+                                   "MM3ALIGN2 frames=%lld layers=%lld heads=%lld tokens=%lld "
+                                   "order=frame,layer,head,token fps=%u ids=int32\n",
                                    (long long) align_frames, (long long) n_layers, (long long) n_heads,
                                    (long long) n_tok, m.lm_cfg.frame_rate);
             fwrite(hdr, 1, (size_t) n, f);
+            fwrite(cond_ids + lyr0, sizeof(int32_t), (size_t) n_tok, f);
             fwrite(align_acc.data(), sizeof(float), align_acc.size(), f);
             fclose(f);
             fprintf(stderr,
