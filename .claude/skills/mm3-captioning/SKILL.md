@@ -147,6 +147,45 @@ drift. This directly motivates building the request-translator to *always* emit 
 full Structured Caption rather than passing a short user-typed description straight
 through to `<|caption_start|>`.
 
+## The format is MANDATORY, not preferred (ear-verified 2026-08-14)
+
+A controlled A/B settled this for training data. One track (Alkaline Trio,
+`alk3_crimson`), 30 s, identical lyrics, 5 seeds per arm, f16/f16, no adapter:
+
+- **Arm A** — a good ACE-style caption verbatim: 219 words of Gemini descriptive
+  prose already covering groove, per-instrument detail, timbre, mix AND
+  arrangement-over-time. Not tag prose; genuinely rich.
+- **Arm B** — the SAME content restructured into the three sections, 503 words,
+  `Basic Attributes` synthesised from the sidecar's bpm/key/signature.
+
+Rob's verdict by ear: **B better "by a massive margin"; most A takes were not even
+the right genre (1 of 5 was), while B was on-genre and sounded far better.**
+
+Consequences, both load-bearing:
+
+1. **Rich descriptive prose is NOT a substitute for the format.** Arm A had most of
+   the CONTENT and still produced wrong-genre output. So restructuring an existing
+   caption corpus is required work before it can condition MM3 — for generation and
+   for building a training conditioning cache alike.
+2. **Lead the Arrangement with whatever OPENS the track.** B lost a piano intro that
+   A reproduced in 4 of 5 takes. The piano was present in B, but as a subordinate
+   clause two-thirds into a 503-word caption ("Primary: Distorted electric guitars
+   carry the harmonic weight… A clean, bright piano opens the piece alone"). Put the
+   opening instrument first in Instrument Lifecycle, and name it in Global Metadata.
+
+**Do not judge this class of change by spectral proxies.** In the same run,
+flatness (0.080 → 0.200) and centroid (1847 → 3187 Hz) both rose sharply, which
+reads as "noisier/harsher" — and by ear that was simply the genre arriving (crash
+cymbals and wall-of-sound distortion ARE spectrally flat and bright). An
+`intro_ratio` (opening RMS ÷ body RMS) also *favoured* B, while B was the arm with
+no piano at all: it measures a dynamic envelope, not instrumentation. Cross-seed
+spread rose for B rather than falling, contradicting the "informative caption →
+tighter clustering" hypothesis. Every proxy either misled or measured something
+adjacent. Ears decided it; keep it that way.
+
+Artifacts: `M:\HOT-Step-CPP\_experiments\caption-ab-2026-08-14\` (10 WAVs, both
+captions, `results.json`, and the runner).
+
 ## Directory contents
 
 ```
