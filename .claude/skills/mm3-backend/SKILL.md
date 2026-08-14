@@ -163,11 +163,36 @@ sweeping violence_level 2.0 → 0.0 changes nothing. A plain monotonic DTW over
 the head-averaged matrix, grouped on newline tokens, is what works — see
 `mm3-align.h`. `lrc_align()` stays untouched for ACE.
 
-## Watch items
+## Training: DiT yes, LM never (assessed 2026-08-14)
 
-- SimpleTuner PR [#3074](https://github.com/bghira/SimpleTuner/pull/3074) — vendored MM3
-  training scaffolding (precomputed Flow-VAE-latent flow training). Unproven (tiny-random smoke
-  tests only) but signals community training. Note: the release includes the encoders inference
-  never uses (`flowmatching_vae.pth` incl. encoder; music tokenizer in `qwen_7B/`) — DiT
-  flow-matching loss and LM code-SFT are both derivable without official docs. If a LoRA format
-  emerges, the adapter system needs an `mm3` target to load it.
+Full teardown + staged plan: `docs/plans/2026-08-14-mm3-training-feasibility.md` (local).
+
+**MM3 ships decode-side only for the audio-token path — there is no audio → code encoder.**
+Verified from the HF tensor inventory, not inferred: `qwen_7B/` (18.5 GB) is the **LM +
+RVQ depth decoder in MiniMax's original `AbabForCausalLM` format** (`model.layers.*` +
+`model.audio_decoder.*` with 7 audio heads, `embed_tokens [200000,4096]`), matching
+`language_model/` + `rvq_depth_decoder/` to ~5 MB. It is **NOT a music tokenizer** — an earlier
+note here said it was, which wrongly made LM training look possible. Consequences:
+
+1. **LM / planner adapters are BLOCKED.** Code-SFT needs ground-truth codes per song; none
+   exist and none can be derived. (ACE's LM training works only because FSQ encodes audio→codes.)
+2. **DiT conditioning cannot be teacher-forced.** The only way to get `frame_hiddens` for a
+   training clip is to AR-sample the LM from its caption/lyrics — so condition and target come
+   from *different music*, matching only in caption/lyrics/duration. A timbre/production adapter
+   can still work (low sigma is well-posed); the risk is the DiT learning to ignore
+   `encoder_hidden_states`, i.e. prompt/lyric adherence. Measure it with the LRC probe above.
+
+The encoder that IS needed and IS released: **`dav.pth` (492 MB) — the DAV encoder**, audio →
+128-ch latents @ 86.13 Hz, L/R through shared weights, **mean only** (`logs_proj` unused). Our
+local `comfy/vae/minimax_music3_dav.safetensors` is **decoder-only**, so it is a new download.
+
+SimpleTuner ([#3074](https://github.com/bghira/SimpleTuner/pull/3074)/#3075, merged 2026-08-14)
+trains the 2.4B flow DiT only, targets `to_q/to_k/to_v/to_out.0/ff_in/ff_out/proj_in/proj_out`,
+plain rectified-flow loss, and defines the de-facto **ComfyUI MM3 LoRA format**. No published
+evidence anyone has trained a *good* MM3 LoRA yet — treat it as a reference implementation, not
+as validation. Two traps for loading those LoRAs: we **fuse q,k,v** into `dit.blk.N.attn_qkv`,
+and our `mm3.dit.glu_order = value_gate` must be reconciled with their `swiglu_gate_first`
+metadata. `convert-mm3.py:build_dit` already resolves both ComfyUI and diffusers names.
+
+Recommended first step is **load, don't train**: add an `mm3` target to the adapter system,
+train one LoRA in SimpleTuner, and hear whether it works before building a native trainer.
