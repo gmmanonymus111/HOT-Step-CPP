@@ -99,6 +99,41 @@ torch). Established floors: per-module ≥ 0.999 corr vs the bf16 dumps (the dum
 ~1.6e-2 relRMSE) or ≥ 0.9999 vs an fp32 CPU rerun of the reference module. Full-clip replay:
 0.9988. If a change should be bit-neutral, prove it with the deterministic seeds.
 
+## Lyric timestamps: use Whisper, not attention (measured 2026-08-14)
+
+ACE derives LRC from its **DiT's lyric cross-attention**. MM3 has no analogue:
+its flow DiT has no cross-attention and never sees lyrics — conditioning is
+channel concatenation from the condition encoder. The only place lyric tokens
+and audio frames coexist is the **LM decode loop**, so that was probed
+(`MM3_ALIGN_DUMP=1`, `MM3_ALIGN_FILE=<path>`; forces the manual F32 attention
+path because flash fuses the softmax away).
+
+Result: **the signal is real but too coarse to ship.** Three heads track the
+lyric across every test clip — **L12/H27, L19/H7, L24/H29** — but DTW over their
+consensus lands **0.8–1.4 s median** off Whisper (indie 1.25, folk 0.80,
+synth 1.42). Karaoke word-level needs ~0.2–0.3 s. Whisper is already wired for
+MM3, is word-accurate, and wins outright.
+
+Traps, each of which produced a wrong answer first:
+1. **55 % of all 1152 heads sit permanently on one structural token.** Any head
+   ranking must reward MOVEMENT — scoring "monotonic" as `delta >= 0` counts a
+   pinned head as perfectly monotonic (it scored 0.98 and ranked first).
+2. **Single-clip results do not generalise.** The best head on one clip (L16/H13)
+   did not make the top 14 across three. Rank by the WORST clip, never the mean.
+3. **Whisper `base` is not adequate ground truth for sung vocals** — it returned
+   11 word timings for a folk clip `large-v3-turbo` transcribes as one 10-word
+   line, which made attention look 7 s wrong. Validate against `large-v3-turbo`.
+4. Capturing attention costs ~60 % on the LM step (11.6 vs 7.2 ms) because it
+   forces non-flash. Only layers 12/19/24 actually need it, so a production path
+   could keep flash on the other 33 — but that optimisation is only worth doing
+   if the accuracy problem is solved first.
+
+`lrc_align()` (engine/src/lrc-alignment.h) is generic over
+`[n_heads][n_tokens][n_frames]` and would take this input unchanged, so the
+wiring is easy whenever accuracy improves. `features.lyricTimestamps` stays
+false for MM3 until then — pointing that toggle at Whisper would make it lie
+about where the timings come from.
+
 ## Watch items
 
 - SimpleTuner PR [#3074](https://github.com/bghira/SimpleTuner/pull/3074) — vendored MM3
