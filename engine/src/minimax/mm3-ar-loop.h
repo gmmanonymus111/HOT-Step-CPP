@@ -262,6 +262,38 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
         return false;
     }
 
+    // ── Alignment probe (MM3_ALIGN_DUMP=1) ───────────────────────────────────
+    //
+    // Discovery instrumentation for lyric timestamps. MM3's flow DiT has no
+    // cross-attention and never sees lyrics, so ACE's DiT-cross-attention
+    // technique has no analogue here. The one place lyric tokens and audio
+    // frames coexist is THIS loop: every decode step attends over the whole
+    // prompt, so slicing the lyric columns out of each step's attention builds
+    // a [head][lyric_token][frame] matrix directly — the exact shape lrc_align()
+    // already consumes. Frames are 25 fps, so frame f is 40 ms with no
+    // latent-rate conversion (cleaner than the ACE path).
+    //
+    // WHICH heads carry monotonic alignment is unknown for MM3 (ACE's are
+    // hardcoded per architecture and were found empirically), so this dumps ALL
+    // of them for offline scoring. Discovery only — never on in a normal run.
+    const bool align_dump = g_mm3_lm.dump_attn;
+    int64_t    lyr0 = -1, lyr1 = -1;
+    if (align_dump) {
+        for (int64_t i = 0; i < n_prompt; i++) {
+            if (cond_ids[i] == (int32_t) m.lm_cfg.tok_lyrics_start) lyr0 = i + 1;
+            if (cond_ids[i] == (int32_t) m.lm_cfg.tok_lyrics_end)   lyr1 = i;
+        }
+        if (lyr0 < 0 || lyr1 <= lyr0) {
+            fprintf(stderr, "[MM3-Align] No lyric span in the prompt (instrumental?) — dump disabled\n");
+        } else {
+            fprintf(stderr, "[MM3-Align] Lyric span = prompt tokens [%lld, %lld) = %lld tokens\n",
+                    (long long) lyr0, (long long) lyr1, (long long) (lyr1 - lyr0));
+        }
+    }
+    std::vector<float> align_acc;    // [layer][head][token] per frame, appended
+    int64_t            align_frames = 0;
+
+
     *out             = MM3ArResult{};
     out->hidden_dim  = H;
     out->n_codebooks = NC + 1;
@@ -440,6 +472,15 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
             out->lm_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             out->lm_steps++;
         }
+        if (align_dump && lyr0 >= 0 && lyr1 > lyr0) {
+            std::vector<float> slice;
+            for (size_t L = 0; L < g_mm3_lm.decode.attn_scores.size(); L++) {
+                if (mm3_lm_read_attn_slice(m.lm_cfg, g_mm3_lm.decode, L, lyr0, lyr1, slice)) {
+                    align_acc.insert(align_acc.end(), slice.begin(), slice.end());
+                }
+            }
+            align_frames++;
+        }
         if (dumping) {
             MM3ArDump & d = out->dumps.back();
             // The reference dumps [2, H]; both rows are the same vector because
@@ -457,6 +498,37 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
                                 : "zero audio frames were generated";
         }
         return false;
+    }
+
+    if (align_dump && align_frames > 0 && !align_acc.empty()) {
+        // Flat binary: a small ASCII header line, then f32 in
+        // [frame][layer][head][token] order. Layout is written down rather than
+        // implied so the offline scorer cannot silently misread it.
+        const int64_t n_tok    = lyr1 - lyr0;
+        const int64_t n_layers = (int64_t) g_mm3_lm.decode.attn_scores.size();
+        const int64_t n_heads  = n_layers > 0 && align_frames > 0
+            ? (int64_t) (align_acc.size() / (size_t) (align_frames * n_layers * n_tok)) : 0;
+        const char *  path     = std::getenv("MM3_ALIGN_FILE");
+        std::string   out_path = path && path[0] ? path : "mm3-align-dump.bin";
+        FILE *        f        = fopen(out_path.c_str(), "wb");
+        if (!f) {
+            fprintf(stderr, "[MM3-Align] Could not open %s for writing\n", out_path.c_str());
+        } else {
+            char hdr[256];
+            const int n = snprintf(hdr, sizeof(hdr),
+                                   "MM3ALIGN1 frames=%lld layers=%lld heads=%lld tokens=%lld "
+                                   "order=frame,layer,head,token fps=%u\n",
+                                   (long long) align_frames, (long long) n_layers, (long long) n_heads,
+                                   (long long) n_tok, m.lm_cfg.frame_rate);
+            fwrite(hdr, 1, (size_t) n, f);
+            fwrite(align_acc.data(), sizeof(float), align_acc.size(), f);
+            fclose(f);
+            fprintf(stderr,
+                    "[MM3-Align] Wrote %s — %lld frames x %lld layers x %lld heads x %lld lyric tokens "
+                    "(%.1f MB)\n",
+                    out_path.c_str(), (long long) align_frames, (long long) n_layers, (long long) n_heads,
+                    (long long) n_tok, (double) (align_acc.size() * sizeof(float)) / 1e6);
+        }
     }
 
     fprintf(stderr,

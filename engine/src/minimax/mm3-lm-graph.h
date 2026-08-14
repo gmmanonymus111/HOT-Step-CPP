@@ -168,6 +168,11 @@ struct MM3LmSlot {
     ggml_tensor * out_logits   = nullptr;  // F32 [V, 1, B]
     ggml_tensor * out_feedback = nullptr;  // F32 [H, 1]     decode only
 
+    // Alignment probe (MM3_ALIGN_DUMP=1): post-softmax attention weights per
+    // layer, [n_kv, T, Nh, B]. Only populated on the manual F32 path — flash
+    // attention never materialises them. Empty in normal runs.
+    std::vector<ggml_tensor *> attn_scores;
+
     int64_t T             = 0;
     int64_t n_kv_pad      = 0;
     size_t  compute_bytes = 0;
@@ -180,6 +185,10 @@ struct MM3LmGraph {
     ggml_backend_t cpu_backend    = nullptr;
     bool           backend_ref    = false;
     bool           use_flash_attn = false;
+    // MM3_ALIGN_DUMP=1 — capture per-layer attention for lyric alignment
+    // discovery. Forces the manual F32 attention path (flash fuses the softmax
+    // and never produces a score tensor to read).
+    bool           dump_attn      = false;
 
     // Identity of the weights this prep was derived from. BOTH buffers matter:
     // the feedback embedding reads token_embd from the LM file and audio_embd
@@ -268,9 +277,12 @@ static ggml_tensor * mm3_lm_rms(ggml_context * ctx, ggml_tensor * x, ggml_tensor
 // Manual F32 attention, for CPU / -DHOT_STEP_DISABLE_FA / MM3_LM_NO_FLASH builds.
 // q [D, T, Nh, B], k/v [D, n_kv, Nkv, B] (strided cache views) -> [D, Nh, T, B].
 static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
-                                     ggml_tensor * mask, float scale) {
+                                     ggml_tensor * mask, float scale, ggml_tensor ** out_scores = nullptr) {
     ggml_tensor * scores = ggml_mul_mat(ctx, k, q);                            // [n_kv, T, Nh, B]
     scores               = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
+    if (out_scores) {
+        *out_scores = scores;   // the lyric->frame alignment signal, pre-V
+    }
     ggml_tensor * vt     = ggml_cont(ctx, ggml_transpose(ctx, v));             // [n_kv, D, Nkv, B]
     ggml_tensor * out    = ggml_mul_mat(ctx, vt, scores);                      // [D, T, Nh, B]
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));                 // [D, Nh, T, B]
@@ -282,7 +294,8 @@ static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_t
 // and a cache view carries no data dependency on the write that filled it.
 static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM3LmConfig & c, const MM3LmLayer & w,
                                   ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
-                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash) {
+                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
+                                  ggml_tensor ** out_scores = nullptr) {
     const int64_t H   = (int64_t) c.embedding_length;
     const int64_t D   = (int64_t) c.key_length;
     const int64_t Nh  = (int64_t) c.head_count;
@@ -329,7 +342,7 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
         attn = ggml_flash_attn_ext(ctx, q4, k_win, v_win, mask, scale, 0.0f, 0.0f);
         ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
     } else {
-        attn = mm3_lm_attn_f32(ctx, q4, k_win, v_win, mask, scale);
+        attn = mm3_lm_attn_f32(ctx, q4, k_win, v_win, mask, scale, out_scores);
     }
     attn = ggml_reshape_3d(ctx, attn, H, T, B);  // [D, Nh, T, B] -> [H, T, B]
 
@@ -426,9 +439,21 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
         h = ggml_concat(ctx, fb, fb, 2);  // [H, 1, B]
     }
 
+    // Alignment probe: keep a handle on every layer's post-softmax attention so
+    // the AR loop can slice the lyric columns out of it. Costs nothing when off,
+    // and cannot work under flash attention (which never materialises them) —
+    // mm3_lm_prepare forces the manual path when the probe is enabled.
+    s->attn_scores.assign(g->dump_attn ? m.lm.blk.size() : 0, nullptr);
     for (size_t i = 0; i < m.lm.blk.size(); i++) {
+        ggml_tensor * sc = nullptr;
         h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn);
+                         n_kv_pad, g->use_flash_attn, g->dump_attn ? &sc : nullptr);
+        if (g->dump_attn && sc) {
+            ggml_set_name(sc, ("mm3_lm_attn_" + std::to_string(i)).c_str());
+            ggml_set_output(sc);
+            ggml_build_forward_expand(gf, sc);
+            s->attn_scores[i] = sc;
+        }
     }
     h = mm3_lm_rms(ctx, h, m.lm.output_norm, c.rms_eps);  // [H, T, B]
 
@@ -532,7 +557,17 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         // MM3_LM_NO_FLASH=1 forces the manual F32 soft_max path — a parity-debug
         // escape hatch, not a production knob.
         const char * no_fa = std::getenv("MM3_LM_NO_FLASH");
-        g->use_flash_attn  = bp.has_gpu && !HOT_STEP_FA_DISABLED && !(no_fa && no_fa[0] && no_fa[0] != '0');
+        const char * dump  = std::getenv("MM3_ALIGN_DUMP");
+        g->dump_attn       = dump && dump[0] && dump[0] != '0';
+        // The probe reads the softmax output, which flash attention fuses away —
+        // so enabling it implies the manual path, and says so rather than
+        // silently producing an empty dump.
+        g->use_flash_attn  = bp.has_gpu && !HOT_STEP_FA_DISABLED && !g->dump_attn &&
+                             !(no_fa && no_fa[0] && no_fa[0] != '0');
+        if (g->dump_attn) {
+            fprintf(stderr, "[MM3-Align] Attention dump ON — forcing the manual F32 attention path "
+                            "(slower; discovery build only)\n");
+        }
         g->lm_token        = lt;
         g->synth_token     = st;
     }
@@ -635,6 +670,42 @@ static void mm3_lm_read_outputs(const MM3LmConfig & c, const MM3LmSlot & s, floa
     if (out_feedback && s.out_feedback) {
         ggml_backend_tensor_get(s.out_feedback, out_feedback, 0, H * sizeof(float));
     }
+}
+
+// Copy one layer's post-softmax attention for the CONDITIONAL CFG row (row 0)
+// into `dst`, restricted to KV columns [col0, col1). Decode graphs have T = 1,
+// so the result is [Nh, n_cols]: for each head, its distribution over those
+// prompt positions at this frame. That is exactly the per-frame column of a
+// lyric-token x frame alignment matrix.
+//
+// Returns false when the probe is off or the layer has no score tensor.
+static bool mm3_lm_read_attn_slice(const MM3LmConfig & c, const MM3LmSlot & s, size_t layer,
+                                   int64_t col0, int64_t col1, std::vector<float> & dst) {
+    if (layer >= s.attn_scores.size() || !s.attn_scores[layer]) {
+        return false;
+    }
+    ggml_tensor * sc = s.attn_scores[layer];      // [n_kv, T, Nh, B]
+    const int64_t n_kv = sc->ne[0];
+    const int64_t T    = sc->ne[1];
+    const int64_t Nh   = sc->ne[2];
+    if (col0 < 0 || col1 > n_kv || col1 <= col0) {
+        return false;
+    }
+    const int64_t n_cols = col1 - col0;
+    dst.assign((size_t) (Nh * n_cols), 0.0f);
+
+    // Row 0 of the CFG batch is the conditional one — the only row whose context
+    // contains the lyrics. ne3 is the batch axis.
+    std::vector<float> row((size_t) n_kv);
+    for (int64_t hh = 0; hh < Nh; hh++) {
+        const size_t off = (size_t) ((T - 1) * sc->nb[1] + hh * sc->nb[2] + 0 * sc->nb[3]);
+        ggml_backend_tensor_get(sc, row.data(), off, (size_t) n_kv * sizeof(float));
+        for (int64_t j = 0; j < n_cols; j++) {
+            dst[(size_t) (hh * n_cols + j)] = row[(size_t) (col0 + j)];
+        }
+    }
+    (void) c;
+    return true;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
