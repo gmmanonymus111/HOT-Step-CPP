@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.21)
 project(acestep-ggml LANGUAGES C CXX)
 
 # CI cache generation: 2 (2026-07-16). This file is hashed into the GitHub
@@ -105,6 +105,23 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
             list(APPEND CMAKE_CUDA_ARCHITECTURES "121a-real")
         endif()
+    endif()
+endif()
+
+# AMD ROCm/HIP (community-contributed, no CI coverage — see engine/buildhip.sh).
+#
+# GATED ON GGML_HIP DELIBERATELY. The probe must not run on a CUDA build: a
+# Linux box with both SDKs installed would set hip_FOUND, and the global
+# __HIP_PLATFORM_AMD__ then makes src/gpu.h rewrite cudaMemGetInfo ->
+# hipMemGetInfo and link hip::host into a CUDA binary. GGML_HIP is the flag
+# that actually selects the backend, so it is the one to key off.
+if(GGML_HIP)
+    list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+    find_package(hip CONFIG QUIET)
+
+    if(hip_FOUND)
+        message(STATUS "building with AMD ROCm support")
+        add_compile_definitions(__HIP_PLATFORM_AMD__)
     endif()
 endif()
 
@@ -308,7 +325,11 @@ add_library(acestep-core STATIC
     src/pipeline-synth-ops.cpp
     src/pipeline-understand.cpp
 )
-target_link_libraries(acestep-core PUBLIC yyjson lua54 supersep)
+if(hip_FOUND)
+   target_link_libraries(acestep-core PUBLIC yyjson lua54 supersep hip::host)
+else()
+   target_link_libraries(acestep-core PUBLIC yyjson lua54 supersep)
+endif()
 link_ggml_backends(acestep-core)
 
 # ONNX Runtime for the paths that still use it: sa3-refine.h (StableStep's ONNX
@@ -448,7 +469,11 @@ set_source_files_properties(${WEBUI_OUTPUT} PROPERTIES GENERATED TRUE)
 #       Our server binary is hot-step-server.cpp with extension layer support.
 add_executable(ace-server tools/hot-step-server.cpp ${WEBUI_OUTPUT})
 target_include_directories(ace-server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(ace-server PRIVATE acestep-core httplib supersep)
+if(hip_FOUND)
+    target_link_libraries(ace-server PRIVATE acestep-core httplib supersep hip::host)
+else()
+    target_link_libraries(ace-server PRIVATE acestep-core httplib supersep)
+endif()
 link_ggml_backends(ace-server)
 # CUDA runtime for GET /vram (cudaMemGetInfo)
 find_package(CUDAToolkit QUIET)

@@ -45,7 +45,19 @@ export interface TrainLmFormState {
   stages: TrainLmStage[];
   overwrite: boolean;
   stopEngine: boolean;
-  /** Projection GEMM dtype (speed lever A). 'f32-window' is the shipped path. */
+  /** Resume: continue from the newest non-calibrated run of this adapter name
+   *  (server resolves the 'latest' sentinel; engine adopts identity).
+   *  Default ON (Rob, 2026-08-12). */
+  resumeFromLatest: boolean;
+  /** Post-training calibration: eval old-vs-new x scales, pick under guards,
+   *  bake the winner, write the score sidecar. Default OFF (Rob, 2026-08-12);
+   *  it was ON from 2026-08-10. */
+  calibrate: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default ON. */
+  calibrateRepoint: boolean;
+  /** Projection GEMM dtype (speed lever A). 'f32-window' is the default; note
+   *  that on the LM 'bf16' is also the only route to the mul_mat backward, so
+   *  this is a precision/speed trade, not a free dial. */
   weights: 'f32-window' | 'bf16';
   /** Micro-batch size (speed lever B). 1 is the shipped path. */
   batch: number | 'auto';
@@ -62,20 +74,32 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   lmSize: '4B',
   lmModel: '',
   adapterName: '',
-  targetLoss: 4.0,
-  epochs: 75,
-  // LoRA stays the LM default: LoKr is gated (LK1/LK2 exact) but its
-  // hyperparameters are borrowed from the DiT and unproven on an LM.
-  adapterType: 'lora',
-  // AdamW stays the LM default. Muon is 1.41x more sample-efficient on the DiT
-  // and ear-validated there, but on the LM only an 8-epoch smoke exists — and
-  // 8 epochs is exactly the window that showed false parity on the DiT.
-  optimizer: 'adamw',
+  // 0.1 (Rob, 2026-08-12) — was 0.2, and 2.0 before that. The server route's
+  // own fallback tracks this number so a batch-pipeline run (which POSTs an
+  // empty option bag) stops at the same loss a manual run does.
+  targetLoss: 0.1,
+  epochs: 150,
+  adapterType: 'lokr',
+  optimizer: 'muon',
   muonLrScale: 20,
   rank: 16,
   alpha: 32,
-  lokrDim: 512,
-  lokrAlpha: 512,
+  // dim 128, NOT the DiT's 512 (Rob, 2026-07-30). At 512 every attention site
+  // is monolithic and every MLP site factorized; at 128 EVERY site factorizes
+  // (the mono test is dim >= max(out_k,in_n)/2, and the smallest max on a 4B
+  // Qwen3 is 512). That cuts a 4B adapter from ~420 MB to ~124 MB.
+  //
+  // lokrAlpha MUST TRACK lokrDim. scale = alpha_eff/dim, and LyCORIS forces
+  // alpha_eff = dim only on MONOLITHIC sites — at dim 128 there are none, so
+  // alpha 512 would leave every site running at scale 4.0, i.e. a silent 4x on
+  // the adapter's effective learning rate. That is the same class of failure as
+  // the Uber-LoKR alpha asymmetry. Keep them equal unless you mean it.
+  lokrDim: 128,
+  lokrAlpha: 128,
+  // 6 stays. The 4B LM's hidden size is 2560 — the same as the DiT's — so
+  // factor 6 yields the identical, proven splits: 2560 -> 5x512, 4096 -> 4x1024,
+  // 1024 -> 4x256, 9728 -> 4x2432. Verified against a trained adapter's tensor
+  // shapes, not assumed.
   lokrFactor: 6,
   learningRate: 0.0001,
   gradAccum: 2,
@@ -86,16 +110,35 @@ export const TRAIN_LM_DEFAULTS: TrainLmFormState = {
   seed: 42,
   order: 'shuffle',
   lossOnCot: true,
-  milestoneStep: 1,
+  // Milestones OFF by default again (Rob, 2026-08-12) — they were ON at 0.1
+  // from 2026-08-10 to feed the post-training calibration step with candidate
+  // snapshots. Set a step > 0 to re-enable; milestone-keep caps the disk cost.
+  milestoneStep: 0,
   milestoneKeep: 6,
   stages: ['extract', 'train', 'export'],
   overwrite: false,
   stopEngine: true,
+  // Resume ON, calibrate OFF (Rob, 2026-08-12) — the inverse of the 2026-08-10
+  // seed. Continuing the newest run is now the normal way to train: with target
+  // loss at 0.1 a re-run is almost always "keep going", not "start over".
+  // Resume is soft on the server: an adapter name with no previous run trains
+  // from scratch rather than failing, which is what makes it safe as a default.
+  resumeFromLatest: true,
+  calibrate: false,
+  calibrateRepoint: true,
   // batch still defaults to the shipped CLI behaviour (no --batch flag emitted).
-  // weights no longer does: the server default flipped to 'bf16' (2026-07-29),
-  // so a default run now explicitly requests --weights bf16 — which is a hard
-  // fatal against a non-BF16-quantized LM base (see aceTrain.ts/types.ts docs).
-  weights: 'bf16',
+  //
+  // f32-window (Rob, 2026-07-30, final) — matching the DiT's F32 mirror.
+  //
+  // KNOWN AND ACCEPTED COST: on the LM this is NOT a free precision dial the way
+  // the DiT's mirror is. `weights: 'bf16'` is also what reaches the mul_mat
+  // backward, by rewriting ggml's out_prod nodes in place (lm-bf16.h Lever A,
+  // ~1.7-1.8x on the GEMM mix), and NOTHING buys that back here — pairing
+  // --bwd mm with f32-window is refused for the LM, because there the
+  // transposed weight IS the F32 window, so the GEMM stays TF32 and you only
+  // pay an extra cont. Expect LM training to be meaningfully slower than it was
+  // under bf16; that is the trade being made, not a regression.
+  weights: 'f32-window',
   batch: 1,
   // MUL_MAT activation-gradient formulation. 'outprod' here, unlike train-dit's
   // 'mm': `weights: 'bf16'` above ALREADY gives this base the mul_mat backward,
@@ -275,7 +318,7 @@ export const TrainLmForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', 'Default 4.0 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 0.1 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -283,7 +326,7 @@ export const TrainLmForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, 4.0) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.1) })}
             className={FIELD}
           />
         </label>
@@ -294,7 +337,7 @@ export const TrainLmForm: React.FC<Props> = ({
       {/* ── Max epochs ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="flex flex-col gap-1.5">
-          {P('maxEpochs', 'Default 75 · 1–200')}
+          {P('maxEpochs', 'Default 150 · 1–200')}
           <input
             type="number"
             min={1}
@@ -302,11 +345,47 @@ export const TrainLmForm: React.FC<Props> = ({
             step={1}
             value={value.epochs}
             disabled={lock}
-            onChange={(e) => onChange({ epochs: num(e.target.value, 75) })}
+            onChange={(e) => onChange({ epochs: num(e.target.value, 150) })}
             className={FIELD}
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>
         </label>
+      </div>
+
+      {/* ── Resume + calibration (2026-08-10) ─────────────────────────── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.resumeFromLatest}
+            disabled={lock}
+            onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('resumeFromLatest', 'Default on', CHECK_LABEL)}
+        </label>
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.calibrate}
+            disabled={lock}
+            onChange={(e) => onChange({ calibrate: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('calibrate', 'Default off', CHECK_LABEL)}
+        </label>
+        {value.calibrate && (
+          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">
+            <input
+              type="checkbox"
+              checked={value.calibrateRepoint}
+              disabled={lock}
+              onChange={(e) => onChange({ calibrateRepoint: e.target.checked })}
+              className="accent-amber-500"
+            />
+            {P('calibrateRepoint', 'Default on', CHECK_LABEL)}
+          </label>
+        )}
       </div>
 
       {/* ── Advanced ──────────────────────────────────────────────────── */}
@@ -332,7 +411,7 @@ export const TrainLmForm: React.FC<Props> = ({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            {P('lm.optimizer', 'Default AdamW · Muon unproven on the LM')}
+            {P('lm.optimizer', 'Default Muon · AdamW remains fully supported')}
             <StyledSelect
               accent="amber"
               value={value.optimizer}
@@ -359,7 +438,7 @@ export const TrainLmForm: React.FC<Props> = ({
           )}
 
           <div className="flex flex-col gap-1.5">
-            {P('lm.adapterType', 'Default LoRA · LoKr is experimental on the LM')}
+            {P('lm.adapterType', 'Default LoKr · LoRA remains fully supported')}
             <StyledSelect
               accent="amber"
               value={value.adapterType}
@@ -375,11 +454,11 @@ export const TrainLmForm: React.FC<Props> = ({
 
           {value.adapterType === 'lokr' && (
             <label className="flex flex-col gap-1.5">
-              {P('lm.lokrDim', 'Default 512 · 4–4096')}
+              {P('lm.lokrDim', 'Default 128 · 4–4096 · keep alpha equal to it')}
               <input
                 type="number" min={4} max={4096} step={1}
                 value={value.lokrDim} disabled={lock}
-                onChange={(e) => onChange({ lokrDim: num(e.target.value, 512) })}
+                onChange={(e) => onChange({ lokrDim: num(e.target.value, 128) })}
                 className={FIELD}
               />
             </label>
@@ -552,11 +631,11 @@ export const TrainLmForm: React.FC<Props> = ({
           </div>
 
           <label className="flex flex-col gap-1.5">
-            {P('milestoneStep', 'Default 1.0 · 0 = off')}
+            {P('milestoneStep', 'Default 0 (off) · the best adapter is kept regardless')}
             <input
               type="number" min={0} max={5} step={0.05}
               value={value.milestoneStep} disabled={lock}
-              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0.1) })}
+              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0) })}
               className={FIELD}
             />
           </label>

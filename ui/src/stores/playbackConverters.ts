@@ -33,6 +33,7 @@ export function songToTrack(song: Song): PlaybackTrack {
     title: song.title || 'Untitled',
     audioUrl: song.audioUrl || song.audio_url || '',
     masteredAudioUrl: song.masteredAudioUrl || song.mastered_audio_url || '',
+    noAdapterAudioUrl: song.noAdapterAudioUrl || song.noadapter_audio_url || '',
     kickStemUrl: song.kickStemUrl || song.kick_stem_url || '',
     snareStemUrl: song.snareStemUrl || song.snare_stem_url || '',
     hihatStemUrl: song.hihatStemUrl || song.hihat_stem_url || '',
@@ -53,6 +54,7 @@ export function playlistItemToTrack(item: PlaylistItem): PlaybackTrack {
     title: item.title || 'Untitled',
     audioUrl: item.audioUrl || '',
     masteredAudioUrl: item.masteredAudioUrl || '',
+    noAdapterAudioUrl: item.noAdapterAudioUrl || '',
     artistName: item.artistName || '',
     coverUrl: item.coverUrl || '',
     duration: coerceDuration(item.duration),
@@ -68,6 +70,7 @@ export function recentSongToTrack(rs: {
   song_title?: string;
   audio_url?: string;
   mastered_audio_url?: string;
+  noadapter_audio_url?: string;
   artist_name?: string;
   cover_url?: string;
   album_image?: string;
@@ -85,6 +88,7 @@ export function recentSongToTrack(rs: {
     title: rs.song_title || 'Untitled',
     audioUrl: rs.audio_url || '',
     masteredAudioUrl: rs.mastered_audio_url || '',
+    noAdapterAudioUrl: rs.noadapter_audio_url || '',
     kickStemUrl: rs.kick_stem_url || '',
     snareStemUrl: rs.snare_stem_url || '',
     hihatStemUrl: rs.hihat_stem_url || '',
@@ -103,6 +107,7 @@ export function unifiedRecentSongToTrack(rs: {
   title: string;
   audio_url: string;
   mastered_audio_url?: string;
+  noadapter_audio_url?: string;
   artist_name?: string;
   cover_url?: string;
   artist_image?: string;
@@ -116,6 +121,7 @@ export function unifiedRecentSongToTrack(rs: {
     title: rs.title || 'Untitled',
     audioUrl: rs.audio_url || '',
     masteredAudioUrl: rs.mastered_audio_url || '',
+    noAdapterAudioUrl: rs.noadapter_audio_url || '',
     artistName: rs.artist_name || '',
     coverUrl: rs.cover_url || rs.artist_image || '',
     duration: coerceDuration(rs.duration),
@@ -131,6 +137,7 @@ export function audioQueueItemToTrack(item: {
   songId?: string;
   audioUrl?: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   artistName?: string;
   artistImageUrl?: string;
   coverUrl?: string;
@@ -142,6 +149,7 @@ export function audioQueueItemToTrack(item: {
     title: item.generation.title || 'Untitled',
     audioUrl: item.audioUrl || '',
     masteredAudioUrl: item.masteredAudioUrl || '',
+    noAdapterAudioUrl: item.noAdapterAudioUrl || '',
     artistName: item.artistName || '',
     coverUrl: item.coverUrl || item.artistImageUrl || '',
     duration: coerceDuration(item.audioDuration),

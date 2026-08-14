@@ -4,16 +4,20 @@
 // Each section shows a summary badge and expands on hover to reveal controls.
 // Sits full-width at the top of the entire window (above sidebar).
 
-import React, { useState, useCallback, useEffect } from 'react';
-import { Cpu, Plug, Sliders, Brain, AudioWaveform, Bookmark } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Cpu, Plug, Sliders, Brain, AudioWaveform, Bookmark, AlertTriangle, Download, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BarSection, ToggleSwitch } from './BarSection';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
+import { useCapabilities } from '../../hooks/useCapabilities';
 import { modelApi } from '../../services/api';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
+import { BackendModelsDropdown, BackendModelsBadge } from './BackendModelsDropdown';
+import { BackendToggle } from './BackendToggle';
 import { AdaptersDropdown, AdaptersBadge } from './AdaptersDropdown';
 import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
+import { BackendGenerationDropdown, BackendGenerationBadge } from './BackendGenerationDropdown';
 import { LmThinkingDropdown, LmThinkingBadge } from './LmThinkingDropdown';
 import { PostProcessingDropdown, PostProcessingBadge } from './PostProcessingDropdown';
 import { VramIndicator } from '../shared/VramIndicator';
@@ -24,11 +28,89 @@ import { ProfilesModal } from './ProfilesModal';
 
 type SectionId = 'models' | 'adapters' | 'generation' | 'lm' | 'postprocessing' | null;
 
+/** Placeholder body for a cluster whose subsystem the ACTIVE backend doesn't
+ *  have yet. The section stays in the bar (its absence reads as a bug) but says
+ *  plainly that there is nothing to configure, rather than showing ACE's
+ *  controls where they would do nothing. */
+const NotYetPanel: React.FC<{ feature: string }> = ({ feature }) => (
+  <p className="text-[11px] text-zinc-500 leading-relaxed">
+    {feature} isn’t supported by the active backend yet. This section will fill in
+    as the capability lands.
+  </p>
+);
+
+const UnsupportedBadge: React.FC = () => (
+  <span className="text-[10px] text-zinc-600 dark:text-zinc-500 italic truncate">not available</span>
+);
+
+/** Holds a hidden cluster's slot in the bar.
+ *
+ *  Every section is `flex-1`, so simply omitting one makes the survivors share
+ *  the freed width and the whole bar re-flows — the tabs end up noticeably
+ *  wider and in different places than in ACE mode. Rendering an inert slot of
+ *  the same width keeps section size and position identical across backends,
+ *  leaving a gap where the missing cluster would be. */
+const SectionSpacer: React.FC = () => (
+  <div className="flex-1 min-w-0" aria-hidden="true" />
+);
+
 export const GlobalParamBar: React.FC = () => {
   const { t } = useTranslation();
   const [openSection, setOpenSection] = useState<SectionId>(null);
   const gp = useGlobalParams();
   const monitoring = useVstChainStore(s => s.monitoring);
+  const { capabilities } = useCapabilities();
+
+  // Capability gating (docs/plans/multi-backend-architecture.md §4.5,
+  // §2 principle 2): undefined/loading capabilities default to SHOWING every
+  // cluster (ACE behavior today) — never flash-hide while /api/capabilities
+  // is in flight. Only hide once a manifest has actually loaded and says no.
+  //
+  // PostProcessingDropdown has no dedicated capability flag in the manifest
+  // (BackendFeatureCapabilities has no stems/postprocess-shaped field) — it
+  // mixes ACE-VAE-specific panels (PP-VAE, Spectral Lifter) with genuinely
+  // backend-agnostic ones (Mastering, VST chain, per §3.4 of the plan doc).
+  // Gated behind `plugins` as the closest existing flag per the task brief;
+  // a future finer-grained pass could split the agnostic sub-panels out.
+  // Models is gated on its own `models` flag, not on `lm`: MiniMax-Music3 has
+  // a selectable quant ladder but no ACE-style LM stage, and the old
+  // `features.lm` gate hid its model picker entirely.
+  const showModels = !capabilities || capabilities.features.models !== false;
+  // Which picker: backends that hold model choice as engine state (MM3 loads
+  // and pins one quant) get the generic bucket-driven one; ACE keeps its own,
+  // which writes per-request globalParams. Keyed on the capability, not on the
+  // backend id (plan §2 principle 2).
+  const useBackendModelPicker = !!capabilities && capabilities.features.lm === false;
+
+  // Adapters / Post-Processing stay VISIBLE for every backend and render an
+  // empty placeholder when the subsystem doesn't exist yet, rather than
+  // vanishing — the clusters are part of the app's shape, and a missing
+  // section reads as a bug. Their contents are still capability-gated inside.
+  const showAdapters = true;
+  const showPostProcessing = true;
+  const adaptersSupported = !capabilities || capabilities.features.adapters;
+  // Post-processing is NOT all-or-nothing. The VST chain, reference mastering
+  // and StableStep read the sample rate from the audio rather than assuming
+  // ACE's 48 kHz, so they work for any backend; only PP-VAE re-encode and
+  // Spectral Lifter are genuinely ACE-model-coupled. Gate the cluster on the
+  // agnostic subset and let the dropdown hide the coupled panels.
+  const postProcessingSupported = !capabilities
+    || capabilities.features.plugins
+    || capabilities.features.postProcess !== false;
+
+  // Generation is NOT only plugins — the seed lives here, and seed is
+  // backend-agnostic. Gating the whole cluster on `plugins` left MiniMax-Music3
+  // with no way to change the seed, so every render of a given prompt came back
+  // identical. Show it whenever the backend has plugins, a seed, or any
+  // declared extension knob; the contents pick themselves below.
+  const backendHasGenControls = !!capabilities &&
+    (capabilities.core?.seed !== false || (capabilities.extensions?.length ?? 0) > 0);
+  const showGeneration = !capabilities || capabilities.features.plugins || backendHasGenControls;
+  // ACE's dropdown is built around the Lua plugin registry; a backend without
+  // it gets the generic seed + declared-extensions cluster instead.
+  const useBackendGenPicker = !!capabilities && !capabilities.features.plugins;
+
+  const showLm = !capabilities || capabilities.features.lm;
 
   // ── Auto-select models when engine becomes ready ────────────────
   // Polls the engine until it returns a model list, then auto-selects
@@ -106,6 +188,25 @@ export const GlobalParamBar: React.FC = () => {
     return () => clearTimeout(timer);
   }, []);
 
+  // ── MiniMax-Music3 "models missing" banner ────────────────────────
+  // capabilities().core.modelsMissing (server: backends/minimax/index.ts) is
+  // true only when the MM3 backend is active, the engine is reachable, and
+  // its weight files specifically weren't found — never for engine-down or
+  // corrupt-file cases. Surfacing is opt-in: a dismissible banner pointing at
+  // the Model Manager, never an auto-started 24 GB download.
+  const mm3ModelsMissing = capabilities?.backend === 'minimax-m3' && capabilities.core?.modelsMissing === true;
+  const [mm3BannerDismissed, setMm3BannerDismissed] = useState(false);
+  const lastBackendRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const b = capabilities?.backend;
+    // Re-arm the banner whenever the user switches INTO minimax-m3, so a
+    // dismissal doesn't stick forever across backend switches.
+    if (b === 'minimax-m3' && lastBackendRef.current !== 'minimax-m3') {
+      setMm3BannerDismissed(false);
+    }
+    lastBackendRef.current = b;
+  }, [capabilities?.backend]);
+
   const handleOpen = useCallback((id: SectionId) => {
     setOpenSection(id);
   }, []);
@@ -127,51 +228,64 @@ export const GlobalParamBar: React.FC = () => {
 
         {/* Sections — separated by dividers */}
         <div className="flex-1 flex items-stretch divide-x divide-white/5">
+          {showModels && (
           <DiscoPulseWrapper hue={0} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="models"
             label={t('globalBar.models')}
             icon={<Cpu size={14} />}
-            badge={<ModelsBadge />}
+            badge={useBackendModelPicker ? <BackendModelsBadge /> : <ModelsBadge />}
             accentColor="pink"
             isOpen={openSection === 'models'}
             onOpen={() => handleOpen('models')}
             onClose={() => handleClose('models')}
           >
-            <ModelsDropdown />
+            {useBackendModelPicker ? <BackendModelsDropdown /> : <ModelsDropdown />}
           </BarSection>
           </DiscoPulseWrapper>
+          )}
+          {!showModels && <SectionSpacer />}
 
+          <BackendToggle />
+
+          {showAdapters && (
           <DiscoPulseWrapper hue={72} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="adapters"
             label={t('globalBar.adapters')}
             icon={<Plug size={14} />}
-            badge={<AdaptersBadge />}
+            badge={adaptersSupported ? <AdaptersBadge /> : <UnsupportedBadge />}
             accentColor="emerald"
             isOpen={openSection === 'adapters'}
             onOpen={() => handleOpen('adapters')}
             onClose={() => handleClose('adapters')}
           >
-            <AdaptersDropdown />
+            {adaptersSupported
+              ? <AdaptersDropdown />
+              : <NotYetPanel feature="Adapters" />}
           </BarSection>
           </DiscoPulseWrapper>
+          )}
 
+          {showGeneration && (
           <DiscoPulseWrapper hue={144} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="generation"
             label={t('globalBar.generation')}
             icon={<Sliders size={14} />}
-            badge={<GenerationBadge />}
+            badge={useBackendGenPicker ? <BackendGenerationBadge /> : <GenerationBadge />}
             accentColor="sky"
             isOpen={openSection === 'generation'}
             onOpen={() => handleOpen('generation')}
             onClose={() => handleClose('generation')}
           >
-            <GenerationDropdown />
+            {useBackendGenPicker ? <BackendGenerationDropdown /> : <GenerationDropdown />}
           </BarSection>
           </DiscoPulseWrapper>
+          )}
+          {!showGeneration && <SectionSpacer />}
 
+          {showLm && (
           <DiscoPulseWrapper hue={216} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="lm"
@@ -193,28 +307,34 @@ export const GlobalParamBar: React.FC = () => {
             <LmThinkingDropdown />
           </BarSection>
           </DiscoPulseWrapper>
+          )}
+          {!showLm && <SectionSpacer />}
 
+          {showPostProcessing && (
           <DiscoPulseWrapper hue={288} stem="snare" className="flex-1 min-w-0">
           <BarSection
             id="postprocessing"
             label={t('globalBar.postProcessing')}
             icon={<AudioWaveform size={14} />}
-            badge={<PostProcessingBadge />}
+            badge={postProcessingSupported ? <PostProcessingBadge /> : <UnsupportedBadge />}
             accentColor="amber"
             isOpen={openSection === 'postprocessing'}
             onOpen={() => handleOpen('postprocessing')}
             onClose={() => handleClose('postprocessing')}
-            headerToggle={
+            headerToggle={postProcessingSupported ? (
               <ToggleSwitch
                 checked={gp.postProcessingEnabled}
                 onChange={(on) => gp.setPostProcessingEnabled(on)}
                 accentColor="amber"
               />
-            }
+            ) : undefined}
           >
-            <PostProcessingDropdown />
+            {postProcessingSupported
+              ? <PostProcessingDropdown />
+              : <NotYetPanel feature="Post-processing" />}
           </BarSection>
           </DiscoPulseWrapper>
+          )}
         </div>
 
         {/* Right — MonitorBar when active, otherwise Export/Import + VRAM */}
@@ -237,6 +357,29 @@ export const GlobalParamBar: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* MiniMax-Music3 models-missing banner — dismissible, links to the
+          Model Manager rather than auto-starting a 24 GB download. */}
+      {mm3ModelsMissing && !mm3BannerDismissed && (
+        <div className="flex items-center gap-2 px-4 py-2 border-t border-amber-500/20 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          <span className="flex-1">{t('globalBar.mm3ModelsMissing')}</span>
+          <button
+            onClick={() => setShowModelManager(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 font-medium transition-colors"
+          >
+            <Download size={12} />
+            {t('globalBar.mm3GetModels')}
+          </button>
+          <button
+            onClick={() => setMm3BannerDismissed(true)}
+            className="p-1 rounded-lg hover:bg-amber-500/15 text-amber-600 dark:text-amber-400 transition-colors"
+            title={t('common.dismiss')}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
 
       {/* Parameter Profiles Modal */}
       {showProfiles && <ProfilesModal onClose={() => setShowProfiles(false)} />}

@@ -13,9 +13,13 @@ import { adapterApi } from '../../services/api';
 export interface LmAdapterOption {
   label: string;
   value: string;
-  /** 'peft' | 'safetensors' | '' (an injected option carries no kind). */
+  /** 'peft' | 'lokr' | 'safetensors' | '' (an injected option carries no kind). */
   kind?: string;
   size?: number;
+  /** Eval score (marginal+transition JS to the artist, lower = closer) from the
+   *  adapter's hot_step_eval.json sidecar; undefined/null = never evaluated. */
+  evalScore?: number | null;
+  evalVerdict?: string;
 }
 
 interface LmAdapterPickerProps {
@@ -60,6 +64,7 @@ export const LmAdapterPicker: React.FC<LmAdapterPickerProps> = ({
         setRegistry(res.adapters.map(a => ({
           label: [a.name, a.lmSize, a.run].filter(Boolean).join(' · '),
           value: a.path, kind: a.kind, size: a.size,
+          evalScore: a.evalScore, evalVerdict: a.evalVerdict,
         })));
         setLoading(false);
       },
@@ -220,6 +225,22 @@ export const LmAdapterPicker: React.FC<LmAdapterPickerProps> = ({
               } ${o.value === value ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-700 dark:text-zinc-300'}`}
             >
               <span className="flex-1 min-w-0 truncate text-[11px] font-mono">{o.label}</span>
+              {/* Eval score from the adapter's sidecar — lower = closer to the
+                  artist. Green when the eval verdict was 'toward'. */}
+              {typeof o.evalScore === 'number' && (
+                <span
+                  title={`Artist-match score (marginal+transition JS, lower = closer) — verdict: ${o.evalVerdict || 'n/a'}`}
+                  className={`text-[9px] tabular-nums flex-shrink-0 ${
+                    o.evalVerdict === 'toward'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : o.evalVerdict === 'away'
+                        ? 'text-red-500 dark:text-red-400'
+                        : 'text-zinc-500'
+                  }`}
+                >
+                  {o.evalScore.toFixed(3)}
+                </span>
+              )}
               {o.kind && <span className="text-[9px] text-zinc-500 flex-shrink-0">{o.kind}</span>}
               {formatSize(o.size) && (
                 <span className="text-[9px] text-zinc-500 tabular-nums flex-shrink-0">{formatSize(o.size)}</span>

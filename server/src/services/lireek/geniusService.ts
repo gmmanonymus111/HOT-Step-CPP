@@ -92,10 +92,43 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // ── Authenticated Genius API calls ──────────────────────────────────────────
 
+/** Statuses worth trying again — rate limit, timeout, transient upstream. */
+const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * fetch() with a short backoff on transient failures.
+ *
+ * There was no retry anywhere in this module, so a single 429 or dropped socket
+ * dropped that track's lyrics permanently — the sidecar is simply written
+ * without them and nothing ever revisits it. A bulk label run over ~180 albums
+ * left ~22 single-track holes whose queries match perfectly on a later attempt,
+ * which is exactly the signature of an unretried blip (2026-08-05).
+ *
+ * Honours Retry-After when the server sends one.
+ */
+async function apiFetch(url: string, headers: Record<string, string>, attempts = 3): Promise<Response> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const resp = await fetch(url, { headers });
+      if (resp.ok || !TRANSIENT_STATUS.has(resp.status) || attempt === attempts - 1) return resp;
+      const retryAfter = Number(resp.headers.get('retry-after'));
+      await sleep(Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(retryAfter * 1000, 15_000)
+        : 800 * 2 ** attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt === attempts - 1) throw err;
+      await sleep(800 * 2 ** attempt);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Genius request failed');
+}
+
 async function apiSearch(query: string, perPage = 20): Promise<any[]> {
   const headers = getAuthHeaders();
   const url = `${API_ROOT}/search?q=${encodeURIComponent(query)}&per_page=${perPage}`;
-  const resp = await fetch(url, { headers });
+  const resp = await apiFetch(url, headers);
   if (!resp.ok) throw new Error(`Genius search failed: ${resp.status}`);
   const data = await resp.json() as any;
   return data.response.hits;
@@ -411,29 +444,55 @@ function normalizeTitle(s: string): string {
     .trim();
 }
 
+/**
+ * Artist names compared the way titles already are.
+ *
+ * Titles went through normalizeTitle() while ARTISTS were compared as raw
+ * lowercased strings, and that asymmetry silently threw away correct matches:
+ *
+ *   tag "Guns N' Roses"          vs Genius "Guns N’ Roses"          (U+2019)
+ *   tag "KC & The Sunshine Band" vs Genius "KC and the Sunshine Band"
+ *
+ * In both cases the RIGHT song was the top hit with the title already agreeing,
+ * and the artist gate — exact and relaxed, since `includes()` fails just as hard
+ * when one character differs — rejected it. That cost gnr_appetite 12/12 and
+ * kcsunshineband 9/9 in the bulk run (verified against the live API 2026-08-05).
+ *
+ * '&' becomes 'and' BEFORE punctuation is stripped, so both spellings converge.
+ */
+function normalizeArtist(s: string): string {
+  return s.toLowerCase()
+    .replace(/[‘’ʼ′]/g, "'")   // curly/modifier apostrophes
+    .replace(/[“”]/g, '"')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function searchSongLyrics(
   artist: string, title: string,
   opts?: { relaxed?: boolean },
 ): Promise<{ title: string; lyrics: string; url: string } | null> {
   const hits = await apiSearch(`${title} ${artist}`, 5);
-  const artistLower = artist.toLowerCase().trim();
+  const artistNorm = normalizeArtist(artist);
   const titleNorm = normalizeTitle(title);
 
   for (const hit of hits) {
     const result = hit.result ?? {};
-    const primaryLower = (result.primary_artist?.name ?? '').toLowerCase().trim();
+    const primaryNorm = normalizeArtist(result.primary_artist?.name ?? '');
     if (opts?.relaxed) {
       // Collabs and feats break exact matching ("Electric Callboy & BABYMETAL",
       // "Artist feat. X") — accept containment either way, but then require the
       // titles to agree so a popular unrelated song can't slip in.
-      const artistOk = !!primaryLower
-        && (primaryLower.includes(artistLower) || artistLower.includes(primaryLower));
+      const artistOk = !!primaryNorm
+        && (primaryNorm.includes(artistNorm) || artistNorm.includes(primaryNorm));
       if (!artistOk) continue;
       const resultNorm = normalizeTitle(result.title ?? '');
       const titleOk = !!titleNorm && !!resultNorm
         && (resultNorm.includes(titleNorm) || titleNorm.includes(resultNorm));
       if (!titleOk) continue;
-    } else if (primaryLower !== artistLower) {
+    } else if (primaryNorm !== artistNorm) {
       continue;
     }
     const songUrl = result.url;

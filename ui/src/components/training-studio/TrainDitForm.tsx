@@ -88,6 +88,14 @@ export interface TrainDitFormState {
   stages: TrainDitStage[];
   overwrite: boolean;
   stopEngine: boolean;
+  /** Resume: continue from the newest non-calibrated run of this adapter name.
+   *  Default ON (Rob, 2026-08-13). */
+  resumeFromLatest: boolean;
+  /** Post-training latent-Frechet calibration. Default OFF (Rob, 2026-08-13);
+   *  it was ON from 2026-08-11. */
+  calibrate: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default ON. */
+  calibrateRepoint: boolean;
 }
 
 /** §2.6 defaults, with the DiT retune applied: 400 epochs, r128/a256, 30 %
@@ -97,8 +105,14 @@ export interface TrainDitFormState {
 export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   adapterName: '',
   quality: 'balanced',
-  targetLoss: 0.4,
-  epochs: 400,
+  // 0.1 / 500 (Rob, 2026-08-13) — targetLoss was 0.2 from 2026-07-30. Both are
+  // deliberately beyond what a run typically reaches: the run always leaves the
+  // BEST adapter behind, so an unreached target costs nothing and simply means
+  // "use the whole horizon". The train-dit route's own fallback tracks this
+  // number so a batch-pipeline run (which POSTs an empty option bag) stops at
+  // the same loss a manual run does.
+  targetLoss: 0.1,
+  epochs: 500,
   adapterType: 'lora',
   rank: 128,
   alpha: 256,
@@ -130,13 +144,16 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   genreRatio: 30,
   seed: 42,
   order: 'shuffle',
-  milestoneStep: 0.1,
+  // Milestones OFF by default (Rob, 2026-07-30) — the best adapter is now
+  // always what lands in the run dir, so mid-run snapshots are opt-in.
+  milestoneStep: 0,
   milestoneKeep: 6,
   vramReserveMb: 2048,
-  // Default 'bf16' for both adapter types (2026-07-29); TRAIN_DIT_LOKR_DEFAULTS
-  // spreads this object and doesn't override mirror, so LoKR inherits it too.
-  // The engine itself falls back to 'f32' with a warning on a non-CUDA backend.
-  mirror: 'bf16',
+  // F32, not bf16 (Rob, 2026-07-30). TRAIN_DIT_LOKR_DEFAULTS spreads this object
+  // and doesn't override mirror, so LoKR inherits it too. Costs VRAM — the F32
+  // mirror is twice the BF16 one — and gives up BF16 tensor cores on the
+  // mirrored GEMMs. Precision over speed, same call as the LM's f32-window.
+  mirror: 'f32',
   // MUL_MAT activation-gradient formulation. 'mm' mirrors the server default
   // (2026-07-29): identical maths to out_prod but dtype-agnostic, so the BF16
   // mirror above rides BF16 tensor cores instead of being promoted to F32.
@@ -159,6 +176,15 @@ export const TRAIN_DIT_DEFAULTS: TrainDitFormState = {
   stages: ['train', 'export'],
   overwrite: false,
   stopEngine: true,
+  // Resume ON, calibrate OFF (Rob, 2026-08-13) — the inverse of the 2026-08-11
+  // seed, matching the LM form's 2026-08-12 flip. With target loss at 0.1 a
+  // re-run is almost always "keep going", not "start over", and resume is soft
+  // on the server: an adapter name with no previous run trains from scratch
+  // rather than failing. TRAIN_DIT_LOKR_DEFAULTS spreads this object and
+  // doesn't override either flag, so LoKR inherits both.
+  resumeFromLatest: true,
+  calibrate: false,
+  calibrateRepoint: true,
 };
 
 /** K1/K2 (lokr-dit-training plan §0): LoKR is the UI's DEFAULT adapter type —
@@ -203,9 +229,15 @@ export const TRAIN_DIT_LOKR_DEFAULTS: TrainDitFormState = {
   // that reduced the work required rather than rearranging it. Don't shorten
   // much further: that run used 203 of its 250, and a horizon below the epochs
   // actually needed leaves the LR at its 10% floor with the tail unfinished.
-  epochs: 250,
+  // 500 / 0.2 (Rob, 2026-07-30), overriding the 250/0.6 that the horizon study
+  // landed on. That study's point stands — a horizon SHORTER than the epochs
+  // actually needed leaves the LR pinned at its 10% floor — but it was written
+  // when an unreached target meant shipping the LAST adapter. Now the run keeps
+  // the best, so a long horizon plus an ambitious target is the safe direction:
+  // you get the whole cosine decay and still keep the best point on it.
+  epochs: 500,
   lossWeighting: 'none',
-  targetLoss: 0.6,
+  targetLoss: 0.1,
   weightDecay: 0.001,
   crop: 0,
 };
@@ -223,22 +255,28 @@ const deriveCropMode = (state: TrainDitFormState): CropMode => {
 /** §5.2 quality dial. Each preset patches the SAME key set so flipping back and
  *  forth is reversible — the plan names targetLoss only under Thorough, which on
  *  its own would leave 0.3 stuck after switching away from it. */
-// Balanced IS the default state, so its epoch count has to be the new default
-// (400) — leaving it at 100 would mean the dial silently undid the retune the
-// moment anyone clicked the button that was already highlighted. Fast and
-// Thorough are re-spaced around it to keep the dial monotone.
+// Balanced IS the default state, so its values have to BE the new defaults —
+// leaving them behind would mean the dial silently undid the retune the moment
+// anyone clicked the button that was already highlighted. Fast and Thorough are
+// re-spaced around it to keep the dial monotone. milestoneStep stays 0 across
+// all three (2026-07-30): the best adapter is kept regardless, so snapshots are
+// an explicit choice, not something a quality click turns back on.
+// Target-loss ladder re-spaced 2026-08-13 around the new 0.1 default (was
+// 0.3/0.2/0.15): Balanced must equal TRAIN_DIT_DEFAULTS.targetLoss, and
+// Thorough has to stay below it to keep the dial monotone.
 const DIT_QUALITY_PRESETS: Record<DitQuality, Partial<TrainDitFormState>> = {
-  fast:     { epochs: 100, cropMax: 750,  milestoneStep: 0.2, targetLoss: 0.4 },
-  balanced: { epochs: 400, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.4 },
-  thorough: { epochs: 800, cropMax: 1250, milestoneStep: 0.1, targetLoss: 0.3 },
+  fast:     { epochs: 150, cropMax: 750,  milestoneStep: 0, targetLoss: 0.2 },
+  balanced: { epochs: 500, cropMax: 1250, milestoneStep: 0, targetLoss: 0.1 },
+  thorough: { epochs: 900, cropMax: 1250, milestoneStep: 0, targetLoss: 0.05 },
 };
 
-/** …but the loss thresholds above are LoRA's. LoKR's validated auto-stop is 0.6
- *  (K2, frozen contract), so applying the LoRA numbers on a quality click would
- *  silently undo the default the LoKR form ships with. Only targetLoss is
- *  type-aware — every other preset field means the same thing for both. */
+/** LoKR's targets were 0.6/0.6/0.5 — its validated auto-stop under the old
+ *  "unreached target ships the LAST adapter" rule. With the best adapter now
+ *  always kept, LoKR tracks the same ambitious targets as LoRA. Balanced MUST
+ *  equal TRAIN_DIT_LOKR_DEFAULTS.targetLoss so the already-highlighted button
+ *  is a no-op. */
 const DIT_LOKR_TARGET_LOSS: Record<DitQuality, number> = {
-  fast: 0.6, balanced: 0.6, thorough: 0.5,
+  fast: 0.2, balanced: 0.1, thorough: 0.05,
 };
 
 /** Same reasoning for the epoch counts: the presets above are LoRA's 100/400/800,
@@ -248,7 +286,7 @@ const DIT_LOKR_TARGET_LOSS: Record<DitQuality, number> = {
  *  button has to be a no-op rather than a silent undo of the retune. Fast and
  *  Thorough keep the dial monotone around it. */
 const DIT_LOKR_EPOCHS: Record<DitQuality, number> = {
-  fast: 120, balanced: 250, thorough: 500,
+  fast: 150, balanced: 500, thorough: 900,
 };
 
 const ALL_STAGES: TrainDitStage[] = ['train', 'export'];
@@ -491,7 +529,7 @@ export const TrainDitForm: React.FC<Props> = ({
 
         {/* ── Target loss ─────────────────────────────────────────────── */}
         <label className="flex flex-col gap-1.5">
-          {P('targetLoss', isLokr ? 'LoKR default 0.6 · 0 = no auto-stop' : 'LoRA default 0.4 · 0 = no auto-stop')}
+          {P('targetLoss', 'Default 0.1 · 0 = no auto-stop')}
           <input
             type="number"
             min={0}
@@ -499,7 +537,7 @@ export const TrainDitForm: React.FC<Props> = ({
             step={0.05}
             value={value.targetLoss}
             disabled={lock}
-            onChange={(e) => onChange({ targetLoss: num(e.target.value, isLokr ? 0.6 : 0.4) })}
+            onChange={(e) => onChange({ targetLoss: num(e.target.value, 0.1) })}
             className={FIELD}
           />
         </label>
@@ -510,7 +548,7 @@ export const TrainDitForm: React.FC<Props> = ({
       {/* ── Max epochs ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="flex flex-col gap-1.5">
-          {P('maxEpochs', 'Default 400 · 1–2000')}
+          {P('maxEpochs', 'Default 500 · 1–2000')}
           <input
             type="number"
             min={1}
@@ -518,7 +556,7 @@ export const TrainDitForm: React.FC<Props> = ({
             step={1}
             value={value.epochs}
             disabled={lock}
-            onChange={(e) => onChange({ epochs: num(e.target.value, 400) })}
+            onChange={(e) => onChange({ epochs: num(e.target.value, 500) })}
             className={FIELD}
           />
           <span className="text-[11px] text-zinc-500">{t('trainingStudio.train.maxEpochsHelp')}</span>
@@ -534,6 +572,42 @@ export const TrainDitForm: React.FC<Props> = ({
           })}
         </span>
       )}
+
+      {/* ── Resume + calibration (2026-08-11) ─────────────────────────── */}
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.resumeFromLatest}
+            disabled={lock}
+            onChange={(e) => onChange({ resumeFromLatest: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('resumeFromLatest', 'Default on', CHECK_LABEL)}
+        </label>
+        <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={value.calibrate}
+            disabled={lock}
+            onChange={(e) => onChange({ calibrate: e.target.checked })}
+            className="accent-amber-500"
+          />
+          {P('calibrate', 'Default off', CHECK_LABEL)}
+        </label>
+        {value.calibrate && (
+          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 pl-6">
+            <input
+              type="checkbox"
+              checked={value.calibrateRepoint}
+              disabled={lock}
+              onChange={(e) => onChange({ calibrateRepoint: e.target.checked })}
+              className="accent-amber-500"
+            />
+            {P('calibrateRepoint', 'Default on', CHECK_LABEL)}
+          </label>
+        )}
+      </div>
 
       {/* ── Advanced ──────────────────────────────────────────────────── */}
       <details className="rounded-lg border border-zinc-200 dark:border-white/5 px-3 py-2">
@@ -864,11 +938,11 @@ export const TrainDitForm: React.FC<Props> = ({
           </div>
 
           <label className="flex flex-col gap-1.5">
-            {P('milestoneStep', 'Default 0.1 · 0 = off')}
+            {P('milestoneStep', 'Default 0 (off) · 0 = off')}
             <input
               type="number" min={0} max={5} step={0.05}
               value={value.milestoneStep} disabled={lock}
-              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0.1) })}
+              onChange={(e) => onChange({ milestoneStep: num(e.target.value, 0) })}
               className={FIELD}
             />
           </label>

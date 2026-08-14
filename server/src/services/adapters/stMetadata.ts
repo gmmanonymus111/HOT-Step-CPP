@@ -22,8 +22,14 @@ const MAX_HEADER_BYTES = 64 * 1024 * 1024;
 export interface AdapterTrigger {
   /** '' when the adapter carries no embedded trigger. */
   trigger: string;
-  /** 'prepend' | 'append', or '' when there is no trigger. */
-  position: 'prepend' | 'append' | '';
+  /**
+   * 'prepend' | 'append' | 'replace', or '' when there is no trigger.
+   *
+   * 'replace' means the adapter was trained with the trigger as the WHOLE
+   * caption (tag_position: replace), so reproducing that at inference means
+   * dropping the caption entirely — anything else is off-distribution for it.
+   */
+  position: 'prepend' | 'append' | 'replace' | '';
 }
 
 const EMPTY: AdapterTrigger = { trigger: '', position: '' };
@@ -93,7 +99,7 @@ export function readAdapterTrigger(pathOrDir: string): AdapterTrigger {
     const trigger = (md.hot_step_trigger || md['modelspec.trigger_phrase'] || '').trim();
     const raw = (md.hot_step_trigger_position || '').trim();
     const position: AdapterTrigger['position'] =
-      !trigger ? '' : raw === 'append' ? 'append' : 'prepend';
+      !trigger ? '' : raw === 'append' ? 'append' : raw === 'replace' ? 'replace' : 'prepend';
 
     const value: AdapterTrigger = trigger ? { trigger, position } : EMPTY;
     cache.set(file, { size: fst.size, mtimeMs: fst.mtimeMs, value });

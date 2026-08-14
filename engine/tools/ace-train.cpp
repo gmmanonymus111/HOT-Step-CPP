@@ -161,6 +161,15 @@ static void print_usage(void) {
             "    --rank <n>                  16\n"
             "    --alpha <n>                 32\n"
             "\n"
+            "  Resume:\n"
+            "    --init-adapter <dir>        continue training from an exported run (PEFT LoRA or\n"
+            "                                LoKr dir). Identity hyperparams (adapter type, rank/\n"
+            "                                alpha, lokr dim/alpha/factor, --weights, base size)\n"
+            "                                are ADOPTED from its lm_train_log.json; an explicit\n"
+            "                                contradicting flag is refused. Fresh warmup+cosine;\n"
+            "                                optimizer momentum starts cold. Epoch 1 should land\n"
+            "                                near the source's saved_loss (logged as a check).\n"
+            "\n"
             "  Optimizer / schedule:\n"
             "    --lr <f>                    1e-4\n"
             "    --epochs <n>                16          hard cap; target-loss usually stops earlier\n"
@@ -315,6 +324,15 @@ static void print_usage(void) {
             "    --target-loss <f>           0.4         0 = disabled (run to the epoch cap)\n"
             "    --order <shuffle|fixed>     shuffle\n"
             "\n"
+            "  Resume:\n"
+            "    --init-adapter <dir>        continue training from an exported run (PEFT LoRA or\n"
+            "                                LoKr dir). Identity hyperparams (adapter type, rank/\n"
+            "                                alpha, lokr dims, target-mlp, layers, base model) are\n"
+            "                                ADOPTED from its dit_train_log.json; an explicit\n"
+            "                                contradicting flag is refused. Layer-window coverage is\n"
+            "                                tolerant: uncovered sites start at zero delta. mirror\n"
+            "                                and --bwd may differ (measured ~7e-5 loss drift).\n"
+            "\n"
             "  Crop / memory:\n"
             "    --crop <n>                  0           latent frames; 0 = auto-fit\n"
             "    --crop-min <n>              375\n"
@@ -431,7 +449,7 @@ static void purge_suffix(const std::string & dir, const char * suffix) {
     const size_t slen = strlen(suffix);
     for (size_t i = 0; i < names.size(); i++) {
         if (names[i].size() >= slen && names[i].compare(names[i].size() - slen, slen, suffix) == 0) {
-            remove((dir + "/" + names[i]).c_str());
+            hs_remove(dir + "/" + names[i]);
         }
     }
 }
@@ -440,7 +458,7 @@ static void purge_all(const std::string & dir) {
     std::vector<std::string> names;
     registry_list_dir(dir.c_str(), &names);
     for (size_t i = 0; i < names.size(); i++) {
-        remove((dir + "/" + names[i]).c_str());
+        hs_remove(dir + "/" + names[i]);
     }
 }
 
@@ -741,6 +759,31 @@ static int cmd_preprocess(int argc, char ** argv) {
                 cmp_i("max_lyric_tokens", cs.max_lyric_tokens, o.max_lyric_tokens);
                 cmp_i("vae_chunk", cs.vae_chunk, o.vae_chunk);
                 cmp_i("vae_overlap", cs.vae_overlap, o.vae_overlap);
+
+                // Trigger pair — resolved exactly the way pp_caption_text does,
+                // because it decides the CAPTION that got text-encoded into
+                // this file. NOT cmp_s: that skips an empty `had`, and the
+                // costliest change here (a cache written before the dataset had
+                // a tag, or with the key absent) has precisely that shape. An
+                // empty position means "prepend", and position is meaningless
+                // without a tag, so both sides normalise before comparing.
+                const std::string want_tag = s.custom_tag.empty() ? mf.custom_tag : s.custom_tag;
+                const std::string want_pos_raw = s.tag_position.empty() ? mf.tag_position : s.tag_position;
+                auto norm_pos = [](const std::string & tag, const std::string & pos) {
+                    return tag.empty() ? std::string() : (pos.empty() ? std::string("prepend") : pos);
+                };
+                const std::string had_pos  = norm_pos(cs.custom_tag, cs.tag_position);
+                const std::string want_pos = norm_pos(want_tag, want_pos_raw);
+                if (cs.custom_tag != want_tag) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "custom_tag " + (cs.custom_tag.empty() ? std::string("(none)") : cs.custom_tag)
+                                 + "\xE2\x86\x92" + (want_tag.empty() ? std::string("(none)") : want_tag);
+                }
+                if (had_pos != want_pos) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "tag_position " + (had_pos.empty() ? std::string("(none)") : had_pos)
+                                 + "\xE2\x86\x92" + (want_pos.empty() ? std::string("(none)") : want_pos);
+                }
             }
             if (!resume_diff.empty()) {
                 char wb[640];
@@ -930,7 +973,8 @@ static void bwd_apply(const std::string & v) {
 // docs/plans/2026-07-27-lm-trainer-implementation.md §2.1, §3.1
 
 static int cmd_train_lm(int argc, char ** argv) {
-    LmTrainArgs a;
+    LmTrainArgs      a;
+    LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
     std::string stages_csv, dit_arg, lm_arg, lm_size_arg;
 
     for (int i = 1; i < argc; i++) {
@@ -942,8 +986,9 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
         else if (!strcmp(argv[i], "--lm") && i + 1 < argc) lm_arg = argv[++i];
         else if (!strcmp(argv[i], "--lm-size") && i + 1 < argc) lm_size_arg = argv[++i];
-        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--init-adapter") && i + 1 < argc) a.init_adapter = argv[++i];
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) { a.rank = atoi(argv[++i]); saw.rank = true; }
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) { a.alpha = atoi(argv[++i]); saw.alpha = true; }
         else if (!strcmp(argv[i], "--lr") && i + 1 < argc) a.lr = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--epochs") && i + 1 < argc) a.epochs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--grad-accum") && i + 1 < argc) a.grad_accum = atoi(argv[++i]);
@@ -958,7 +1003,7 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--low-vram") && i + 1 < argc) a.low_vram = argv[++i];
         else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
+        else if (!strcmp(argv[i], "--weights") && i + 1 < argc) { a.weights = argv[++i]; saw.weights = true; }
         else if (!strcmp(argv[i], "--optimizer") && i + 1 < argc) a.optimizer = argv[++i];
         else if (!strcmp(argv[i], "--muon-lr-scale") && i + 1 < argc) a.muon_lr_scale = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--muon-momentum") && i + 1 < argc) a.muon_momentum = (float) atof(argv[++i]);
@@ -966,10 +1011,10 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--muon-bucket") && i + 1 < argc) a.muon_bucket = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
-        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
-        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) { a.adapter_type = argv[++i]; saw.adapter_type = true; }
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) { a.lokr_dim = atoi(argv[++i]); saw.lokr_dim = true; }
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) { a.lokr_alpha = (float) atof(argv[++i]); saw.lokr_alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) { a.lokr_factor = atoi(argv[++i]); saw.lokr_factor = true; }
         else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
@@ -1005,6 +1050,32 @@ static int cmd_train_lm(int argc, char ** argv) {
             fprintf(stderr, "ace-train train-lm: --stages must name at least one of extract,train,export\n");
             return 2;
         }
+    }
+
+    // ── resume (--init-adapter): adopt the source run's identity ─────────
+    //
+    // BEFORE the sanity/lever checks so they validate the ADOPTED values, and
+    // before model resolution so the lm_size refuse below can use the source's
+    // recorded size. Explicit CLI contradictions exit 2 inside prepare.
+    LmResumeSource resume_src;
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        if (!lm_resume_prepare(&a, saw, &resume_src, &err)) {
+            fprintf(stderr, "ace-train train-lm: %s\n", err.c_str());
+            return 2;
+        }
+        a.init_from_loss = resume_src.saved_loss;
+        if (!lm_size_arg.empty() && !resume_src.lm_size.empty() && lm_size_arg != resume_src.lm_size) {
+            fprintf(stderr,
+                    "ace-train train-lm: --init-adapter %s was trained on a %s base but --lm-size says %s — "
+                    "a resumed adapter must stay on its own base size\n",
+                    a.init_adapter.c_str(), resume_src.lm_size.c_str(), lm_size_arg.c_str());
+            return 2;
+        }
+        fprintf(stderr,
+                "[train-lm] resuming %s (%s, saved_loss %.4f @ epoch %d) — identity adopted from its log\n",
+                a.init_adapter.c_str(), resume_src.adapter_type.c_str(), resume_src.saved_loss,
+                resume_src.saved_epoch);
     }
 
     // ── numeric sanity (the server clamps these too; be defensive) ───────
@@ -1151,6 +1222,23 @@ static int cmd_train_lm(int argc, char ** argv) {
             return 2;
         }
         a.lm_name = name;
+        // Resume base check: same SIZE is a hard rule (the shapes differ);
+        // a different file of the same size (quant/bf16 variant) only warns.
+        if (!a.init_adapter.empty() && !resume_src.lm_size.empty()) {
+            const std::string token = "-" + resume_src.lm_size + "-";
+            if (a.lm_name.find(token) == std::string::npos) {
+                fprintf(stderr,
+                        "ace-train train-lm: --init-adapter %s was trained on a %s base but --lm resolved to %s — "
+                        "a resumed adapter must stay on its own base size\n",
+                        a.init_adapter.c_str(), resume_src.lm_size.c_str(), a.lm_name.c_str());
+                return 2;
+            }
+            const std::string src_base = resume_src.lm_path.substr(resume_src.lm_path.find_last_of("/\\") + 1);
+            if (!src_base.empty() && src_base != a.lm_name) {
+                fprintf(stderr, "[train-lm] note: resuming on %s; the source run used %s (same size — proceeding)\n",
+                        a.lm_name.c_str(), src_base.c_str());
+            }
+        }
     }
     if (!dit_arg.empty()) {
         std::string name;
@@ -1212,7 +1300,8 @@ static int cmd_train_lm(int argc, char ** argv) {
 // ─── train-dit (plan §2.1) ──────────────────────────────────────────────────
 
 static int cmd_train_dit(int argc, char ** argv) {
-    DitTrainArgs a;
+    DitTrainArgs      a;
+    DitResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
     std::string  stages_csv, dit_arg;
     bool         safety_user = false;
 
@@ -1222,17 +1311,18 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) a.out_dir = argv[++i];
         else if (!strcmp(argv[i], "--models") && i + 1 < argc) a.models_dir = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
-        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
-        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--init-adapter") && i + 1 < argc) a.init_adapter = argv[++i];
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) { a.adapter_type = argv[++i]; saw.adapter_type = true; }
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) { a.rank = atoi(argv[++i]); saw.rank = true; }
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) { a.alpha = atoi(argv[++i]); saw.alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) { a.lokr_dim = atoi(argv[++i]); saw.lokr_dim = true; }
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) { a.lokr_alpha = (float) atof(argv[++i]); saw.lokr_alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) { a.lokr_factor = atoi(argv[++i]); saw.lokr_factor = true; }
         else if (!strcmp(argv[i], "--lokr-decompose-both")) a.lokr_decompose_both = true;
         else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
-        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
-        else if (!strcmp(argv[i], "--no-target-mlp")) a.target_mlp = false;
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) { a.layers = atoi(argv[++i]); saw.layers = true; }
+        else if (!strcmp(argv[i], "--target-mlp")) { a.target_mlp = true; saw.target_mlp = true; }
+        else if (!strcmp(argv[i], "--no-target-mlp")) { a.target_mlp = false; saw.target_mlp = true; }
         else if (!strcmp(argv[i], "--loss-weighting") && i + 1 < argc) a.loss_weighting = argv[++i];
         else if (!strcmp(argv[i], "--snr-gamma") && i + 1 < argc) a.snr_gamma = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--t-bias") && i + 1 < argc) a.t_bias = (float) atof(argv[++i]);
@@ -1299,6 +1389,22 @@ static int cmd_train_dit(int argc, char ** argv) {
             fprintf(stderr, "ace-train train-dit: --stages must name at least one of train,export\n");
             return 2;
         }
+    }
+
+    // ── resume (--init-adapter): adopt the source run's identity ─────────
+    // BEFORE the sanity checks so they validate the ADOPTED values. Explicit
+    // CLI contradictions exit 2 inside prepare. Same shape as train-lm's.
+    DitResumeSource resume_src;
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        if (!dit_resume_prepare(&a, saw, &resume_src, &err)) {
+            fprintf(stderr, "ace-train train-dit: %s\n", err.c_str());
+            return 2;
+        }
+        a.init_from_ma5 = resume_src.saved_ma5;
+        fprintf(stderr, "[train-dit] resuming %s (%s, saved ma5 %.4f @ epoch %d) — identity adopted from its log\n",
+                a.init_adapter.c_str(), resume_src.adapter_type.c_str(), resume_src.saved_ma5,
+                resume_src.saved_epoch);
     }
 
     // ── numeric sanity (the server clamps these too; be defensive) ───────
@@ -1394,6 +1500,16 @@ static int cmd_train_dit(int argc, char ** argv) {
             return 2;
         }
         a.dit_name = name;
+        // Resume base check: a DiT adapter is per-base (cross-base transfer is
+        // its own basin-sensitive minefield — docs/plans lokr-cross-base) so a
+        // different base file is a hard refuse, not a warn.
+        if (!a.init_adapter.empty() && !resume_src.dit_name.empty() && resume_src.dit_name != a.dit_name) {
+            fprintf(stderr,
+                    "ace-train train-dit: --init-adapter %s was trained on %s but --dit resolved to %s — "
+                    "a resumed adapter must stay on its own base\n",
+                    a.init_adapter.c_str(), resume_src.dit_name.c_str(), a.dit_name.c_str());
+            return 2;
+        }
     }
 
     // MUST precede every model load and graph build — the ggml patch latches

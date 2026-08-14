@@ -72,6 +72,14 @@ interface ModelSelectProps {
   formatLabel?: (name: string) => string;
   placeholder?: string;
   id?: string;
+  /** Override how an option's format badge is derived. The default sniffs the
+   *  file name, which only works when the option IS a file name — backends
+   *  whose options are something else (MM3 lists quant tokens like "q8_0")
+   *  pass their own, or `null` to drop the badge entirely. */
+  formatOf?: ((name: string) => 'gguf' | 'safetensors' | 'onnx') | null;
+  /** Hide the filter box. Pointless for short, fixed option lists. */
+  filterable?: boolean;
+  disabled?: boolean;
 }
 
 export const ModelSelect: React.FC<ModelSelectProps> = ({
@@ -81,6 +89,9 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
   formatLabel = (n) => n,
   placeholder = 'Select model…',
   id,
+  formatOf = getModelFormat,
+  filterable = true,
+  disabled = false,
 }) => {
   const [open, setOpen] = useState(false);
   const [focusIdx, setFocusIdx] = useState(-1);
@@ -126,18 +137,8 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
     el?.scrollIntoView({ block: 'nearest' });
   }, [focusIdx, open]);
 
-  // Trigger-button keys: only used to open the dropdown.
-  const handleTriggerKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) {
-        e.preventDefault();
-        setOpen(true);
-      }
-    },
-    [open]
-  );
-
   // Filter-input keys: navigate + select within the filtered list.
+  // Declared before the trigger handler, which depends on it.
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       switch (e.key) {
@@ -165,15 +166,33 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
     [focusIdx, filtered, onChange]
   );
 
-  const selectedFormat = value ? getModelFormat(value) : null;
+  // Trigger-button keys: opens the dropdown. When the filter box is hidden
+  // there is no input to take focus, so the trigger also has to drive
+  // navigation once open — otherwise the list is mouse-only.
+  const handleTriggerKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        setOpen(true);
+        return;
+      }
+      if (open && !filterable) {
+        handleInputKeyDown(e);
+      }
+    },
+    [open, filterable, handleInputKeyDown]
+  );
+
+  const selectedFormat = value && formatOf ? formatOf(value) : null;
 
   return (
     <div ref={containerRef} className="relative" id={id}>
       {/* Trigger button */}
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => !disabled && setOpen(!open)}
         onKeyDown={handleTriggerKeyDown}
+        disabled={disabled}
         title={value || undefined}
         className="w-full flex items-center gap-2 px-3 py-2 rounded-xl
                    bg-zinc-100 dark:bg-zinc-800
@@ -181,7 +200,8 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                    text-sm text-zinc-800 dark:text-zinc-200
                    hover:border-zinc-400 dark:hover:border-white/20
                    focus:border-pink-500/50 focus:ring-1 focus:ring-pink-500/20
-                   outline-none transition-colors cursor-pointer"
+                   outline-none transition-colors cursor-pointer
+                   disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {value ? (
           <>
@@ -206,6 +226,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                      shadow-lg shadow-black/20"
         >
           {/* Text filter */}
+          {filterable && (
           <div className="p-1.5 border-b border-zinc-200 dark:border-white/10">
             <div className="relative">
               <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
@@ -224,6 +245,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
               />
             </div>
           </div>
+          )}
 
           {/* Filtered list */}
           <div ref={listRef} className="max-h-56 overflow-auto py-1" role="listbox">
@@ -231,7 +253,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
               <div className="px-3 py-2 text-sm text-zinc-400">No models match.</div>
             ) : (
               filtered.map((opt, i) => {
-                const fmt = getModelFormat(opt);
+                const fmt = formatOf ? formatOf(opt) : null;
                 const selected = opt === value;
                 const focused = i === focusIdx;
                 return (
@@ -251,7 +273,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
                       ${selected ? 'text-pink-400' : 'text-zinc-700 dark:text-zinc-200'}
                       hover:bg-pink-500/10 dark:hover:bg-pink-500/15`}
                   >
-                    <FormatBadge format={fmt} />
+                    {fmt && <FormatBadge format={fmt} />}
                     <span className="truncate flex-1">{middleEllipsis(formatLabel(opt), 48)}</span>
                     {selected && <Check size={14} className="shrink-0 text-pink-400" />}
                   </button>

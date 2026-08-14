@@ -60,11 +60,42 @@ struct AceRequest {
     float       lm_cfg_cutoff_ratio; // 1.0 (1.0 = full CFG, 0.5 = CFG for first 50% of tokens)
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
-    float       lm_rep_penalty;      // 1.0 = off. HF-style windowed repetition
-                                     // penalty over recently emitted audio codes;
-                                     // breaks degenerate code loops (adapters
-                                     // sharpen the code distribution). ~1.05-1.15.
+    float       lm_rep_penalty;      // 1.0 = off. Windowed repetition penalty
+                                     // over recently emitted audio codes; breaks
+                                     // degenerate code loops (adapters sharpen
+                                     // the code distribution). ~1.05-1.15.
     int         lm_rep_window;       // 64 codes (~13 s at 5 Hz) penalty lookback
+    // How lm_rep_penalty is turned into a per-code logit adjustment. All three
+    // modes are inert at lm_rep_penalty == 1.0.
+    //   "presence"  (default, legacy) — every DISTINCT code in the window is
+    //               penalised once, however often it recurred. It therefore
+    //               cannot tell a stuck loop from ordinary musical restatement,
+    //               and at strengths that break loops it also flattens the
+    //               structural reuse (bars, phrase restatement, sustains) that
+    //               the 5 Hz code stream encodes.
+    //   "frequency" — penalty^occurrences, occurrences capped at
+    //               LM_REP_FREQ_MAX_COUNT. Identical to "presence" for codes
+    //               seen once, so the loop's few codes are hit far harder than
+    //               the section's one-off codes and a much gentler penalty
+    //               suffices.
+    //   "dry"       — Don't Repeat Yourself. Penalises ONLY codes that would
+    //               extend a verbatim recent cycle, scaled exponentially in the
+    //               matched suffix length. Non-verbatim restatement is left
+    //               completely alone; verbatim loops are annihilated.
+    std::string lm_rep_mode;         // "presence"
+    float       lm_dry_base;         // 1.75 ("dry" only) growth per extra matched code
+    int         lm_dry_min_len;      // 3    ("dry" only) matched codes before any
+                                     // penalty at all (~0.6 s at 5 Hz). Raise it if
+                                     // legitimate sustained textures get chewed up.
+                                     // Do not raise it far: this is a licence to
+                                     // repeat verbatim, and the LM will use all of
+                                     // it and then restart the cycle with a fresh
+                                     // code. Measured on one 151 s track, min_len 6
+                                     // left 4% of frames in a >=2 s loop and produced
+                                     // 94 runs of >=6 verbatim frames (vs 36 with the
+                                     // penalty off) -- short stitched repeats that
+                                     // still sound like one continuous loop. min_len
+                                     // 3 gave 0% looped frames and 4 such runs.
     std::string lm_negative_prompt;  // ""
     int64_t     lm_seed;             // -1 = random. mt19937 consumes the low 32
                                      // bits. Same int64_t storage trick as seed
@@ -80,6 +111,19 @@ struct AceRequest {
     int   inference_steps;  // 0 = auto (turbo: 8, base/sft: 50)
     float guidance_scale;   // 0 = auto (1.0 for all models)
     float shift;            // 0 = auto (turbo: 3.0, base/sft: 1.0)
+
+    // Self-attention sliding-window override for the DiT's layer_type=0 layers.
+    // The model alternates 16 windowed / 16 full-attention layers; the windowed
+    // half sees only +/- sliding_window TOKENS, and tokens run at 12.5 Hz
+    // (25 Hz latents / patch_size 2). At the stock 128 that is +/-10.2 s, so a
+    // repeated chorus a minute later is invisible to half the network's depth.
+    //   -1 = use the model's own value (default, bit-identical to before)
+    //    0 = no window at all: every layer runs full attention
+    //   >0 = custom window in tokens (256 = +/-20.5 s, 1024 = +/-82 s)
+    // Widening is OUT OF DISTRIBUTION — those layers were trained windowed —
+    // but it is compute-free: the window is a dense S*S mask handed to
+    // flash_attn_ext, not a sparse kernel, so the O(S^2) cost is already paid.
+    int dit_sliding_window;  // -1 = model default
 
     // Differential Correction in Wavelet domain (CVPR 2026, arXiv:2604.16044).
     // Sampler-side correction for SNR-t bias in flow matching.

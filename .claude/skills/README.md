@@ -28,10 +28,17 @@ file/function/string over the exact line.
 | Know when a change is actually "done" | [validating-changes](validating-changes/SKILL.md) |
 | Model files, GGUF, quantization, model manager | [model-management](model-management/SKILL.md) |
 | Speed: TensorRT paths, profiling, quality/speed knobs | [engine-performance](engine-performance/SKILL.md) |
+| Anything MiniMax-Music3: engine port, /mm3 endpoints, backend toggle, MM3 debugging | [mm3-backend](mm3-backend/SKILL.md)* |
+| Format a MiniMax-Music3 caption; MM3 genre drift/adherence | [mm3-captioning](mm3-captioning/SKILL.md)* |
 
 Feature-specific work (Stem Studio, Lyric Studio/lireek, mastering, cover art,
 VST, whisper, i18n, auth, …) starts at **project-map**'s feature table, which
 maps each feature to its route, service, UI folder, and engine piece.
+
+\* `mm3-captioning` (added 2026-08-13) is a later addition outside the
+original thirteen's fact-check pass; its `upstream/` reference library
+(MiniMax's official caption-rewriter content) is **gitignored** — local
+installs fetch it per the skill's PROVENANCE.md instructions.
 
 ## The five rules that prevent the expensive disasters
 

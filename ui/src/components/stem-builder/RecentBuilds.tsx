@@ -69,6 +69,7 @@ export const RecentBuilds: React.FC<RecentBuildsProps> = ({
             title: s.title || 'Untitled',
             audioUrl: s.audio_url || s.audioUrl || '',
             masteredAudioUrl: s.mastered_audio_url || s.masteredAudioUrl,
+            noAdapterAudioUrl: s.noadapter_audio_url || s.noAdapterAudioUrl,
             trackName,
             createdAt: s.created_at,
           };

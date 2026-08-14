@@ -1,0 +1,146 @@
+# ROCm/HIP compile-only guard.
+#
+# WHAT THIS IS FOR
+#   The AMD ROCm backend (PR #115) is community-contributed and nothing else in
+#   CI builds it, so it would rot silently — the next person to touch
+#   engine/src/gpu.h, the GGML_HIP gate in engine/CMakeLists.txt, or any file
+#   that includes <cuda_runtime.h> would break it with no signal. This job is
+#   that signal.
+#
+# WHAT THIS IS NOT
+#   - Not a release job. It produces no artifacts and packages nothing.
+#     ROCm builds are not shipped; users build them with engine/buildhip.sh.
+#   - Not a functional test. GitHub-hosted runners have no AMD GPU, so this
+#     only proves the code COMPILES and LINKS under HIP. It cannot catch a
+#     wrong hipMemGetInfo result, only a wrong hipMemGetInfo signature.
+#   - Not a full-parity build. It skips ONNX Runtime (SuperSep/sa3-refine) and
+#     builds only the `ace-server` target, which is what actually pulls in the
+#     HIP-sensitive translation units (pipeline-synth.cpp via acestep-core, and
+#     hot-step-server.cpp). Widening this costs runner minutes for little gain.
+#
+# NON-BLOCKING BY DESIGN
+#   continue-on-error: true. A community backend must never block a release or
+#   a merge to master. Read it as advisory: red here means "the ROCm path needs
+#   attention", not "stop".
+
+name: ROCm Build (compile-only)
+
+on:
+  push:
+    paths:
+      - 'engine/**'
+      - '.github/workflows/rocm-build.yml'
+  pull_request:
+    paths:
+      - 'engine/**'
+      - '.github/workflows/rocm-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: rocm-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-rocm:
+    name: Compile engine under ROCm/HIP
+    runs-on: ubuntu-22.04   # jammy — matches build-linux in release.yml, and is
+                            # a supported target for the ROCm apt repo below.
+    continue-on-error: true
+    timeout-minutes: 120
+
+    env:
+      ROCM_VERSION: '6.2.4'
+      # Single GPU arch. HIP recompiles the whole ggml-cuda kernel set per
+      # target, so each extra arch is roughly another full kernel build. gfx1030
+      # (RDNA2) is the same default engine/buildhip.sh falls back to.
+      GPU_TARGET: 'gfx1030'
+
+    steps:
+      # ROCm is multi-GB and the HIP objects are large; the stock runner image
+      # does not leave enough headroom.
+      - name: Free disk space
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          echo "After:"; df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # Manual init below — vstgui4 is fragile + unneeded.
+
+      # Mirrors release.yml's build-linux. vst3sdk is NOT optional: engine's
+      # CMakeLists references its sources unconditionally, so configure fails
+      # without it even though this job never builds vst-host.
+      - name: Init required submodules
+        run: |
+          git submodule update --init engine/ggml
+          git submodule update --init engine/vendor/vst3sdk
+          cd engine/vendor/vst3sdk
+          git submodule update --init base cmake pluginterfaces public.sdk
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      # rocm-hip-sdk, not the full `rocm` metapackage: it pulls hip + rocblas +
+      # hipblas (everything ggml/src/ggml-hip/CMakeLists.txt find_package()s)
+      # without the profilers, libraries and tooling we would never compile
+      # against. --no-dkms equivalent: we install no kernel driver, because
+      # nothing here talks to a GPU.
+      - name: Install ROCm ${{ env.ROCM_VERSION }}
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} jammy main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update
+          sudo apt-get install -y rocm-hip-sdk
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+
+      - name: Verify ROCm toolchain
+        run: |
+          /opt/rocm/bin/hipconfig --version
+          /opt/rocm/llvm/bin/clang++ --version
+          df -h /
+
+      # HIPCXX/HIP_PATH is the invocation ggml documents for HIP builds; without
+      # it CMake's enable_language(HIP) may not find the ROCm clang.
+      # GGML_STATIC must stay OFF — ggml-hip raises a hard FATAL_ERROR on it.
+      - name: Configure
+        run: |
+          set -o pipefail
+          HIPCXX="$(/opt/rocm/bin/hipconfig -l)/clang" \
+          HIP_PATH="$(/opt/rocm/bin/hipconfig -R)" \
+          cmake -S engine -B engine/build \
+            -DGGML_HIP=ON \
+            -DGPU_TARGETS="${GPU_TARGET}" \
+            -DGGML_STATIC=OFF \
+            -DCMAKE_BUILD_TYPE=Release 2>&1 | tee configure.log
+
+      # Confirms the GGML_HIP gate in engine/CMakeLists.txt actually fired. The
+      # marker is a message(STATUS ...), so it lives in the configure output,
+      # not in CMakeCache.txt. If this fails, the ROCm block was skipped and the
+      # build below would silently be a non-HIP build.
+      - name: Assert the ROCm gate engaged
+        run: |
+          grep -q "GGML_HIP:BOOL=ON" engine/build/CMakeCache.txt \
+            || { echo "::error::GGML_HIP did not stick in the CMake cache"; exit 1; }
+          grep -q "building with AMD ROCm support" configure.log \
+            || { echo "::error::ROCm gate did not fire — find_package(hip) failed inside the GGML_HIP block"; exit 1; }
+          echo "GGML_HIP=ON and the ROCm gate fired"
+
+      - name: Build ace-server
+        run: cmake --build engine/build --target ace-server -j "$(nproc)"
+
+      # CMAKE_RUNTIME_OUTPUT_DIRECTORY is the build root (engine/CMakeLists.txt:48),
+      # so a single-config Linux build drops the binary at engine/build/ace-server.
+      - name: Confirm binary
+        run: |
+          test -f engine/build/ace-server \
+            || { echo "::error::ace-server not found after build"; find engine/build -name 'ace-server*' -print; exit 1; }
+          ls -la engine/build/ace-server
+          file engine/build/ace-server

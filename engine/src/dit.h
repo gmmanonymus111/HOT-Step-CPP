@@ -13,6 +13,7 @@
 #include "hot-step-build-flags.h"
 #include "adapter-runtime.h"
 #include "backend.h"
+#include "concept-steer.h"
 #include "config-json.h"
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -157,6 +158,22 @@ struct DiTGGML {
     // uploaded by the sampler.
     std::vector<DiTLoRA>          loras;
     std::vector<struct ggml_tensor *> lora_masks;
+
+    // ─── Concept activation steering (CAA / TADA) ───
+    // `steer` holds the concepts resolved for THIS generation; `steer_vecs` are
+    // the per-layer [H,1,1] input tensors, created per graph build and uploaded
+    // by the sampler at every model evaluation.
+    //
+    // Not part of the ModelKey by design — these are activations, not weights,
+    // so the same loaded DiT serves any alpha. Prepared by the sampler before
+    // the graph build, NOT by dit_ggml_load.
+    ConceptSteerRuntime               steer;
+    std::vector<struct ggml_tensor *> steer_vecs;
+
+    // Extraction tap: when set, the graph gains a GPU-side frame-mean of every
+    // layer's cross-attn output, read back by the sampler each step. Driven by
+    // g_concept_tap.recording at graph-build time.
+    std::vector<struct ggml_tensor *> tap_vecs;
 
     // ─── HOT-Step ConvRot (group-wise Hadamard-rotated int8 weights) ───
     // GGUF KV "acestep.convrot_map" ("name:group;name:group;...") marks weights
@@ -416,6 +433,12 @@ static bool dit_ggml_load(DiTGGML *    m,
     if (g_hotstep_params.adapter_mode == "runtime_lowrank") {
         size_t n_adapters = g_hotstep_params.adapters.empty() ? 1 : g_hotstep_params.adapters.size();
         sched_nodes += (int) (n_adapters * 360 * 12);
+    }
+    // Concept steering adds one input leaf + one add node per layer. Sized from
+    // the request (the config isn't parsed yet here), generously at the XL layer
+    // count so a standard-scale load is never under-budgeted.
+    if (g_hotstep_params.has_concepts("dit")) {
+        sched_nodes += DIT_GGML_MAX_LAYERS * 2;
     }
     m->sched          = backend_sched_new(bp, sched_nodes);
     m->use_flash_attn = bp.has_gpu && !HOT_STEP_FA_DISABLED;

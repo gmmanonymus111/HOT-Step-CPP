@@ -46,6 +46,18 @@ export function computeLmCacheKey(req: AceRequest): string {
     lm_top_k: req.lm_top_k,
     lm_negative_prompt: req.lm_negative_prompt,
     use_cot_caption: req.use_cot_caption,
+    // Sampling-time anti-loop settings change the emitted codes, so they have
+    // to key the cache — omitting them made A/B-ing the repetition penalty at a
+    // fixed seed return the previous run's codes and look like a dead knob.
+    lm_rep_penalty: req.lm_rep_penalty,
+    lm_rep_window: req.lm_rep_window,
+    lm_rep_mode: req.lm_rep_mode,
+    lm_dry_base: req.lm_dry_base,
+    lm_dry_min_len: req.lm_dry_min_len,
+    // Same reasoning for the LM adapter: it changes the code distribution as
+    // surely as lm_model does.
+    lm_adapter: req.lm_adapter,
+    lm_adapter_scale: req.lm_adapter_scale,
   };
   return crypto.createHash('sha256')
     .update(JSON.stringify(keyObj))

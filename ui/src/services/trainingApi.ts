@@ -18,7 +18,7 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition';
+  | 'audition' | 'lm-calibrate' | 'dit-calibrate';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -51,8 +51,33 @@ export interface TrainingDatasetSummary {
   status: 'draft' | 'labeling' | 'labeled' | 'built' | 'error';
   builtAt: string;            // ISO or ''
   datasetJsonPath: string;    // absolute path or ''
+  /** Friendly album name from the tracks' embedded tags — '' when unknown. */
+  albumName: string;
   createdAt: string;          // ISO
   updatedAt: string;          // ISO
+  /** What the dataset has on DISK beyond its row — attached by the list and
+   *  detail endpoints, absent on the bare row a PATCH echoes back. */
+  assets?: DatasetAssets;
+}
+
+/** One trained adapter directory found on disk. */
+export interface TrainingAdapterHit {
+  path: string;               // absolute adapter run dir
+  kind: 'dit' | 'lm';
+  detail: string;             // dit-<base> shorthand / LM size — display only
+  trainedAt: string;          // ISO or ''
+}
+
+/** Per-dataset pipeline progress, read fresh off disk on every request. */
+export interface DatasetAssets {
+  labeled: boolean;           // at least one caption
+  built: boolean;             // dataset.json written
+  tensorVariants: number;     // preprocessed variant dirs
+  tensorVariantKey: string;   // newest variant, '' when none
+  tensorSamples: number;      // .safetensors files in that variant
+  ditBase: string;            // base the newest variant was preprocessed against
+  lm: TrainingAdapterHit | null;
+  dit: TrainingAdapterHit | null;
 }
 
 export interface TrainingSample {
@@ -189,7 +214,7 @@ export interface TrainLmOptions {
   /** Adapter directory stem; final dir is `<adapterName>-<lmSize>`.
    *  Omit = the dataset slug. */
   adapterName?: string;
-  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 16 (hard cap)
   rank?: number;                   // default 16
   alpha?: number;                  // default 32
@@ -223,6 +248,20 @@ export interface TrainLmOptions {
   stages?: TrainLmStage[];         // default ['extract','train','export']
   overwrite?: boolean;             // default false — re-extract every song
   stopEngine?: boolean;            // default TRUE — stop ace-server for the job
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  lm_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-12);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
+  /** Run the post-training calibration job (eval candidates x scales, pick
+   *  under guards, bake the winner, write hot_step_eval.json).
+   *  Default FALSE (2026-08-12) — only an explicit `true` runs it. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s) at the served
+   *  adapter. Default TRUE. Meaningless when calibrate is false. */
+  calibrateRepoint?: boolean;
   /** Per-layer gradient checkpointing + chunked CE. 'auto' (default) turns it on
    *  for 4B, and for smaller bases only when the naive path would have to skip
    *  full-song samples. */
@@ -326,7 +365,7 @@ export interface TrainDitOptions {
   crop?: number;                   // default 0 = auto-fit
   cropMin?: number;                // default 375
   cropMax?: number;                // default 1250
-  targetLoss?: number;             // default 0.4 (lora) / 0.6 (lokr, K2); 0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 400 (hard cap)
   learningRate?: number;           // default 0.0005 (lora) / 0.01 (lokr, K2)
   gradAccum?: number;              // default 4 (lora) / 20 (lokr — Side-Step's effective batch 20, which the lokr lr assumes)
@@ -348,6 +387,19 @@ export interface TrainDitOptions {
   milestoneStep?: number;          // default 0.1;  0 disables
   milestoneKeep?: number;          // default 6
   vramReserveMb?: number;          // default 2048
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  dit_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-13);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
+  /** Run the post-training DiT calibration job (latent-Frechet eval of
+   *  old-vs-new x scales, strict-win pick, bake, sidecar).
+   *  Default FALSE (2026-08-13) — only an explicit `true` runs it. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default TRUE. */
+  calibrateRepoint?: boolean;
   /** Frozen-weight mirror precision. Default 'bf16' (2026-07-29) — keeps the
    *  trainable layers' matmul weights in the base's native BF16 instead of
    *  promoting them to F32, roughly halving the mirror's VRAM. Needs the
@@ -709,8 +761,9 @@ export interface LyricStudioExportResult {
 // Verbatim copy of docs/plans/2026-07-28-training-batch-pipeline.md §2.1 /
 // server/src/services/training/types.ts — keep both sides in sync by hand.
 
-export type PipelineStage = 'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm';
-export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type PipelineStage =
+  'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
+export type PipelineStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface PipelineFolderSpec {
@@ -754,6 +807,9 @@ export interface PipelineSummary {
   items: PipelineItem[];
   createdAt: number;
   finishedAt: number | null;
+  /** Pause asked for but the in-flight stage is still finishing; status flips
+   *  to 'paused' once the runner parks. Absent on pre-pause snapshots. */
+  pauseRequested?: boolean;
 }
 
 export interface TrainingDefaults {
@@ -766,7 +822,8 @@ export interface TrainingDefaults {
 /** Canonical stage order, mirrors server pipelineRunner.ts's PIPELINE_STAGES —
  *  not itself part of the frozen contract, but keeping one copy avoids the UI
  *  re-deriving order from whatever sequence a checkbox row happens to render. */
-export const PIPELINE_STAGES: readonly PipelineStage[] = ['label', 'build', 'preprocess', 'train-dit', 'train-lm'];
+export const PIPELINE_STAGES: readonly PipelineStage[] =
+  ['label', 'build', 'preprocess', 'train-dit', 'train-lm', 'lyric-studio'];
 
 // ── fetch helpers ────────────────────────────────────────────────────────
 
@@ -1004,6 +1061,11 @@ export interface AuditionSideResult {
   renderUrl?: string;       // /api/training/previews/<id>/<slot>-render
   renderMs?: number;        // wall clock of the /synth render
   renderError?: string;     // render failed; the codes sketch above is still valid
+  /** Opt-in SECOND render through the dataset's trained DiT adapter — with
+   *  renderUrl this gives the 2×2 {base LM, LM adapter} × {bare DiT, DiT adapter}. */
+  renderAdapterUrl?: string;   // /api/training/previews/<id>/<slot>-render-adapter
+  renderAdapterMs?: number;
+  renderAdapterError?: string;
 }
 
 export interface AuditionPreview {
@@ -1024,6 +1086,18 @@ export interface AuditionPreview {
   /** Set when the sides carry DiT renders — reproducibility receipt. */
   renderDitModel?: string;
   renderSteps?: number;
+  /** The resolved DiT-adapter run dir the *-render-adapter files used. */
+  renderDitAdapter?: string;
+  /** Mirrored-generation receipts — what "Send to Custom-Gen" replays.
+   *  Absent on previews recorded before the feature. */
+  captionInput?: string;    // the caption BEFORE the trigger tag was applied
+  bpm?: number;             // metadata pins (0/'' = LM predicted)
+  keyscale?: string;
+  timesignature?: string;   // numerator form ('4')
+  lmTemperature?: number;
+  lmTopP?: number;
+  lmCfgScale?: number;
+  lmRepPenalty?: number;
 }
 
 export interface AuditionOptions {
@@ -1037,6 +1111,11 @@ export interface AuditionOptions {
   vaeModel?: string;              // default: engine's resolve_name default
   variantKey?: string;            // default: newestVariantKey(slug)
   sampleId?: string;              // when set, caption/lyrics default from its lm_codes.jsonl row
+  /** Explicit metadata pins (Lyric Studio prompt source) — force_fields'd into
+   *  the CoT like the sample-row pins; win over the row when both present. */
+  bpm?: number;
+  keyscale?: string;
+  timesignature?: string;
   temperature?: number;           // default 0.85, clamp 0.1..2
   topP?: number;                  // default 0.9,  clamp 0.05..1
   cfgScale?: number;              // default 2.0,  clamp 0..10
@@ -1050,6 +1129,11 @@ export interface AuditionOptions {
   renderDit?: boolean;            // default false
   renderSteps?: number;           // default 8, clamp 2..60
   renderDitModel?: string;        // default: newest installed xl-turbo, else the detok DiT
+  /** With renderDit: ALSO render each side through the dataset's latest trained
+   *  DiT adapter (2×2 matrix). Server resolves the adapter and pins every
+   *  render to its training base; 409 when nothing is trained. */
+  renderDitAdapter?: boolean;     // default false
+  renderDitAdapterName?: string;  // default: the dataset slug
 }
 
 export interface AuditionListResponse {
@@ -1070,6 +1154,33 @@ export async function startAudition(id: string, opts: AuditionOptions): Promise<
   return request<{ jobId: string }>(
     `/datasets/${encodeURIComponent(id)}/audition`,
     { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+/** One Lyric Studio generation, offered as an audition prompt. */
+export interface LsGeneration {
+  id: number;
+  title: string;
+  caption: string;
+  lyrics: string;
+  bpm: number;          // 0 = unknown
+  key: string;          // '' = unknown
+  duration: number;     // seconds, 0 = unknown
+  createdAt: string;
+}
+
+export interface LsGenerationsResponse {
+  lyricsSetId: number;  // 0 = this dataset has no linked Lyric Studio album
+  artist: string;
+  album: string;
+  generations: LsGeneration[];
+}
+
+/** Generated lyrics of the dataset's linked Lyric Studio album (persisted
+ *  link, falling back to artist/album detection which then persists). */
+export async function getLsGenerations(id: string): Promise<LsGenerationsResponse> {
+  return request<LsGenerationsResponse>(
+    `/datasets/${encodeURIComponent(id)}/ls-generations`,
   );
 }
 
@@ -1112,6 +1223,14 @@ export async function listPipelines(): Promise<PipelineSummary[]> {
 
 export async function getPipeline(id: string): Promise<PipelineSummary> {
   return request<PipelineSummary>(`/pipeline/${encodeURIComponent(id)}`);
+}
+
+export async function pausePipeline(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/pipeline/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+}
+
+export async function resumePipeline(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/pipeline/${encodeURIComponent(id)}/resume`, { method: 'POST' });
 }
 
 export async function cancelPipeline(id: string): Promise<void> {

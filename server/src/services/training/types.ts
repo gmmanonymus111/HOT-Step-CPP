@@ -18,7 +18,7 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition';
+  | 'audition' | 'lm-calibrate' | 'dit-calibrate';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -51,8 +51,42 @@ export interface TrainingDatasetSummary {
   status: 'draft' | 'labeling' | 'labeled' | 'built' | 'error';
   builtAt: string;            // ISO or ''
   datasetJsonPath: string;    // absolute path or ''
+  /** Friendly album name from the tracks' embedded tags — '' when unknown.
+   *  Cached in the row; detected by datasetAssets.ts (majority vote). */
+  albumName: string;
+  /** Lyric Studio lyrics_sets.id this dataset exported to — 0 = never linked.
+   *  Written by the export commit; lazily backfilled when the audition's
+   *  Lyric Studio prompt source resolves the album by detection. */
+  lyricsSetId?: number;
   createdAt: string;          // ISO
   updatedAt: string;          // ISO
+  /** What the dataset has on DISK beyond its row — attached by the list and
+   *  detail endpoints, absent on the bare row a PATCH echoes back. */
+  assets?: DatasetAssets;
+}
+
+/** One trained adapter directory found on disk. */
+export interface TrainingAdapterHit {
+  path: string;               // absolute adapter run dir
+  kind: 'dit' | 'lm';
+  detail: string;             // dit-<base> shorthand / LM size — display only
+  trainedAt: string;          // ISO or ''
+}
+
+/**
+ * Per-dataset pipeline progress, read fresh off disk on every request: which
+ * stages have actually left an artefact behind. Never cached — deleting a
+ * tensors folder or an adapter has to show up immediately.
+ */
+export interface DatasetAssets {
+  labeled: boolean;           // at least one caption
+  built: boolean;             // dataset.json written
+  tensorVariants: number;     // preprocessed variant dirs
+  tensorVariantKey: string;   // newest variant, '' when none
+  tensorSamples: number;      // .safetensors files in that variant
+  ditBase: string;            // base the newest variant was preprocessed against
+  lm: TrainingAdapterHit | null;
+  dit: TrainingAdapterHit | null;
 }
 
 export interface TrainingSample {
@@ -296,6 +330,10 @@ export interface LabelOptions {
   mergePolicy?: MergePolicy;
   understand?: UnderstandOverrides;
   caption?: { provider?: string; model?: string };
+  /** Answer 200 {jobId:null, skipped} instead of 400 when nothing needs
+   *  labelling. Set by the bulk pipeline, for which an already-labelled dataset
+   *  is a completed stage rather than a failure. */
+  allowEmpty?: boolean;
 }
 
 export interface GeniusOptions {
@@ -385,7 +423,7 @@ export interface TrainLmOptions {
   /** Adapter directory stem; final dir is `<adapterName>-<lmSize>`.
    *  Omit = the dataset slug. */
   adapterName?: string;
-  targetLoss?: number;             // default 0.4;  0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 16 (hard cap)
   rank?: number;                   // default 16
   alpha?: number;                  // default 32
@@ -414,11 +452,25 @@ export interface TrainLmOptions {
   seed?: number;                   // default 42
   lossOnCot?: boolean;             // default true
   order?: 'shuffle' | 'fixed';     // default 'shuffle'
-  milestoneStep?: number;          // default 0.1;  0 disables
+  milestoneStep?: number;          // default 0 (milestones off)
   milestoneKeep?: number;          // default 6
   stages?: TrainLmStage[];         // default ['extract','train','export']
   overwrite?: boolean;             // default false — re-extract every song
   stopEngine?: boolean;            // default TRUE — stop ace-server for the job
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  lm_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-12);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
+  /** Run the post-training calibration job (eval candidates x scales, pick
+   *  under guards, bake the winner, write hot_step_eval.json).
+   *  Default FALSE (2026-08-12) — only an explicit `true` runs it. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s) at the served
+   *  adapter. Default TRUE. Meaningless when calibrate is false. */
+  calibrateRepoint?: boolean;
   /** Per-layer gradient checkpointing + chunked CE. 'auto' (default) turns it on
    *  for 4B, and for smaller bases only when the naive path would have to skip
    *  full-song samples. */
@@ -528,7 +580,7 @@ export interface TrainDitOptions {
   crop?: number;                   // default 0 = auto-fit
   cropMin?: number;                // default 375
   cropMax?: number;                // default 1250
-  targetLoss?: number;             // default 0.4 (lora) / 0.6 (lokr, K2); 0 disables auto-stop
+  targetLoss?: number;             // default 0.1;  0 disables auto-stop
   epochs?: number;                 // default 400 (hard cap)
   learningRate?: number;           // default 0.0005 (lora) / 0.01 (lokr, K2)
   gradAccum?: number;              // default 4 (lora) / 20 (lokr — Side-Step's effective batch 20, which the lokr lr assumes)
@@ -550,6 +602,19 @@ export interface TrainDitOptions {
   milestoneStep?: number;          // default 0.1;  0 disables
   milestoneKeep?: number;          // default 6
   vramReserveMb?: number;          // default 2048
+  /** Resume: continue training from this exported adapter run dir
+   *  (--init-adapter). Identity hyperparams are adopted from its
+   *  dit_train_log.json by the engine; contradictions are refused.
+   *  'latest' = newest non-calibrated run of this adapter name, or a scratch
+   *  run when there is none. OMITTING THE FIELD MEANS 'latest' (2026-08-13);
+   *  send '' to force training from scratch. */
+  initAdapter?: string;            // default 'latest' = resume if there is one
+  /** Run the post-training DiT calibration job (latent-Frechet eval of
+   *  old-vs-new x scales, strict-win pick, bake, sidecar).
+   *  Default FALSE (2026-08-13) — only an explicit `true` runs it. */
+  calibrate?: boolean;
+  /** Let calibration repoint this artist's album preset(s). Default TRUE. */
+  calibrateRepoint?: boolean;
   /** Frozen-weight mirror precision. Default 'bf16' (2026-07-29) — keeps the
    *  trainable layers' matmul weights in the base's native BF16 instead of
    *  promoting them to F32, roughly halving the mirror's VRAM. Needs the
@@ -678,6 +743,12 @@ export interface AuditionSideResult {
   renderUrl?: string;       // /api/training/previews/<id>/<slot>-render
   renderMs?: number;        // wall clock of the /synth render
   renderError?: string;     // render failed; the codes sketch above is still valid
+  /** Opt-in SECOND render of the same codes through the dataset's trained DiT
+   *  adapter (renderDitAdapter) — together with renderUrl this gives the 2×2
+   *  matrix {base LM, LM adapter} × {bare DiT, DiT adapter}. */
+  renderAdapterUrl?: string;   // /api/training/previews/<id>/<slot>-render-adapter
+  renderAdapterMs?: number;    // wall clock of the adapter /synth render
+  renderAdapterError?: string; // adapter render failed; bare render/sketch still valid
   codesCount: number;       // number of 5 Hz codes the LM emitted
   codesSha1: string;        // sha1 of the raw audio_codes string — the determinism receipt
   durationSec: number;      // codesCount / 5, rounded to 0.1
@@ -708,6 +779,19 @@ export interface AuditionPreview {
   /** Set when the sides carry DiT renders — reproducibility receipt. */
   renderDitModel?: string;
   renderSteps?: number;
+  /** The resolved DiT-adapter run dir the *-render-adapter files used. */
+  renderDitAdapter?: string;
+  /** Mirrored-generation receipts (2026-08-12 parity recipe): everything
+   *  "Send to Custom-Gen" needs to reproduce this run bit-identically.
+   *  Absent on previews recorded before the feature. */
+  captionInput?: string;    // the caption BEFORE the trigger tag was applied
+  bpm?: number;             // metadata pins the LM was forced to (0/'' = LM predicted)
+  keyscale?: string;
+  timesignature?: string;   // numerator form ('4'), as pinned
+  lmTemperature?: number;
+  lmTopP?: number;
+  lmCfgScale?: number;
+  lmRepPenalty?: number;
 }
 
 export interface AuditionOptions {
@@ -721,6 +805,12 @@ export interface AuditionOptions {
   vaeModel?: string;              // default: engine's resolve_name default
   variantKey?: string;            // default: newestVariantKey(slug)
   sampleId?: string;              // when set, caption/lyrics default from its lm_codes.jsonl row
+  /** Explicit metadata pins (Lyric Studio prompt source): force_fields'd into
+   *  the CoT FSM exactly like the sample-row pins. Take precedence over the
+   *  sample row when both are present; 0/'' = not pinned. */
+  bpm?: number;
+  keyscale?: string;
+  timesignature?: string;         // '4' or '4/4' — normalized to the numerator
   temperature?: number;           // default 0.85, clamp 0.1..2
   topP?: number;                  // default 0.9,  clamp 0.05..1
   cfgScale?: number;              // default 2.0,  clamp 0..10
@@ -734,6 +824,13 @@ export interface AuditionOptions {
   renderDit?: boolean;            // default false
   renderSteps?: number;           // default 8, clamp 2..60
   renderDitModel?: string;        // default: newest installed xl-turbo, else the detok DiT
+  /** With renderDit: ALSO render each side through the dataset's latest trained
+   *  DiT adapter, giving the 2×2 {base LM, LM adapter} × {bare DiT, DiT
+   *  adapter}. The adapter is resolved server-side from the adapter layout;
+   *  409 when none is trained. Pins every render to the adapter's training
+   *  base (cross-base adapters are basin-sensitive). */
+  renderDitAdapter?: boolean;     // default false; only meaningful with renderDit
+  renderDitAdapterName?: string;  // default: the dataset slug (the trainer's default)
 }
 
 export interface AuditionListResponse {
@@ -766,12 +863,9 @@ export interface LyricStudioExportSong {
   hasCaption: boolean;
 }
 
-export interface LyricStudioAdapterHit {
-  path: string;               // absolute adapter run dir (folder-only presets)
-  kind: 'dit' | 'lm';
-  detail: string;             // dit-<base> shorthand / LM size — display only
-  trainedAt: string;          // ISO or ''
-}
+/** Legacy name for TrainingAdapterHit — same shape, kept so the Lyric Studio
+ *  export contract reads the way its consumers already expect. */
+export type LyricStudioAdapterHit = TrainingAdapterHit;
 
 export interface LyricStudioExportPreview {
   artist: string;             // detected, pre-fills the override field
@@ -809,8 +903,9 @@ export interface LyricStudioExportResult {
 //
 // Spec: docs/plans/2026-07-28-training-batch-pipeline.md §2.1
 
-export type PipelineStage = 'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm';
-export type PipelineStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type PipelineStage =
+  'label' | 'build' | 'preprocess' | 'train-dit' | 'train-lm' | 'lyric-studio';
+export type PipelineStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PipelineItemStatus = 'pending' | 'creating' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface PipelineFolderSpec {
@@ -854,6 +949,10 @@ export interface PipelineSummary {
   items: PipelineItem[];
   createdAt: number;
   finishedAt: number | null;
+  /** Pause has been requested but the in-flight stage is still finishing.
+   *  status flips to 'paused' once the runner parks at the next stage
+   *  boundary. Absent on snapshots written before pause existed. */
+  pauseRequested?: boolean;
 }
 
 export interface TrainingDefaults {

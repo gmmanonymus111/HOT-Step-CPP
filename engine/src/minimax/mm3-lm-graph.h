@@ -1,0 +1,837 @@
+#pragma once
+// minimax/mm3-lm-graph.h — MiniMax-Music3 global LM (Qwen3-8B) as an AR engine.
+//
+// HOT-Step file (does not exist upstream). Included only by minimax/mm3-ar-loop.h
+// and minimax/mm3-server.h, the latter being the single hook include into
+// tools/hot-step-server.cpp.
+//
+// SCOPE (increment 5a): the Qwen3-8B forward graph in the exact shape the MM3 AR
+// stage needs — a PERSISTENT 2-ROW CFG BATCH over one KV cache, a prefill that
+// takes token ids, a decode step that takes a SOFT INPUT EMBEDDING it builds
+// itself from the previous frame's eight RVQ codes, and both hidden-state and
+// head-logit taps on every step. The loop that drives it is mm3-ar-loop.h.
+//
+// ── Architecture ─────────────────────────────────────────────────────────────
+//
+// Stock Qwen3-8B (layout doc §3.1): 36 blocks, H=4096, 32 query heads / 8 KV
+// heads x 128, SwiGLU 12288, RMSNorm eps 1e-6, per-head q/k RMSNorm BEFORE RoPE,
+// NeoX RoPE over all 128 head dims at theta 1e6, untied 200000-row head. The only
+// non-stock thing about it is the vocabulary: ids 151675..168058 are semantic
+// audio codes and 151670 is the AR stop token.
+//
+// ── Design decisions, and why ────────────────────────────────────────────────
+//
+// A. THE 2-ROW CFG BATCH IS THE WHOLE POINT, AND IT IS FREE. AR CFG is a fixed
+//    1.5 (`mm3.ar.cfg_scale`), so every step must evaluate a conditional and an
+//    unconditional row. At one token per row a decode step is pure BANDWIDTH:
+//    17.2 GB of f16 weights get streamed whatever the batch is. Two rows through
+//    one graph therefore costs almost exactly what one row costs, and two
+//    sequential passes would cost double. This is the opposite trade from the
+//    flow DiT (mm3-dit-graph.h note B), where each pass is already 690 tokens
+//    wide and batching buys nothing — same model, different regime.
+//
+//    Batch lives in ne3 throughout: activations are [H, T, B], attention is
+//    [D, T, Nh, B] against a [D, n_kv, Nkv, B] cache. GQA falls out of ggml's
+//    mul_mat/flash_attn broadcast (query head h reads KV head h/4) and needs no
+//    repeat.
+//
+// B. ONE KV CACHE ALLOCATION, ne3 = 2. Per layer a [D, n_ctx, Nkv, 2] F16 tensor,
+//    all layers in one backend buffer, zeroed once (a padded attention window
+//    must read finite values, never uninitialised F16 bit patterns that decode to
+//    NaN). Writes go through `ggml_set_rows` with the destination row indices
+//    supplied AS DATA, so the graph topology is identical at every step and only
+//    an upload changes between frames.
+//
+//    SIZE IT FROM THE REQUEST. n_ctx = prompt + max_frames + slack, rounded to the
+//    bucket. The cache costs
+//        2 rows x 36 layers x 2 (K+V) x 8 heads x 128 dims x 2 bytes = 288 kB
+//    per position — 106 MB for a 12-second render, 2.2 GB for the 5-minute
+//    ceiling, 2.9 GB at the model's declared 10240-token context. Allocating the
+//    ceiling unconditionally would cost more VRAM than the depth decoder. The
+//    cache therefore GROWS on demand and never shrinks, so a repeat request at
+//    the same length is free.
+//
+// C. THE ATTENTION WINDOW IS BUCKETED TO 256, NOT EXACT. A graph is cached per
+//    (T, n_kv_pad); an exact window would rebuild all 36 blocks every frame. At a
+//    256 bucket a 300-frame render rebuilds twice and a 9000-frame render 36
+//    times, and the wasted attention is at most 255 masked positions — a rounding
+//    error against 8.6 B parameters of matmul. Same constant the ACE LM uses
+//    (qwen3-lm.h), for the same reason.
+//
+// D. PREFILL AND DECODE ARE THE SAME BUILDER, TWO CACHED SLOTS, TWO SCHEDULERS.
+//    They differ only in T and in how the input embedding is produced. Separate
+//    schedulers because `ggml_backend_sched_alloc_graph` owns the allocation: a
+//    second graph on a shared scheduler would invalidate the first. Same reason
+//    the depth decoder keeps seven (mm3-depth-graph.h note A).
+//
+// E. THE FEEDBACK EMBEDDING IS BUILT INSIDE THE DECODE GRAPH. The reference's
+//    `_embed_audio_frame` is
+//        (token_embd[semantic + 151675] + SUM_c audio_embd[code_c + (c-1)*1024])
+//        * num_codebooks^-0.5
+//    Both tables are already resident (token_embd in the LM file, audio_embd in
+//    the synth file — this graph reads BOTH, like the depth decoder does), so
+//    doing it in-graph replaces a 16 kB readback + 16 kB upload per frame with
+//    eight row gathers. It is still exposed as a graph OUTPUT, because
+//    `lm_i*_feedback_embed` is a parity target and an unobservable intermediate
+//    cannot be validated.
+//
+//    Note the asymmetry with the depth decoder: THERE every token is pushed
+//    through `depth.proj` first; HERE nothing is projected. Same two tables, two
+//    different consumers.
+//
+// F. THE HEAD IS APPLIED TO THE LAST POSITION ONLY, AND OVER THE FULL 200000.
+//    Restricting it to the semantic slice + EOS would be mathematically identical
+//    (everything else is masked out downstream) and 12x cheaper — but it is 1.6 GB
+//    of the 17.2 GB streamed per step, under 10 %, and computing the whole thing
+//    keeps the masking honest and the logits directly comparable to the reference
+//    dump. Revisit if the AR stage ever becomes the bottleneck it is not today.
+//
+// G. F32 ACTIVATIONS, F16 K/V. Same trade as the DiT and the ACE LM. The
+//    reference ran bf16 end to end, which has FEWER mantissa bits than F16, so
+//    this is strictly more precise than the thing it is validated against.
+//    MM3_LM_NO_FLASH=1 forces the manual soft_max path for parity debugging.
+//
+// ── Parity + cost, measured 2026-08-13 (RTX 5090, f16 GGUF, 70-token prompt) ──
+//
+// Forced replay against mm3-weights/fixtures/ (corr / rel RMSE vs the bf16 dumps):
+//
+//                          prefill      iter 0      iter 1      iter 2..4
+//   last_hidden cond      .99953/3.5e-2  (same)    .99960/2.9e-2  .99943..99964 / 2.7..3.4e-2
+//   last_hidden uncond    .99995/1.1e-2  (same)    .99995/1.1e-2  .99989..99995 / 1.0..1.6e-2
+//   semantic_logits cond        —      .99982/2.4e-2 .99980/2.1e-2 .99941..99971 / 2.3..3.5e-2
+//   semantic_logits uncond      —      .99998/9.1e-3 .99994/1.2e-2 .99989..99993 / 1.2..1.4e-2
+//   feedback_embed              —      .999996/2.8e-3 ................ 2.77e-3 every iteration
+//
+// THE FEEDBACK EMBEDDING IS THE CALIBRATION. It is one row gather plus six adds
+// plus a scale — there is no depth in which a port bug could hide — and it lands
+// at 2.78e-3, invariant across iterations. That is the CAPTURE's bf16 floor, not
+// ours, and it is confirmed independently: every value in lm_prefill_last_hidden,
+// lm_i*_feedback_embed, lm_i*_depth_hidden and lm_i*_semantic_logits is EXACTLY
+// bf16-representable (zero values with a non-zero low mantissa half). Read the
+// 1..3.5e-2 on the hidden states as that 2.8e-3 accumulated through 36 residual
+// blocks; it matches the flow DiT's independently measured 1.74e-2 dump floor at
+// the same depth.
+//
+// The `guided_logits` -inf mask differs from the dump by 1..7 positions per
+// iteration, ALWAYS in the same direction: the reference keeps 50..55 candidates
+// where we keep exactly 50. That is not a filter-rule difference. The top-k
+// threshold is compared with STRICT less-than, so exact ties survive — and the
+// reference's 50th-largest conditional logit is a coarse bf16 grid point
+// (6.40625, 9.0, 7.4375, 8.4375, 10.5625) with 2..6 exact duplicates, while our
+// F32 logits essentially never tie. The bf16 capture manufactures the ties.
+//
+// Speed: 15.3 ms per decode step (2-row batch, steady state over 1200 frames,
+// 5 attention-window rebuilds, no drift). Prefill 41 ms for 70 tokens x 2 rows
+// after the graph is cached, 140 ms including the build. That is 17.2 GB of f16
+// weights streamed in 15.3 ms = ~1.12 TB/s effective — the step is bandwidth
+// bound, as design note A assumed, which is exactly why the second CFG row is
+// nearly free.
+
+#include "mm3-model.h"
+
+#include "backend.h"
+#include "ggml.h"
+#include "hot-step-build-flags.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+// 36 blocks x ~45 nodes + embedding/head plumbing measures ~1700; loose on purpose.
+#define MM3_LM_MAX_NODES 4096
+// Attention-window quantum (design note C).
+#define MM3_LM_KV_BUCKET 256
+// The CFG batch. Fixed by the checkpoint, not a knob.
+#define MM3_LM_CFG_ROWS 2
+
+// One cached graph. Prefill and decode differ only in T and the input mode.
+struct MM3LmSlot {
+    ggml_backend_sched_t sched = nullptr;
+    ggml_context *       gctx  = nullptr;
+    uint8_t *            gbuf  = nullptr;
+    ggml_cgraph *        graph = nullptr;
+
+    // inputs
+    ggml_tensor * in_ids  = nullptr;  // prefill: I32 [T*B] (row-major: cond row then uncond row)
+                                      // decode:  I32 [num_codebooks] feedback row indices
+    ggml_tensor * in_pos  = nullptr;  // I32 [T]
+    ggml_tensor * in_rows = nullptr;  // I64 [T] KV destination rows
+    ggml_tensor * in_mask = nullptr;  // F16 [n_kv_pad, T]
+
+    // outputs
+    ggml_tensor * out_hidden   = nullptr;  // F32 [H, 1, B] last position, pre-head
+    ggml_tensor * out_logits   = nullptr;  // F32 [V, 1, B]
+    ggml_tensor * out_feedback = nullptr;  // F32 [H, 1]     decode only
+
+    // Alignment probe (MM3_ALIGN_DUMP=1): post-softmax attention weights per
+    // layer, [n_kv, T, Nh, B]. Only populated on the manual F32 path — flash
+    // attention never materialises them. Empty in normal runs.
+    std::vector<ggml_tensor *> attn_scores;
+
+    int64_t T             = 0;
+    int64_t n_kv_pad      = 0;
+    size_t  compute_bytes = 0;
+    int     n_nodes       = 0;
+};
+
+struct MM3LmGraph {
+    BackendPair    bp             = {};
+    ggml_backend_t backend        = nullptr;
+    ggml_backend_t cpu_backend    = nullptr;
+    bool           backend_ref    = false;
+    bool           use_flash_attn = false;
+    // MM3_ALIGN_DUMP=1 — capture EVERY layer's attention for lyric alignment
+    // discovery. Forces the manual F32 attention path on all 36 layers (flash
+    // fuses the softmax and never produces a score tensor to read).
+    bool           dump_attn      = false;
+    // Production alignment: capture only the layers in MM3_ALIGN_HEADS. The
+    // other 33 keep flash attention, so this costs a fraction of dump_attn.
+    bool           align_capture  = false;
+
+    // Identity of the weights this prep was derived from. BOTH buffers matter:
+    // the feedback embedding reads token_embd from the LM file and audio_embd
+    // from the synth file, so either being reloaded invalidates the graphs.
+    const void * lm_token    = nullptr;
+    const void * synth_token = nullptr;
+
+    // KV cache: one buffer, one [D, n_ctx, Nkv, B] F16 tensor per layer.
+    ggml_context *             kv_ctx = nullptr;
+    ggml_backend_buffer_t      kv_buf = nullptr;
+    std::vector<ggml_tensor *> kv_k;
+    std::vector<ggml_tensor *> kv_v;
+    int64_t                    n_ctx    = 0;
+    size_t                     kv_bytes = 0;
+    int64_t                    kv_pos   = 0;  // shared: both CFG rows advance together
+
+    MM3LmSlot prefill;
+    MM3LmSlot decode;
+
+    // host staging, reused every step
+    std::vector<int32_t>  ids_host;
+    std::vector<int32_t>  pos_host;
+    std::vector<int64_t>  rows_host;
+    std::vector<uint16_t> mask_host;
+};
+
+// ── Free ────────────────────────────────────────────────────────────────────
+
+static void mm3_lm_free_slot(MM3LmSlot * s) {
+    if (s->gctx) {
+        if (s->sched) {
+            ggml_backend_sched_reset(s->sched);
+        }
+        ggml_free(s->gctx);
+        free(s->gbuf);
+    }
+    ggml_backend_sched_t keep = s->sched;
+    *s                        = MM3LmSlot{};
+    s->sched                  = keep;
+}
+
+static void mm3_lm_free_slot_all(MM3LmSlot * s) {
+    mm3_lm_free_slot(s);
+    if (s->sched) {
+        ggml_backend_sched_free(s->sched);
+        s->sched = nullptr;
+    }
+}
+
+static void mm3_lm_free_kv(MM3LmGraph * g) {
+    if (g->kv_buf) {
+        ggml_backend_buffer_free(g->kv_buf);
+    }
+    if (g->kv_ctx) {
+        ggml_free(g->kv_ctx);
+    }
+    g->kv_buf = nullptr;
+    g->kv_ctx = nullptr;
+    g->kv_k.clear();
+    g->kv_v.clear();
+    g->n_ctx    = 0;
+    g->kv_bytes = 0;
+    g->kv_pos   = 0;
+}
+
+static void mm3_lm_free(MM3LmGraph * g) {
+    mm3_lm_free_slot_all(&g->prefill);
+    mm3_lm_free_slot_all(&g->decode);
+    mm3_lm_free_kv(g);
+    g->lm_token    = nullptr;
+    g->synth_token = nullptr;
+    if (g->backend_ref) {
+        backend_release(g->backend, g->cpu_backend);
+        g->backend     = nullptr;
+        g->cpu_backend = nullptr;
+        g->backend_ref = false;
+    }
+}
+
+// ── Graph pieces ────────────────────────────────────────────────────────────
+
+static ggml_tensor * mm3_lm_rms(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, float eps) {
+    return ggml_mul(ctx, ggml_rms_norm(ctx, x, eps), w);
+}
+
+// Manual F32 attention, for CPU / -DHOT_STEP_DISABLE_FA / MM3_LM_NO_FLASH builds.
+// q [D, T, Nh, B], k/v [D, n_kv, Nkv, B] (strided cache views) -> [D, Nh, T, B].
+static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+                                     ggml_tensor * mask, float scale, ggml_tensor ** out_scores = nullptr) {
+    ggml_tensor * scores = ggml_mul_mat(ctx, k, q);                            // [n_kv, T, Nh, B]
+    scores               = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
+    if (out_scores) {
+        *out_scores = scores;   // the lyric->frame alignment signal, pre-V
+    }
+    ggml_tensor * vt     = ggml_cont(ctx, ggml_transpose(ctx, v));             // [n_kv, D, Nkv, B]
+    ggml_tensor * out    = ggml_mul_mat(ctx, vt, scores);                      // [D, T, Nh, B]
+    return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));                 // [D, Nh, T, B]
+}
+
+// One transformer block. h [H, T, B] -> [H, T, B]. The KV writes are expanded
+// into `gf` eagerly so they are ordered before this layer's cache read (and,
+// transitively, before every later layer's) — ggml executes nodes in list order,
+// and a cache view carries no data dependency on the write that filled it.
+static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM3LmConfig & c, const MM3LmLayer & w,
+                                  ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
+                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
+                                  ggml_tensor ** out_scores = nullptr) {
+    const int64_t H   = (int64_t) c.embedding_length;
+    const int64_t D   = (int64_t) c.key_length;
+    const int64_t Nh  = (int64_t) c.head_count;
+    const int64_t Nkv = (int64_t) c.head_count_kv;
+    const int64_t T   = h->ne[1];
+    const int64_t B   = h->ne[2];
+
+    ggml_tensor * n = mm3_lm_rms(ctx, h, w.attn_norm, c.rms_eps);
+
+    ggml_tensor * q = ggml_mul_mat(ctx, w.attn_q, n);  // [Nh*D, T, B]
+    ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);  // [Nkv*D, T, B]
+    ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
+
+    q = ggml_reshape_4d(ctx, q, D, Nh, T, B);
+    k = ggml_reshape_4d(ctx, k, D, Nkv, T, B);
+    v = ggml_reshape_4d(ctx, v, D, Nkv, T, B);
+
+    // Qwen3's per-head q/k RMSNorm, over the head dim, BEFORE RoPE.
+    q = ggml_mul(ctx, ggml_rms_norm(ctx, q, c.rms_eps), w.attn_q_norm);
+    k = ggml_mul(ctx, ggml_rms_norm(ctx, k, c.rms_eps), w.attn_k_norm);
+
+    // NeoX RoPE over all head dims. Positions map to ne2 (= T) and are shared by
+    // both CFG rows in ne3 — they are the same sequence position by construction.
+    q = ggml_rope_ext(ctx, q, positions, NULL, (int) D, GGML_ROPE_TYPE_NEOX, 0, c.rope_freq_base, 1.0f, 0.0f, 1.0f,
+                      0.0f, 0.0f);
+    k = ggml_rope_ext(ctx, k, positions, NULL, (int) D, GGML_ROPE_TYPE_NEOX, 0, c.rope_freq_base, 1.0f, 0.0f, 1.0f,
+                      0.0f, 0.0f);
+
+    // Cache layout is [D, position, head, row]; the projections come out
+    // [D, head, position, row]. One permute each, then set_rows.
+    ggml_tensor * k_w = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));  // [D, T, Nkv, B]
+    ggml_tensor * v_w = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, k_w, rows));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, v_w, rows));
+
+    ggml_tensor * k_win = ggml_view_4d(ctx, kcache, D, n_kv_pad, Nkv, B, kcache->nb[1], kcache->nb[2], kcache->nb[3], 0);
+    ggml_tensor * v_win = ggml_view_4d(ctx, vcache, D, n_kv_pad, Nkv, B, vcache->nb[1], vcache->nb[2], vcache->nb[3], 0);
+
+    ggml_tensor * q4 = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [D, T, Nh, B]
+
+    const float   scale = 1.0f / sqrtf((float) D);
+    ggml_tensor * attn;
+    if (use_flash) {
+        attn = ggml_flash_attn_ext(ctx, q4, k_win, v_win, mask, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+    } else {
+        attn = mm3_lm_attn_f32(ctx, q4, k_win, v_win, mask, scale, out_scores);
+    }
+    attn = ggml_reshape_3d(ctx, attn, H, T, B);  // [D, Nh, T, B] -> [H, T, B]
+
+    h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
+
+    // SwiGLU: down(silu(gate) * up).
+    ggml_tensor * n2   = mm3_lm_rms(ctx, h, w.ffn_norm, c.rms_eps);
+    ggml_tensor * gate = ggml_silu(ctx, ggml_mul_mat(ctx, w.ffn_gate, n2));
+    ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
+    return ggml_add(ctx, h, ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up)));
+}
+
+// Build one slot. `decode` selects the input mode: false = token ids for T
+// positions per CFG row, true = a single soft feedback embedding built in-graph
+// from the previous frame's eight codes.
+static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad,
+                              bool decode, std::string * err) {
+    const MM3LmConfig & c  = m.lm_cfg;
+    const int64_t       H  = (int64_t) c.embedding_length;
+    const int64_t       B  = MM3_LM_CFG_ROWS;
+    const int64_t       NC = (int64_t) c.num_codebooks - 1;
+
+    const size_t ctx_bytes =
+        ggml_tensor_overhead() * (MM3_LM_MAX_NODES + 256) + ggml_graph_overhead_custom(MM3_LM_MAX_NODES, false);
+    s->gbuf = (uint8_t *) malloc(ctx_bytes);
+    if (!s->gbuf) {
+        if (err) {
+            *err = "out of host memory allocating the MM3 LM graph context";
+        }
+        return false;
+    }
+    ggml_init_params ip  = { ctx_bytes, s->gbuf, /*no_alloc*/ true };
+    ggml_context *   ctx = ggml_init(ip);
+    if (!ctx) {
+        free(s->gbuf);
+        s->gbuf = nullptr;
+        if (err) {
+            *err = "ggml_init failed for the MM3 LM graph context";
+        }
+        return false;
+    }
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, MM3_LM_MAX_NODES, false);
+
+    s->in_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+    ggml_set_name(s->in_pos, "mm3_lm_positions");
+    ggml_set_input(s->in_pos);
+
+    s->in_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, T);
+    ggml_set_name(s->in_rows, "mm3_lm_kv_rows");
+    ggml_set_input(s->in_rows);
+
+    s->in_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_kv_pad, T);
+    ggml_set_name(s->in_mask, "mm3_lm_mask");
+    ggml_set_input(s->in_mask);
+
+    ggml_tensor * h = nullptr;
+    if (!decode) {
+        // Prefill: [T*B] ids, cond row first. get_rows demands a 1-D index
+        // tensor (a->ne[2] == b->ne[1]), so the two rows are flattened and the
+        // result reshaped — identical memory order either way.
+        s->in_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T * B);
+        ggml_set_name(s->in_ids, "mm3_lm_token_ids");
+        ggml_set_input(s->in_ids);
+        h = ggml_get_rows(ctx, m.lm.token_embd, s->in_ids);  // [H, T*B]
+        h = ggml_reshape_3d(ctx, h, H, T, B);
+    } else {
+        // Decode: the soft feedback embedding (design note E). Row 0 of in_ids is
+        // the LM vocab id of the semantic code; rows 1..NC are FLAT row indices
+        // into depth.audio_embd (code + (i-1)*audio_vocab_size), computed by the
+        // caller because the offset arithmetic is shared with the depth decoder.
+        s->in_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, NC + 1);
+        ggml_set_name(s->in_ids, "mm3_lm_feedback_rows");
+        ggml_set_input(s->in_ids);
+
+        ggml_tensor * sem_idx = ggml_view_1d(ctx, s->in_ids, 1, 0);
+        ggml_tensor * ac_idx  = ggml_view_1d(ctx, s->in_ids, NC, ggml_type_size(GGML_TYPE_I32));
+
+        ggml_tensor * e_sem = ggml_get_rows(ctx, m.lm.token_embd, sem_idx);              // [H, 1]
+        ggml_tensor * e_ac  = ggml_get_rows(ctx, m.synth.depth.audio_embd, ac_idx);      // [H, NC]
+
+        ggml_tensor * acc = ggml_view_2d(ctx, e_ac, H, 1, e_ac->nb[1], 0);
+        for (int64_t i = 1; i < NC; i++) {
+            acc = ggml_add(ctx, acc, ggml_view_2d(ctx, e_ac, H, 1, e_ac->nb[1], (size_t) i * e_ac->nb[1]));
+        }
+        ggml_tensor * fb = ggml_scale(ctx, ggml_add(ctx, e_sem, acc), c.ar_embedding_scale);  // [H, 1]
+
+        s->out_feedback = fb;
+        ggml_set_name(s->out_feedback, "mm3_lm_feedback");
+        ggml_set_output(s->out_feedback);
+
+        // Both CFG rows are fed the SAME embedding: the sampled codes are shared
+        // (the reference `.repeat(2)`s them) and only the KV history differs.
+        h = ggml_concat(ctx, fb, fb, 2);  // [H, 1, B]
+    }
+
+    // Alignment probe: keep a handle on every layer's post-softmax attention so
+    // the AR loop can slice the lyric columns out of it. Costs nothing when off,
+    // and cannot work under flash attention (which never materialises them) —
+    // mm3_lm_prepare forces the manual path when the probe is enabled.
+    const bool any_scores = g->dump_attn || g->align_capture;
+    s->attn_scores.assign(any_scores ? m.lm.blk.size() : 0, nullptr);
+    for (size_t i = 0; i < m.lm.blk.size(); i++) {
+        ggml_tensor * sc = nullptr;
+        // Which layers must materialise their softmax. The discovery dump wants
+        // all of them; production alignment wants only the three that carry the
+        // signal, so the other 33 keep flash attention and its speed.
+        const bool want = g->dump_attn || (g->align_capture && mm3_align_layer_needed((int) i));
+        h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
+                         n_kv_pad, g->use_flash_attn && !want, want ? &sc : nullptr);
+        if (want && sc) {
+            ggml_set_name(sc, ("mm3_lm_attn_" + std::to_string(i)).c_str());
+            ggml_set_output(sc);
+            ggml_build_forward_expand(gf, sc);
+            s->attn_scores[i] = sc;
+        }
+    }
+    h = mm3_lm_rms(ctx, h, m.lm.output_norm, c.rms_eps);  // [H, T, B]
+
+    // Last position only — the head never reads anything else, and materialising
+    // [200000, T, B] for a 70-token prefill would cost 112 MB for nothing.
+    ggml_tensor * last =
+        ggml_cont(ctx, ggml_view_3d(ctx, h, H, 1, B, h->nb[1], h->nb[2], (size_t) (T - 1) * h->nb[1]));
+
+    s->out_hidden = last;
+    ggml_set_name(s->out_hidden, "mm3_lm_last_hidden");
+    ggml_set_output(s->out_hidden);
+
+    s->out_logits = ggml_mul_mat(ctx, m.lm.output, last);  // [V, 1, B]
+    ggml_set_name(s->out_logits, "mm3_lm_logits");
+    ggml_set_output(s->out_logits);
+
+    ggml_build_forward_expand(gf, s->out_hidden);
+    ggml_build_forward_expand(gf, s->out_logits);
+    if (s->out_feedback) {
+        ggml_build_forward_expand(gf, s->out_feedback);
+    }
+    s->graph = gf;
+
+    ggml_backend_sched_reset(s->sched);
+    if (!ggml_backend_sched_alloc_graph(s->sched, s->graph)) {
+        ggml_free(ctx);
+        free(s->gbuf);
+        s->gbuf  = nullptr;
+        s->graph = nullptr;
+        if (err) {
+            *err = std::string("MM3 LM graph allocation failed (out of VRAM?) for the ") +
+                   (decode ? "decode" : "prefill") + " slot at T=" + std::to_string(T) +
+                   ", kv=" + std::to_string(n_kv_pad);
+        }
+        return false;
+    }
+
+    s->gctx          = ctx;
+    s->T             = T;
+    s->n_kv_pad      = n_kv_pad;
+    s->n_nodes       = ggml_graph_n_nodes(s->graph);
+    s->compute_bytes = ggml_backend_sched_get_buffer_size(s->sched, g->backend);
+    return true;
+}
+
+// ── Prep ────────────────────────────────────────────────────────────────────
+
+static int64_t mm3_lm_bucket(int64_t n) {
+    const int64_t b = MM3_LM_KV_BUCKET;
+    return ((n + b - 1) / b) * b;
+}
+
+// Acquire the backend and make sure the KV cache covers `n_ctx_needed` positions.
+// Grows only; a shrink would throw away a valid allocation for nothing.
+static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_needed, std::string * err) {
+    // Residency is staged (mm3-model.h): check the parts this graph actually
+    // reads, not the all-three `loaded` flag. During stage 2 the LM is gone by
+    // design and `loaded` is false, so the old check would have refused a
+    // perfectly valid model.
+    if (!m.lm_resident || !m.depth_resident) {
+        if (err) {
+            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
+        }
+        return false;
+    }
+    const MM3LmConfig & c = m.lm_cfg;
+    if (c.block_count == 0 || c.embedding_length == 0 || c.head_count == 0 || c.key_length == 0) {
+        if (err) {
+            *err = "LM config is empty — qwen3.* KVs missing from the LM GGUF";
+        }
+        return false;
+    }
+    if (!m.lm.token_embd || !m.lm.output || !m.lm.output_norm) {
+        if (err) {
+            *err = "the LM weights are not resident";
+        }
+        return false;
+    }
+    if (!m.synth.depth.audio_embd) {
+        if (err) {
+            *err = "depth.audio_embd is not resident; the AR feedback embedding needs it";
+        }
+        return false;
+    }
+
+    const void * lt = (const void *) m.wctx_lm.buffer;
+    // The only non-LM weight this graph touches is depth.audio_embd (the AR
+    // feedback embedding), which lives in the DEPTH buffer — so that is the
+    // buffer whose identity must invalidate the cached graph.
+    const void * st = (const void *) m.wctx_depth.buffer;
+    if (g->lm_token != lt || g->synth_token != st) {
+        mm3_lm_free(g);
+    }
+
+    if (!g->backend_ref) {
+        BackendPair bp = backend_init("MM3-LM");
+        g->bp          = bp;
+        g->backend     = bp.backend;
+        g->cpu_backend = bp.cpu_backend;
+        g->backend_ref = true;
+        // MM3_LM_NO_FLASH=1 forces the manual F32 soft_max path — a parity-debug
+        // escape hatch, not a production knob.
+        const char * no_fa = std::getenv("MM3_LM_NO_FLASH");
+        const char * dump  = std::getenv("MM3_ALIGN_DUMP");
+        g->dump_attn       = dump && dump[0] && dump[0] != '0';
+        // Alignment capture forces the manual path on EVERY layer, not just the
+        // three whose scores are read.
+        //
+        // That is not the obvious choice and it was not the first one: capturing
+        // only layers 12/19/24 and leaving the other 33 on flash costs far less
+        // (9.8 vs 11.2 ms/step) and produces the right audio — but it produces
+        // WRONG alignment. Measured on the same seed, selective capture stamped
+        // the four lyric lines at 0.9/3.6/7.5/10.3 s where the vocal actually
+        // sits at 0.1/10.2/15.1/19.4; all-manual gives 2.2/9.9/16.5/19.5. The
+        // captured layers' attention evidently depends on whether the layers
+        // FEEDING them ran flash or manual, by more than the numerical noise
+        // that difference is supposed to be. Until that is understood, the mixed
+        // graph is not a safe optimisation — a silently mistimed LRC is worse
+        // than a slower one.
+        g->use_flash_attn  = bp.has_gpu && !HOT_STEP_FA_DISABLED && !g->dump_attn && !g->align_capture &&
+                             !(no_fa && no_fa[0] && no_fa[0] != '0');
+        if (g->dump_attn) {
+            fprintf(stderr, "[MM3-Align] Attention DUMP on — manual F32 attention for all %d layers "
+                            "(discovery only, slow)\n", (int) m.lm.blk.size());
+        }
+        g->lm_token        = lt;
+        g->synth_token     = st;
+    }
+
+    const int64_t want = mm3_lm_bucket(n_ctx_needed);
+    if (g->n_ctx >= want) {
+        return true;
+    }
+
+    // A bigger cache means new tensors, so every graph that views them dies too.
+    mm3_lm_free_slot(&g->prefill);
+    mm3_lm_free_slot(&g->decode);
+    mm3_lm_free_kv(g);
+
+    const int64_t D   = (int64_t) c.key_length;
+    const int64_t Nkv = (int64_t) c.head_count_kv;
+    const int     L   = (int) c.block_count;
+
+    ggml_init_params ip = { (size_t) (L * 2) * ggml_tensor_overhead() + 1024, NULL, /*no_alloc*/ true };
+    g->kv_ctx           = ggml_init(ip);
+    if (!g->kv_ctx) {
+        if (err) {
+            *err = "ggml_init failed for the MM3 LM KV cache context";
+        }
+        return false;
+    }
+    g->kv_k.assign((size_t) L, nullptr);
+    g->kv_v.assign((size_t) L, nullptr);
+    for (int i = 0; i < L; i++) {
+        char nm[64];
+        g->kv_k[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F16, D, want, Nkv, MM3_LM_CFG_ROWS);
+        snprintf(nm, sizeof(nm), "mm3.lm.kv_k.%d", i);
+        ggml_set_name(g->kv_k[(size_t) i], nm);
+        g->kv_v[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F16, D, want, Nkv, MM3_LM_CFG_ROWS);
+        snprintf(nm, sizeof(nm), "mm3.lm.kv_v.%d", i);
+        ggml_set_name(g->kv_v[(size_t) i], nm);
+    }
+    g->kv_buf = ggml_backend_alloc_ctx_tensors(g->kv_ctx, g->backend);
+    if (!g->kv_buf) {
+        ggml_free(g->kv_ctx);
+        g->kv_ctx = nullptr;
+        g->kv_k.clear();
+        g->kv_v.clear();
+        if (err) {
+            *err = "backend buffer allocation failed for the MM3 LM KV cache (" +
+                   std::to_string((long long) want) + " positions, out of VRAM?)";
+        }
+        return false;
+    }
+    // The attention window is padded past kv_pos; the masked tail must read
+    // finite values, never uninitialised F16 bit patterns that decode to NaN.
+    ggml_backend_buffer_clear(g->kv_buf, 0);
+
+    g->n_ctx    = want;
+    g->kv_bytes = ggml_backend_buffer_get_size(g->kv_buf);
+    g->kv_pos   = 0;
+
+    fprintf(stderr, "[MM3-LM] KV cache: %lld positions x %d layers x 2 rows = %.2f GB (%.0f kB/position), flash=%s\n",
+            (long long) want, L, (double) g->kv_bytes / (1024.0 * 1024.0 * 1024.0),
+            (double) g->kv_bytes / (double) want / 1024.0, g->use_flash_attn ? "yes" : "no");
+    return true;
+}
+
+static void mm3_lm_reset(MM3LmGraph * g) {
+    g->kv_pos = 0;
+}
+
+// ── Step plumbing ───────────────────────────────────────────────────────────
+
+// Fill positions / KV rows / causal mask for a step of T tokens starting at
+// kv_pos, and upload them. The mask covers the whole padded window on every path:
+// row i (absolute position kv_pos+i) attends columns 0..kv_pos+i and nothing else.
+static void mm3_lm_upload_step(MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad) {
+    g->pos_host.resize((size_t) T);
+    g->rows_host.resize((size_t) T);
+    g->mask_host.resize((size_t) (n_kv_pad * T));
+    for (int64_t i = 0; i < T; i++) {
+        const int64_t abs      = g->kv_pos + i;
+        g->pos_host[(size_t) i]  = (int32_t) abs;
+        g->rows_host[(size_t) i] = abs;
+        for (int64_t j = 0; j < n_kv_pad; j++) {
+            g->mask_host[(size_t) (i * n_kv_pad + j)] = ggml_fp32_to_fp16(j <= abs ? 0.0f : -INFINITY);
+        }
+    }
+    ggml_backend_tensor_set(s->in_pos, g->pos_host.data(), 0, (size_t) T * sizeof(int32_t));
+    ggml_backend_tensor_set(s->in_rows, g->rows_host.data(), 0, (size_t) T * sizeof(int64_t));
+    ggml_backend_tensor_set(s->in_mask, g->mask_host.data(), 0, (size_t) (n_kv_pad * T) * sizeof(uint16_t));
+}
+
+static void mm3_lm_read_outputs(const MM3LmConfig & c, const MM3LmSlot & s, float * out_hidden, float * out_logits,
+                                float * out_feedback) {
+    const size_t H = (size_t) c.embedding_length;
+    const size_t V = (size_t) c.vocab_size;
+    if (out_hidden) {
+        ggml_backend_tensor_get(s.out_hidden, out_hidden, 0, H * MM3_LM_CFG_ROWS * sizeof(float));
+    }
+    if (out_logits) {
+        ggml_backend_tensor_get(s.out_logits, out_logits, 0, V * MM3_LM_CFG_ROWS * sizeof(float));
+    }
+    if (out_feedback && s.out_feedback) {
+        ggml_backend_tensor_get(s.out_feedback, out_feedback, 0, H * sizeof(float));
+    }
+}
+
+// Copy one layer's post-softmax attention for the CONDITIONAL CFG row (row 0)
+// into `dst`, restricted to KV columns [col0, col1). Decode graphs have T = 1,
+// so the result is [Nh, n_cols]: for each head, its distribution over those
+// prompt positions at this frame. That is exactly the per-frame column of a
+// lyric-token x frame alignment matrix.
+//
+// Returns false when the probe is off or the layer has no score tensor.
+static bool mm3_lm_read_attn_slice(const MM3LmConfig & c, const MM3LmSlot & s, size_t layer,
+                                   int64_t col0, int64_t col1, std::vector<float> & dst) {
+    if (layer >= s.attn_scores.size() || !s.attn_scores[layer]) {
+        return false;
+    }
+    ggml_tensor * sc = s.attn_scores[layer];      // [n_kv, T, Nh, B]
+    const int64_t n_kv = sc->ne[0];
+    const int64_t T    = sc->ne[1];
+    const int64_t Nh   = sc->ne[2];
+    if (col0 < 0 || col1 > n_kv || col1 <= col0) {
+        return false;
+    }
+    const int64_t n_cols = col1 - col0;
+    dst.assign((size_t) (Nh * n_cols), 0.0f);
+
+    // Row 0 of the CFG batch is the conditional one — the only row whose context
+    // contains the lyrics. ne3 is the batch axis.
+    std::vector<float> row((size_t) n_kv);
+    for (int64_t hh = 0; hh < Nh; hh++) {
+        const size_t off = (size_t) ((T - 1) * sc->nb[1] + hh * sc->nb[2] + 0 * sc->nb[3]);
+        ggml_backend_tensor_get(sc, row.data(), off, (size_t) n_kv * sizeof(float));
+        for (int64_t j = 0; j < n_cols; j++) {
+            dst[(size_t) (hh * n_cols + j)] = row[(size_t) (col0 + j)];
+        }
+    }
+    (void) c;
+    return true;
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+// Prefill both CFG rows of the prompt in one pass and return the last position's
+// hidden state and head logits.
+//
+//   ids_cond / ids_uncond   n_prompt token ids each; row 0 is conditional
+//   out_hidden              [2, H] F32, row 0 conditional
+//   out_logits              [2, V] F32, row 0 conditional
+//
+// Resets the KV cache: a prefill always starts a new sequence.
+static bool mm3_lm_prefill(const MM3Model & m, MM3LmGraph * g, const int32_t * ids_cond, const int32_t * ids_uncond,
+                           int64_t n_prompt, float * out_hidden, float * out_logits, std::string * err) {
+    const MM3LmConfig & c = m.lm_cfg;
+    if (n_prompt <= 0) {
+        if (err) {
+            *err = "the prompt is empty";
+        }
+        return false;
+    }
+    if (n_prompt > g->n_ctx) {
+        if (err) {
+            *err = "prompt of " + std::to_string((long long) n_prompt) + " tokens exceeds the KV cache (" +
+                   std::to_string((long long) g->n_ctx) + ")";
+        }
+        return false;
+    }
+
+    const int64_t n_kv_pad = std::min<int64_t>(mm3_lm_bucket(n_prompt), g->n_ctx);
+    if (!g->prefill.graph || g->prefill.T != n_prompt || g->prefill.n_kv_pad != n_kv_pad) {
+        mm3_lm_free_slot(&g->prefill);
+        if (!g->prefill.sched) {
+            g->prefill.sched = backend_sched_new(g->bp, MM3_LM_MAX_NODES * 2);
+        }
+        if (!mm3_lm_build_slot(m, g, &g->prefill, n_prompt, n_kv_pad, /*decode*/ false, err)) {
+            return false;
+        }
+        fprintf(stderr, "[MM3-LM] Prefill graph: T=%lld kv=%lld, %d nodes, %.1f MB compute\n", (long long) n_prompt,
+                (long long) n_kv_pad, g->prefill.n_nodes, (double) g->prefill.compute_bytes / (1024.0 * 1024.0));
+    }
+
+    g->kv_pos = 0;
+
+    g->ids_host.resize((size_t) (n_prompt * MM3_LM_CFG_ROWS));
+    memcpy(g->ids_host.data(), ids_cond, (size_t) n_prompt * sizeof(int32_t));
+    memcpy(g->ids_host.data() + n_prompt, ids_uncond, (size_t) n_prompt * sizeof(int32_t));
+    ggml_backend_tensor_set(g->prefill.in_ids, g->ids_host.data(), 0,
+                            (size_t) (n_prompt * MM3_LM_CFG_ROWS) * sizeof(int32_t));
+    mm3_lm_upload_step(g, &g->prefill, n_prompt, n_kv_pad);
+
+    if (ggml_backend_sched_graph_compute(g->prefill.sched, g->prefill.graph) != GGML_STATUS_SUCCESS) {
+        if (err) {
+            *err = "MM3 LM prefill graph compute failed";
+        }
+        return false;
+    }
+    mm3_lm_read_outputs(c, g->prefill, out_hidden, out_logits, nullptr);
+    g->kv_pos = n_prompt;
+    return true;
+}
+
+// One decode step. Builds the soft feedback embedding from the previous frame's
+// codes in-graph, advances both CFG rows by one position, and returns the new
+// last hidden state, head logits, and (for parity) the feedback embedding itself.
+//
+//   sem_token_id   LM vocab id of the frame's semantic code (code + offset)
+//   acoustic_rows  [num_codebooks-1] FLAT depth.audio_embd row indices
+//   out_feedback   [H] F32, may be null
+static bool mm3_lm_decode(const MM3Model & m, MM3LmGraph * g, int32_t sem_token_id, const int32_t * acoustic_rows,
+                          float * out_hidden, float * out_logits, float * out_feedback, std::string * err) {
+    const MM3LmConfig & c  = m.lm_cfg;
+    const int64_t       NC = (int64_t) c.num_codebooks - 1;
+
+    if (g->kv_pos + 1 > g->n_ctx) {
+        if (err) {
+            *err = "the KV cache is full at " + std::to_string((long long) g->n_ctx) + " positions";
+        }
+        return false;
+    }
+
+    const int64_t n_kv_pad = std::min<int64_t>(mm3_lm_bucket(g->kv_pos + 1), g->n_ctx);
+    if (!g->decode.graph || g->decode.n_kv_pad != n_kv_pad) {
+        mm3_lm_free_slot(&g->decode);
+        if (!g->decode.sched) {
+            g->decode.sched = backend_sched_new(g->bp, MM3_LM_MAX_NODES * 2);
+        }
+        if (!mm3_lm_build_slot(m, g, &g->decode, 1, n_kv_pad, /*decode*/ true, err)) {
+            return false;
+        }
+        fprintf(stderr, "[MM3-LM] Decode graph: kv=%lld, %d nodes, %.1f MB compute\n", (long long) n_kv_pad,
+                g->decode.n_nodes, (double) g->decode.compute_bytes / (1024.0 * 1024.0));
+    }
+
+    g->ids_host.resize((size_t) (NC + 1));
+    g->ids_host[0] = sem_token_id;
+    memcpy(g->ids_host.data() + 1, acoustic_rows, (size_t) NC * sizeof(int32_t));
+    ggml_backend_tensor_set(g->decode.in_ids, g->ids_host.data(), 0, (size_t) (NC + 1) * sizeof(int32_t));
+    mm3_lm_upload_step(g, &g->decode, 1, n_kv_pad);
+
+    if (ggml_backend_sched_graph_compute(g->decode.sched, g->decode.graph) != GGML_STATUS_SUCCESS) {
+        if (err) {
+            *err = "MM3 LM decode graph compute failed";
+        }
+        return false;
+    }
+    mm3_lm_read_outputs(c, g->decode, out_hidden, out_logits, out_feedback);
+    g->kv_pos++;
+    return true;
+}

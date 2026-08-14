@@ -8,6 +8,7 @@
 //
 // docs/plans/2026-07-27-preprocess-implementation.md §3.2
 
+#include "hot-step-fsutf8.h"  // hs_fopen/hs_rename/hs_remove — UTF-8 paths
 #include "yyjson.h"
 
 #include <cstdint>
@@ -57,25 +58,25 @@ static bool stw_replace_file(const char * tmp, const char * path) {
     std::string aside;
     bool        have_aside = false;
 
-    FILE * probe = fopen(path, "rb");
+    FILE * probe = hs_fopen(path, "rb");
     if (probe) {
         fclose(probe);
         aside = std::string(path) + ".__old__";
-        remove(aside.c_str());
-        have_aside = (rename(path, aside.c_str()) == 0);
+        hs_remove(aside);
+        have_aside = (hs_rename(path, aside) == 0);
         if (!have_aside) {
-            remove(path);  // could not move it aside; fall back to plain replace
+            hs_remove(path);  // could not move it aside; fall back to plain replace
         }
     }
 
-    if (rename(tmp, path) != 0) {
+    if (hs_rename(tmp, path) != 0) {
         if (have_aside) {
-            rename(aside.c_str(), path);  // put the good file back
+            hs_rename(aside, path);  // put the good file back
         }
         return false;
     }
     if (have_aside) {
-        remove(aside.c_str());
+        hs_remove(aside);
     }
     return true;
 }
@@ -149,7 +150,7 @@ static bool st_write_file(const char *                                          
 
     // 4. Write to a temp file, then rename.
     std::string tmp = std::string(path) + ".__writing__";
-    FILE *      f   = fopen(tmp.c_str(), "wb");
+    FILE *      f   = hs_fopen(tmp, "wb");
     if (!f) {
         fprintf(stderr, "[STWrite] cannot open %s for writing\n", tmp.c_str());
         return false;
@@ -199,14 +200,14 @@ static bool st_write_file(const char *                                          
     fclose(f);
 
     if (!ok) {
-        remove(tmp.c_str());
+        hs_remove(tmp);
         fprintf(stderr, "[STWrite] write failed for %s\n", path);
         return false;
     }
 
     if (!stw_replace_file(tmp.c_str(), path)) {
         fprintf(stderr, "[STWrite] rename %s -> %s failed (previous file left intact)\n", tmp.c_str(), path);
-        remove(tmp.c_str());
+        hs_remove(tmp);
         return false;
     }
     return true;

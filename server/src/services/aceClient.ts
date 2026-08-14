@@ -59,6 +59,14 @@ export interface AceRequest {
   /** Windowed repetition penalty on audio-code sampling (1.0 = off) */
   lm_rep_penalty?: number;
   lm_rep_window?: number;
+  /** How lm_rep_penalty is applied. 'presence' (default) penalises every
+   *  distinct code in the window once; 'frequency' scales by occurrence count;
+   *  'dry' penalises only codes that would extend a verbatim recent cycle. */
+  lm_rep_mode?: 'presence' | 'frequency' | 'dry';
+  /** 'dry' only: exponential growth per matched code beyond lm_dry_min_len */
+  lm_dry_base?: number;
+  /** 'dry' only: matched codes required before any penalty applies */
+  lm_dry_min_len?: number;
   lm_top_k?: number;
   lm_negative_prompt?: string;
   negative_prompt?: string;
@@ -67,6 +75,10 @@ export interface AceRequest {
   inference_steps?: number;
   guidance_scale?: number;
   shift?: number;
+  /** Self-attention sliding-window override for the DiT's 16 windowed layers,
+   *  in tokens (tokens run at 12.5 Hz). -1/undefined = the model's own value
+   *  (128 = ±10.2 s), 0 = no window at all (full attention on all 32 layers). */
+  dit_sliding_window?: number;
   audio_cover_strength?: number;
   cover_noise_strength?: number;
   cover_noise_method?: string;

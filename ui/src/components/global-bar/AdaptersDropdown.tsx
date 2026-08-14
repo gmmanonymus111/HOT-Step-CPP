@@ -61,7 +61,7 @@ export const AdaptersDropdown: React.FC = () => {
   // the Node route so freshly trained adapters appear WITHOUT an engine
   // restart — selection sends the absolute path, which the engine's
   // path-fallback resolver loads directly.
-  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number; lmSize?: string; run?: string }[]>([]);
+  const [lmAdapters, setLmAdapters] = useState<{ name: string; path: string; kind: string; size: number; lmSize?: string; run?: string; evalScore?: number | null; evalVerdict?: string }[]>([]);
   const refreshLmAdapters = useCallback(() => {
     adapterApi.lmList(gp.lmAdapterFolder || undefined).then(r => setLmAdapters(r?.adapters || [])).catch(() => {});
   }, [gp.lmAdapterFolder]);
@@ -481,6 +481,20 @@ export const AdaptersDropdown: React.FC = () => {
                       {a.run.slice(0, 10)}
                     </span>
                   )}
+                  {/* Artist-match eval score (hot_step_eval.json) — LOWER =
+                      closer to the artist. Green when the verdict was 'toward'. */}
+                  {typeof a.evalScore === 'number' && (
+                    <span
+                      className={`flex-shrink-0 font-mono ${
+                        a.evalVerdict === 'toward' ? 'text-emerald-500'
+                          : a.evalVerdict === 'away' ? 'text-red-400' : 'text-zinc-500'
+                      }`}
+                      style={{ fontSize: '9px' }}
+                      title={`Artist-match score (lower = closer) — verdict: ${a.evalVerdict || 'n/a'}`}
+                    >
+                      {a.evalScore.toFixed(3)}
+                    </span>
+                  )}
                   {a.lmSize && (
                     <span className="text-violet-400/70 flex-shrink-0 font-mono" style={{ fontSize: '10px' }}>
                       {a.lmSize}
@@ -529,6 +543,32 @@ export const AdaptersDropdown: React.FC = () => {
             <Slider label="Adapter Scale" value={gp.adapterScale}
               onChange={gp.setAdapterScale} min={0} max={4} step={0.05} showInput />
           )}
+
+          {/* No-adapter reference render — optional 3rd output per generation */}
+          <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{t('adapter.noAdapterRender', 'No-adapter reference')}</span>
+                {gp.noAdapterRender && <span className="w-1.5 h-1.5 rounded-full bg-purple-400" title="Reference render active" />}
+              </div>
+              <p className="text-[10px] text-zinc-600 mt-0.5">
+                {t('adapter.noAdapterRenderHint', 'Adds a raw 20-step render with the DiT adapter bypassed (LM adapter kept, no post-processing) — hear the song without the adapter via the playbar switch.')}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={gp.noAdapterRender}
+              onClick={() => gp.setNoAdapterRender(!gp.noAdapterRender)}
+              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                gp.noAdapterRender ? 'bg-purple-600' : 'bg-zinc-300 dark:bg-zinc-700'
+              }`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                gp.noAdapterRender ? 'translate-x-4' : ''
+              }`} />
+            </button>
+          </div>
 
           {/* Loading Mode */}
           <div>

@@ -65,6 +65,12 @@ struct LmExportMeta {
     double                      target_stop_loss  = 0.0;
     double                      final_loss = -1.0, best_loss = -1.0;
     int                         best_epoch = 0, epochs_run = 0;
+    // Which epoch's adapter this file actually holds (2026-07-30). The export
+    // is best-only now, so final_loss is not what shipped. saved_reason is
+    // "target" (the epoch that tripped the auto-stop) or "best".
+    double                      saved_loss = -1.0;
+    int                         saved_epoch = 0;
+    std::string                 saved_reason;
 
     size_t    vram_free_mb = 0, vram_total_mb = 0, vram_mirror_mb = 0, vram_est_mb = 0, vram_peak_mb = 0;
     long long total_ms = 0;
@@ -102,6 +108,12 @@ struct LmExportMeta {
     int         muon_ns_steps = 0;
     int         muon_params   = 0;   // parameters actually on Muon
     int         muon_buckets  = 0;
+
+    // Resume provenance (--init-adapter, 2026-08-09). Additive; readers
+    // default to "trained from scratch". init_from_loss is the SOURCE run's
+    // saved_loss — the loss this run's factors started from.
+    std::string init_adapter;
+    double      init_from_loss = -1.0;
 };
 
 // ─── adapter_config.json (frozen literal, §2.4) ─────────────────────────────
@@ -200,6 +212,10 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     }
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger", m.trigger.c_str());
     yyjson_mut_obj_add_strcpy(doc, cfg, "trigger_position", m.trigger_position.c_str());
+    if (!m.init_adapter.empty()) {
+        yyjson_mut_obj_add_strcpy(doc, cfg, "init_adapter", m.init_adapter.c_str());
+        yyjson_mut_obj_add_real(doc, cfg, "init_from_loss", m.init_from_loss);
+    }
 
     yyjson_mut_val * eps = yyjson_mut_obj_add_arr(doc, root, "epochs");
     for (size_t i = 0; i < m.epoch_log.size(); i++) {
@@ -221,6 +237,10 @@ static bool lm_write_train_log(const std::string & dir, const LmExportMeta & m) 
     yyjson_mut_obj_add_real(doc, root, "final_loss", m.final_loss);
     yyjson_mut_obj_add_real(doc, root, "best_loss", m.best_loss);
     yyjson_mut_obj_add_int(doc, root, "best_epoch", m.best_epoch);
+    yyjson_mut_obj_add_real(doc, root, "saved_loss", m.saved_loss);
+    yyjson_mut_obj_add_int(doc, root, "saved_epoch", m.saved_epoch);
+    yyjson_mut_obj_add_strcpy(doc, root, "saved_reason",
+                              m.saved_reason.empty() ? "best" : m.saved_reason.c_str());
     yyjson_mut_obj_add_int(doc, root, "epochs_run", m.epochs_run);
 
     yyjson_mut_val * ms = yyjson_mut_obj_add_arr(doc, root, "milestones");

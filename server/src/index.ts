@@ -48,6 +48,7 @@ import profilesRoutes from './routes/profiles.js';
 import songBuilderRoutes from './routes/songBuilder.js';
 import midiStudioRoutes from './routes/midiStudio.js';
 import trainingRoutes from './routes/training.js';
+import backendsRoutes from './routes/backends.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -86,6 +87,10 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/shutdown', shutdownRoutes);
+// Mounted at '/api' (not '/api/backends') — the router spells its own full
+// sub-paths (/backends, /backends/active, /capabilities) per the plan's
+// top-level /api/capabilities path (docs/plans/multi-backend-architecture.md §4.2).
+app.use('/api', backendsRoutes);
 
 // Protected API routes (require auth)
 app.use('/api/songs', requireAuth, songRoutes);
@@ -166,6 +171,7 @@ if (fs.existsSync(uiDistPath)) {
 // deliberate stop/restart) lives in services/aceEngineProcess.ts so that the
 // training preprocess job can borrow the GPU. §4.1 of the preprocess plan.
 import { setEngineReady } from './engineState.js';
+import { restoreMm3Selection } from './services/backends/minimax/index.js';
 import { aceClient } from './services/aceClient.js';
 import { startAceServer, stopAceServer } from './services/aceEngineProcess.js';
 import { killActiveChildren } from './services/training/labelingQueue.js';
@@ -333,6 +339,15 @@ async function ensureRequiredRuntime(): Promise<{ ok: boolean; missing: string[]
   setEngineReady(false, cudaReady ? 'Starting engine...' : 'Starting engine (CPU only — CUDA runtime missing)...');
   startAceServer();
   setEngineReady(true, cudaReady ? 'Ready' : 'Ready (CPU only — GPU runtime missing)');
+
+  // MiniMax-Music3 holds its chosen quant in engine memory, so a restart
+  // reverts to the best-first default (f16) and silently discards the user's
+  // pick. Put the persisted choice back before the first generation can run.
+  // Fire-and-forget: a failed restore leaves the engine on its default, which
+  // still generates — it must never block request serving.
+  void restoreMm3Selection().catch(err => {
+    console.warn('[Server] MM3 model restore failed:', err?.message || err);
+  });
 
   // Fire-and-forget warm-on-startup: once the engine /health is up, POST /warm
   // with the configured DiT + VAE + adapter so the first user /synth skips the

@@ -75,6 +75,21 @@ struct AdapterSection {
     float              size = 1.0f;
 };
 
+// One concept steering vector requested for this generation (CAA / TADA).
+// `path` is the resolved concept GGUF; `target` selects which network is hooked
+// ("dit" = cross-attn output, "lm" = decoder layer output). `layers` optionally
+// restricts steering to a subset; empty = every layer in the file.
+//
+// Deliberately ggml-free so hot-step-params.h stays light enough for
+// model-store.h and the server (mirrors the adapter-cancel.h split).
+struct HotStepConcept {
+    std::string      path;
+    std::string      name;
+    std::string      target = "dit";
+    float            alpha  = 1.0f;
+    std::vector<int> layers;
+};
+
 // Classify a GGUF tensor name into its adapter group.
 // Returns "self_attn", "cross_attn", "mlp", "cond_embed", "time_embed",
 // "proj_in", or "" for truly unclassified.
@@ -118,6 +133,19 @@ struct HotStepParams {
     std::string scheduler     = "";       // empty = use upstream default (shifted linear)
     std::string guidance_mode = "apg";
     float       shift         = -1.0f;    // -1 = use upstream value (auto or from request)
+
+    // Self-attention sliding-window override for the DiT's layer_type=0 layers
+    // (16 of 32; the others are full attention). Window is in TOKENS, and tokens
+    // run at 12.5 Hz — 25 Hz latents / patch_size 2 — so the stock 128 is a
+    // bidirectional +/-10.2 s. Anything further back is invisible to half the
+    // network's depth, which is the suspected cause of repeated choruses drifting.
+    //   -1 = model's own value (default; bit-identical to pre-override behaviour)
+    //    0 = no window: every layer full attention
+    //   >0 = custom window in tokens
+    // Free to widen: the window is a dense S*S mask fed to flash_attn_ext, not a
+    // sparse kernel, so the O(S^2) cost is paid either way. Widening is OOD
+    // though — these layers were trained windowed.
+    int dit_sliding_window = -1;
 
     // APG tuning
     float apg_momentum       = 0.75f;
@@ -235,6 +263,19 @@ struct HotStepParams {
     int vae_chunk_override = 0;   // >0: VAE tile size (smaller = less VAE peak)
     int batch_cfg_override = -1;  // 0: split CFG into 2 forwards (half DiT mem,
                                   //    ~2x DiT time); 1: batch; -1: default
+
+    // Concept activation steering (CAA / TADA arXiv 2602.11910). Purely a
+    // per-request sideband: steering vectors are NOT weights, so unlike every
+    // adapter field these must NOT enter the ModelKey — alpha changes cost no
+    // reload. See concept-steer.h and docs/plans/caa-activation-steering.md.
+    std::vector<HotStepConcept> concepts;
+
+    bool has_concepts(const char * target) const {
+        for (const auto & c : concepts) {
+            if (c.target == target) return true;
+        }
+        return false;
+    }
 };
 
 // Single-worker-thread global. Set in hot-step-server.cpp before

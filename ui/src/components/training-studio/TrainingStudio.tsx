@@ -43,6 +43,20 @@ export const TrainingStudio: React.FC = () => {
           <div>
             <h1 className="text-xl font-bold text-zinc-900 dark:text-white">{t('trainingStudio.title')}</h1>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t('trainingStudio.subtitle')}</p>
+            {/* Side-Step is a deeper training suite than this one and the LoKR /
+                LoRA formats are interchangeable — worth pointing users at. */}
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-500 mt-1.5">
+              {t('trainingStudio.sideStepNote')}{' '}
+              <a
+                href="https://github.com/koda-dernet/Side-Step"
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-amber-600 dark:text-amber-500 hover:underline"
+              >
+                Side-Step
+              </a>{' '}
+              {t('trainingStudio.sideStepNoteTail')}
+            </p>
           </div>
         </div>
 

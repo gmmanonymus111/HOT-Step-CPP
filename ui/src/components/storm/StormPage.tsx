@@ -8,6 +8,7 @@ import { usePersistedState } from '../../hooks/usePersistedState';
 import { useStreamAudio } from '../../hooks/useStreamAudio';
 import { StormLiveControls, type LyricsMode, type SlotMeta } from './StormLiveControls';
 import { expandWildcards, hasWildcards } from '../../utils/wildcardUtils';
+import { BackendCapabilityGate } from '../shared/BackendCapabilityGate';
 import type { GenerationParams } from '../../types';
 
 // ── Camelot wheel ─────────────────────────────────────────────────────────────
@@ -538,6 +539,7 @@ export const StormPage: React.FC<StormPageProps> = ({ onGenerate, activeJobCount
   );
 
   return (
+    <BackendCapabilityGate feature="streaming">
     <div className="h-full flex flex-col bg-zinc-950 overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 shrink-0">
@@ -1072,5 +1074,6 @@ export const StormPage: React.FC<StormPageProps> = ({ onGenerate, activeJobCount
         </div>
       )}
     </div>
+    </BackendCapabilityGate>
   );
 };

@@ -92,6 +92,34 @@ export function cleanArtistForSearch(artist: string): string {
   return artist.replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, '').trim();
 }
 
+/** Words that mark a parenthetical as an EDITION, not part of the song title. */
+const EDITION_WORDS =
+  /\b(?:re-?master(?:ed)?|remix(?:es|ed)?|mono|stereo|deluxe|bonus|reissue|expanded|anniversary|edition|version|mix|edit|live|acoustic|demo|instrumental|unplugged|session|produced\s+by|feat\.?|ft\.?|featuring|explicit|clean|radio|single|take\s+\d+|\d{4})\b/i;
+
+/**
+ * Drop edition/version parentheticals from a title before it is SEARCHED.
+ *
+ * cleanTitleForSearch only ever removed feat-clauses, so a tag like
+ * "Rio (2009 Remaster)" went into the Genius query verbatim — and the query
+ * `Rio (2009 Remaster) Duran Duran` returns five unrelated user playlists, with
+ * the actual song nowhere in the candidate set. No amount of match-side
+ * normalisation can recover that; the search itself has to be clean. This one
+ * pattern accounted for whole albums: duranduran_rio, madness_wonderful,
+ * panicatthedisco_fever, snoopdogg_randg ("(Produced By The Neptunes)"),
+ * joydivision_bestof ("(12\" Single Version)") — verified 2026-08-05.
+ *
+ * Keyword-gated on purpose: a blanket parenthetical strip would maim titles
+ * where the brackets are the name — "That's The Way (I Like It)",
+ * "(Don't Fear) The Reaper", "Let It Go (Part One)".
+ */
+export function stripEditionSuffixes(title: string): string {
+  return title
+    .replace(/[([][^)\]]*[)\]]/g, m => (EDITION_WORDS.test(m) ? ' ' : m))
+    .replace(/\s+/g, ' ')
+    .replace(/[\s\-–—]+$/, '')
+    .trim();
+}
+
 /**
  * Fetch lyrics from Genius for one sample.
  * `null` means "no confident match" — the caller logs a warning and moves on.
@@ -100,8 +128,17 @@ export function cleanArtistForSearch(artist: string): string {
  * "Electric Callboy & BABYMETAL" is the primary artist of RATATATA):
  *   1. exact match, artist/title as resolved (tags first)
  *   2. exact match, feat-clauses stripped from both
- *   3. relaxed match (artist containment + title agreement), cleaned strings
+ *   3. exact match, edition/version parentheticals also dropped
+ *   4. relaxed match (artist containment + title agreement), barest title
+ *
+ * Steps run widest-query-first so an exact tag match is still preferred; the
+ * stripped forms are only tried once the verbatim tag has failed.
+ *
+ * Throws `GeniusNoArtistError` when there is nothing to search WITH, so the
+ * caller can tell "Genius has no lyrics for this" apart from "we never asked".
  */
+export class GeniusNoArtistError extends Error {}
+
 export async function enhanceGenius(
   sample: TrainingSample,
   ds: TrainingDatasetRow,
@@ -109,17 +146,31 @@ export async function enhanceGenius(
 ): Promise<{ lyrics: string; source: 'genius'; searched: string } | null> {
   const { artist, title } = resolveArtistTitle(sample, ds, opts);
   const searched = `${artist} — ${title}`;
-  if (!artist || !title) return null;
+  if (!artist || !title) {
+    // pod_satellite lost all 12 tracks here silently: no embedded tags, and
+    // "01. Set It Off.mp3" parses to an empty artist, so Genius was never even
+    // called. Surfacing it tells the user to set the dataset's default artist
+    // instead of leaving a blank-lyrics album that looks like a Genius miss.
+    throw new GeniusNoArtistError(
+      !artist
+        ? 'no artist — set the dataset default artist, or tag the files'
+        : 'no title — tag the files',
+    );
+  }
 
   const cleanArtist = cleanArtistForSearch(artist) || artist;
   const cleanTitle = cleanTitleForSearch(title) || title;
+  const bareTitle = stripEditionSuffixes(cleanTitle) || cleanTitle;
 
   let hit = await searchSongLyrics(artist, title);
   if (!hit && (cleanArtist !== artist || cleanTitle !== title)) {
     hit = await searchSongLyrics(cleanArtist, cleanTitle);
   }
+  if (!hit && bareTitle !== cleanTitle) {
+    hit = await searchSongLyrics(cleanArtist, bareTitle);
+  }
   if (!hit) {
-    hit = await searchSongLyrics(cleanArtist, cleanTitle, { relaxed: true });
+    hit = await searchSongLyrics(cleanArtist, bareTitle, { relaxed: true });
   }
   if (!hit || !hit.lyrics?.trim()) return null;
 

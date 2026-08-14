@@ -5,6 +5,12 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Slider } from '../shared/Slider';
 import { VOCAL_LANGUAGES } from '../../constants/languages';
+import { useCapabilities } from '../../hooks/useCapabilities';
+
+/** UI-side ceiling, unchanged from before capability gating existed. Used
+ *  whenever the active backend's manifest hasn't defined a duration max yet
+ *  (undefined/loading) so the slider never grows or shrinks unexpectedly. */
+const DEFAULT_DURATION_MAX = 240;
 
 const KEY_SIGNATURES = [
   '', 'C major', 'C minor', 'C# major', 'C# minor',
@@ -39,6 +45,12 @@ export const MetadataSection: React.FC<MetadataSectionProps> = ({
   vocalLanguage, onVocalLanguageChange,
 }) => {
   const { t } = useTranslation();
+  const { capabilities } = useCapabilities();
+  // Clamp to the active backend's manifest when it defines one (§4.2/§4.5) —
+  // never a hardcoded ACE-only ceiling. capabilities?.core.duration.max is
+  // undefined while loading, so DEFAULT_DURATION_MAX (the prior hardcoded
+  // value) covers that gap.
+  const durationMax = capabilities?.core.duration.max ?? DEFAULT_DURATION_MAX;
   return (
     <div className="space-y-3 pt-3 border-t border-zinc-200 dark:border-white/5">
       <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">{t('metadataSection.musicParameters')}</h4>
@@ -54,7 +66,7 @@ export const MetadataSection: React.FC<MetadataSectionProps> = ({
         {/* Duration */}
         <div>
           <Slider label={t('metadataSection.duration')} value={duration} onChange={onDurationChange}
-            min={-1} max={240} step={1} suffix="s" showInput />
+            min={-1} max={durationMax} step={1} suffix="s" showInput />
           {duration <= 0 && <span className="text-[10px] text-zinc-600">{t('metadataSection.auto')}</span>}
         </div>
 

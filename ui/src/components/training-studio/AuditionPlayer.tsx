@@ -8,9 +8,10 @@
 // forgotten at a call site. It is never collapsible and never a tooltip.
 
 import React from 'react';
-import { AlertTriangle, Music4, XCircle } from 'lucide-react';
+import { AlertTriangle, Music4, SendHorizonal, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { AuditionSideResult } from '../../services/trainingApi';
+import type { AuditionPreview, AuditionSideResult } from '../../services/trainingApi';
+import { sendAuditionToCustomGen, type AuditionRenderCell } from './sendAuditionToCustomGen';
 
 interface AuditionPlayerProps {
   side: AuditionSideResult;
@@ -18,14 +19,31 @@ interface AuditionPlayerProps {
   /** True when the OTHER side of this A/B reported the same codesSha1. The
    *  single most likely silent failure of the whole feature (§6.4). */
   identicalCodes?: boolean;
+  /** The preview this side belongs to. When present (the A/B card), each
+   *  render row gets a "Send to Custom-Gen" button that replays this exact
+   *  run on the Create page via the mirrored-settings recipe. The
+   *  SampleDrawer's stored-codes preview passes nothing — there is no LM run
+   *  to replay. */
+  preview?: AuditionPreview;
 }
 
 const CHIP = 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full border tabular-nums';
 
 export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
-  side, hintPosition = 'above', identicalCodes = false,
+  side, hintPosition = 'above', identicalCodes = false, preview,
 }) => {
   const { t } = useTranslation();
+
+  const sendButton = (cell: AuditionRenderCell) => preview && (
+    <button
+      onClick={() => sendAuditionToCustomGen(preview, side, cell)}
+      title={t('trainingStudio.audition.sendToCustomGenHint')}
+      className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold normal-case tracking-normal text-zinc-500 hover:text-amber-500 hover:bg-amber-500/10 transition-colors flex-shrink-0"
+    >
+      <SendHorizonal size={11} />
+      {t('trainingStudio.audition.sendToCustomGen')}
+    </button>
+  );
 
   const accent = side.slot === 'adapter'
     ? 'text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/25'
@@ -82,13 +100,14 @@ export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
               stays for the structural view. */}
           {side.renderUrl && (
             <div className="flex flex-col gap-1">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+              <span className="flex items-center text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
                 {t('trainingStudio.audition.renderedLabel')}
                 {!!side.renderMs && (
                   <span className="ml-2 normal-case font-normal text-zinc-500 tabular-nums">
                     {t('trainingStudio.audition.renderMs', { ms: Math.round(side.renderMs) })}
                   </span>
                 )}
+                {sendButton('bare')}
               </span>
               <audio src={side.renderUrl} controls preload="none" className="w-full h-9" />
             </div>
@@ -98,6 +117,32 @@ export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
               <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
               <span className="min-w-0 break-words">
                 {t('trainingStudio.audition.renderFailed', { error: side.renderError })}
+              </span>
+            </div>
+          )}
+
+          {/* DiT-adapter render — the same codes through the dataset's trained
+              sound adapter. With the bare render above this side shows both
+              halves of its row in the 2×2 matrix. */}
+          {side.renderAdapterUrl && (
+            <div className="flex flex-col gap-1">
+              <span className="flex items-center text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                {t('trainingStudio.audition.renderedAdapterLabel')}
+                {!!side.renderAdapterMs && (
+                  <span className="ml-2 normal-case font-normal text-zinc-500 tabular-nums">
+                    {t('trainingStudio.audition.renderMs', { ms: Math.round(side.renderAdapterMs) })}
+                  </span>
+                )}
+                {sendButton('adapter')}
+              </span>
+              <audio src={side.renderAdapterUrl} controls preload="none" className="w-full h-9" />
+            </div>
+          )}
+          {side.renderAdapterError && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] text-amber-600 dark:text-amber-400">
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+              <span className="min-w-0 break-words">
+                {t('trainingStudio.audition.renderAdapterFailed', { error: side.renderAdapterError })}
               </span>
             </div>
           )}
@@ -154,6 +199,9 @@ export const AuditionPlayer: React.FC<AuditionPlayerProps> = ({
                 {side.codesSha1.slice(0, 8)}
               </span>
             )}
+            {/* No render on this preview → the send lives here instead; the
+                Create page then produces the render this audition skipped. */}
+            {!side.renderUrl && !side.renderAdapterUrl && sendButton('bare')}
           </div>
 
           {hasPlan && (

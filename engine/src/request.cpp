@@ -35,6 +35,9 @@ void request_init(AceRequest * r) {
     r->lm_top_k             = 0;
     r->lm_rep_penalty       = 1.0f;
     r->lm_rep_window        = 64;
+    r->lm_rep_mode          = "presence";
+    r->lm_dry_base          = 1.75f;
+    r->lm_dry_min_len       = 3;
     r->lm_negative_prompt   = "";
     r->lm_seed              = -1;
     r->use_cot_caption      = true;
@@ -42,6 +45,7 @@ void request_init(AceRequest * r) {
     r->inference_steps      = 0;     // 0 = auto (turbo: 8, base/sft: 50)
     r->guidance_scale       = 0.0f;  // 0 = auto (1.0 for all models)
     r->shift                = 0.0f;  // 0 = auto (turbo: 3.0, base/sft: 1.0)
+    r->dit_sliding_window   = -1;    // -1 = use the model's own sliding_window
     r->dcw_scaler           = 0.0f;
     r->dcw_high_scaler      = 0.0f;
     r->dcw_mode             = DCW_MODE_LOW;
@@ -252,11 +256,23 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     if ((v = yyjson_obj_get(obj, "lm_rep_window")) && yyjson_is_num(v)) {
         r->lm_rep_window = (int) yyjson_get_num(v);
     }
+    if ((v = yyjson_obj_get(obj, "lm_rep_mode")) && yyjson_is_str(v)) {
+        r->lm_rep_mode = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_dry_base")) && yyjson_is_num(v)) {
+        r->lm_dry_base = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_dry_min_len")) && yyjson_is_num(v)) {
+        r->lm_dry_min_len = (int) yyjson_get_num(v);
+    }
     if ((v = yyjson_obj_get(obj, "guidance_scale")) && yyjson_is_num(v)) {
         r->guidance_scale = (float) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "shift")) && yyjson_is_num(v)) {
         r->shift = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "dit_sliding_window")) && yyjson_is_num(v)) {
+        r->dit_sliding_window = (int) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "dcw_scaler")) && yyjson_is_num(v)) {
         r->dcw_scaler = (float) yyjson_get_num(v);
@@ -517,6 +533,15 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->lm_rep_window != def.lm_rep_window) {
         yyjson_mut_obj_add_int(doc, root, "lm_rep_window", r->lm_rep_window);
     }
+    if (all || r->lm_rep_mode != def.lm_rep_mode) {
+        yyjson_mut_obj_add_str(doc, root, "lm_rep_mode", r->lm_rep_mode.c_str());
+    }
+    if (all || r->lm_dry_base != def.lm_dry_base) {
+        yyjson_mut_obj_add_real(doc, root, "lm_dry_base", r->lm_dry_base);
+    }
+    if (all || r->lm_dry_min_len != def.lm_dry_min_len) {
+        yyjson_mut_obj_add_int(doc, root, "lm_dry_min_len", r->lm_dry_min_len);
+    }
     if (all || r->lm_top_p != def.lm_top_p) {
         yyjson_mut_obj_add_real(doc, root, "lm_top_p", r->lm_top_p);
     }
@@ -545,6 +570,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->shift != def.shift) {
         yyjson_mut_obj_add_real(doc, root, "shift", r->shift);
+    }
+    if (all || r->dit_sliding_window != def.dit_sliding_window) {
+        yyjson_mut_obj_add_int(doc, root, "dit_sliding_window", r->dit_sliding_window);
     }
     if (all || r->dcw_scaler != def.dcw_scaler) {
         yyjson_mut_obj_add_real(doc, root, "dcw_scaler", r->dcw_scaler);
@@ -700,10 +728,15 @@ bool request_write(const AceRequest * r, const char * path) {
     }
 
     yyjson_mut_doc * doc = request_build_doc(r, true);
-    size_t           len;
+    size_t           len  = 0;
     char *           json = yyjson_mut_write(doc, WRITE_FLAGS | YYJSON_WRITE_NEWLINE_AT_END, &len);
     yyjson_mut_doc_free(doc);
 
+    if (!json) {  // same invalid-UTF-8 failure request_to_json guards against
+        fprintf(stderr, "[Request] ERROR: cannot serialize request for %s (invalid UTF-8?)\n", path);
+        fclose(f);
+        return false;
+    }
     fwrite(json, 1, len, f);
     free(json);
     fclose(f);
@@ -712,11 +745,69 @@ bool request_write(const AceRequest * r, const char * path) {
     return true;
 }
 
+// Replace invalid UTF-8 byte sequences with U+FFFD so yyjson can serialize
+// the string. LM-sampled text can legitimately contain broken sequences — a
+// BPE tokenizer truncated mid-multibyte-character emits partial bytes — and
+// with use_cot_caption the LM rewrites `caption`, giving raw model output a
+// path into the serialized fields (found live 2026-08-11: an adapter+CoT
+// generation made yyjson_mut_write return NULL, the old code built a
+// std::string from that NULL, and the engine shipped "[]" while logging
+// "1 results" — the server then 400'd on an empty caption).
+static std::string sanitize_utf8(const std::string & in) {
+    std::string out;
+    out.reserve(in.size());
+    size_t i = 0;
+    const size_t  n = in.size();
+    const auto cont = [&](size_t k) { return i + k < n && ((unsigned char) in[i + k] & 0xC0) == 0x80; };
+    while (i < n) {
+        const unsigned char c = (unsigned char) in[i];
+        size_t take = 0;
+        if (c < 0x80) {
+            take = 1;
+        } else if ((c & 0xE0) == 0xC0 && c >= 0xC2 && cont(1)) {
+            take = 2;
+        } else if ((c & 0xF0) == 0xE0 && cont(1) && cont(2)) {
+            take = 3;
+        } else if ((c & 0xF8) == 0xF0 && c <= 0xF4 && cont(1) && cont(2) && cont(3)) {
+            take = 4;
+        }
+        if (take == 0) {
+            out += "\xEF\xBF\xBD";  // U+FFFD replacement character
+            i += 1;
+        } else {
+            out.append(in, i, take);
+            i += take;
+        }
+    }
+    return out;
+}
+
 std::string request_to_json(const AceRequest * r, bool sparse) {
     yyjson_mut_doc * doc = request_build_doc(r, sparse);
-    size_t           len;
+    size_t           len  = 0;
     char *           json = yyjson_mut_write(doc, WRITE_FLAGS, &len);
     yyjson_mut_doc_free(doc);
+
+    if (!json) {
+        // Serialization refused — almost always invalid UTF-8 in an
+        // LM-generated field. Sanitize the text fields the LM can write and
+        // retry ONCE; a result the client can parse with a few replacement
+        // characters beats an empty body that fails the whole generation.
+        fprintf(stderr, "[Request] request_to_json: yyjson_mut_write returned NULL — sanitizing text fields\n");
+        AceRequest fixed  = *r;
+        fixed.caption     = sanitize_utf8(fixed.caption);
+        fixed.lyrics      = sanitize_utf8(fixed.lyrics);
+        fixed.keyscale    = sanitize_utf8(fixed.keyscale);
+        fixed.timesignature = sanitize_utf8(fixed.timesignature);
+        fixed.vocal_language = sanitize_utf8(fixed.vocal_language);
+        yyjson_mut_doc * doc2 = request_build_doc(&fixed, sparse);
+        json                  = yyjson_mut_write(doc2, WRITE_FLAGS, &len);
+        yyjson_mut_doc_free(doc2);
+        if (!json) {
+            fprintf(stderr, "[Request] request_to_json: still unserializable after sanitize — returning {}\n");
+            return "{}";
+        }
+    }
 
     std::string result(json, len);
     free(json);

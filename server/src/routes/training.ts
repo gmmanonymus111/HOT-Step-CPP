@@ -21,6 +21,8 @@
 //   GET    /pipeline                                    — active + recent pipelines
 //   GET    /pipeline/:id                                — one pipeline
 //   DELETE /pipeline/:id                                — cancel a pipeline
+//   POST   /pipeline/:id/pause                          — hold at the next stage boundary
+//   POST   /pipeline/:id/resume                         — continue a paused OR ended/cancelled pipeline
 //   GET    /defaults                                    — stored per-stage defaults
 //   PUT    /defaults                                    — set per-stage defaults
 //   GET    /jobs                                        — active + finished jobs
@@ -67,10 +69,12 @@ import {
 } from '../services/training/datasetScan.js';
 import { isInside, trainingBaseDir } from '../services/training/paths.js';
 import { deleteLabel, deleteLabels, patchLabel, readLabel } from '../services/training/labelStore.js';
+import { listDatasetsWithAssets } from '../services/training/datasetAssets.js';
 import { createDatasetFromFolder, DatasetCreateError } from '../services/training/datasetCreate.js';
 import { detailFor, syncCounters } from '../services/training/datasetDetail.js';
 import {
-  cancelPipeline, getPipeline, hasActivePipeline, listPipelines, PIPELINE_STAGES, startPipeline,
+  cancelPipeline, getPipeline, hasActivePipeline, listPipelines, pausePipeline, PIPELINE_STAGES,
+  resumePipeline, startPipeline,
 } from '../services/training/pipelineRunner.js';
 import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
@@ -92,6 +96,10 @@ import {
   adapterDitRoot, ditRunDirFor, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
 import { hasWeights, lmAdapterRoots } from '../services/training/adapterLayout.js';
+import { adoptExistingDatasetJson } from '../services/training/datasetBuilder.js';
+import {
+  getActiveModels, resolveTrainingDit, setActiveModels,
+} from '../services/training/activeModels.js';
 import {
   deleteDatasetPreviews, isPreviewFileKey, isPreviewId, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
@@ -100,6 +108,7 @@ import { AuditionError, decodeStoredCodes } from '../services/training/auditionS
 import {
   commitLyricStudioExport, LyricStudioExportError, previewLyricStudioExport,
 } from '../services/training/lyricStudioExport.js';
+import { getGenerations, getLyricsSet } from '../db/lireekDb.js';
 import type {
   AuditionListResponse, AuditionOptions, AuditionSideSpec,
   BulkSetInput, CaptionOptions, CreateDatasetInput, FieldSource, GeniusOptions, LabelOptions, LmSize,
@@ -292,9 +301,12 @@ router.get('/scan-preview', (req: Request, res: Response) => {
 
 // ── Dataset list / create (§2.3) ─────────────────────────────────────────
 
-router.get('/datasets', (_req: Request, res: Response) => {
+router.get('/datasets', async (_req: Request, res: Response) => {
   try {
-    res.json({ datasets: repo.listDatasets() });
+    // Every row carries what it has ON DISK (built / tensors / LM / DiT adapter)
+    // plus its detected album name, so the list and the batch wizard can show
+    // pipeline progress without opening each dataset — datasetAssets.ts.
+    res.json({ datasets: await listDatasetsWithAssets() });
   } catch (err: any) {
     console.error(`[Training] List datasets failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -528,6 +540,49 @@ router.delete('/pipeline/:id', (req: Request, res: Response) => {
   }
 });
 
+// Pause/resume are boundary holds, not kills — the in-flight stage always
+// finishes first (pipelineRunner.ts). Both are idempotent on an active
+// pipeline; a finished/cancelled one answers 409.
+router.post('/pipeline/:id/pause', (req: Request, res: Response) => {
+  try {
+    const result = pausePipeline(req.params.id as string);
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    if (result === 'not_active') {
+      res.status(409).json({ error: 'Pipeline is not running' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline pause failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Resume also revives ended/cancelled/restart-recovered pipelines: the runner
+// rebuilds its loop from the persisted record, keeps everything already done,
+// and re-runs the rest (failures retry). 409 only when another pipeline is
+// already active.
+router.post('/pipeline/:id/resume', (req: Request, res: Response) => {
+  try {
+    const result = resumePipeline(req.params.id as string);
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'Pipeline not found' });
+      return;
+    }
+    if (result === 'busy') {
+      res.status(409).json({ error: 'A pipeline is already running' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error(`[Training] Pipeline resume failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Stage defaults (batch-pipeline §2.2) ─────────────────────────────────
 //
 // No deep validation on PUT: a section is an opaque bag of the stage route's
@@ -542,6 +597,32 @@ router.get('/defaults', (_req: Request, res: Response) => {
     res.json(getTrainingDefaults());
   } catch (err: any) {
     console.error(`[Training] Defaults read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Server-side mirror of the Models tab selection.
+ *
+ * The UI owns this state in localStorage; training needs it on the server,
+ * because a bulk run has no UI in the loop and the engine (which knows its own
+ * loaded DiT) is deliberately stopped while a training job runs.
+ */
+router.get('/active-models', (_req: Request, res: Response) => {
+  res.json(getActiveModels());
+});
+
+router.put('/active-models', (req: Request, res: Response) => {
+  try {
+    const body = (req.body || {}) as Record<string, unknown>;
+    res.json(setActiveModels({
+      ditModel: typeof body.ditModel === 'string' ? body.ditModel : undefined,
+      lmModel: typeof body.lmModel === 'string' ? body.lmModel : undefined,
+      vaeModel: typeof body.vaeModel === 'string' ? body.vaeModel : undefined,
+      textEncoder: typeof body.textEncoder === 'string' ? body.textEncoder : undefined,
+    }));
+  } catch (err: any) {
+    console.error(`[Training] Active-models write failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -923,17 +1004,34 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
     const useEssentia = body.useEssentia !== false;
     // 2026-07-27 pivot: understand is LEGACY and opt-in; the default flow is
     // Essentia + Genius + LLM caption, all engine-free.
+    //
+    // Genius and caption DEFAULT ON (2026-07-30), matching LabelPanel, which has
+    // shipped with all three boxes ticked. They were `=== true` — default OFF —
+    // so the batch pipeline, which POSTs only the stored per-stage defaults
+    // (`{}` in practice), silently ran Essentia-only and produced datasets with
+    // no lyrics and no captions. Same class of bug as the train-dit adapterType
+    // and train-lm lmSize divergences: the form's numbers and this handler's
+    // numbers are two different sets reached by two different callers.
     const useUnderstand = body.useUnderstand === true;
-    const useGenius = body.useGenius === true;
-    const useCaption = body.useCaption === true;
-    if (!useEssentia && !useUnderstand && !useGenius && !useCaption) {
-      res.status(400).json({ error: 'No labeling steps enabled' });
-      return;
-    }
+    let useGenius = body.useGenius !== false;
+    let useCaption = body.useCaption !== false;
+
+    // Capability handling has to distinguish ASKED-FOR from DEFAULTED-ON, now
+    // that these default on. An explicit `useGenius: true` with no token is a
+    // request the server cannot honour and must refuse. A default-on step with
+    // no token is just a machine that does not have that capability — skip it,
+    // exactly as LabelPanel does by disabling the checkbox (effectiveGenius =
+    // useGenius && geniusOk). Otherwise every keyless install would 503 on a
+    // plain label call that never mentioned Genius.
+    const geniusAsked  = body.useGenius === true;
+    const captionAsked = body.useCaption === true;
 
     if (useGenius && !config.lireek.geniusAccessToken) {
-      res.status(503).json({ error: 'GENIUS_ACCESS_TOKEN is not set' });
-      return;
+      if (geniusAsked) {
+        res.status(503).json({ error: 'GENIUS_ACCESS_TOKEN is not set' });
+        return;
+      }
+      useGenius = false;
     }
     if (useCaption) {
       const providerName = body.caption?.provider || config.lireek.defaultProvider;
@@ -941,15 +1039,31 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       try {
         provider = getProvider(providerName);
       } catch (err: any) {
-        res.status(400).json({ error: err.message });
-        return;
+        if (captionAsked) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        provider = null;
       }
-      if (!provider.isAvailable()) {
-        res.status(503).json({
-          error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
-        });
-        return;
+      if (provider && !provider.isAvailable()) {
+        if (captionAsked) {
+          res.status(503).json({
+            error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
+          });
+          return;
+        }
+        provider = null;
       }
+      if (!provider) {
+        useCaption = false;
+      }
+    }
+
+    // Checked AFTER the capability downgrades above, or a keyless machine would
+    // pass this test on steps that are about to be switched off.
+    if (!useEssentia && !useUnderstand && !useGenius && !useCaption) {
+      res.status(400).json({ error: 'No labeling steps enabled' });
+      return;
     }
 
     if (useUnderstand) {
@@ -977,6 +1091,16 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
     const scope = body.scope === 'all' ? 'all' : 'unlabeled';
     const targets = pickTargets(samples, body.sampleIds, scope);
     if (targets.length === 0) {
+      // A dataset that is ALREADY fully labelled is not an error — it is the
+      // desired end state. Answering 400 made the bulk pipeline treat it as a
+      // stage failure and abandon the whole item, so a folder that arrived with
+      // sidecars already written got no preprocess, no LM train and no DiT
+      // train (2026-07-31). `allowEmpty` lets a caller that can act on "nothing
+      // to do" say so; the UI keeps the 400, where it is a useful toast.
+      if (body.allowEmpty === true) {
+        res.status(200).json({ jobId: null, skipped: 'nothing-to-label' });
+        return;
+      }
       res.status(400).json({ error: 'Nothing to label' });
       return;
     }
@@ -1153,7 +1277,7 @@ router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => 
       return;
     }
     const samples = await buildSamples(ds, { warnings: [] });
-    res.json(previewLyricStudioExport(ds, samples));
+    res.json(await previewLyricStudioExport(ds, samples));
   } catch (err: any) {
     if (err instanceof ScanLimitError) {
       res.status(400).json({ error: err.message });
@@ -1200,7 +1324,7 @@ function numOpt(value: unknown, fallback: number): number {
 
 router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1211,6 +1335,10 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     }
     // The Build step is what produces dataset.json — and with it the stable
     // sample ids the tensor cache filenames are keyed on.
+    // A folder that already carries a dataset.json is built — the DB just may
+    // never have been told (a fresh row for a previously-built folder, or a run
+    // that skipped the Build stage). Believe the file before refusing.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Preprocess' });
       return;
@@ -1243,7 +1371,16 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     // even though the engine is reachable — probe once instead of rejecting.
     let snap = getModelSnapshot();
     if (!snap.cachedAt && !isEngineSuspended()) snap = await refreshModelSnapshot();
-    const dit = (typeof body.ditModel === 'string' ? body.ditModel.trim() : '') || pickBf16(snap.dit);
+    // The DiT chosen HERE is the one the adapter ends up bound to: train-dit
+    // reads --dit back out of preprocess_meta.json. Falling back to
+    // pickBf16(snap.dit) — the first BF16 in the catalogue, i.e. the stock base
+    // — is what made an 18-dataset overnight bulk run train against the base
+    // instead of the user's fine-tune (2026-07-31). Prefer what they actually
+    // have selected in the Models tab, mirrored server-side by
+    // PUT /api/training/active-models, and fall back to the old behaviour only
+    // when nothing is recorded.
+    const dit = (typeof body.ditModel === 'string' ? body.ditModel.trim() : '')
+      || resolveTrainingDit(getActiveModels().ditModel, snap.dit, pickBf16(snap.dit));
     if (!dit) {
       res.status(400).json({ error: 'No DiT base model available' });
       return;
@@ -1260,8 +1397,18 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     const maxDuration = numOpt(body.maxDuration, 240);
     const vaeChunk = numOpt(body.vaeChunk, 384);
     const vaeOverlap = numOpt(body.vaeOverlap, 48);
-    const maxCaptionTokens = numOpt(body.maxCaptionTokens, 256);
-    const maxLyricTokens = numOpt(body.maxLyricTokens, 512);
+    // 512 / 2048, raised from Side-Step's 256 / 512 on 2026-07-30. Measured on
+    // 7 datasets: ALL 83 captions exceeded 256 (median ~352) and ~half the
+    // lyrics exceeded 512 (max ~1685), so every adapter trained so far never saw
+    // the tail of any caption. E4 pads encoder states to a dataset-wide enc_S,
+    // so the cap is a SAFETY VALVE, not a cost driver — enc_S is set by the
+    // longest actual song, not by this number. Ceiling is
+    // DIT_REPEAT_BACK_MAX/n_kv_heads/B = 4096; worst case here is
+    // 2048 + 1 + 512 = 2561. ace-train's own defaults stay 256/512 for
+    // reference parity. Full record + rollback:
+    // docs/plans/2026-07-30-conditioning-token-caps.md
+    const maxCaptionTokens = numOpt(body.maxCaptionTokens, 512);
+    const maxLyricTokens = numOpt(body.maxLyricTokens, 2048);
     const targetDb = numOpt(body.targetDb, -1.0);
 
     if (maxDuration < 0) {
@@ -1389,7 +1536,7 @@ function outOfRange(name: string, n: number, min: number, max: number): string |
 
 router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1402,6 +1549,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
       return;
     }
+    // Same adoption as preprocess: an existing dataset.json IS the build.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
       return;
@@ -1430,8 +1579,20 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // path (per-layer checkpointing + chunked CE). An unaffordable 4B request
     // is now refused by ace-train's own VRAM solve with real numbers, not by a
     // blanket 400 here.
+    // DEFAULT IS 4B, matching TRAIN_LM_DEFAULTS (2026-07-30). It was '0.6B' —
+    // the safe-for-any-GPU seed — while the form seeded 4B, and those are two
+    // different sets of numbers reached by two different callers. The batch
+    // pipeline POSTs only the STORED per-stage defaults (`{}` unless someone
+    // has PUT /defaults, and no UI does), so every field it omits falls through
+    // to this handler. A batch run was therefore silently training 0.6B
+    // adapters while the identical manual run trained 4B — the one field where
+    // the two disagreed.
+    //
+    // An unaffordable 4B is refused by ace-train's own VRAM solve with real
+    // numbers, so a small card now gets a loud, specific failure instead of a
+    // quietly wrong-sized adapter. That is the better of the two failure modes.
     const lmSize: LmSize =
-      body.lmSize === '1.7B' ? '1.7B' : body.lmSize === '4B' ? '4B' : '0.6B';
+      body.lmSize === '1.7B' ? '1.7B' : body.lmSize === '0.6B' ? '0.6B' : '4B';
 
     // ── models ───────────────────────────────────────────────────────────
     // Same never-probed race fix as preprocess: a fresh boot would otherwise
@@ -1480,12 +1641,19 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── numeric clamps (§4.5 step 8) ─────────────────────────────────────
-    const epochs = numOpt(body.epochs, 75);
-    const targetLoss = numOpt(body.targetLoss, 4.0);
+    const epochs = numOpt(body.epochs, 150);
+    // 0.1 (Rob, 2026-08-12) — was 0.2 earlier the same day, 2.0 before that.
+    // Tracks TRAIN_LM_DEFAULTS.targetLoss: the batch pipeline POSTs the STORED
+    // per-stage defaults (`{}` in practice), so this fallback IS the number a
+    // bulk run trains to, and it has to be the one the form shows.
+    const targetLoss = numOpt(body.targetLoss, 0.1);
     const rank = numOpt(body.rank, 16);
-    // LoKr (2026-07-30). Default 'lora' — the shipped path — so an omitted
-    // field can never move an existing caller onto a different parameterization.
-    const lmIsLokr = body.adapterType === 'lokr';
+    // LoKr is the DEFAULT (Rob, 2026-07-30) — an omitted adapterType now means
+    // LoKr, so a caller that wants the old LoRA path must say so explicitly.
+    // NOTE the sense: `!== 'lora'`, not `=== 'lokr'`. The batch pipeline stores
+    // partial option bags, and an absent field there has to land on the default
+    // a user would have seen in the form, not on the other branch.
+    const lmIsLokr = body.adapterType !== 'lora';
     const lmMuonLrScale = numOpt(body.muonLrScale, 20.0);
     const lmMuonNsSteps = numOpt(body.muonNsSteps, 5);
     if (body.optimizer !== undefined && body.optimizer !== 'adamw' && body.optimizer !== 'muon') {
@@ -1500,8 +1668,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'muonNsSteps must be between 1 and 20' });
       return;
     }
-    const lmLokrDim = numOpt(body.lokrDim, 512);
-    const lmLokrAlpha = numOpt(body.lokrAlpha, 512);
+    const lmLokrDim = numOpt(body.lokrDim, 128);
+    const lmLokrAlpha = numOpt(body.lokrAlpha, 128);
     const lmLokrFactor = numOpt(body.lokrFactor, 6);
     if (body.adapterType !== undefined && body.adapterType !== 'lora' && body.adapterType !== 'lokr') {
       res.status(400).json({ error: 'adapterType must be lora or lokr' });
@@ -1523,7 +1691,12 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     const weightDecay = numOpt(body.weightDecay, 0.01);
     const maxLen = numOpt(body.maxLen, 0);
     const seed = numOpt(body.seed, 42);
-    const milestoneStep = numOpt(body.milestoneStep, 1);
+    // 0 = milestones OFF by default (Rob, 2026-08-12). History: the default was
+    // 0.1 from 2026-08-09 (a 0 fallback had silently disabled snapshots for the
+    // whole 2026-08 LoKr corpus, back when nobody wanted that); now off is the
+    // intended default for both the form and pipeline/batch runs. Callers that
+    // want milestone snapshots must send milestoneStep explicitly.
+    const milestoneStep = numOpt(body.milestoneStep, 0);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
 
     const rangeFailure =
@@ -1573,13 +1746,19 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     }
 
     // ── speed levers (2026-07-28 plan §2.5) ──────────────────────────────
-    // The 'weights' default flipped to 'bf16' (2026-07-29) and is no longer the
-    // CLI default ('f32-window'), so an omitted field now DOES emit an explicit
-    // --weights bf16 flag (buildTrainLmArgs). The engine owns the semantic
-    // rules (bf16 needs a BF16 base; batch>1 implies low-VRAM) — this is a
-    // value whitelist only, so a stale UI can never make the runner stop
-    // ace-server for an argument ace-train would reject.
-    const weights = body.weights === undefined ? 'bf16' : body.weights;
+    // 'weights' went bf16 (2026-07-29) and back to 'f32-window' (Rob,
+    // 2026-07-30, final) to match the DiT's F32 mirror. That is once again the
+    // CLI's own default, so an omitted field emits no --weights flag at all.
+    //
+    // KNOWN AND ACCEPTED COST: unlike the DiT's mirror this is not a free
+    // precision dial — bf16 is ALSO the only route to the mul_mat backward on
+    // the LM (lm-bf16.h rewrites out_prod in place, ~1.7-1.8x on the GEMM mix)
+    // and --bwd mm cannot substitute; see the bwd comment below.
+    //
+    // The engine owns the semantic rules (bf16 needs a BF16 base; batch>1
+    // implies low-VRAM) — this is a value whitelist only, so a stale UI can
+    // never make the runner stop ace-server for an argument ace-train rejects.
+    const weights = body.weights === undefined ? 'f32-window' : body.weights;
     if (weights !== 'f32-window' && weights !== 'bf16') {
       res.status(400).json({ error: 'weights must be f32-window or bf16' });
       return;
@@ -1638,6 +1817,57 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── resume + post-training calibration (2026-08-10) ─────────────────
+    // initAdapter must be a real adapter run dir BEFORE the runner stops the
+    // engine — the engine would also refuse it, but only after a full engine
+    // stop/restart cycle (same rule as every other pre-flight check here).
+    //
+    // The sentinel 'latest' (the UI checkbox) resolves to the newest run of
+    // THIS adapter name that holds weights, excluding -calibrated bakes: a
+    // bake's factors carry the baked scale, so resuming one would train from
+    // rescaled weights and shift the adapter's effective strength mid-lineage.
+    //
+    // AN OMITTED initAdapter NOW MEANS 'latest' TOO (Rob, 2026-08-12), matching
+    // the form's now-ticked Continue checkbox. The batch pipeline POSTs `{}`, so
+    // without this a bulk re-run over already-trained datasets would restart
+    // every adapter from scratch while the identical manual run continued it —
+    // the same form-vs-pipeline split that once trained 0.6B adapters in bulk.
+    let initAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : 'latest';
+    if (initAdapter === 'latest') {
+      const artistDir = path.dirname(adapterDir);
+      let newest = '';
+      try {
+        const runs = fs.readdirSync(artistDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !/-calibrated$/i.test(e.name)
+            && hasWeights(path.join(artistDir, e.name)))
+          .map(e => e.name)
+          .sort();
+        if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
+      } catch { /* artist dir may not exist yet */ }
+      if (!newest && hasWeights(artistDir)) newest = artistDir;   // legacy unversioned
+      // "Nothing to resume" is NOT an error any more. It was a 400 while resume
+      // was a deliberate opt-in; now that it is the default for both the form
+      // and the pipeline, a first-ever run for an adapter name would fail on the
+      // one thing it cannot possibly satisfy. Fall through to a scratch run and
+      // say so in the log, so a bulk sweep can mix new and existing datasets.
+      if (!newest) {
+        console.log(
+          `[Training] train-lm: nothing to resume for "${adapterName}" (${lmSize}) — training from scratch`);
+      }
+      initAdapter = newest;
+    }
+    if (initAdapter && !hasWeights(initAdapter)) {
+      res.status(400).json({
+        error: `initAdapter ${initAdapter} holds no adapter weights (adapter_model/lokr_weights.safetensors)`,
+      });
+      return;
+    }
+    // Calibration is OPT-IN (Rob, 2026-08-12) — it was default ON from
+    // 2026-08-10. Only an explicit `true` runs it, so the batch pipeline's empty
+    // bag no longer appends an eval pass to every adapter in a bulk sweep.
+    const calibrate = body.calibrate === true;
+    const calibrateRepoint = body.calibrateRepoint !== false;
+
     // ── stages ───────────────────────────────────────────────────────────
     const requestedStages = Array.isArray(body.stages) ? body.stages : [];
     const stages = TRAIN_LM_STAGES.filter(s => requestedStages.includes(s));
@@ -1664,7 +1894,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       // Only the exact string 'lokr' opts in; anything else is a LoRA.
       adapterType: lmIsLokr ? 'lokr' : 'lora',
       // Only the exact string 'muon' opts in; anything else is AdamW.
-      optimizer: body.optimizer === 'muon' ? 'muon' : 'adamw',
+      optimizer: body.optimizer === 'adamw' ? 'adamw' : 'muon',
       muonLrScale: lmMuonLrScale,
       muonNsSteps: Math.trunc(lmMuonNsSteps),
       rank: Math.trunc(rank),
@@ -1687,6 +1917,9 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
+      initAdapter,
+      calibrate,
+      calibrateRepoint,
       lowVram,
       attnHeadBlock: Math.trunc(attnHeadBlock),
       chunk: Math.trunc(chunk),
@@ -1740,7 +1973,7 @@ const TRAIN_DIT_STAGES: readonly TrainDitStage[] = ['train', 'export'];
 router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
   try {
     // ── 1. dataset / job / binary ────────────────────────────────────────
-    const ds = repo.getDataset(req.params.id as string);
+    let ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1754,6 +1987,8 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       return;
     }
     // ── 2. built ─────────────────────────────────────────────────────────
+    // Same adoption as preprocess: an existing dataset.json IS the build.
+    ds = adoptExistingDatasetJson(ds, repo.updateDataset);
     if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
       res.status(400).json({ error: 'Dataset must be built first — run Build before Training' });
       return;
@@ -1793,7 +2028,21 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'adapterType must be "lora" or "lokr"' });
       return;
     }
-    const adapterType: DitAdapterType = body.adapterType === 'lokr' ? 'lokr' : 'lora';
+    // DEFAULT IS LoKR (2026-07-30), matching the form: TrainPanel seeds
+    // TRAIN_DIT_LOKR_DEFAULTS, not TRAIN_DIT_DEFAULTS — LoKR is the UI's default
+    // adapter type (K1/K2, Rob's validated Uber-LoKR preference), and the base
+    // constant only exists as the object the LoKR preset spreads.
+    //
+    // This handler is where the BATCH pipeline lands: it POSTs only the stored
+    // per-stage defaults (`{}` in practice) so every omitted field resolves
+    // here. Defaulting to 'lora' meant a batch run trained a LoRA where the
+    // identical manual run trained a LoKR.
+    //
+    // NOTE the sense: `!== 'lora'`, not `=== 'lokr'`. Everything downstream
+    // keys off isLokr — learningRate 0.002 vs 5e-4, weightDecay 0.001 vs 0.01,
+    // lossWeighting none vs flow_snr — so getting this branch wrong silently
+    // retunes four other parameters, not one.
+    const adapterType: DitAdapterType = body.adapterType === 'lora' ? 'lora' : 'lokr';
     const isLokr = adapterType === 'lokr';
 
     // ── 5. base model ────────────────────────────────────────────────────
@@ -1848,8 +2097,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // 250 for LoKR (2026-07-30 retune): a 400-epoch cosine horizon left every
     // measured run stopping at ~50% of peak LR, so the schedule never decayed
     // into the target. 250 cut epochs-to-0.6 from 228 to 203. LoRA keeps 400.
-    const epochs = numOpt(body.epochs, isLokr ? 250 : 400);
-    const targetLoss = numOpt(body.targetLoss, isLokr ? 0.6 : 0.4);
+    const epochs = numOpt(body.epochs, 500);
+    // 0.1 (Rob, 2026-08-13) — was 0.2 from 2026-07-30. Tracks
+    // TRAIN_DIT_DEFAULTS.targetLoss: the batch pipeline POSTs the STORED
+    // per-stage defaults (`{}` in practice), so this fallback IS the number a
+    // bulk run trains to, and it has to be the one the form shows.
+    const targetLoss = numOpt(body.targetLoss, 0.1);
     const rank = numOpt(body.rank, 128);
     const alpha = numOpt(body.alpha, 256);
     const lokrDim = numOpt(body.lokrDim, 512);
@@ -1886,6 +2139,8 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // handle without the caption path going untrained.
     const genreRatio = numOpt(body.genreRatio, 30);
     const seed = numOpt(body.seed, 42);
+    // 0.1, NOT 0 — same fix as train-lm above: the 0 fallback silently
+    // disabled milestone snapshots for any caller omitting the field.
     const milestoneStep = numOpt(body.milestoneStep, 0.1);
     const milestoneKeep = numOpt(body.milestoneKeep, 6);
     const vramReserveMb = numOpt(body.vramReserveMb, 2048);
@@ -1897,8 +2152,9 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // land on the same behaviour.
     const batch = numOpt(body.batch, 1);
     const ckptSegments = numOpt(body.ckptSegments, 1);
-    // Optimizer (2026-07-30). Default 'adamw' — the shipped path — so an
-    // omitted field can never move an existing caller onto Muon.
+    // Optimizer (2026-07-30). Muon is the DEFAULT for the DiT, after a full-run
+    // A/B (161 epochs to target vs AdamW's 227) and ear validation. Resolved
+    // below as `=== 'adamw' ? 'adamw' : 'muon'`, so an omitted field means Muon.
     const muonLrScale = numOpt(body.muonLrScale, 20.0);
     const muonMomentum = numOpt(body.muonMomentum, 0.95);
     const muonNsSteps = numOpt(body.muonNsSteps, 5);
@@ -1994,6 +2250,44 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     const stages = TRAIN_DIT_STAGES.filter(s => requestedStages.includes(s));
     const resolvedStages: TrainDitStage[] = stages.length > 0 ? [...stages] : [...TRAIN_DIT_STAGES];
 
+    // ── 8b. resume (--init-adapter, 2026-08-11) — same rules as train-lm:
+    // 'latest' resolves to the newest non-calibrated run of this adapter name
+    // (bakes excluded — their factors carry the baked scale), and any explicit
+    // path must hold weights BEFORE the runner stops the engine.
+    // AN OMITTED initAdapter MEANS 'latest' (Rob, 2026-08-13), matching the
+    // form's now-ticked Continue checkbox and the train-lm route's 2026-08-12
+    // flip. The batch pipeline POSTs `{}`, so without this a bulk re-run over
+    // already-trained datasets would restart every adapter from scratch while
+    // the identical manual run continued it.
+    let ditInitAdapter = typeof body.initAdapter === 'string' ? body.initAdapter.trim() : 'latest';
+    if (ditInitAdapter === 'latest') {
+      const artistDir = path.dirname(adapterDir);
+      let newest = '';
+      try {
+        const runs = fs.readdirSync(artistDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !/-calibrated$/i.test(e.name)
+            && hasWeights(path.join(artistDir, e.name)))
+          .map(e => e.name)
+          .sort();
+        if (runs.length) newest = path.join(artistDir, runs[runs.length - 1]);
+      } catch { /* artist dir may not exist yet */ }
+      if (!newest && hasWeights(artistDir)) newest = artistDir;
+      // "Nothing to resume" is NOT an error any more — same reasoning as
+      // train-lm: now that resume is the default for both the form and the
+      // pipeline, a first-ever run for an adapter name would fail on the one
+      // thing it cannot possibly satisfy. Fall through to a scratch run and
+      // say so in the log, so a bulk sweep can mix new and existing datasets.
+      if (!newest) {
+        console.log(
+          `[Training] train-dit: nothing to resume for "${adapterName}" — training from scratch`);
+      }
+      ditInitAdapter = newest;
+    }
+    if (ditInitAdapter && !hasWeights(ditInitAdapter)) {
+      res.status(400).json({ error: `initAdapter ${ditInitAdapter} holds no adapter weights` });
+      return;
+    }
+
     // ── 9. queue ─────────────────────────────────────────────────────────
     // No VRAM gating here (§4.5): only ace-train knows the mirror size, and only
     // after the base is loaded with the engine already stopped.
@@ -2049,7 +2343,7 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       // Frozen-weight mirror precision. Default is 'bf16' (2026-07-29); only
       // the exact string 'f32' opts back out. The engine itself falls back to
       // f32 with a warning on a non-CUDA backend (dit-train-run.h).
-      mirror: body.mirror === 'f32' ? 'f32' : 'bf16',
+      mirror: body.mirror === 'bf16' ? 'bf16' : 'f32',
       // MUL_MAT activation-gradient formulation. Default 'mm' (2026-07-29);
       // only the exact string 'outprod' opts back out to upstream ggml's
       // F32-only out_prod backward.
@@ -2069,6 +2363,12 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       stages: resolvedStages,
       overwrite: body.overwrite === true,
       stopEngine: body.stopEngine !== false,
+      initAdapter: ditInitAdapter,
+      // Calibration is OPT-IN (Rob, 2026-08-13) — it was default ON from
+      // 2026-08-11. Only an explicit `true` runs it, so the batch pipeline's
+      // empty bag no longer appends an eval pass to every adapter in a sweep.
+      calibrate: body.calibrate === true,
+      calibrateRepoint: body.calibrateRepoint !== false,
     };
 
     const job = queue.startTrainDitJob(ds.id, opts);
@@ -2146,6 +2446,62 @@ function auditionAdapterError(value: string): string | null {
   }
   return null;
 }
+
+/**
+ * The linked Lyric Studio album's generated lyrics, as audition prompts.
+ *
+ * Link resolution: the persisted `lyrics_set_id` on the dataset row (written by
+ * the export commit) wins; a never-linked dataset falls back to the export
+ * preview's artist/album detection (tag majority vote), and a successful
+ * detection is persisted back onto the row so the scan only ever runs once.
+ */
+router.get('/datasets/:id/ls-generations', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+
+    let lyricsSetId = ds.lyricsSetId ?? 0;
+    // A stale link (album deleted in Lyric Studio) degrades to re-detection.
+    if (lyricsSetId > 0 && !getLyricsSet(lyricsSetId)) lyricsSetId = 0;
+    if (lyricsSetId <= 0) {
+      const samples = await buildSamples(ds);
+      const preview = await previewLyricStudioExport(ds, samples);
+      lyricsSetId = preview.existingLyricsSetId ?? 0;
+      if (lyricsSetId > 0) {
+        try { repo.updateDataset(ds.id, { lyricsSetId }); } catch { /* lazy backfill only */ }
+      }
+    }
+
+    if (lyricsSetId <= 0) {
+      res.json({ lyricsSetId: 0, artist: '', album: '', generations: [] });
+      return;
+    }
+
+    const set = getLyricsSet(lyricsSetId);
+    const gens = getGenerations(undefined, lyricsSetId).map(g => ({
+      id: Number(g.id),
+      title: String(g.title ?? ''),
+      caption: String(g.caption ?? ''),
+      lyrics: String(g.lyrics ?? ''),
+      bpm: Math.trunc(Number(g.bpm) || 0),
+      key: String(g.key ?? ''),
+      duration: Math.trunc(Number(g.duration) || 0),
+      createdAt: String(g.created_at ?? ''),
+    }));
+    res.json({
+      lyricsSetId,
+      artist: String(set?.artist_name ?? ''),
+      album: String(set?.album ?? ''),
+      generations: gens,
+    });
+  } catch (err: any) {
+    console.error(`[Training] ls-generations failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
   try {
@@ -2251,6 +2607,20 @@ router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
     const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
     if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
+      return;
+    }
+
+    // ── 6b. DiT-adapter render name — same bar as the train-dit adapterName
+    // validator: the regex plus the safeAdapterName cross-check, because this
+    // string reaches path.join inside adapterDitDirFor. The resolved dir is
+    // then server-derived (never a client path), so this is the whole surface.
+    const rdaName = typeof (body as { renderDitAdapterName?: unknown }).renderDitAdapterName === 'string'
+      ? (body.renderDitAdapterName as string).trim()
+      : '';
+    if (rdaName && (!ADAPTER_NAME_RE.test(rdaName) || safeAdapterName(rdaName) !== rdaName)) {
+      res.status(400).json({
+        error: 'renderDitAdapterName must match [A-Za-z0-9._-]{1,64} and cannot start with a dot',
+      });
       return;
     }
 

@@ -10,7 +10,7 @@
 import React from 'react';
 import { useGlobalParamsStore } from '../stores/globalParamsStore';
 import type { AdapterGroupScales } from '../stores/globalParamsStore';
-import type { GenerationParams } from '../types';
+import type { GenerationParams, LmRepMode } from '../types';
 
 // Re-export types that consumers may import from here
 export type { AdapterGroupScales } from '../stores/globalParamsStore';
@@ -59,6 +59,8 @@ export interface GlobalParams {
   rebaseBeta: number; setRebaseBeta: (v: number) => void;
   adapterFolder: string; setAdapterFolder: (v: string) => void;
   advancedAdapters: boolean; setAdvancedAdapters: (v: boolean) => void;
+  // No-adapter reference render: extra low-step bare-DiT output per generation
+  noAdapterRender: boolean; setNoAdapterRender: (v: boolean) => void;
   adaptersOpen: boolean; setAdaptersOpen: (v: boolean) => void;
   // Generation
   inferenceSteps: number; setInferenceSteps: (v: number) => void;
@@ -67,6 +69,7 @@ export interface GlobalParams {
   lmCfgCutoffRatio: number; setLmCfgCutoffRatio: (v: number) => void;
   cacheRatio: number; setCacheRatio: (v: number) => void;
   shift: number; setShift: (v: number) => void;
+  ditSlidingWindow: number; setDitSlidingWindow: (v: number) => void;
   inferMethod: string; setInferMethod: (v: string) => void;
   scheduler: string; setScheduler: (v: string) => void;
   guidanceMode: string; setGuidanceMode: (v: string) => void;
@@ -117,8 +120,13 @@ export interface GlobalParams {
   // Anti-loop repetition penalty on code sampling (local HOT-Step feature)
   lmRepPenalty: number; setLmRepPenalty: (v: number) => void;
   lmRepWindow: number; setLmRepWindow: (v: number) => void;
+  lmRepMode: LmRepMode; setLmRepMode: (v: LmRepMode) => void;
+  lmDryBase: number; setLmDryBase: (v: number) => void;
+  lmDryMinLen: number; setLmDryMinLen: (v: number) => void;
   lmNegativePrompt: string; setLmNegativePrompt: (v: string) => void;
   lmCodesStrength: number; setLmCodesStrength: (v: number) => void;
+  lmCodesMode: 'ratio' | 'steps'; setLmCodesMode: (v: 'ratio' | 'steps') => void;
+  lmCodesSteps: number; setLmCodesSteps: (v: number) => void;
   // Post-processing
   postProcessingEnabled: boolean; setPostProcessingEnabled: (v: boolean) => void;
   spectralLifterEnabled: boolean; setSpectralLifterEnabled: (v: boolean) => void;
@@ -153,6 +161,7 @@ export interface GlobalParams {
   stableStepAdapters: Array<{ name: string; scale: number; enabled: boolean }>;
   setStableStepAdapters: (v: Array<{ name: string; scale: number; enabled: boolean }>) => void;
   stableStepPreserveDynamics: boolean; setStableStepPreserveDynamics: (v: boolean) => void;
+  stableStepVocalPpVae: boolean; setStableStepVocalPpVae: (v: boolean) => void;
   stableStepBlendMode: 'off' | 'crossover' | 'mix'; setStableStepBlendMode: (v: 'off' | 'crossover' | 'mix') => void;
   stableStepCrossoverHz: number; setStableStepCrossoverHz: (v: number) => void;
   stableStepCrossoverWidthHz: number; setStableStepCrossoverWidthHz: (v: number) => void;

@@ -35,6 +35,7 @@
 //   /understand LM + DiT + VAE
 
 #include "adapter-cancel.h"   // g_adapter_cancel — set by worker around ace_synth_load
+#include "concept-extract.h"  // CAA extraction: tap accumulator + concept GGUF writer
 #include "audio-io.h"
 #include "audio-resample.h"
 #include "denoiser.h"
@@ -78,6 +79,12 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 #    pragma GCC diagnostic pop
 #endif
 
+// ── HOT-Step hook: MiniMax-Music3 backend ─────────────────────────────
+// Single include wiring engine/src/minimax/ (mm3-server.h -> mm3-model.h)
+// into the server. Everything MM3 lives in that subtree; the only call site
+// is mm3_register_routes(svr, models_dir) below. Checked by verify-hooks.ps1.
+#include "minimax/mm3-server.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <csignal>
@@ -105,7 +112,7 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 #endif
 
 #ifdef GGML_USE_CUDA
-#    include <cuda_runtime_api.h>
+#    include "../src/gpu.h"
 #endif
 
 // portable fd wrappers. avoids macros that collide with C++ method names
@@ -393,6 +400,16 @@ static const char * job_status_str(int s) {
     }
 }
 
+// HOT-STEP: second (and last) hook wiring engine/src/minimax/ in. Registers
+// POST /mm3/synth + GET /mm3/job, which run MiniMax-Music3 generation on THIS
+// file's work queue (work_push -> the one GPU worker thread), so MM3 and ACE
+// jobs serialise on the device instead of racing. It is included HERE rather
+// than beside minimax/mm3-server.h at the top because it needs Job,
+// job_create(), job_set_phase(), work_push() and g_store, all defined above.
+// The call site is mm3_register_job_routes(svr) next to mm3_register_routes().
+// Checked by verify-hooks.ps1.
+#include "minimax/mm3-job.h"
+
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
 // SSE clients connect to /logs and receive lines in real time.
 #define LOG_RING_BITS 9
@@ -581,6 +598,29 @@ struct ServerFields {
     // Basin re-base: nudge adapted weights toward the adapter's training base S.
     std::string rebase_source = "";   // absolute path to S (resolved by Node server)
     float       rebase_beta   = 0.0f; // 0 = off
+    // Concept activation steering (CAA / TADA). Per-request only — never part of
+    // the ModelKey, so alpha changes cost no reload.
+    std::vector<HotStepConcept> concepts;
+    // Concept EXTRACTION (Phase B): turns this job into a paired-run harvest that
+    // writes a concept GGUF instead of returning audio.
+    bool        concept_extract = false;
+    std::string concept_out_path;
+    std::string concept_name;
+    // Prompt LISTS, cycled per pair. A single string is accepted and becomes a
+    // one-entry list, but that degenerate case is a measurement error, not a
+    // convenience: with one caption pair the text conditioning is identical in
+    // every pair, so the constant caption component never averages out of the
+    // mean difference and beta is inflated across every layer. The paper
+    // computes over N *different* prompt pairs.
+    std::vector<std::string> concept_pos;
+    std::vector<std::string> concept_neg;
+    std::string concept_target_class;
+    int         concept_pairs = 24;
+    // Path to a previously extracted null-control concept. Without it the
+    // suggested-layer ranking is dominated by the early-layer architectural
+    // prior and is not usable as a default.
+    std::string concept_null_ref;
+    int         concept_top_k = 4;
     // DCW (Differential Correction in Wavelet domain)
     bool        dcw_enabled      = false;
     std::string dcw_mode         = "low";
@@ -734,6 +774,76 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
         fprintf(stderr, "[DIAG] adapter_group_scales: gs_obj=%p is_obj=%d\n",
                 (void*)gs_obj, gs_obj ? yyjson_is_obj(gs_obj) : -1);
     }
+    // Concept activation steering (CAA / TADA arXiv 2602.11910):
+    //   "concepts": [{"name":"aggressive","path":"...","target":"dit",
+    //                 "alpha":1.0,"layers":[9,10]}]
+    // Sideband-only — see the LM-echo gotcha note where these are consumed.
+    yyjson_val * cps = yyjson_obj_get(obj, "concepts");
+    if (cps && yyjson_is_arr(cps)) {
+        size_t       ci, cmax;
+        yyjson_val * cv;
+        yyjson_arr_foreach(cps, ci, cmax, cv) {
+            if (!yyjson_is_obj(cv)) continue;
+            HotStepConcept hc;
+            yyjson_val *   f;
+            if ((f = yyjson_obj_get(cv, "path")) && yyjson_is_str(f)) hc.path = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "name")) && yyjson_is_str(f)) hc.name = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "target")) && yyjson_is_str(f)) hc.target = yyjson_get_str(f);
+            if ((f = yyjson_obj_get(cv, "alpha")) && yyjson_is_num(f)) hc.alpha = get_num(f);
+            if ((f = yyjson_obj_get(cv, "layers")) && yyjson_is_arr(f)) {
+                size_t       li, lmax;
+                yyjson_val * lv;
+                yyjson_arr_foreach(f, li, lmax, lv) {
+                    if (yyjson_is_int(lv)) hc.layers.push_back((int) yyjson_get_int(lv));
+                }
+            }
+            if (hc.path.empty()) {
+                fprintf(stderr, "[Concept] WARNING: concept entry with no path — skipping\n");
+                continue;
+            }
+            if (hc.target != "dit" && hc.target != "lm") {
+                fprintf(stderr, "[Concept] WARNING: unknown target '%s' — skipping\n", hc.target.c_str());
+                continue;
+            }
+            sf->concepts.push_back(std::move(hc));
+        }
+    }
+
+    // Concept extraction config:
+    //   "concept_extract": {"out":"...","name":"aggressive","positive":"...",
+    //                       "negative":"...","target_class":"","pairs":24}
+    yyjson_val * cx = yyjson_obj_get(obj, "concept_extract");
+    if (cx && yyjson_is_obj(cx)) {
+        yyjson_val * f;
+        // "positive"/"negative" accept a string or an array of strings.
+        auto read_prompts = [](yyjson_val * v, std::vector<std::string> * out) {
+            if (!v) return;
+            if (yyjson_is_str(v)) {
+                out->push_back(yyjson_get_str(v));
+            } else if (yyjson_is_arr(v)) {
+                size_t       pi, pmax;
+                yyjson_val * pv;
+                yyjson_arr_foreach(v, pi, pmax, pv) {
+                    if (yyjson_is_str(pv) && *yyjson_get_str(pv)) out->push_back(yyjson_get_str(pv));
+                }
+            }
+        };
+        if ((f = yyjson_obj_get(cx, "out")) && yyjson_is_str(f)) sf->concept_out_path = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "name")) && yyjson_is_str(f)) sf->concept_name = yyjson_get_str(f);
+        read_prompts(yyjson_obj_get(cx, "positive"), &sf->concept_pos);
+        read_prompts(yyjson_obj_get(cx, "negative"), &sf->concept_neg);
+        if ((f = yyjson_obj_get(cx, "target_class")) && yyjson_is_str(f))
+            sf->concept_target_class = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "pairs")) && yyjson_is_int(f)) sf->concept_pairs = (int) yyjson_get_int(f);
+        if ((f = yyjson_obj_get(cx, "null_ref")) && yyjson_is_str(f)) sf->concept_null_ref = yyjson_get_str(f);
+        if ((f = yyjson_obj_get(cx, "top_k")) && yyjson_is_int(f)) sf->concept_top_k = (int) yyjson_get_int(f);
+        sf->concept_extract = !sf->concept_out_path.empty() && !sf->concept_pos.empty() &&
+                              !sf->concept_neg.empty();
+        if (!sf->concept_extract) {
+            fprintf(stderr, "[Concept] WARNING: concept_extract needs out + positive + negative — ignoring\n");
+        }
+    }
+
     // DCW fields
     if ((v = yyjson_obj_get(obj, "dcw_enabled"))) {
         if (yyjson_is_bool(v)) {
@@ -1235,6 +1345,9 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.beat_stability      = sf.beat_stability;
     g_hotstep_params.frequency_damping   = sf.frequency_damping;
     g_hotstep_params.temporal_smoothing  = sf.temporal_smoothing;
+    // Read from the parsed AceRequest, not ServerFields: sideband ServerFields
+    // do not survive the /lm round trip, and this is a synth-side param.
+    g_hotstep_params.dit_sliding_window  = ace_reqs[0].dit_sliding_window;
     g_hotstep_params.adapter_group_scales = sf.group_scales;
     g_hotstep_params.adapter_mode         = sf.adapter_mode;
     g_hotstep_params.adapter_runtime_quant = sf.adapter_runtime_quant.empty() ? "bf16" : sf.adapter_runtime_quant;
@@ -1294,6 +1407,14 @@ static void synth_worker(std::shared_ptr<Job>    job,
     g_hotstep_params.seed_latents          = sf.seed_latents;
     g_hotstep_params.vae_chunk_override    = sf.vae_chunk;
     g_hotstep_params.batch_cfg_override    = sf.batch_cfg;
+    // Concept steering vectors are activations, not weights: they are set here
+    // like any sideband field and deliberately do NOT participate in the DiT
+    // ModelKey, so changing alpha reuses the loaded model with no reload.
+    g_hotstep_params.concepts              = sf.concepts;
+    for (const auto & c : g_hotstep_params.concepts) {
+        fprintf(stderr, "[Server]   concept: %s (%s) alpha=%+.2f -> %s\n",
+                c.name.empty() ? "(unnamed)" : c.name.c_str(), c.target.c_str(), c.alpha, c.path.c_str());
+    }
     fprintf(stderr, "[Server] HOT-Step params: solver=%s, guidance=%s, scheduler=%s\n",
             sf.solver_name.c_str(), sf.guidance_mode.c_str(),
             sf.scheduler.empty() ? "(default)" : sf.scheduler.c_str());
@@ -1395,6 +1516,166 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     if (total_alloc > 1) {
         fprintf(stderr, "[Server] Batch: %d track(s) from %d request(s)\n", total_alloc, batch_n);
+    }
+
+    // ── Concept extraction (CAA / AUSteer, TADA arXiv 2602.11910) ─────────────
+    // Hijacks this job: run `pairs` positive/negative generations with everything
+    // else held identical, tap the frame-averaged cross-attn output at every
+    // (layer, step), and write a concept GGUF. Produces no audio.
+    if (sf.concept_extract) {
+        auto compose = [&](const std::string & side) {
+            return sf.concept_target_class.empty() ? side : (sf.concept_target_class + ", " + side);
+        };
+
+        // Both the PROMPT and the seed must vary across pairs. Averaging over
+        // seeds alone leaves the text conditioning byte-identical in every pair,
+        // so the constant caption component survives the mean difference intact
+        // and every layer scores high on sign agreement — measured on the first
+        // real run, 2026-07-31. The prompt lists are cycled independently of the
+        // seed walk so a short list still pairs with fresh noise each time.
+        const size_t n_pos = sf.concept_pos.size();
+        const size_t n_neg = sf.concept_neg.size();
+        if (n_pos < 2 || n_neg < 2) {
+            fprintf(stderr,
+                    "[Concept] WARNING: only %zu positive / %zu negative prompt(s). Concept directions "
+                    "extracted from a single caption pair encode that caption, not the concept — "
+                    "pass arrays of varied prompts for a trustworthy result.\n",
+                    n_pos, n_neg);
+        }
+
+        // Both runs of a pair must record the SAME number of evaluations, else
+        // step s of the positive run is contrasted against a different diffusion
+        // time in the negative run. Step caching and CFG cutoff both skip
+        // forwards, so force them off for the duration and say so in the log.
+        const float saved_cache  = g_hotstep_params.cache_ratio;
+        const float saved_cutoff = g_hotstep_params.cfg_cutoff_ratio;
+        if (saved_cache != 0.0f || saved_cutoff != 1.0f) {
+            fprintf(stderr,
+                    "[Concept] Extraction: forcing cache_ratio 0 (was %.2f) and cfg_cutoff_ratio 1 "
+                    "(was %.2f) so paired runs stay step-aligned\n",
+                    saved_cache, saved_cutoff);
+        }
+        g_hotstep_params.cache_ratio      = 0.0f;
+        g_hotstep_params.cfg_cutoff_ratio = 1.0f;
+
+        // Never steer while extracting — a concept must be measured against the
+        // unsteered model, or it encodes whatever was already applied.
+        std::vector<HotStepConcept> saved_concepts;
+        saved_concepts.swap(g_hotstep_params.concepts);
+        if (!saved_concepts.empty()) {
+            fprintf(stderr, "[Concept] Extraction: %zu active concept(s) suspended for the harvest\n",
+                    saved_concepts.size());
+        }
+
+        const int n_pairs = sf.concept_pairs > 0 ? sf.concept_pairs : 24;
+        fprintf(stderr, "[Concept] Extracting '%s': %d pairs over %zu+ / %zu- prompt(s)\n",
+                sf.concept_name.c_str(), n_pairs, n_pos, n_neg);
+        for (size_t k = 0; k < n_pos; k++)
+            fprintf(stderr, "[Concept]   +[%zu]: %s\n", k, compose(sf.concept_pos[k]).c_str());
+        for (size_t k = 0; k < n_neg; k++)
+            fprintf(stderr, "[Concept]   -[%zu]: %s\n", k, compose(sf.concept_neg[k]).c_str());
+
+        ConceptAccum acc;
+        AceRequest   base = groups[0][0];
+        request_resolve_seed(&base);
+        const long long base_seed = base.seed;
+
+        int accepted = 0;
+        job_set_phase(*job, JobPhase::DIT_INFERENCE, 0, n_pairs * 2);
+
+        for (int i = 0; i < n_pairs; i++) {
+            if (job->cancel.load()) {
+                fprintf(stderr, "[Concept] Extraction cancelled at pair %d/%d\n", i, n_pairs);
+                break;
+            }
+
+            ConceptTapSink sink[2];
+            bool           run_ok = true;
+
+            for (int side = 0; side < 2 && run_ok; side++) {
+                AceRequest r = base;
+                // Prompt cycles per pair; both sides of a pair share the same
+                // seed so the contrast isolates the prompt, not the noise.
+                r.caption = compose(side == 0 ? sf.concept_pos[(size_t) i % n_pos]
+                                              : sf.concept_neg[(size_t) i % n_neg]);
+                r.seed    = base_seed + i;
+
+                groups[0].clear();
+                groups[0].push_back(r);
+
+                g_concept_tap.arm();
+                std::vector<std::string>        lrc_tmp(1);
+                std::vector<std::vector<float>> lat_tmp;
+                const int rc = synth_batch_run(ctx, groups,
+                                               src_interleaved, src_len,
+                                               src_latents, src_T_latent,
+                                               ref_interleaved, ref_len,
+                                               ref_latents, ref_T_latent,
+                                               audio.data(),
+                                               lrc_tmp.data(),
+                                               &lat_tmp,
+                                               server_cancel_job, (void *) &job->cancel);
+                g_concept_tap.disarm();
+
+                // Extraction discards the audio, but synth_batch_run allocates a
+                // fresh buffer every call — without this the harvest leaks one
+                // full render per run (~50 buffers over a 24-pair extraction).
+                for (int b = 0; b < total_alloc; b++) {
+                    ace_audio_free(&audio[b]);
+                }
+
+                if (rc != 0 || g_concept_tap.steps.empty()) {
+                    fprintf(stderr, "[Concept] Pair %d side %s failed (rc=%d, %zu evals) — skipping pair\n",
+                            i, side == 0 ? "+" : "-", rc, g_concept_tap.steps.size());
+                    run_ok = false;
+                    break;
+                }
+                sink[side] = g_concept_tap;  // copy out before the next arm()
+
+                job_set_phase(*job, JobPhase::DIT_INFERENCE, i * 2 + side + 1, n_pairs * 2);
+            }
+
+            if (!run_ok) continue;
+
+            if (acc.n_steps == 0) {
+                acc.init(sink[0].n_layers, sink[0].hidden, (int) sink[0].steps.size(), sink[0].t_values);
+                fprintf(stderr, "[Concept] Accumulator: %dL x %d evals x %dH\n", acc.n_layers, acc.n_steps,
+                        acc.hidden);
+            }
+            if (acc.add_pair(sink[0], sink[1])) {
+                accepted++;
+            }
+            fprintf(stderr, "[Concept] Pair %d/%d done (%d accepted)\n", i + 1, n_pairs, accepted);
+        }
+
+        g_hotstep_params.cache_ratio      = saved_cache;
+        g_hotstep_params.cfg_cutoff_ratio = saved_cutoff;
+        g_hotstep_params.concepts         = saved_concepts;
+
+        ConceptMeta meta;
+        meta.name         = sf.concept_name;
+        meta.target       = "dit";
+        meta.method       = "caa";
+        meta.base_name    = dit_name;
+        // Provenance: record the whole prompt list, not just the first entry.
+        for (size_t k = 0; k < n_pos; k++) meta.pos_prompt += (k ? " | " : "") + sf.concept_pos[k];
+        for (size_t k = 0; k < n_neg; k++) meta.neg_prompt += (k ? " | " : "") + sf.concept_neg[k];
+        meta.target_class = sf.concept_target_class;
+        meta.null_ref     = sf.concept_null_ref;
+        meta.top_k        = sf.concept_top_k;
+
+        const bool wrote = concept_write_gguf(sf.concept_out_path.c_str(), meta, acc);
+
+        ace_synth_free(ctx);
+        free(src_interleaved);
+        free(src_latents);
+        free(ref_interleaved);
+        free(ref_latents);
+
+        const bool cancelled = job->cancel.load();
+        job_set_phase(*job, cancelled ? JobPhase::CANCELLED : (wrote ? JobPhase::DONE : JobPhase::FAILED));
+        job->status.store(cancelled ? 3 : (wrote ? 1 : 2));
+        return;
     }
 
     // Two-phase run (+ optional Phase 3 LRC).
@@ -3095,6 +3376,16 @@ int main(int argc, char ** argv) {
         std::string json = PluginRegistry::instance().to_json();
         res.set_content(json, "application/json");
     });
+
+    // HOT-STEP: MiniMax-Music3 backend — GET /mm3/props, POST /mm3/warm,
+    // POST /mm3/unload. Discovers <models>/mm3/*.gguf and probes their headers.
+    // No-op (routes report available:false) when no MM3 weights are present.
+    mm3_register_routes(svr, models_dir);
+
+    // HOT-STEP: the production MM3 generation endpoint (POST /mm3/synth) and
+    // its progress poller (GET /mm3/job). Separate from the call above because
+    // minimax/mm3-job.h has to be included after this file's job system.
+    mm3_register_job_routes(svr);
 
     // HOT-STEP: GET /vram — GPU memory usage (CUDA only)
     svr.Get("/vram", [](const httplib::Request &, httplib::Response & res) {

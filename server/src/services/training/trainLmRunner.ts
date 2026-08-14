@@ -454,12 +454,36 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
       }
     }
 
-    // Album presets follow the newest run automatically (Rob, 2026-07-29):
-    // any Lyric Studio preset pointing at an older run of this artist folder
-    // now plays this one. Advisory — a lireek hiccup must not fail the run.
-    const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'lm');
-    if (presetsTouched) {
-      pushLog(`[Training] train-lm job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
+    // Album presets follow the newest run automatically (Rob, 2026-07-29) —
+    // UNLESS a calibration job is about to run: calibration has the final say
+    // on which adapter serves (the new run only wins the preset if it beats
+    // the previous adapter in eval; see calibrateRunner PRESET RULE), so
+    // repointing here would hand the preset to a possibly-worse run first.
+    if (!(opts.calibrate && opts.stages.includes('export'))) {
+      const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'lm');
+      if (presetsTouched) {
+        pushLog(`[Training] train-lm job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
+      }
+    }
+
+    // Post-training calibration — OPT-IN since 2026-08-12 (it was default ON
+    // from 2026-08-10). Note the consequence in the branch above: with
+    // calibration off the new run takes this artist's album presets outright,
+    // under the older newest-run-wins rule, with no beat-the-previous guard.
+    // Queued into the
+    // same GPU lane, so it runs right after this job's finally has restarted
+    // the engine it needs. oldRunDir '' = the calibrate command auto-picks the
+    // newest other non-calibrated run — or the resume source when this run was
+    // a resume, which IS that newest run.
+    if (opts.calibrate && opts.stages.includes('export')) {
+      const { startLmCalibrateJob } = await import('./labelingQueue.js');
+      const cal = startLmCalibrateJob(job.datasetId, {
+        newRunDir: opts.adapterDir,
+        oldRunDir: opts.initAdapter || '',
+        variantKey: opts.variantKey,
+        repoint: opts.calibrateRepoint,
+      });
+      pushLog(`[Training] train-lm job ${job.id}: calibration queued as job ${cal.id}`);
     }
 
     pushLog(`[Training] train-lm job ${job.id} finished — adapter at ${opts.adapterDir}`);

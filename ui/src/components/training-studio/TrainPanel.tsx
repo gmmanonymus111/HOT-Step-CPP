@@ -220,6 +220,16 @@ export const TrainPanel: React.FC = () => {
       stages: form.stages,
       overwrite: form.overwrite,
       stopEngine: form.stopEngine,
+      // Resume + post-training calibration (2026-08-10). 'latest' = the server
+      // resolves the newest non-calibrated run of this adapter name.
+      //
+      // ALWAYS SENT, both ways. Since 2026-08-12 an OMITTED initAdapter means
+      // 'latest' on the LM route (so the batch pipeline's empty body resumes),
+      // which makes '' the only way to say "from scratch" — unticking the box
+      // would otherwise be a no-op.
+      initAdapter: form.resumeFromLatest ? 'latest' : '',
+      calibrate: form.calibrate,
+      calibrateRepoint: form.calibrateRepoint,
       // Speed levers. Sent only when the user moved them off the shipped
       // default, so a normal start posts the same body it always did — and an
       // engine without the flags never sees them.
@@ -282,6 +292,15 @@ export const TrainPanel: React.FC = () => {
       genreRatio: ditForm.genreRatio,
       seed: ditForm.seed,
       order: ditForm.order,
+      // Resume + post-training calibration, same shape as train-lm.
+      //
+      // ALWAYS SENT, both ways. Since 2026-08-13 an OMITTED initAdapter means
+      // 'latest' on the DiT route too (so the batch pipeline's empty body
+      // resumes), which makes '' the only way to say "from scratch" —
+      // unticking the box would otherwise be a no-op.
+      initAdapter: ditForm.resumeFromLatest ? 'latest' : '',
+      calibrate: ditForm.calibrate,
+      calibrateRepoint: ditForm.calibrateRepoint,
       milestoneStep: ditForm.milestoneStep,
       milestoneKeep: ditForm.milestoneKeep,
       vramReserveMb: ditForm.vramReserveMb,

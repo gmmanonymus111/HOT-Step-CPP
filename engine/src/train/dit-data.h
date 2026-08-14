@@ -114,7 +114,7 @@ static bool dit_load_sample(const std::string & path, DitSample * s, std::string
 // `dit_path` recorded by preprocess for this variant (§4.2's base-match rule).
 static std::string dit_meta_dit_path(const char * tensors_dir) {
     const std::string p = lm_join(tensors_dir, "preprocess_meta.json");
-    FILE *            f = fopen(p.c_str(), "rb");
+    FILE *            f = hs_fopen(p, "rb");
     if (!f) {
         return std::string();
     }
@@ -143,7 +143,7 @@ static bool dit_scan_samples(const char * tensors_dir, int limit, std::vector<Di
     std::vector<std::pair<std::string, std::string>> files;  // (file, id)
 
     const std::string meta_path = lm_join(tensors_dir, "preprocess_meta.json");
-    FILE *            f         = fopen(meta_path.c_str(), "rb");
+    FILE *            f         = hs_fopen(meta_path, "rb");
     if (f) {
         std::string buf;
         char        tmp[8192];
@@ -218,7 +218,7 @@ static bool dit_load_channel_stats(const char * tensors_dir, DitChannelStats * o
     out->ok = false;
     out->weight.clear();
     const std::string p = lm_join(tensors_dir, "channel_stats.json");
-    FILE *            f = fopen(p.c_str(), "rb");
+    FILE *            f = hs_fopen(p, "rb");
     if (!f) {
         return false;
     }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, ListOrdered, Code2, Download, Clock, Shuffle, Zap } from 'lucide-react';
+import { ChevronDown, ChevronRight, ListOrdered, Code2, Download, Clock, Shuffle } from 'lucide-react';
 import type { Artist } from '../../services/lireekApi';
 import { TripleProviderSelector, type ModelSelections, loadSelections, saveSelections } from './ProviderSelector';
 import { LLM_DURATION_KEY } from '../../utils/estimateDuration';
@@ -30,11 +30,10 @@ interface ArtistPageSidebarProps {
   albumCount?: number;
   onOpenQueue: () => void;
   onOpenPromptEditor: () => void;
-  onGenerateAll?: () => void;
 }
 
 export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
-  artist, albumCount, onOpenQueue, onOpenPromptEditor, onGenerateAll,
+  artist, albumCount, onOpenQueue, onOpenPromptEditor,
 }) => {
   const [imageError, setImageError] = useState(false);
   const { t } = useTranslation();
@@ -183,21 +182,9 @@ export const ArtistPageSidebar: React.FC<ArtistPageSidebarProps> = ({
           </p>
         </div>
 
-        {/* ── Generate All Audio ──────────────────────────────── */}
-        {onGenerateAll && (
-          <div>
-            <button
-              onClick={onGenerateAll}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg bg-gradient-to-r from-amber-600/20 to-pink-600/20 hover:from-amber-600/30 hover:to-pink-600/30 border border-amber-500/10 hover:border-amber-500/20 text-amber-400 hover:text-amber-300 text-xs font-semibold transition-all"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              Generate All Audio
-            </button>
-            <p className="text-[10px] text-zinc-600 mt-1 px-1 leading-tight">
-              Queue every written song from every artist for audio generation.
-            </p>
-          </div>
-        )}
+        {/* "Generate All Audio" lived here. It queued every written song in the library
+            with no way to narrow it down, and has been replaced by the Generate Audio tab
+            in Bulk Operations, which does the same job per artist/album. */}
 
         {/* ── LLM Models ──────────────────────────────────────────── */}
         <div>

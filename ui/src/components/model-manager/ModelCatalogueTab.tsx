@@ -16,7 +16,7 @@ interface Props {
   onDelete: (filename: string) => void;
 }
 
-type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper';
+type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper' | 'mm3';
 
 const TABS: { id: RoleTab; label: string }[] = [
   { id: 'dit', label: 'DiT Models' },
@@ -27,6 +27,7 @@ const TABS: { id: RoleTab; label: string }[] = [
   { id: 'stablestep', label: 'StableStep' },
   { id: 'supersep', label: 'Stem Separation' },
   { id: 'whisper', label: 'Whisper' },
+  { id: 'mm3', label: 'MiniMax-Music3' },
 ];
 
 // ── Info blocks per category ────────────────────────────────
@@ -46,6 +47,7 @@ const ROLE_INFO: Record<string, string> = {
   stablestep: 'Stable Audio 3 refiner models for the StableStep post-processing feature. StableStep re-renders the instrumental through Stable Audio 3 to replace VAE fizz with real detail; vocals are split out, cleaned with PP-VAE, and remixed. Two engine backends are available — install either (or both): the GGML backend (4 GGUF files, ~5.8 GB) runs on CUDA, Vulkan or CPU and is the fastest option on NVIDIA in current testing; the ONNX backend (~12 GB, fp32) runs via TensorRT on NVIDIA only and is slow on first use while the TensorRT engine builds (one-time per length bucket). The tokenizer files from the ONNX set are required by BOTH backends. Powered by Stability AI.',
   supersep: 'Stem separation models for Cover Studio. Uses a 4-stage ONNX pipeline: BS-Roformer splits audio into 6 stems, Mel-Band RoFormer separates lead/backing vocals, MDX23C isolates drum components, and HTDemucs refines the "other" stem. All 4 models are required for full separation. Models run via ONNX Runtime GPU — no Python needed.',
   whisper: 'OpenAI Whisper models for transcribing actual sung lyrics with word-level timestamps. Enable Whisper Lyrics in Post-Processing to use.',
+  mm3: 'MiniMax-Music3 — a separate generation backend with its own LM and synth models (no lm/dit/vae split; exactly two files). Both are required and load together, needing ~24 GB of VRAM. Switch to it via the Backend toggle in the top bar. A LICENSE file is fetched alongside automatically once either GGUF finishes downloading.',
 };
 
 // ── Grouping logic ──────────────────────────────────────────
@@ -355,6 +357,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
   const stablestepFiles = useMemo(() => files.filter(f => f.role === 'stablestep'), [files]);
   const supersepFiles = useMemo(() => files.filter(f => f.role === 'supersep'), [files]);
   const whisperFiles = useMemo(() => files.filter(f => f.role === 'whisper'), [files]);
+  const mm3Files = useMemo(() => files.filter(f => f.role === 'mm3'), [files]);
 
   const renderSimpleGroup = (roleFiles: RegistryFile[], info?: string) => (
     <div className="space-y-3">
@@ -455,6 +458,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
       )}
       {activeTab === 'supersep' && renderSimpleGroup(supersepFiles, ROLE_INFO.supersep)}
       {activeTab === 'whisper' && renderSimpleGroup(whisperFiles, ROLE_INFO.whisper)}
+      {activeTab === 'mm3' && renderSimpleGroup(mm3Files, ROLE_INFO.mm3)}
     </div>
   );
 };

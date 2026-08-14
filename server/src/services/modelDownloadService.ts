@@ -76,6 +76,14 @@ interface InternalJob extends DownloadJob {
   hfToken?: string;   // Optional Hugging Face token for gated repos
 }
 
+/** A small non-model file (license, readme, ...) that should land next to its
+ *  parent once the parent finishes downloading. Not tracked as its own job —
+ *  no progress/resume, best-effort, generic (not tied to any one model). */
+interface RegistryCompanion {
+  filename: string;
+  repoPath?: string;   // Path within the HuggingFace repo; defaults to filename
+}
+
 interface RegistryFile {
   id: string;
   filename: string;
@@ -90,6 +98,7 @@ interface RegistryFile {
   repo: string;
   description: string;
   tags: string[];
+  companions?: RegistryCompanion[];
 }
 
 // ── Service ─────────────────────────────────────────────────
@@ -424,6 +433,12 @@ class ModelDownloadService extends EventEmitter {
         job.speed = 0;
         this.emit('progress');
         console.log(`[ModelManager] Download complete: ${file.filename}`);
+
+        // Best-effort: fetch any companion files (e.g. a LICENSE that must
+        // travel with the weights) into the same directory. Never blocks or
+        // fails the parent job — errors are logged only.
+        this._fetchCompanions(file, targetDir).catch(() => {});
+
         return; // Success — exit retry loop
       } catch (err: any) {
         if ((job.status as DownloadStatus) === 'cancelled') return;
@@ -488,6 +503,55 @@ class ModelDownloadService extends EventEmitter {
         );
       }
     }
+  }
+
+  /** Fetch each of a file's companion files into `targetDir`, skipping ones
+   *  that already exist. No progress tracking, no resume — these are small
+   *  (license/readme-sized) side files, not models. Generic: any registry
+   *  entry can declare `companions`, not just MM3. */
+  private async _fetchCompanions(file: RegistryFile, targetDir: string): Promise<void> {
+    if (!file.companions?.length) return;
+    for (const companion of file.companions) {
+      const dest = path.join(targetDir, companion.filename);
+      if (fs.existsSync(dest)) continue;
+      const repoPath = companion.repoPath || companion.filename;
+      const url = `https://huggingface.co/${file.repo}/resolve/main/${repoPath}`;
+      try {
+        await this._downloadSimple(url, dest);
+        console.log(`[ModelManager] Companion file fetched: ${companion.filename}`);
+      } catch (err: any) {
+        console.warn(`[ModelManager] Companion fetch failed for ${companion.filename}: ${err.message}`);
+      }
+    }
+  }
+
+  /** Minimal one-shot download (redirects, no Range/resume, no progress
+   *  events) for small companion files. */
+  private _downloadSimple(url: string, destPath: string, redirectCount = 0): Promise<void> {
+    if (redirectCount > 5) return Promise.reject(new Error('Too many redirects'));
+    return new Promise((resolve, reject) => {
+      const parsedUrl = new URL(url);
+      const transport = parsedUrl.protocol === 'https:' ? https : http;
+      const req = transport.get(parsedUrl, { headers: { 'User-Agent': 'HOT-Step-CPP/1.0' } }, (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          const redirectUrl = new URL(res.headers.location, parsedUrl).href;
+          this._downloadSimple(redirectUrl, destPath, redirectCount + 1).then(resolve).catch(reject);
+          return;
+        }
+        if (res.statusCode && res.statusCode >= 400) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode}: ${res.statusMessage}`));
+          return;
+        }
+        const writeStream = fs.createWriteStream(destPath);
+        res.pipe(writeStream);
+        writeStream.on('finish', () => writeStream.close(() => resolve()));
+        writeStream.on('error', reject);
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+    });
   }
 
   private _downloadWithRedirects(url: string, partPath: string, job: InternalJob, startByte: number, redirectCount = 0): Promise<void> {

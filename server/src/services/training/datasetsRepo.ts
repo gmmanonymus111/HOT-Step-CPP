@@ -9,6 +9,7 @@
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §3, §4.12
 
 import { getDb } from '../../db/database.js';
+import { normalizeLanguage } from '../languageCodes.js';
 import type { TagPosition, TrainingDatasetRow } from './types.js';
 
 interface DbRow {
@@ -30,6 +31,8 @@ interface DbRow {
   status: string;
   built_at: string;
   dataset_json_path: string;
+  album_name: string;
+  lyrics_set_id: number;
   created_at: string;
   updated_at: string;
 }
@@ -52,7 +55,12 @@ function toRow(r: DbRow): TrainingDatasetRow {
     defaultArtist: r.default_artist,
     defaultAlbum: r.default_album,
     defaultGenre: r.default_genre,
-    defaultLanguage: r.default_language,
+    // Normalized on READ so the ~183 rows still storing the old 'english'
+    // literal cannot re-seed it into sidecars (labelingQueue force-writes this
+    // value on every label pass) and from there back into training data. An
+    // EMPTY value stays empty — it means "do not force a language", which is
+    // not the same as 'en'. See services/languageCodes.ts.
+    defaultLanguage: r.default_language ? normalizeLanguage(r.default_language) : '',
     sampleCount: r.sample_count,
     labeledCount: r.labeled_count,
     excludedCount: r.excluded_count,
@@ -61,6 +69,8 @@ function toRow(r: DbRow): TrainingDatasetRow {
       : 'draft',
     builtAt: r.built_at,
     datasetJsonPath: r.dataset_json_path,
+    albumName: r.album_name ?? '',
+    lyricsSetId: r.lyrics_set_id ?? 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -83,6 +93,8 @@ const COLUMN_OF: Record<string, string> = {
   status: 'status',
   builtAt: 'built_at',
   datasetJsonPath: 'dataset_json_path',
+  albumName: 'album_name',
+  lyricsSetId: 'lyrics_set_id',
 };
 
 export function listDatasets(): TrainingDatasetRow[] {
@@ -120,11 +132,11 @@ export function insertDataset(row: TrainingDatasetRow): void {
     INSERT INTO training_datasets (
       id, slug, name, source_dir, recursive, custom_tag, tag_position, genre_ratio,
       default_artist, default_album, default_genre, default_language, sample_count, labeled_count,
-      excluded_count, status, built_at, dataset_json_path, created_at, updated_at
+      excluded_count, status, built_at, dataset_json_path, album_name, created_at, updated_at
     ) VALUES (
       @id, @slug, @name, @source_dir, @recursive, @custom_tag, @tag_position, @genre_ratio,
       @default_artist, @default_album, @default_genre, @default_language, @sample_count, @labeled_count,
-      @excluded_count, @status, @built_at, @dataset_json_path, @created_at, @updated_at
+      @excluded_count, @status, @built_at, @dataset_json_path, @album_name, @created_at, @updated_at
     )
   `).run({
     id: row.id,
@@ -145,6 +157,7 @@ export function insertDataset(row: TrainingDatasetRow): void {
     status: row.status,
     built_at: row.builtAt,
     dataset_json_path: row.datasetJsonPath,
+    album_name: row.albumName ?? '',
     created_at: row.createdAt,
     updated_at: row.updatedAt,
   });

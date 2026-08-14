@@ -4,13 +4,19 @@
  * Modes:
  *   - Build Profiles: Queue profile builds for unprofiled albums
  *   - Generate Lyrics: Queue lyric generation for profiled albums
+ *   - Generate Audio: Queue written songs for audio generation, per album
  *   - Assign Presets: Bulk-assign adapter + reference track presets to albums
  *   - Fetch Lyrics: Batch-fetch lyrics from Genius for new artists/albums
  *
  * Adapted for C++ engine: removed adapter type detection (not needed).
+ *
+ * NOTE on the two "generate" modes: 'generate' queues LYRIC writing (through the
+ * streaming queue), 'audio' queues AUDIO rendering of lyrics already written
+ * (through audioGenQueueStore). They are different queues with different targets —
+ * 'generate' keys selection by profile_id, 'audio' keys it by lyrics_set_id.
  */
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   X, Loader2, CheckCircle, AlertCircle, ListOrdered, Sparkles,
@@ -27,7 +33,9 @@ import {
 import type { QueueItemType } from '../../stores/streamingStore';
 import { lireekApi } from '../../services/lireekApi';
 import { adapterApi } from '../../services/api';
-import type { Artist, LyricsSet, Profile, AlbumPreset } from '../../services/lireekApi';
+import type { Artist, LyricsSet, Profile, AlbumPreset, Generation } from '../../services/lireekApi';
+import { enqueueAudioGen } from '../../stores/audioGenQueueStore';
+import { useGlobalParamsStore } from '../../stores/globalParamsStore';
 import { useAuth } from '../../context/AuthContext';
 import { FileBrowserModal } from '../shared/FileBrowserModal';
 import { EditableSlider } from '../shared/EditableSlider';
@@ -46,7 +54,33 @@ interface QueuePanelProps {
   onFetchComplete?: () => void;
 }
 
-type QueueMode = 'profile' | 'generate' | 'presets' | 'fetch-lyrics';
+type QueueMode = 'profile' | 'generate' | 'audio' | 'presets' | 'fetch-lyrics';
+
+/** Which end of an album's written songs to take when queueing a fixed number. */
+type AudioOrder = 'newest' | 'oldest';
+
+/** Which already-done songs to leave out of a bulk audio run.
+ *  'generated'  — anything that has ever been rendered
+ *  'downloaded' — only ones you kept a copy of, so unloved renders can be re-rolled
+ *  'none'       — queue everything */
+type AudioSkipMode = 'generated' | 'downloaded' | 'none';
+
+/** One album's worth of written songs, ready to queue for audio. */
+interface AudioAlbumRow {
+  lyricsSetId: number;
+  artistId: number;
+  artistName: string;
+  album: string;
+  gens: Generation[];   // newest first
+  /** Songs the skip filter removed BEFORE the newest/oldest slice. Surfaced on
+   *  the row because the removal is otherwise invisible: with the default
+   *  "skip generated", an already-rendered newest song silently slides the
+   *  "Newest first" window down onto older lyrics. */
+  skipped: number;
+  /** True when a skipped song is newer than every included one — the exact
+   *  case where "Newest first" will not queue the newest lyric. */
+  skippedNewer: boolean;
+}
 
 interface FetchEntry { artist: string; album: string; }
 type FetchStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
@@ -73,13 +107,14 @@ const STATUS_BADGE: Record<PresetStatus, { label: string; color: string; icon: s
 };
 
 export const QueuePanel: React.FC<QueuePanelProps> = ({
-  open, onClose, artists: _artists, lyricsSets, profiles,
+  open, onClose, artists, lyricsSets, profiles,
   profilingModel, generationModel, refinementModel: _refinementModel, showToast,
   onFetchComplete,
 }) => {
   const stream = useStreamingStore();
   const { t } = useTranslation();
-  const { token: _token } = useAuth();
+  const { token } = useAuth();
+  const globalParams = useGlobalParamsStore();
   const { disguiseArtist, disguiseAlbum } = useDisguiseMode();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<QueueMode>('profile');
@@ -92,6 +127,21 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
   const [genCountsMap, setGenCountsMap] = useState<Map<number, number>>(new Map());
   const [genCountsLoading, setGenCountsLoading] = useState(false);
   const [genFilterThreshold, setGenFilterThreshold] = useState('');
+
+  // Generate Audio state. `audioAllTracks` off means "take N per album", and only
+  // then does the oldest/newest choice mean anything.
+  const [audioGens, setAudioGens] = useState<Generation[]>([]);
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [audioAllTracks, setAudioAllTracks] = useState(true);
+  const [audioCount, setAudioCount] = useState(1);
+  const [audioOrder, setAudioOrder] = useState<AudioOrder>('newest');
+  const [audioFilter, setAudioFilter] = useState('');
+  // What counts as "already done" and should be left out of a bulk run.
+  // Defaults to 'generated' — the previous behaviour. 'downloaded' is the looser
+  // one: it lets you re-roll songs you generated but never thought worth keeping.
+  const [audioSkip, setAudioSkip] = useState<AudioSkipMode>('generated');
+  const [audioEnqueuing, setAudioEnqueuing] = useState(false);
+  const [audioProgress, setAudioProgress] = useState({ current: 0, total: 0 });
 
   // Presets state
   const [presetMap, setPresetMap] = useState<Map<number, AlbumPreset>>(new Map());
@@ -158,6 +208,101 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
       setGenCountsLoading(false);
     }
   }, []);
+
+  const loadAudioGenerations = useCallback(async () => {
+    setAudioLoading(true);
+    try {
+      const res = await lireekApi.listAllGenerations();
+      // Server hands back a raw array; the declared type says { generations }. Both happen.
+      const gens: Generation[] = Array.isArray(res) ? res : (res.generations || []);
+      setAudioGens(gens);
+    } catch (err) {
+      console.error('[QueuePanel] Failed to load generations:', err);
+      showToast?.(`Failed to load written songs: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setAudioLoading(false);
+    }
+  }, [showToast]);
+
+  // Refetch whenever the panel is OPEN on the audio tab — not just on tab click.
+  // The panel stays mounted across closes (state persists), and lyrics written
+  // by the MCP bypass the UI stores entirely, so a reopen straight onto this
+  // tab used to show the previous open's list: "Newest first" then honestly
+  // picked the newest of a STALE list, i.e. older songs. (Rob, 2026-08-08)
+  useEffect(() => {
+    if (open && mode === 'audio') loadAudioGenerations();
+  }, [open, mode, loadAudioGenerations]);
+
+  // Written songs folded into one row per album. /generations/all returns artist_id and
+  // artist_name but NOT lyrics_set_id, so the album is recovered via the profile — which
+  // is also what enqueueAudioGen needs in order to look the album preset up.
+  const audioAlbums = useMemo<AudioAlbumRow[]>(() => {
+    const profileToSet = new Map(profiles.map(p => [p.id, p.lyrics_set_id]));
+    const rows = new Map<number, AudioAlbumRow>();
+    const skippedBySet = new Map<number, { n: number; newest: string }>();
+    for (const g of audioGens) {
+      const lsId = profileToSet.get(g.profile_id);
+      if (lsId == null) continue;                       // orphan generation, nothing to queue against
+      // Leave out lyrics that are already "done". Both markers are permanent, so
+      // this holds for songs whose audio was downloaded and then deleted — which
+      // is the normal end state for a track that turned out well.
+      const skippedOut =
+        (audioSkip === 'generated' && (g.audio_generated_count ?? 0) > 0) ||
+        (audioSkip === 'downloaded' && (g.download_count ?? 0) > 0);
+      if (skippedOut) {
+        const s = skippedBySet.get(lsId) ?? { n: 0, newest: '' };
+        s.n++;
+        if ((g.created_at || '') > s.newest) s.newest = g.created_at || '';
+        skippedBySet.set(lsId, s);
+        continue;
+      }
+      let row = rows.get(lsId);
+      if (!row) {
+        const ls = lyricsSets.find(l => l.id === lsId);
+        row = {
+          lyricsSetId: lsId,
+          artistId: g.artist_id ?? ls?.artist_id ?? 0,
+          artistName: g.artist_name || ls?.artist_name || 'Unknown',
+          album: g.album || ls?.album || '',
+          gens: [],
+          skipped: 0,
+          skippedNewer: false,
+        };
+        rows.set(lsId, row);
+      }
+      row.gens.push(g);
+    }
+    for (const row of rows.values()) {
+      row.gens.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '') || b.id - a.id);
+      const s = skippedBySet.get(row.lyricsSetId);
+      if (s) {
+        row.skipped = s.n;
+        row.skippedNewer = s.newest > (row.gens[0]?.created_at || '');
+      }
+    }
+    return Array.from(rows.values()).sort((a, b) =>
+      a.artistName.localeCompare(b.artistName, undefined, { sensitivity: 'base' })
+      || a.album.localeCompare(b.album, undefined, { sensitivity: 'base' }));
+  }, [audioGens, profiles, lyricsSets, audioSkip]);
+
+  const audioVisible = useMemo<AudioAlbumRow[]>(() => {
+    const needle = audioFilter.toLowerCase().trim();
+    if (!needle) return audioAlbums;
+    return audioAlbums.filter(r =>
+      r.artistName.toLowerCase().includes(needle) || r.album.toLowerCase().includes(needle));
+  }, [audioAlbums, audioFilter]);
+
+  /** The songs this album would contribute under the current count/order settings. */
+  const audioTracksFor = useCallback((row: AudioAlbumRow): Generation[] => {
+    if (audioAllTracks) return row.gens;
+    // gens are newest-first, so reversing gives oldest-first and the slice reads the same way
+    const ordered = audioOrder === 'newest' ? row.gens : [...row.gens].reverse();
+    return ordered.slice(0, audioCount);
+  }, [audioAllTracks, audioOrder, audioCount]);
+
+  const audioSelectedTotal = useMemo(() => audioAlbums
+    .filter(r => selected.has(r.lyricsSetId))
+    .reduce((sum, r) => sum + audioTracksFor(r).length, 0), [audioAlbums, selected, audioTracksFor]);
 
   if (!open) return null;
 
@@ -243,6 +388,9 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
         return (genCountsMap.get(p.id) || 0) < threshold;
       });
       setSelected(new Set(visible.map(p => p.id)));
+    } else if (mode === 'audio') {
+      // only what the filter is actually showing, and only albums that have songs
+      setSelected(new Set(audioVisible.map(r => r.lyricsSetId)));
     } else {
       setSelected(new Set(lyricsSets.map(ls => ls.id)));
     }
@@ -286,6 +434,48 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
       addBulkToQueue(items);
     }
     setSelected(new Set());
+  };
+
+  const handleQueueAudio = async () => {
+    if (selected.size === 0) return;
+    if (!token) { showToast?.('Not signed in — cannot queue audio'); return; }
+
+    const rows = audioAlbums.filter(r => selected.has(r.lyricsSetId));
+    const jobs = rows.flatMap(r => audioTracksFor(r).map(gen => ({ row: r, gen })));
+    if (jobs.length === 0) { showToast?.('Nothing to queue for the selected albums'); return; }
+
+    setAudioEnqueuing(true);
+    setAudioProgress({ current: 0, total: jobs.length });
+
+    // Snapshot the params once so every song in the batch renders under identical
+    // settings, even if the user changes a knob while the batch is still enqueueing.
+    const paramsSnapshot = globalParams.getGlobalParams();
+    const artistMap = new Map(artists.map(a => [a.id, a]));
+
+    let queued = 0, failed = 0;
+    for (let i = 0; i < jobs.length; i++) {
+      const { row, gen } = jobs[i];
+      try {
+        await enqueueAudioGen(gen, {
+          artistId: row.artistId,
+          artistName: row.artistName,
+          artistImageUrl: artistMap.get(row.artistId)?.image_url || '',
+          profileId: gen.profile_id,
+          lyricsSetId: row.lyricsSetId,
+        }, paramsSnapshot, token);
+        queued++;
+      } catch (err) {
+        failed++;
+        console.error(`[QueuePanel] Failed to enqueue generation ${gen.id}:`, err);
+      }
+      setAudioProgress({ current: i + 1, total: jobs.length });
+    }
+
+    showToast?.(failed === 0
+      ? `${queued} song${queued !== 1 ? 's' : ''} queued for audio`
+      : `${queued} queued, ${failed} failed`);
+    setSelected(new Set());
+    setAudioEnqueuing(false);
   };
 
   const handleApplyPresets = async () => {
@@ -367,6 +557,10 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'generate' ? 'bg-green-500/20 text-green-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Wand2 className="w-3.5 h-3.5" /> Generate Lyrics
             </button>
+            <button onClick={() => { setMode('audio'); setSelected(new Set()); }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'audio' ? 'bg-purple-500/20 text-purple-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
+              <Music className="w-3.5 h-3.5" /> {t('lyric.generateAudio')}
+            </button>
             <button onClick={() => { setMode('presets'); setSelected(new Set()); loadPresets(); }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${mode === 'presets' ? 'bg-pink-500/20 text-pink-300' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5'}`}>
               <Settings2 className="w-3.5 h-3.5" /> Assign Presets
@@ -376,6 +570,84 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
               <Search className="w-3.5 h-3.5" /> Fetch Lyrics
             </button>
           </div>
+
+          {/* ══ Generate Audio config panel ══ */}
+          {mode === 'audio' && (
+            <div className="px-6 pt-3 pb-2 space-y-3 border-b border-zinc-200 dark:border-white/5">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500 pointer-events-none" />
+                <input type="text" value={audioFilter} onChange={e => setAudioFilter(e.target.value)}
+                  placeholder={t('lyric.filterPlaceholder')}
+                  className="w-full bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none focus:border-purple-500/50 transition-colors" />
+                {audioFilter && (
+                  <button onClick={() => setAudioFilter('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-white/10 text-zinc-500 hover:text-white transition-colors">
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {/* How many per album */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.tracksPerAlbum')}</span>
+                <div className="flex items-center gap-1 p-0.5 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10">
+                  <button onClick={() => setAudioAllTracks(true)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${audioAllTracks ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                    {t('lyric.allTracks')}
+                  </button>
+                  <button onClick={() => setAudioAllTracks(false)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${!audioAllTracks ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                    {t('lyric.fixedNumber')}
+                  </button>
+                </div>
+                {!audioAllTracks && (
+                  <input type="number" min={1} max={50} value={audioCount}
+                    onChange={e => setAudioCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+                    className="w-16 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-white/10 text-sm text-white text-center focus:outline-none focus:border-purple-500/50" />
+                )}
+              </div>
+
+              {/* Which end to take them from — only meaningful for a fixed number */}
+              {!audioAllTracks && (
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.takeFrom')}</span>
+                  <div className="flex items-center gap-1 p-0.5 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10">
+                    <button onClick={() => setAudioOrder('newest')}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${audioOrder === 'newest' ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                      {t('lyric.newestFirst')}
+                    </button>
+                    <button onClick={() => setAudioOrder('oldest')}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${audioOrder === 'oldest' ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                      {t('lyric.oldestFirst')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">{t('lyric.skipSongs')}</span>
+                <div className="flex items-center gap-1 p-0.5 rounded-lg bg-zinc-200 dark:bg-black/20 border border-zinc-300 dark:border-white/10">
+                  {(['generated', 'downloaded', 'none'] as AudioSkipMode[]).map(m => (
+                    <button key={m}
+                      onClick={() => { setAudioSkip(m); setSelected(new Set()); }}
+                      title={t(`lyric.skip.${m}.hint`)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${audioSkip === m ? 'bg-purple-500/25 text-purple-200' : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'}`}>
+                      {t(`lyric.skip.${m}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="text-[10px] text-zinc-500">
+                {audioLoading
+                  ? t('lyric.loadingWrittenSongs')
+                  : t('lyric.audioSelectionSummary', {
+                      albums: selected.size,
+                      songs: audioSelectedTotal,
+                      available: audioAlbums.length,
+                    })}
+              </div>
+            </div>
+          )}
 
           {/* ══ Presets mode config panel ══ */}
           {mode === 'presets' && (
@@ -525,7 +797,7 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
           )}
 
           {/* Selection list */}
-          <div className="flex-1 overflow-y-auto px-6 py-3 space-y-1 scrollbar-hide" style={{ maxHeight: mode === 'presets' ? '250px' : '300px' }}>
+          <div className="flex-1 overflow-y-auto px-6 py-3 space-y-1 scrollbar-hide" style={{ maxHeight: mode === 'presets' || mode === 'audio' ? '250px' : '300px' }}>
             {mode === 'profile' ? (() => {
               const profiledSetIds = new Set(profiles.map(p => p.lyrics_set_id));
               const unprofiled = lyricsSets.filter(ls => !profiledSetIds.has(ls.id));
@@ -579,6 +851,45 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                   );
                 })}</>);
               })()
+            ) : mode === 'audio' ? (
+              audioLoading ? (
+                <div className="flex items-center justify-center py-8"><Loader2 className="w-5 h-5 text-zinc-500 animate-spin" /></div>
+              ) : audioAlbums.length === 0 ? (
+                <p className="text-zinc-500 text-sm text-center py-4">{t('lyric.noWrittenSongs')}</p>
+              ) : audioVisible.length === 0 ? (
+                <p className="text-zinc-500 text-sm text-center py-4">{t('lyric.noAlbumsMatch', { filter: audioFilter })}</p>
+              ) : (<>{audioVisible.map(row => {
+                const take = audioTracksFor(row).length;
+                return (
+                  <label key={row.lyricsSetId} className={`flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors ${selected.has(row.lyricsSetId) ? 'bg-purple-500/10 border border-purple-500/20' : 'bg-white/5 border border-transparent hover:bg-white/10'}`}>
+                    <input type="checkbox" checked={selected.has(row.lyricsSetId)} onChange={() => toggleItem(row.lyricsSetId)} className="accent-purple-500" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-white truncate">{disguiseArtist(row.artistName)}</span>
+                        <span className="text-[10px] text-zinc-600">—</span>
+                        <span className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{disguiseAlbum(row.album) || 'Top Songs'}</span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 bg-zinc-100 dark:bg-zinc-800 text-zinc-500">
+                          {row.gens.length} written
+                        </span>
+                        {row.skipped > 0 && (
+                          <span
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${row.skippedNewer ? 'bg-amber-900/30 text-amber-400' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600'}`}
+                            title={row.skippedNewer
+                              ? `${row.skipped} song(s) hidden by the skip filter — including this album's NEWEST song, so "Newest first" will start from an older one. Set skip to "none" to re-roll them.`
+                              : `${row.skipped} song(s) hidden by the skip filter (already ${audioSkip === 'downloaded' ? 'downloaded' : 'rendered'}).`}>
+                            {row.skippedNewer ? '⚠ ' : ''}{row.skipped} skipped
+                          </span>
+                        )}
+                        {selected.has(row.lyricsSetId) && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 bg-purple-900/30 text-purple-300">
+                            +{take}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}</>)
             ) : mode === 'presets' ? (
               presetsLoading ? (
                 <div className="flex items-center justify-center py-8"><Loader2 className="w-5 h-5 text-zinc-500 animate-spin" /></div>
@@ -743,6 +1054,22 @@ export const QueuePanel: React.FC<QueuePanelProps> = ({
                       className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-30 bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/10">
                       {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Settings2 className="w-4 h-4" />}
                       Apply to {selected.size} Album{selected.size !== 1 ? 's' : ''}
+                    </button>
+                  </div>
+                ) : mode === 'audio' ? (
+                  <div className="flex items-center gap-2">
+                    <button onClick={loadAudioGenerations} disabled={audioLoading || audioEnqueuing}
+                      className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 hover:bg-white/5 transition-colors disabled:opacity-50" title={t('lyric.refreshWrittenSongs')}>
+                      <RefreshCw className={`w-3.5 h-3.5 ${audioLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                    {audioEnqueuing && (
+                      <span className="text-[10px] text-zinc-500">{audioProgress.current}/{audioProgress.total}</span>
+                    )}
+                    <button onClick={handleQueueAudio}
+                      disabled={selected.size === 0 || audioSelectedTotal === 0 || audioEnqueuing}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-30 bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white shadow-lg shadow-purple-500/10">
+                      {audioEnqueuing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Music className="w-4 h-4" />}
+                      {t('lyric.queueSongsForAudio', { songs: audioSelectedTotal })}
                     </button>
                   </div>
                 ) : (

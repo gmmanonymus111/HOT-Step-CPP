@@ -83,7 +83,7 @@ export function resolveTriggerSpecs(params: TriggerParamsLike): TriggerSpec[] {
 export function resolveAdapterTriggers(
   adapterPaths: string[],
   clientSpecs: TriggerSpec[],
-  readEmbedded: (adapterPath: string) => { trigger: string; position: 'prepend' | 'append' | '' },
+  readEmbedded: (adapterPath: string) => { trigger: string; position: 'prepend' | 'append' | 'replace' | '' },
 ): TriggerSpec[] {
   const out: TriggerSpec[] = [];
   const matched = new Set<TriggerSpec>();
@@ -94,12 +94,19 @@ export function resolveAdapterTriggers(
     const override = clientSpecs.find(s => s.path === p && s.source === 'override');
     if (override) { out.push(override); matched.add(override); continue; }
 
-    let embedded = { trigger: '', position: '' as 'prepend' | 'append' | '' };
+    let embedded = { trigger: '', position: '' as 'prepend' | 'append' | 'replace' | '' };
     try { embedded = readEmbedded(p); } catch { /* an unreadable adapter simply has no trigger */ }
     if (embedded.trigger) {
+      // All three positions come through verbatim. 'replace' in particular MUST
+      // NOT be downgraded to 'prepend': an adapter trained with
+      // tag_position=replace only ever saw the bare trigger as its caption, so
+      // prepending it to prose is exactly the off-distribution case the
+      // embedded position exists to prevent.
       out.push({
         word: embedded.trigger,
-        placement: embedded.position === 'append' ? 'append' : 'prepend',
+        placement: embedded.position === 'append' ? 'append'
+          : embedded.position === 'replace' ? 'replace'
+            : 'prepend',
         source: 'embedded',
         path: p,
       });

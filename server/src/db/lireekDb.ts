@@ -442,9 +442,60 @@ export function getAudioGenerations(generationId: number): Record<string, any>[]
 }
 
 export function resolveAudioGeneration(jobId: string, audioUrl: string, coverUrl?: string): void {
-  getDb().prepare(
+  const db = getDb();
+
+  // Read before the update so we can tell a first resolve from a repeat — the
+  // client calls this from more than one place and must not double-count.
+  const row = db.prepare(
+    'SELECT generation_id, audio_url FROM audio_generations WHERE hotstep_job_id = ?'
+  ).get(jobId) as { generation_id: number; audio_url: string | null } | undefined;
+
+  db.prepare(
     'UPDATE audio_generations SET audio_url = ?, cover_url = ? WHERE hotstep_job_id = ?'
   ).run(audioUrl, coverUrl ?? null, jobId);
+
+  // Permanently mark the lyrics as generated. Counted on resolve rather than at
+  // link time so a job that failed or was cancelled doesn't burn the lyrics, and
+  // held on the generations row so deleting the audio never clears it.
+  if (row && !row.audio_url) {
+    db.prepare(`
+      UPDATE generations SET
+        audio_generated_count = audio_generated_count + 1,
+        first_generated_at    = COALESCE(first_generated_at, ?)
+      WHERE id = ?
+    `).run(new Date().toISOString(), row.generation_id);
+  }
+}
+
+/**
+ * Record that a track was downloaded, against the lyrics it came from.
+ *
+ * Keyed on the ORIGINAL audio_url, because that is what audio_generations
+ * stores and it is the same whether the user took the original or the master.
+ * Marks the audio_generations row so each rendered track counts once: taking
+ * both versions, or the same file twice, is still one kept version.
+ *
+ * Returns true if this was the first download of that track.
+ */
+export function markDownloadedByAudioUrl(audioUrl: string): boolean {
+  if (!audioUrl) return false;
+  const db = getDb();
+
+  const row = db.prepare(
+    'SELECT id, generation_id, downloaded_at FROM audio_generations WHERE audio_url = ?'
+  ).get(audioUrl) as { id: number; generation_id: number; downloaded_at: string | null } | undefined;
+
+  if (!row || row.downloaded_at) return false;
+
+  const now = new Date().toISOString();
+  db.prepare('UPDATE audio_generations SET downloaded_at = ? WHERE id = ?').run(now, row.id);
+  db.prepare(`
+    UPDATE generations SET
+      download_count      = download_count + 1,
+      first_downloaded_at = COALESCE(first_downloaded_at, ?)
+    WHERE id = ?
+  `).run(now, row.generation_id);
+  return true;
 }
 
 export function deleteAudioGeneration(id: number): boolean {
