@@ -33,6 +33,7 @@
 
 #include "backend.h"
 #include "gguf-weights.h"
+#include "minimax/mm3-adapter.h"
 #include "weight-ctx.h"
 
 #include <algorithm>
@@ -369,6 +370,13 @@ struct MM3Model {
 
     MM3LmWeights    lm;
     MM3SynthWeights synth;
+
+    // Adapters merged into wctx_synth's DiT weights at load. A merge is
+    // irreversible in-place, so this is the record of what the resident weights
+    // ACTUALLY contain — /mm3/props reports it, and a later increment compares
+    // it against the requested set to decide whether `rest` must be reloaded.
+    // Empty means the DiT is pristine.
+    std::string     rest_adapter_desc;
 
     // name -> tensor, per file. Introspection only; graphs use the typed structs.
     std::map<std::string, ggml_tensor *> tmap_lm;
@@ -1201,6 +1209,70 @@ static bool mm3_select_variant(MM3Model * m, const std::string & lm_quant, const
     return true;
 }
 
+// Merge any requested LoRAs into the freshly-staged DiT weights.
+//
+// INCREMENT 1a — the adapter set comes from the environment, not the request:
+//
+//   MM3_ADAPTER        one path, or several separated by ';' (Windows) or ':'
+//   MM3_ADAPTER_SCALE  strength, default 1.0, applied to every adapter
+//
+// This is deliberately a bring-up surface, not the final one: an env var is
+// fixed for the process lifetime, so it sidesteps the reload-on-change question
+// entirely while the merge maths is being validated. Increment 1b moves this to
+// a request field and reloads `rest` when the set changes (rest_adapter_desc is
+// the comparison key it will use).
+static void mm3_apply_adapters(MM3Model * m, const GGUFModel & gf_sy) {
+    m->rest_adapter_desc.clear();
+
+    const char * spec = getenv("MM3_ADAPTER");
+    if (!spec || !*spec) {
+        return;
+    }
+    float        scale     = 1.0f;
+    const char * scale_env = getenv("MM3_ADAPTER_SCALE");
+    if (scale_env && *scale_env) {
+        scale = (float) atof(scale_env);
+    }
+
+    std::vector<std::string> paths;
+    {
+        std::string s = spec;
+        size_t      start = 0;
+        while (start <= s.size()) {
+            size_t sep = s.find_first_of(";:", start);
+            // Don't split a Windows drive letter ("D:\...").
+            if (sep != std::string::npos && s[sep] == ':' && sep == start + 1 && isalpha((unsigned char) s[start])) {
+                sep = s.find_first_of(";:", sep + 1);
+            }
+            std::string one = s.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+            if (!one.empty()) {
+                paths.push_back(one);
+            }
+            if (sep == std::string::npos) {
+                break;
+            }
+            start = sep + 1;
+        }
+    }
+
+    int total = 0;
+    for (const std::string & p : paths) {
+        const int n = mm3_adapter_merge(&m->wctx_synth, gf_sy, p.c_str(), scale, m->backend);
+        if (n > 0) {
+            total += n;
+            if (!m->rest_adapter_desc.empty()) {
+                m->rest_adapter_desc += "; ";
+            }
+            m->rest_adapter_desc += p + "@" + std::to_string(scale);
+        } else {
+            fprintf(stderr, "[MM3-Adapter] WARNING: %s merged nothing — the DiT is unchanged by it\n", p.c_str());
+        }
+    }
+    if (total) {
+        fprintf(stderr, "[MM3-Adapter] %d tensor(s) patched across %zu adapter(s)\n", total, paths.size());
+    }
+}
+
 // Load a chosen subset of the three parts into backend buffers. Parts already
 // resident are left alone, so this is idempotent and safe to call repeatedly.
 // On any failure NOTHING stays resident — a half-loaded model is never a state
@@ -1277,6 +1349,12 @@ static bool mm3_load_parts(MM3Model * m, bool want_lm, bool want_depth, bool wan
             if (ok && need_rest) {
                 ok = mm3_load_rest_tensors(m, gf_sy, &errs);
                 if (ok) {
+                    // Adapter merge goes HERE — after the tensors are staged in
+                    // wctx_synth but before they are uploaded, the same seam ACE
+                    // uses in dit.h. Merging patches the PendingCopy sources, so
+                    // wctx_alloc then uploads already-adapted weights and no
+                    // extra VRAM or second pass is needed.
+                    mm3_apply_adapters(m, gf_sy);
                     ok = wctx_alloc(&m->wctx_synth, m->backend);
                     if (!ok) {
                         errs.push_back("backend buffer allocation failed for the synth stack (out of VRAM?)");
