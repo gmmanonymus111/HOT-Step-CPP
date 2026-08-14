@@ -53,6 +53,16 @@ export interface BackendFeatureCapabilities {
   lm: boolean;
   plugins: boolean;
   adapters: boolean;
+  /** The model-agnostic post-processing stages run for this backend: the VST
+   *  chain and reference mastering, both of which read the sample rate from
+   *  the WAV rather than assuming one. Separate from `plugins`, which gates
+   *  ACE's Lua solver/scheduler registry and the ACE-VAE-coupled stages
+   *  (PP-VAE re-encode, Spectral Lifter). */
+  postProcess: boolean;
+  /** StableStep / SA3 refinement is available for this backend's output. SA3
+   *  is natively 44.1 kHz and rate-transparent on its whole-mix path, so it is
+   *  not tied to ACE's 48 kHz pipeline. */
+  stableStep: boolean;
   cover: boolean;
   repaint: boolean;
   lego: boolean;

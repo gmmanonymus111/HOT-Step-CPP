@@ -89,7 +89,14 @@ export const GlobalParamBar: React.FC = () => {
   const showAdapters = true;
   const showPostProcessing = true;
   const adaptersSupported = !capabilities || capabilities.features.adapters;
-  const postProcessingSupported = !capabilities || capabilities.features.plugins;
+  // Post-processing is NOT all-or-nothing. The VST chain, reference mastering
+  // and StableStep read the sample rate from the audio rather than assuming
+  // ACE's 48 kHz, so they work for any backend; only PP-VAE re-encode and
+  // Spectral Lifter are genuinely ACE-model-coupled. Gate the cluster on the
+  // agnostic subset and let the dropdown hide the coupled panels.
+  const postProcessingSupported = !capabilities
+    || capabilities.features.plugins
+    || capabilities.features.postProcess !== false;
 
   // Generation is NOT only plugins — the seed lives here, and seed is
   // backend-agnostic. Gating the whole cluster on `plugins` left MiniMax-Music3

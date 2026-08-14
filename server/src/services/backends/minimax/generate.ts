@@ -45,6 +45,8 @@ import { config } from '../../../config.js';
 import { getDb } from '../../../db/database.js';
 import { aceClient } from '../../aceClient.js';
 import { wavDurationSec } from '../../audioCrop.js';
+import { runPostProcessingChain } from '../../generation/postProcessing.js';
+import type { PostProcessParams } from '../../generation/postProcessing.js';
 import {
   startGenerationLog, logGeneration, logGenerationParams,
   finishGenerationLog, failGenerationLog,
@@ -360,6 +362,58 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       },
     };
 
+    // ── Post-processing (the model-agnostic subset) ──────────────────────
+    //
+    // v1 skipped the whole chain because it is 48 kHz-minded and ACE-coupled.
+    // Re-auditing it stage by stage, that is only true of some of it:
+    //
+    //   VST chain     — rate-agnostic. vst-host reads the rate from the WAV and
+    //                   calls setupProcessing with it; the hardcoded 48000 is
+    //                   in the GUI command, not the processing path.
+    //   StableStep    — SA3 is NATIVELY 44.1 kHz (sa3-refine.h SA3_SR 44100)
+    //                   and out_sr defaults to the input rate, so a 44.1 kHz
+    //                   mix is a better match here than ACE's 48 kHz. The
+    //                   48000 the old audit cited belongs to the vocal-split
+    //                   branch only — disableStemSplit keeps us off it.
+    //   Mastering     — reads and writes the file's own sample rate.
+    //
+    // Still excluded, deliberately: PP-VAE re-encode (round-trips through the
+    // ACE VAE — wrong model and rate) and Spectral Lifter (tuned for the ACE
+    // 48 kHz output). Those are model-coupled, not merely rate-coupled.
+    let masteredUrl = '';
+    try {
+      const ppParams: PostProcessParams = {
+        ...job.params,
+        // Model-coupled stages: off regardless of what the UI persisted.
+        ppVaeReencode: false,
+        spectralLifterEnabled: false,
+        // Keep StableStep on its rate-transparent whole-mix path.
+        disableStemSplit: true,
+        whisperIsolateVocals: false,
+        instrumental: sub.instrumental,
+      };
+      // No "is anything actually on?" pre-check needed: the chain copies the
+      // WAV, runs whatever is enabled, and if NOTHING ran it deletes the copy
+      // and returns '' — so an all-off pass is a cheap no-op that also covers
+      // the VST case (applyVstChain returns false when the chain is empty).
+      if (ppParams.postProcessingEnabled !== false) {
+        const ppStart = performance.now();
+        const ppResult = await runPostProcessingChain(
+          [audioUrl], ppParams, 1, job.id,
+          log, (stage) => { job.stage = stage; },
+        );
+        masteredUrl = ppResult.masteredUrls?.[0] || '';
+        const ppMs = Math.round(performance.now() - ppStart);
+        if (masteredUrl) {
+          log('INFO', `[MM3] Post-processing produced ${masteredUrl} in ${ppMs} ms`);
+        }
+      }
+    } catch (ppErr: any) {
+      // Non-fatal, exactly as on the ACE side: a failed post stage must never
+      // lose the render that already succeeded.
+      log('WARNING', `[MM3] Post-processing chain failed (non-fatal): ${ppErr?.message || ppErr}`);
+    }
+
     const songId = uuidv4();
     getDb().prepare(`
       INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
@@ -371,7 +425,7 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       songId, job.userId, title, req.lyrics || '', style, req.caption,
       audioUrl, duration, 0, '', '',
       JSON.stringify([]), 'mm3', JSON.stringify(trackParams),
-      '', '', '',
+      masteredUrl, '', '',
       '', 'minimax-m3',
     );
 

@@ -43,6 +43,8 @@ async function capabilities(): Promise<BackendCapabilities> {
       lm: true,
       plugins: true,
       adapters: true,
+      postProcess: true,
+      stableStep: true,
       cover: true,
       repaint: true,
       lego: true,

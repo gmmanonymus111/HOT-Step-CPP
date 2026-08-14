@@ -21,6 +21,7 @@ import { useVstChainStore } from '../../stores/vstChainStore';
 import { ToggleSwitch } from './BarSection';
 import { formatReferenceName } from './modelLabels';
 import { VstChainDropdown } from './VstChainDropdown';
+import { useCapabilities } from '../../hooks/useCapabilities';
 import { CoverArtContent, CoverArtBadge } from './CoverArtDropdown';
 import { PluginControls } from './PluginControls';
 import { EditableSlider } from '../shared/EditableSlider';
@@ -265,6 +266,17 @@ export const PostProcessingDropdown: React.FC = () => {
   const gp = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
+  const { capabilities } = useCapabilities();
+
+  // Which post stages the ACTIVE backend can actually run.
+  //
+  // PP-VAE re-encode and Spectral Lifter round-trip audio through ACE's own
+  // VAE / 48 kHz-tuned endpoints, so they are meaningless on another backend
+  // and are hidden rather than shown-and-ignored. The VST chain, mastering and
+  // StableStep read the rate from the audio and are model-agnostic, so they
+  // stay. `!capabilities` (still loading) shows everything — ACE's behaviour.
+  const aceCoupledOk = !capabilities || capabilities.features.plugins;
+  const stableStepOk = !capabilities || capabilities.features.stableStep !== false;
 
   // PP-VAE availability — auto-detect from models directory
   const [ppVaeAvailable, setPpVaeAvailable] = useState(false);
@@ -479,7 +491,7 @@ export const PostProcessingDropdown: React.FC = () => {
       )}
 
       {/* 1. PP-VAE Re-encode (only visible when PP-VAE model is available) */}
-      {ppVaeAvailable && (
+      {ppVaeAvailable && aceCoupledOk && (
         <Accordion
           icon={<AudioWaveform size={14} />}
           label={t('pp.ppVaeReencode')}
@@ -523,7 +535,10 @@ export const PostProcessingDropdown: React.FC = () => {
         </Accordion>
       )}
 
-      {/* 1.5. StableStep — SA3 refine of the instrumental */}
+      {/* 1.5. StableStep — SA3 refine. Model-agnostic: SA3 is natively
+          44.1 kHz and its whole-mix path passes the input rate straight
+          through, so it is not tied to ACE's 48 kHz output. */}
+      {stableStepOk && (
       <Accordion
         icon={<Sparkles size={14} />}
         label="StableStep"
@@ -810,8 +825,10 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
-      {/* 1. Spectral Lifter */}
+      {/* 1. Spectral Lifter — ACE-VAE coupled, hidden on other backends */}
+      {aceCoupledOk && (
       <Accordion
         icon={<Zap size={14} />}
         label={t('pp.spectralLifter')}
@@ -889,6 +906,7 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
       {/* 2. Vocal Naturalizer */}
       <Accordion

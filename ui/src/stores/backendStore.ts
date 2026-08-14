@@ -41,6 +41,12 @@ export interface BackendFeatureCapabilities {
   lm: boolean;
   plugins: boolean;
   adapters: boolean;
+  /** Model-agnostic post stages (VST chain, reference mastering) run for this
+   *  backend. Separate from `plugins`, which also gates the ACE-VAE-coupled
+   *  stages (PP-VAE re-encode, Spectral Lifter). */
+  postProcess: boolean;
+  /** StableStep / SA3 refinement is available for this backend's output. */
+  stableStep: boolean;
   cover: boolean;
   repaint: boolean;
   lego: boolean;

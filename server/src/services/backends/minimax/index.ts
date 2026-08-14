@@ -155,6 +155,12 @@ async function capabilities(): Promise<BackendCapabilities> {
       lm: false,
       plugins: false,
       adapters: false,
+      // Model-agnostic post stages: the VST chain reads the rate from the WAV,
+      // mastering reads and writes it, and SA3 is natively 44.1 kHz — none of
+      // the three assume ACE's 48 kHz output. PP-VAE and Spectral Lifter stay
+      // excluded (ACE-VAE coupled) and ride the `plugins` flag above.
+      postProcess: true,
+      stableStep: true,
       cover: false,
       repaint: false,
       lego: false,

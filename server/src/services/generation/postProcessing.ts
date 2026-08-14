@@ -58,7 +58,7 @@ function leapXeInstalled(): boolean {
 const SEP_LEVEL_VOCALS_ONLY = 4;  // single 6-stem pass, instrumental = mix − vocals
 const SEP_LEVEL_STABLESTEP  = 5;  // dual Leap Xe pass, both stems neural
 
-interface PostProcessParams {
+export interface PostProcessParams {
   postProcessingEnabled?: boolean;
   ppVaeReencode?: boolean;
   ppVaeBlend?: number;
@@ -121,6 +121,13 @@ interface PostProcessParams {
   natTransitionSmooth?: number;
   // Context — used to skip naturalizer on instrumentals
   instrumental?: boolean;
+  /** Force StableStep to refine the whole mix instead of splitting vocals out
+   *  and re-mixing. The split path resamples the vocal stem to 48 kHz (via
+   *  PP-VAE) and asks SA3 for 48 kHz output so the two agree — plumbing shaped
+   *  around ACE's 48 kHz pipeline. A 44.1 kHz backend (MiniMax-Music3) sets
+   *  this so it stays on the rate-transparent whole-mix path, which is SA3's
+   *  native rate anyway (SA3_SR 44100). */
+  disableStemSplit?: boolean;
   // Pre-VST gain offset (dB)
   gainOffsetDb?: number;
   // Audio Quality Evaluator
@@ -271,8 +278,10 @@ export async function runPostProcessingChain(
     // Deliberately NOT gated on ppMasterOn: the split is a service for
     // Whisper, not an audio-modifying PP stage (anyStageRan untouched).
     const sa3Available = sa3ModelsInstalled() || sa3GgufInstalled();
-    const stableStepWantsStems = stableStepOn && sa3Available && !params.instrumental;
-    const whisperWantsStems = !!onVocalStem && !!params.whisperIsolateVocals && !params.instrumental;
+    const stableStepWantsStems = stableStepOn && sa3Available && !params.instrumental
+      && !params.disableStemSplit;
+    const whisperWantsStems = !!onVocalStem && !!params.whisperIsolateVocals && !params.instrumental
+      && !params.disableStemSplit;
     let vocalSep: VocalSeparation | null = null;
 
     if (stableStepWantsStems || whisperWantsStems) {
