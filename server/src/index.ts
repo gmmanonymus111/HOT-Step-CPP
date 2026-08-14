@@ -8,13 +8,18 @@
 
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
+import https from 'https';
+import http from 'http';
 import { fileURLToPath } from 'url';
 
 import { config, PROJECT_ROOT, PORTABLE_MODE } from './config.js';
 import { initLogger, closeLogger } from './services/logger.js';
 import { initDb, closeDb } from './db/database.js';
+import { ensureAdmin, applyAdminPasswordReset } from './services/auth.js';
+import { requireAuth, requireAdmin } from './middleware/authMiddleware.js';
 // lireekDb is now part of the unified hotstep.db — no separate init needed
 import authRoutes from './routes/auth.js';
 import songRoutes from './routes/songs.js';
@@ -59,44 +64,54 @@ console.log(`[Logger] Session logs: ${logDir}`);
 
 // Initialize databases
 initDb();
+
+// Ensure admin user exists and handle password reset
+ensureAdmin();
+applyAdminPasswordReset();
 // lireek tables are created in initDb() — no separate init
 
 // Create Express app
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true, // accept request origin
+  credentials: true, // allow cookies
+}));
+app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// API routes
+// Public API routes (no auth required)
 app.use('/api/auth', authRoutes);
-app.use('/api/songs', songRoutes);
-app.use('/api/generate', generateRoutes);
-app.use('/api/models', modelRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/shutdown', shutdownRoutes);
-app.use('/api/mastering', masteringRoutes);
-app.use('/api/download', downloadRoutes);
-app.use('/api/adapters', adapterRoutes);
-app.use('/api/logs', logsRoutes);
-app.use('/api/lireek', lireekRoutes);
-app.use('/api/vst', vstRoutes);
-app.use('/api/analyze', analyzeRoutes);
-app.use('/api/upload', uploadRoutes);
-app.use('/api/supersep', supersepRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/model-manager', modelManagerRoutes);
-app.use('/api/stem-studio', stemStudioRoutes);
-app.use('/api/assistant', assistantRoutes);
-app.use('/api/plugins', pluginRoutes);
-app.use('/api/inspire', inspireRoutes);
-app.use('/api/cover-art', coverArtRoutes);
-app.use('/api/seeds', seedsRoutes);
-app.use('/api/profiles', profilesRoutes);
-app.use('/api/builder', songBuilderRoutes);
-app.use('/api/midi-studio', midiStudioRoutes);
-app.use('/api/training', trainingRoutes);
+
+// Protected API routes (require auth)
+app.use('/api/songs', requireAuth, songRoutes);
+app.use('/api/generate', requireAuth, generateRoutes);
+app.use('/api/models', requireAuth, modelRoutes);
+app.use('/api/mastering', requireAuth, masteringRoutes);
+app.use('/api/download', requireAuth, downloadRoutes);
+app.use('/api/adapters', requireAuth, adapterRoutes);
+app.use('/api/logs', requireAuth, logsRoutes);
+app.use('/api/lireek', requireAuth, lireekRoutes);
+app.use('/api/vst', requireAuth, vstRoutes);
+app.use('/api/analyze', requireAuth, analyzeRoutes);
+app.use('/api/upload', requireAuth, uploadRoutes);
+app.use('/api/supersep', requireAuth, supersepRoutes);
+app.use('/api/settings', requireAuth, requireAdmin, settingsRoutes);
+app.use('/api/model-manager', requireAuth, modelManagerRoutes);
+app.use('/api/stem-studio', requireAuth, stemStudioRoutes);
+app.use('/api/assistant', requireAuth, assistantRoutes);
+app.use('/api/plugins', requireAuth, pluginRoutes);
+app.use('/api/inspire', requireAuth, inspireRoutes);
+app.use('/api/cover-art', requireAuth, coverArtRoutes);
+app.use('/api/seeds', requireAuth, seedsRoutes);
+app.use('/api/profiles', requireAuth, profilesRoutes);
+app.use('/api/builder', requireAuth, songBuilderRoutes);
+app.use('/api/midi-studio', requireAuth, midiStudioRoutes);
+app.use('/api/training', requireAuth, trainingRoutes);
 
 // Serve audio files from data/audio/
 app.use('/audio', express.static(config.data.audioDir, {
@@ -363,15 +378,35 @@ async function warmEngineOnStartup(): Promise<void> {
   }
 }
 
-// Start Express server
-const server = app.listen(config.server.port, config.server.host, () => {
-  console.log(`[Server] Listening on http://localhost:${config.server.port}`);
-  console.log(`[Server] ace-server URL: ${config.aceServer.url}`);
-  console.log(`[Server] Data directory: ${config.data.dir}`);
-  console.log('');
-  console.log(`  🎵 Open http://localhost:${config.server.port} in your browser`);
-  console.log('');
-});
+// SSL Configuration
+const sslCertPath = process.env.SSL_CERT_PATH;
+const sslKeyPath = process.env.SSL_KEY_PATH;
+let useSsl = false;
+let server: http.Server | https.Server;
+
+if (sslCertPath && sslKeyPath) {
+  try {
+    const cert = fs.readFileSync(sslCertPath);
+    const key = fs.readFileSync(sslKeyPath);
+    server = https.createServer({ cert, key }, app);
+    useSsl = true;
+    console.log(`[Server] SSL enabled (cert: ${sslCertPath})`);
+  } catch (err: any) {
+    console.warn(`[Server] SSL config invalid, falling back to HTTP: ${err.message}`);
+    server = app.listen(config.server.port, config.server.host);
+  }
+} else {
+  console.log('[Server] No SSL config — running on HTTP');
+  server = app.listen(config.server.port, config.server.host);
+}
+
+const protocol = useSsl ? 'https' : 'http';
+console.log(`[Server] Listening on ${protocol}://localhost:${config.server.port}`);
+console.log(`[Server] ace-server URL: ${config.aceServer.url}`);
+console.log(`[Server] Data directory: ${config.data.dir}`);
+console.log('');
+console.log(`  🎵 Open ${protocol}://localhost:${config.server.port} in your browser`);
+console.log('');
 
 // Graceful shutdown
 let isShuttingDown = false;

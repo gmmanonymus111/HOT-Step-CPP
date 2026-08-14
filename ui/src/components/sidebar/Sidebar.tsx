@@ -2,7 +2,7 @@
 // Ported from hot-step-9000, simplified for current cpp feature set.
 
 import React from 'react';
-import { Disc, Library, Mic, Guitar, Paintbrush, Scissors, Layers, Blocks, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles, Wand2, Zap, Piano, GraduationCap } from 'lucide-react';
+import { Disc, Library, Mic, Guitar, Paintbrush, Scissors, Layers, Blocks, Settings, Power, Terminal, RotateCcw, Sun, Moon, Sparkles, Wand2, Zap, Piano, GraduationCap, LogOut, User } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePersistedState } from '../../hooks/usePersistedState';
 
@@ -11,12 +11,15 @@ interface SidebarProps {
   onViewChange: (view: string) => void;
   onQuit: () => void;
   onRestart?: () => void;
+  onLogout?: () => void;
   theme?: 'dark' | 'light';
   onToggleTheme?: () => void;
   showTerminal?: boolean;
   onToggleTerminal?: () => void;
   showAssistant?: boolean;
   onToggleAssistant?: () => void;
+  username?: string;
+  isAdmin?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -24,12 +27,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onViewChange,
   onQuit,
   onRestart,
+  onLogout,
   theme = 'dark',
   onToggleTheme,
   showTerminal = false,
   onToggleTerminal,
   showAssistant = false,
   onToggleAssistant,
+  username = '',
+  isAdmin = false,
 }) => {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = usePersistedState('hs-sidebar-open', true);
@@ -156,13 +162,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isExpanded={isOpen}
         />
 
-        <NavItem
-          icon={<Settings size={20} />}
-          label={t('sidebar.settings')}
-          active={activeView === 'settings'}
-          onClick={() => onViewChange('settings')}
-          isExpanded={isOpen}
-        />
+        {isAdmin && (
+          <NavItem
+            icon={<Settings size={20} />}
+            label={t('sidebar.settings')}
+            active={activeView === 'settings'}
+            onClick={() => onViewChange('settings')}
+            isExpanded={isOpen}
+          />
+        )}
 
         {onToggleTheme && (
           <button onClick={onToggleTheme}
@@ -233,6 +241,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex-shrink-0"><RotateCcw size={20} /></div>
               {isOpen && (
                 <span className="text-sm font-medium whitespace-nowrap">{t('sidebar.restart')}</span>
+              )}
+            </button>
+          )}
+
+          {/* User info */}
+          {isOpen && username && (
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-500">
+              <User size={14} />
+              <span className="truncate">{username}</span>
+              {isAdmin && (
+                <span className="px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400 text-[10px] font-semibold">admin</span>
+              )}
+            </div>
+          )}
+
+          {/* Logout */}
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className={`
+                w-full rounded-xl flex items-center gap-3 transition-all duration-200 text-zinc-400 hover:text-white hover:bg-white/5
+                ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}
+              `}
+              title="Sign out"
+            >
+              <div className="flex-shrink-0"><LogOut size={20} /></div>
+              {isOpen && (
+                <span className="text-sm font-medium whitespace-nowrap">Sign Out</span>
               )}
             </button>
           )}

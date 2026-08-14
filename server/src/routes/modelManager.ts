@@ -1,14 +1,15 @@
 // modelManager.ts — Model download and management API routes
 //
 // GET  /api/model-manager/registry         — registry + installed status
-// POST /api/model-manager/download         — start download { fileId }
+// POST /api/model-manager/download         — start download { fileId } (admin only)
 // GET  /api/model-manager/downloads        — SSE stream of download progress
-// POST /api/model-manager/download/:id/cancel  — cancel download
-// POST /api/model-manager/download/:id/resume  — resume download
-// DELETE /api/model-manager/files/:filename    — delete installed model
+// POST /api/model-manager/download/:id/cancel  — cancel download (admin only)
+// POST /api/model-manager/download/:id/resume  — resume download (admin only)
+// DELETE /api/model-manager/files/:filename    — delete installed model (admin only)
 
 import { Router } from 'express';
 import { modelDownloadService } from '../services/modelDownloadService.js';
+import { requireAdmin } from '../middleware/authMiddleware.js';
 
 const router = Router();
 
@@ -26,7 +27,8 @@ router.get('/registry', (_req, res) => {
 // Body: { fileId, hfToken? } — hfToken is an optional Hugging Face token
 // forwarded as `Authorization: Bearer <token>` to huggingface.co (needed
 // only for gated repos; omitted/empty = anonymous download).
-router.post('/download', (req, res) => {
+// Admin only.
+router.post('/download', requireAdmin, (req, res) => {
   try {
     const { fileId, hfToken } = req.body;
     if (!fileId) {
@@ -74,15 +76,17 @@ router.get('/downloads', (req, res) => {
 });
 
 // POST /api/model-manager/download/:jobId/cancel
-router.post('/download/:jobId/cancel', (req, res) => {
-  const ok = modelDownloadService.cancelDownload(req.params.jobId);
+// Admin only.
+router.post('/download/:jobId/cancel', requireAdmin, (req, res) => {
+  const ok = modelDownloadService.cancelDownload(String(req.params.jobId));
   res.json({ ok });
 });
 
 // POST /api/model-manager/download/:jobId/resume
-router.post('/download/:jobId/resume', (req, res) => {
+// Admin only.
+router.post('/download/:jobId/resume', requireAdmin, (req, res) => {
   try {
-    const jobId = modelDownloadService.resumeDownload(req.params.jobId);
+    const jobId = modelDownloadService.resumeDownload(String(req.params.jobId));
     res.json({ jobId });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -90,9 +94,10 @@ router.post('/download/:jobId/resume', (req, res) => {
 });
 
 // DELETE /api/model-manager/files/:filename
-router.delete('/files/:filename', (req, res) => {
+// Admin only.
+router.delete('/files/:filename', requireAdmin, (req, res) => {
   try {
-    const ok = modelDownloadService.deleteFile(req.params.filename);
+    const ok = modelDownloadService.deleteFile(String(req.params.filename));
     res.json({ ok });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
