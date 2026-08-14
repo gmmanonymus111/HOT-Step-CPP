@@ -162,9 +162,19 @@ def build(sample, sents_by_role):
 
     instrumental = str(sample.get("is_instrumental", "")).lower() == "true"
 
-    # Global Emotional Progression: the source's own arc sentences, which is
-    # exactly what this section is for.
-    emo = " ".join(x for x in (g[S_INTRO], g[S_MID], g[S_OUTRO]) if x)
+    # Global Emotional Progression: LEAD WITH THE GENRE/ENERGY STATEMENT
+    # (sentence 0), then the source's own arc sentences.
+    #
+    # Measured 2026-08-14. An earlier version used the arc sentences alone, so
+    # this section opened "The track begins with a melancholic piano melody..."
+    # while the sentence that actually names the genre ("This high-energy
+    # pop-punk track ... aggressive intensity") sat far below in Groove &
+    # Foundation. By ear that scored ~1-2/5 on-genre — barely better than the
+    # unrestructured caption — producing ballads and southern rock. The
+    # hand-written caption that scored 4-5/5 front-loaded aggression in every
+    # section. Sentence 0 stays in Groove & Foundation as well; the duplication
+    # is cheap and reinforces rather than dilutes.
+    emo = " ".join(x for x in (g[S_OVERALL], g[S_INTRO], g[S_MID], g[S_OUTRO]) if x)
 
     # Sonics: timbre + mix, verbatim. These are the strongest sentences in the
     # source and need no rewriting.
@@ -256,13 +266,18 @@ def main():
     ap.add_argument("--dataset", required=True, help="path to dataset.json")
     ap.add_argument("--print", type=int, default=1, metavar="N", help="print the first N results")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite existing .mm3.txt files. WITHOUT this, existing files are "
+                         "left alone and reported — a caption that has been fixed by hand (some "
+                         "sources are off-genre and cannot be rescued by restructuring) must not "
+                         "be silently destroyed by a re-run.")
     args = ap.parse_args()
 
     with open(args.dataset, encoding="utf-8") as f:
         d = json.load(f)
     root = os.path.dirname(os.path.abspath(args.dataset))
 
-    n_ok = n_fallback = 0
+    n_ok = n_fallback = n_kept = 0
     for i, s in enumerate(d.get("samples", [])):
         cap = s.get("caption") or ""
         sents = split_sentences(cap)
@@ -276,6 +291,10 @@ def main():
 
         stem = os.path.splitext(s.get("filename") or f"{i}")[0]
         path = os.path.join(root, stem + ".mm3.txt")
+        if os.path.exists(path) and not args.force and not args.dry_run:
+            print(f"  = {stem}.mm3.txt exists, kept (pass --force to overwrite)", file=sys.stderr)
+            n_kept += 1
+            continue
         if not args.dry_run:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(out)
@@ -283,8 +302,8 @@ def main():
         if i < args.print:
             print(f"===== {stem}.mm3.txt ({len(out.split())} words) =====\n{out}\n")
 
-    print(f"{n_ok} caption(s) written ({n_fallback} via keyword fallback){' [dry run]' if args.dry_run else ''}",
-          file=sys.stderr)
+    print(f"{n_ok} caption(s) written, {n_kept} kept, {n_fallback} via keyword fallback"
+          f"{' [dry run]' if args.dry_run else ''}", file=sys.stderr)
     return 0
 
 

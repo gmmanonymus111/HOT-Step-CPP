@@ -186,6 +186,56 @@ adjacent. Ears decided it; keep it that way.
 Artifacts: `M:\HOT-Step-CPP\_experiments\caption-ab-2026-08-14\` (10 WAVs, both
 captions, `results.json`, and the runner).
 
+## Restructuring has a ceiling, and it is below hand-written (2026-08-14)
+
+Follow-up to the above: `engine/tools/mm3-caption-restructure.py` converts the
+existing Gemini caption corpus into the format mechanically. Five ear-judged
+rounds on `alk3_crimson`, 5 seeds each, same track/lyrics/model:
+
+| caption | on-genre |
+|---|---|
+| raw ACE caption | 1/5 |
+| **hand-written Structured Caption** | **4–5/5** |
+| scripted restructure v1 | 1–2/5 |
+| scripted v2 (genre statement moved to lead Global Emotional Progression) | worse — country, "big band" |
+| scripted, on a *typical* track (no piano) | heavy rock / old-school punk, still not pop-punk |
+
+**Only hand-written prose reached the target.** Restructuring preserves the
+source's emphasis faithfully — which is the problem, because the source was
+written for a different model and weights things differently. It is a bridge for
+an existing corpus, not a solution. **The real fix is to caption in MM3 format in
+the first place**, from the audio, via the Training Studio Gemini prompt; that
+also turns the ~22 % boilerplate (Application Scenarios & Imagery, Vocal Style,
+Harmony/Backing Vocals, Vocal FX — identical across every track a script emits)
+into real per-track observation.
+
+Three traps, each of which cost a wrong conclusion:
+
+1. **SPECTRAL PROXIES DO NOT MEASURE GENRE. Four consecutive wrong calls.**
+   Flatness/centroid rose → read as "harsh", heard as the genre arriving. An
+   `intro_ratio` favoured the arm with no piano (it measures a dynamic envelope,
+   not instrumentation). Scripted v2 was *statistically identical* to the
+   hand-written winner (0.192 ± 0.070 vs 0.189 ± 0.075) and sounded like big
+   band. Cross-seed spread rose where the hypothesis said it should fall. Judge
+   caption changes BY EAR; use the numbers only to spot a gross regression.
+2. **A source caption can be off-genre in its own content, and no restructuring
+   fixes that.** Track 01 was the only one of 13 mentioning piano (×4) and the
+   only one saying "classic rock-influenced". Piano + classic rock + major key +
+   male vocal lands in country/southern rock, and it did, repeatedly. Grep a
+   corpus for off-genre content words before blaming the tool.
+3. **Do not benchmark on an atypical track.** Track 01 was chosen *because* its
+   piano intro gave a checkable adherence claim — which made it a good adherence
+   probe and a bad genre benchmark. Several rounds were spent tuning against the
+   hardest track in the set and generalising from it.
+
+**Scope note.** All of the above judges the BASE model's genre fidelity from a
+caption. For *training* conditioning that is a proxy, not the objective: the
+conditioning rollout is hallucinated and content-misaligned with the target audio
+by construction, so what the adapter can learn is the target's timbre/production
+marginal, and the trigger word is what binds style to invocation. Do not spend
+unbounded effort perfecting base-model genre before a training run has ever been
+judged.
+
 ## Directory contents
 
 ```
