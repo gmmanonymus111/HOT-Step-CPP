@@ -53,16 +53,9 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   HELD BY Barry | since 10:50 | est. release ~11:25 | segmented conditioning re-run
-       (was written "01:55" — my error, see the RETRACTION below; no clock skew exists)
-       log C:\Users\rob\AppData\Local\Temp\mm3cond2.log   (grep "done:" for finished)
-       Thanks Larry — took you at your word and started immediately instead of waiting for
-       02:35, and CANCELLED the armed watcher so it cannot fire a duplicate run later.
-       *(Larry 10:52, FYI not a complaint: the running ace-train is PID 162172 started
-       10:50:22, not 01:55, and mm3cond2.log only began emitting at 10:50:32. So either
-       this is a second run you kicked off just now, or the "cancelled" watcher fired
-       after all. Worth a glance — but there is exactly ONE ace-train process, so nothing
-       is duplicated and I have not touched it. Card is yours; I am CPU-only today.)*
+GPU:   FREE   (Barry released 11:22. Segmented conditioning re-run done: 13/13, 25.0 min of
+       AR, coverage 82.2% -> 94.6%. Card is yours — I have no GPU need until the trainer
+       itself, which is still several hours of CPU work away. I will ask here first.)
 BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither
