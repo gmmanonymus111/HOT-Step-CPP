@@ -453,6 +453,126 @@ static bool test_logits(const std::string & fixtures, const std::string & track,
     return good;
 }
 
+// Validates the KV cache by differential testing: generate N tokens
+// incrementally (prefill once, then one token at a time against the cache) and
+// compare against the oracle of re-prefilling the whole grown sequence at every
+// step. The oracle is already proven against the fp32 reference, so agreement
+// here isolates the cache write/read/mask path and nothing else.
+static bool test_decode(const std::string & fixtures, const std::string & track,
+                        const moss::AudioTower & tower, const moss::LmModel & lm,
+                        ggml_backend_t backend, int n_steps) {
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    const std::string dir = fixtures + sep + track;
+    std::vector<float> mel, ids_f;
+    if (!read_f32(dir + sep + "mel.f32", mel) ||
+        !read_f32(dir + sep + "input_ids.f32", ids_f)) {
+        printf("  SKIP %-24s (missing fixtures)\n", track.c_str());
+        return true;
+    }
+
+    const int n_mels = (int) tower.hp.n_mels;
+    moss::EncoderOutput eo;
+    if (!moss::moss_encode_audio(tower, mel.data(), n_mels,
+                                 (int) (mel.size() / (size_t) n_mels), backend, &eo)) {
+        printf("  FAIL %-24s (encode failed)\n", track.c_str());
+        return false;
+    }
+
+    const int64_t T0 = (int64_t) ids_f.size();
+    const int64_t H = (int64_t) lm.hp.n_embd;
+    std::vector<int32_t> ids((size_t) T0);
+    std::vector<float> text_mask((size_t) T0, 1.0f);
+    std::vector<float> audio_vals((size_t) (H * T0), 0.0f);
+    std::vector<std::vector<float>> merge(eo.merger_out.size(),
+                                          std::vector<float>((size_t) (H * T0), 0.0f));
+    int64_t seen = 0;
+    for (int64_t i = 0; i < T0; ++i) {
+        ids[(size_t) i] = (int32_t) ids_f[(size_t) i];
+        if ((uint32_t) ids[(size_t) i] == tower.hp.audio_token_id) {
+            text_mask[(size_t) i] = 0.0f;
+            memcpy(&audio_vals[(size_t) (i * H)], &eo.adapter_out[(size_t) (seen * H)],
+                   (size_t) H * sizeof(float));
+            for (size_t k = 0; k < merge.size(); ++k) {
+                memcpy(&merge[k][(size_t) (i * H)], &eo.merger_out[k][(size_t) (seen * H)],
+                       (size_t) H * sizeof(float));
+            }
+            ++seen;
+        }
+    }
+
+    moss::LmKv kv;
+    if (!moss::moss_lm_kv_init(&kv, lm, T0 + n_steps + 4, backend)) {
+        printf("  FAIL %-24s (kv init)\n", track.c_str());
+        return false;
+    }
+
+    std::vector<float> logits;
+    if (!moss::moss_lm_eval(lm, kv, ids, audio_vals, merge, text_mask, backend, &logits)) {
+        moss::moss_lm_kv_free(&kv);
+        return false;
+    }
+
+    std::vector<int32_t> grown = ids;
+    bool ok = true;
+    for (int s = 0; s < n_steps && ok; ++s) {
+        size_t best = 0;
+        for (size_t i = 1; i < logits.size(); ++i) {
+            if (logits[i] > logits[best]) {
+                best = i;
+            }
+        }
+        grown.push_back((int32_t) best);
+
+        // Cached: feed just the new token.
+        std::vector<float> cached;
+        if (!moss::moss_lm_eval(lm, kv, { (int32_t) best }, {}, {}, {}, backend, &cached)) {
+            ok = false;
+            break;
+        }
+        // Oracle: re-prefill everything from scratch.
+        std::vector<float> fresh;
+        std::vector<float> a2((size_t) (H * (int64_t) grown.size()), 0.0f);
+        std::vector<float> tm2(grown.size(), 1.0f);
+        std::vector<std::vector<float>> m2(merge.size(),
+                                           std::vector<float>((size_t) (H * (int64_t) grown.size()), 0.0f));
+        for (int64_t i = 0; i < T0; ++i) {
+            tm2[(size_t) i] = text_mask[(size_t) i];
+            memcpy(&a2[(size_t) (i * H)], &audio_vals[(size_t) (i * H)], (size_t) H * sizeof(float));
+            for (size_t k = 0; k < merge.size(); ++k) {
+                memcpy(&m2[k][(size_t) (i * H)], &merge[k][(size_t) (i * H)],
+                       (size_t) H * sizeof(float));
+            }
+        }
+        if (!moss::moss_lm_prefill_logits(lm, grown, a2, m2, tm2, backend, &fresh)) {
+            ok = false;
+            break;
+        }
+
+        double corr = 0, mx = 0, rel = 0;
+        stats(fresh, cached, &corr, &mx, &rel);
+        size_t ac = 0, af = 0;
+        for (size_t i = 1; i < cached.size(); ++i) {
+            if (cached[i] > cached[ac]) ac = i;
+        }
+        for (size_t i = 1; i < fresh.size(); ++i) {
+            if (fresh[i] > fresh[af]) af = i;
+        }
+        const bool good = corr >= 0.9999 && ac == af;
+        printf("    %s step %d  cached-vs-fresh corr=%.7f  argmax %zu/%zu\n",
+               good ? "OK  " : "FAIL", s + 1, corr, ac, af);
+        ok = ok && good;
+        logits = cached;
+    }
+
+    moss::moss_lm_kv_free(&kv);
+    printf("  %s decode %-22s (%d steps)\n", ok ? "OK  " : "FAIL", track.c_str(), n_steps);
+    return ok;
+}
+
 int main(int argc, char ** argv) {
     std::string fixtures, component = "all", models;
     for (int i = 1; i < argc; ++i) {
@@ -557,6 +677,14 @@ int main(int argc, char ** argv) {
                 moss::moss_print_lm_hparams(lm);
                 for (const std::string & t : tracks) {
                     ok = test_logits(fixtures, t, tower, lm, bp.backend) && ok;
+                }
+                if (component == "all") {
+                    printf("\n== KV cache: incremental decode vs full re-prefill ==\n");
+                    // One track is enough: the oracle re-prefills the whole
+                    // sequence per step, so this is quadratic and slow on CPU.
+                    if (!tracks.empty()) {
+                        ok = test_decode(fixtures, tracks.front(), tower, lm, bp.backend, 3) && ok;
+                    }
                 }
             } else {
                 printf("  FAIL could not load the audio tower and/or the LM\n");

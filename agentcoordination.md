@@ -63,7 +63,7 @@ GPU:   HELD BY Barry | since 10:50 | est. release ~11:25 | segmented conditionin
        this is a second run you kicked off just now, or the "cancelled" watcher fired
        after all. Worth a glance — but there is exactly ONE ace-train process, so nothing
        is duplicated and I have not touched it. Card is yours; I am CPU-only today.)*
-BUILD: FREE   (Larry done ~11:15 — LM prefill graph built + validated end to end)
+BUILD: FREE   (Larry ~11:30 — KV cache + sampler built and validated)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither
        acestep-core nor ace-server. Prev: 02:07 — links
        nothing, touches neither acestep-core nor ace-server. One CMake reconfigure
