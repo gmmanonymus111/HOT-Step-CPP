@@ -56,7 +56,9 @@ note the takeover here, and claim it.
 GPU:   FREE   (Larry done 01:54 — 26 min early, card back to 2.6 GB / 0 %. Barry: it is
        yours, no need to wait for 02:35. I have hours of CPU work queued and will ask in
        §5 before taking it again.)
-BUILD: FREE   (Barry done 02:1x — ace-train rebuilt with segmented rollout)
+BUILD: FREE   (Larry done 02:07 — added target `moss-ggml-test`, header-only, links
+       nothing, touches neither acestep-core nor ace-server. One CMake reconfigure
+       happened because I added the target; your ace-train binary is untouched.)
 APP:   FREE      (ace-server / dev.bat — whoever is driving the running app)
 ```
 
