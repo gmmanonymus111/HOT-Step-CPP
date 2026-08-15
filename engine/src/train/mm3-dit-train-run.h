@@ -358,6 +358,28 @@ static bool mm3_train_micro(MM3Model & m, ggml_backend_sched_t sched, const MM3T
     if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "uploaded, computing");
     const bool ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
     if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "computed");
+    // Are gradients reaching the accumulators? Scan ALL of them, not acc[0]:
+    // acc[0] is a LoRA **A** factor and dL/dA = B^T.grad is LEGITIMATELY zero
+    // while B is still zero-initialised. Only the B factors carry gradient on
+    // the first step, so a single-tensor probe reads as "no gradients" when
+    // everything is in fact fine.
+    if (backward && getenv("MM3_TRAIN_TRACE") && opt && !opt->acc.empty()) {
+        int n_nonzero = 0, n_null = 0, n_nonfinite = 0;
+        double best = 0.0; const char * best_name = "";
+        std::vector<float> tmp;
+        for (size_t j = 0; j < opt->acc.size(); j++) {
+            ggml_tensor * g = opt->acc[j];
+            if (!g || !g->data) { n_null++; continue; }
+            tmp.assign((size_t) ggml_nelements(g), 0.0f);
+            ggml_backend_tensor_get(g, tmp.data(), 0, tmp.size() * sizeof(float));
+            double ss = 0.0;
+            for (float v : tmp) { ss += (double) v * v; if (!std::isfinite(v)) n_nonfinite++; }
+            if (ss > 0.0) n_nonzero++;
+            if (ss > best) { best = ss; best_name = ggml_get_name(g); }
+        }
+        fprintf(stderr, "[trace] acc: %d/%zu nonzero, %d null, %d nonfinite; max |g|=%.4e (%s)\n",
+                n_nonzero, opt->acc.size(), n_null, n_nonfinite, sqrt(best), best_name);
+    }
     if (ok && loss_out) ggml_backend_tensor_get(loss, loss_out, 0, sizeof(float));
     if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "loss read");
     ggml_free(ctx);
@@ -420,6 +442,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     tbp.backend     = m.backend;
     tbp.cpu_backend = m.cpu_backend;
     ggml_backend_sched_t tsched = backend_sched_new(tbp, 65536);
+    ggml_backend_sched_t osched = backend_sched_new(tbp, 16384);   // optimizer only
     if (!tsched) { fprintf(stderr, "[mm3-train] scheduler alloc failed\n"); return 1; }
 
     // Adapter parameters in their own context + backend buffer.
@@ -598,7 +621,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         }
         LmStepStats st{};
         if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "pre optim step");
-        if (!lm_optim_step(&opt, tsched, &st)) {
+        if (!lm_optim_step(&opt, osched, &st)) {
             fprintf(stderr, "[mm3-train] optimizer step failed\n"); return 1;
         }
         if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post optim step");
