@@ -44,6 +44,7 @@
 
 #include "backend.h"
 #include "moss/moss-encoder-graph.h"
+#include "moss/moss-lm-graph.h"
 #include "moss/moss-mel.h"
 #include "moss/moss-model.h"
 
@@ -369,6 +370,89 @@ static bool test_encoder(const std::string & fixtures, const std::string & track
     return ok;
 }
 
+// End-to-end through the audio->LM seam: encoder -> splice + deepstack -> prefill,
+// scored against the reference's last-position logits. This is the check that
+// catches a mis-wired deepstack, which is the most likely silent break in the port
+// (mergers come from ENCODER layers 8/16/24 and land in LM layers 0/1/2).
+static bool test_logits(const std::string & fixtures, const std::string & track,
+                        const moss::AudioTower & tower, const moss::LmModel & lm,
+                        ggml_backend_t backend) {
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    const std::string dir = fixtures + sep + track;
+
+    std::vector<float> mel, ids_f, ref;
+    if (!read_f32(dir + sep + "mel.f32", mel) ||
+        !read_f32(dir + sep + "input_ids.f32", ids_f) ||
+        !read_f32(dir + sep + "logits_last.f32", ref)) {
+        printf("  SKIP %-24s (missing mel/input_ids/logits_last)\n", track.c_str());
+        return true;
+    }
+
+    const int n_mels = (int) tower.hp.n_mels;
+    const int T_mel = (int) (mel.size() / (size_t) n_mels);
+    moss::EncoderOutput eo;
+    if (!moss::moss_encode_audio(tower, mel.data(), n_mels, T_mel, backend, &eo)) {
+        printf("  FAIL %-24s (encode failed)\n", track.c_str());
+        return false;
+    }
+
+    const int64_t T = (int64_t) ids_f.size();
+    const int64_t H = (int64_t) lm.hp.n_embd;
+    std::vector<int32_t> ids((size_t) T);
+    std::vector<float> text_mask((size_t) T, 1.0f);
+    std::vector<float> audio_vals((size_t) (H * T), 0.0f);
+    std::vector<std::vector<float>> merge(eo.merger_out.size(),
+                                          std::vector<float>((size_t) (H * T), 0.0f));
+
+    int64_t seen = 0;
+    for (int64_t i = 0; i < T; ++i) {
+        ids[(size_t) i] = (int32_t) ids_f[(size_t) i];
+        if ((uint32_t) ids[(size_t) i] == tower.hp.audio_token_id) {
+            text_mask[(size_t) i] = 0.0f;
+            if (seen < (int64_t) eo.n_tokens) {
+                memcpy(&audio_vals[(size_t) (i * H)],
+                       &eo.adapter_out[(size_t) (seen * H)], (size_t) H * sizeof(float));
+                for (size_t k = 0; k < merge.size(); ++k) {
+                    memcpy(&merge[k][(size_t) (i * H)],
+                           &eo.merger_out[k][(size_t) (seen * H)], (size_t) H * sizeof(float));
+                }
+            }
+            ++seen;
+        }
+    }
+    if (seen != eo.n_tokens) {
+        printf("  FAIL %-24s: %lld audio slots in ids but encoder made %d tokens\n",
+               track.c_str(), (long long) seen, eo.n_tokens);
+        return false;
+    }
+
+    std::vector<float> got;
+    if (!moss::moss_lm_prefill_logits(lm, ids, audio_vals, merge, text_mask, backend, &got)) {
+        printf("  FAIL %-24s (prefill failed)\n", track.c_str());
+        return false;
+    }
+
+    double corr = 0, mx = 0, rel = 0;
+    stats(ref, got, &corr, &mx, &rel);
+    // argmax agreement is the thing that actually decides the first emitted token.
+    size_t ai = 0, bi = 0;
+    for (size_t i = 1; i < ref.size(); ++i) {
+        if (ref[i] > ref[ai]) ai = i;
+    }
+    for (size_t i = 1; i < got.size(); ++i) {
+        if (got[i] > got[bi]) bi = i;
+    }
+    const bool good = corr >= 0.999 && ai == bi;
+    printf("  %s logits_last %-22s corr=%.7f relRMSE=%.2e argmax ref=%zu got=%zu%s\n",
+           good ? "OK  " : "FAIL", track.c_str(), corr, rel, ai, bi,
+           ai == bi ? "" : "  ** ARGMAX DIFFERS **");
+    return good;
+}
+
 int main(int argc, char ** argv) {
     std::string fixtures, component = "all", models;
     for (int i = 1; i < argc; ++i) {
@@ -441,6 +525,45 @@ int main(int argc, char ** argv) {
                 printf("  FAIL could not load the audio tower\n");
                 ok = false;
             }
+            backend_release(bp.backend, bp.cpu_backend);
+        }
+    }
+    if (component == "logits" || component == "all") {
+        if (models.empty()) {
+            printf("\n== logits == SKIP (pass --models <dir with both GGUFs>)\n");
+        } else {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            printf("\n== audio->LM seam: prefill logits (bar: corr >= 0.999 AND argmax match) ==\n");
+            BackendPair bp = backend_init("MOSS");
+            moss::AudioTower tower;
+            moss::LmModel lm;
+            const std::string aud = models + sep + "moss-aud-f16.gguf";
+            std::string lmf = models + sep + "moss-lm-q8_0.gguf";
+            {   // fall back to an f16 LM if that is what is on disk
+                FILE * probe = fopen(lmf.c_str(), "rb");
+                if (probe) {
+                    fclose(probe);
+                } else {
+                    lmf = models + sep + "moss-lm-f16.gguf";
+                }
+            }
+            if (bp.backend &&
+                moss::moss_load_audio_tower(&tower, aud.c_str(), bp.backend) &&
+                moss::moss_load_lm(&lm, lmf.c_str(), bp.backend)) {
+                moss::moss_print_lm_hparams(lm);
+                for (const std::string & t : tracks) {
+                    ok = test_logits(fixtures, t, tower, lm, bp.backend) && ok;
+                }
+            } else {
+                printf("  FAIL could not load the audio tower and/or the LM\n");
+                ok = false;
+            }
+            moss::moss_free_lm(&lm);
+            moss::moss_free_audio_tower(&tower);
             backend_release(bp.backend, bp.cpu_backend);
         }
     }

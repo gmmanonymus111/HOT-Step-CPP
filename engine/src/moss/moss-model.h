@@ -247,6 +247,145 @@ inline bool moss_load_audio_tower(AudioTower * m, const char * path,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// LM half: moss-lm-<quant>.gguf, arch "qwen3", 399 tensors.
+//
+// Architecturally IDENTICAL to MM3's global LM (see minimax/mm3-lm-graph.h):
+// 36 blocks, H=4096, 32 query / 8 KV heads x 128, SwiGLU 12288, RMSNorm 1e-6,
+// per-head q/k RMSNorm BEFORE RoPE, NeoX RoPE at theta 1e6, untied head. Only
+// the vocabulary differs (151936 here vs MM3's 200000 with audio codes).
+// ---------------------------------------------------------------------------
+
+struct LmLayer {
+    ggml_tensor * attn_norm = nullptr;
+    ggml_tensor * attn_q = nullptr;
+    ggml_tensor * attn_k = nullptr;
+    ggml_tensor * attn_v = nullptr;
+    ggml_tensor * attn_output = nullptr;
+    ggml_tensor * attn_q_norm = nullptr;   // Qwen3 QK-norm, per head, pre-RoPE
+    ggml_tensor * attn_k_norm = nullptr;
+    ggml_tensor * ffn_norm = nullptr;
+    ggml_tensor * ffn_gate = nullptr;
+    ggml_tensor * ffn_up = nullptr;
+    ggml_tensor * ffn_down = nullptr;
+};
+
+struct LmHParams {
+    uint32_t n_layer = 0;
+    uint32_t n_embd = 0;
+    uint32_t n_ffn = 0;
+    uint32_t n_head = 0;
+    uint32_t n_head_kv = 0;
+    uint32_t head_dim = 0;
+    uint32_t n_vocab = 0;
+    uint32_t n_ctx = 0;
+    float    rms_eps = 0.0f;
+    float    rope_theta = 0.0f;
+};
+
+struct LmModel {
+    LmHParams hp;
+    ggml_tensor * token_embd = nullptr;
+    ggml_tensor * output_norm = nullptr;
+    ggml_tensor * output = nullptr;         // untied head
+    std::vector<LmLayer> layers;
+    WeightCtx wctx = {};
+    ggml_backend_t backend = nullptr;
+};
+
+inline void moss_free_lm(LmModel * m) {
+    if (!m) {
+        return;
+    }
+    wctx_free(&m->wctx);
+    *m = {};
+}
+
+inline bool moss_load_lm(LmModel * m, const char * path, ggml_backend_t backend) {
+    *m = {};
+    m->backend = backend;
+
+    GGUFModel gf;
+    if (!gf_load(&gf, path)) {
+        return false;
+    }
+    const char * arch = gf_get_str(gf, "general.architecture");
+    if (!arch || std::string(arch) != "qwen3") {
+        fprintf(stderr, "[MOSS] %s: general.architecture is '%s', expected 'qwen3'\n",
+                path, arch ? arch : "(none)");
+        gf_close(&gf);
+        return false;
+    }
+
+    LmHParams & hp = m->hp;
+    hp.n_layer    = gf_get_u32(gf, "qwen3.block_count");
+    hp.n_embd     = gf_get_u32(gf, "qwen3.embedding_length");
+    hp.n_ffn      = gf_get_u32(gf, "qwen3.feed_forward_length");
+    hp.n_head     = gf_get_u32(gf, "qwen3.attention.head_count");
+    hp.n_head_kv  = gf_get_u32(gf, "qwen3.attention.head_count_kv");
+    hp.head_dim   = gf_get_u32(gf, "qwen3.attention.key_length");
+    hp.n_vocab    = gf_get_u32(gf, "qwen3.vocab_size");
+    hp.n_ctx      = gf_get_u32(gf, "qwen3.context_length");
+    hp.rms_eps    = gf_get_f32(gf, "qwen3.attention.layer_norm_rms_epsilon");
+    hp.rope_theta = gf_get_f32(gf, "qwen3.rope.freq_base");
+    if (hp.n_layer == 0 || hp.n_embd == 0) {
+        fprintf(stderr, "[MOSS] %s: missing core LM hparams\n", path);
+        gf_close(&gf);
+        return false;
+    }
+
+    wctx_init(&m->wctx, (int) (16 + 12 * hp.n_layer));
+    bool ok = true;
+    auto want = [&](const std::string & name) -> ggml_tensor * {
+        ggml_tensor * t = gf_load_tensor(&m->wctx, gf, name);
+        if (!t) {
+            fprintf(stderr, "[MOSS] %s: missing tensor %s\n", path, name.c_str());
+            ok = false;
+        }
+        return t;
+    };
+
+    m->token_embd  = want("token_embd.weight");
+    m->output_norm = want("output_norm.weight");
+    // tie_word_embeddings is false upstream, so this is a real separate tensor.
+    // A stock Qwen3 GGUF that omits it is NOT interchangeable with this file.
+    m->output      = want("output.weight");
+
+    m->layers.resize(hp.n_layer);
+    for (uint32_t i = 0; i < hp.n_layer && ok; ++i) {
+        const std::string p = "blk." + std::to_string(i) + ".";
+        LmLayer & l = m->layers[i];
+        l.attn_norm   = want(p + "attn_norm.weight");
+        l.attn_q      = want(p + "attn_q.weight");
+        l.attn_k      = want(p + "attn_k.weight");
+        l.attn_v      = want(p + "attn_v.weight");
+        l.attn_output = want(p + "attn_output.weight");
+        l.attn_q_norm = want(p + "attn_q_norm.weight");
+        l.attn_k_norm = want(p + "attn_k_norm.weight");
+        l.ffn_norm    = want(p + "ffn_norm.weight");
+        l.ffn_gate    = want(p + "ffn_gate.weight");
+        l.ffn_up      = want(p + "ffn_up.weight");
+        l.ffn_down    = want(p + "ffn_down.weight");
+    }
+
+    if (!ok || !wctx_alloc(&m->wctx, backend)) {
+        fprintf(stderr, "[MOSS] %s: LM load failed\n", path);
+        gf_close(&gf);
+        moss_free_lm(m);
+        return false;
+    }
+    gf_close(&gf);
+    return true;
+}
+
+inline void moss_print_lm_hparams(const LmModel & m) {
+    const LmHParams & h = m.hp;
+    printf("[MOSS] LM: %u blocks, H %u, %u/%u heads x %u, ffn %u, vocab %u\n",
+           h.n_layer, h.n_embd, h.n_head, h.n_head_kv, h.head_dim, h.n_ffn, h.n_vocab);
+    printf("[MOSS]   rms_eps %.2e, rope_theta %.0f, ctx %u\n",
+           h.rms_eps, h.rope_theta, h.n_ctx);
+}
+
 inline void moss_print_audio_hparams(const AudioTower & m) {
     const AudioHParams & h = m.hp;
     printf("[MOSS] audio tower: %u layers, d_model %u, %u heads, ffn %u\n",
