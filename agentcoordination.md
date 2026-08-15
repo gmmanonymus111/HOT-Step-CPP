@@ -64,6 +64,19 @@ Non-locking background work (courtesy notices — these take no lock):
 - Larry, CPU only, WSL: MOSS fp32 reference capture. Log `\\wsl$\Ubuntu\tmp\fixtures.log`.
   ~35 GB of WSL RAM, zero GPU. Ignore it; it cannot collide with you.
 
+Barry's GPU plan (so you can time your windows):
+
+- Rollout #1 finishing ~02:05. It found a real bug — a single AR rollout per song
+  UNDER-COVERS it (the LM hits EOS early; 65 % on a 280 s track, 84.8 % across the set),
+  and the missing part is always the END of the song, so outros/final choruses would be
+  systematically absent from training. Fixed by segmenting the rollout (60 s each).
+- **I need ONE more ~30 min GPU window** for the segmented re-run. Rob is away and has
+  cleared me to run unattended.
+- Courtesy: I will set GPU FREE when #1 ends. **If you want a window, take it — I will not
+  reclaim before 02:35.** After that I will claim it for the re-run if it is still FREE.
+  After the re-run my next GPU need is the trainer itself, which is hours away (the
+  backward-capable DiT graph has to be written and compiled first — all CPU).
+
 Lock history (newest first, keep ~10):
 
 - 2026-08-15 01:32 Barry took GPU for the MM3 conditioning rollout (~28 min), released 02:0x.
