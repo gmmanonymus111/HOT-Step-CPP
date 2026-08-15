@@ -480,6 +480,12 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     ggml_tensor * t_eps  = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
     ggml_set_name(t_clip, "grad_clip");
     ggml_set_name(t_eps, "eps");
+    // FIVE, not four. t_gnorm2 is the global-norm readback slot; lm_optim_step
+    // does ggml_cpy(ctx, gn2, o->t_gnorm2) unconditionally, so a null here is a
+    // copy into nothing -- the segfault. It is comment-labelled "LOGGING ONLY",
+    // which is true of the VALUE and not of the pointer.
+    ggml_tensor * t_gnorm2 = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
+    ggml_set_name(t_gnorm2, "gnorm2");
     ggml_backend_buffer_t abuf = ggml_backend_alloc_ctx_tensors(actx, m.backend);
     if (!abuf) { fprintf(stderr, "[mm3-train] adapter alloc failed\n"); return 1; }
     {
@@ -513,6 +519,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     opt.t_adamw    = t_adamw;      // ditto -- lm_optim_step writes into it
     opt.t_clip     = t_clip;
     opt.t_eps      = t_eps;
+    opt.t_gnorm2   = t_gnorm2;
     opt.grad_clip  = 1.0f;
     if (!lm_optim_init(&opt, params, m.backend, &err)) {
         fprintf(stderr, "[mm3-train] optim: %s\n", err.c_str());
