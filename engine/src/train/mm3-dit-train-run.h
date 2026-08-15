@@ -356,8 +356,13 @@ static bool mm3_train_micro(MM3Model & m, ggml_backend_sched_t sched, const MM3T
     }
 
     if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "uploaded, computing");
+    const int64_t t_c0 = ggml_time_us();
     const bool ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
-    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "computed");
+    if (getenv("MM3_TRAIN_TRACE")) {
+        fprintf(stderr, "[trace] compute %.1f ms | %d sched splits | %d nodes\n",
+                (double) (ggml_time_us() - t_c0) / 1000.0,
+                ggml_backend_sched_get_n_splits(sched), ggml_graph_n_nodes(gf));
+    }
     // Are gradients reaching the accumulators? Scan ALL of them, not acc[0]:
     // acc[0] is a LoRA **A** factor and dL/dA = B^T.grad is LEGITIMATELY zero
     // while B is still zero-initialised. Only the B factors carry gradient on
@@ -488,6 +493,13 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     ggml_set_name(t_gnorm2, "gnorm2");
     ggml_backend_buffer_t abuf = ggml_backend_alloc_ctx_tensors(actx, m.backend);
     if (!abuf) { fprintf(stderr, "[mm3-train] adapter alloc failed\n"); return 1; }
+    // Tell the scheduler these live on the compute backend. Without it the graph
+    // was cut into 293 splits — one per LoRA parameter, plus one — and spent
+    // 47.6 s per step synchronising at each boundary while the GPU sat at 9 %.
+    // weight-ctx.h flags exactly this for the model weights: the usage hint
+    // "assigns ops to the correct backend based on weight location (avoids
+    // fallback through expansion)".
+    ggml_backend_buffer_set_usage(abuf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     {
         const float lg = 1.0f / (float) std::max<int64_t>(1, a.grad_accum);
         ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
