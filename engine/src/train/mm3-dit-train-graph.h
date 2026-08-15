@@ -1,0 +1,217 @@
+#pragma once
+// train/mm3-dit-train-graph.h — trainable MiniMax-Music3 flow DiT.
+//
+// HOT-Step file. TRAINING-SIDE: built into ace-train only. Step 4 of the MM3
+// training path (docs/plans/2026-08-15-mm3-dit-trainer-design.md).
+//
+// ── Why this is much smaller than dit-train-graph.h (the ACE one) ────────────
+//
+// The MM3 inference forward is already nearly differentiable, which was checked
+// by reading mm3-dit-graph.h rather than assumed:
+//
+//   * A MANUAL ATTENTION PATH ALREADY EXISTS. mm3_dit_attn_f32() — the same
+//     mul_mat -> soft_max_ext -> mul_mat -> permute shape ACE's trainer uses.
+//     Flash sits behind MM3DitGraph::use_flash_attn. We simply never take it:
+//     GGML_OP_FLASH_ATTN_EXT has no backward. No new attention code.
+//   * THE GLU IS ALREADY EXPLICIT — ggml_mul(val, ggml_silu(gate)) over two
+//     view_2d halves, not the fused ggml_swiglu (which has no backward).
+//   * NO CROSS-ATTENTION AND NO AdaLN. Conditioning enters by channel concat at
+//     the input. So none of the ACE trainer's cross-attn masking, encoder
+//     padding, or 6-way AdaLN split exists here. This is the single biggest
+//     simplification.
+//   * Norms are LayerNorm (ggml_norm), not rms_norm — so ACE's "rms_norm
+//     backward is wrong on permuted inputs" trap does not apply.
+//
+// Everything else in the block has a backward: mul_mat, norm, silu, rope_ext,
+// soft_max_ext, view/cont, add, mul.
+//
+// ── What this file adds over the inference forward ──────────────────────────
+//
+//   1. LoRA sites at the six projections mm3-adapter.h merges, so a trained
+//      adapter loads back through the EXISTING path with no new format:
+//      attn_qkv, attn_output, ffn_in, ffn_out, proj_in, proj_out.
+//   2. The rectified-flow loss.
+//
+// ── The trap carried over from the ACE trainer ──────────────────────────────
+//
+// **Never let the token axis reach ne2 of a mul_mat whose other operand is a 2-D
+// trainable factor.** ggml then emits the weight gradient as out_prod with
+// dst->ne[2] == S and ggml-cuda takes its per-token fallback: one cublasSgemm
+// per token. On the ACE trainer that was 9.7x. Activations here are [E, S] 2-D
+// throughout and the LoRA factors are 2-D, so ne2 == 1 everywhere — but if a
+// batch axis is ever added, fold it into the column count with a reshape rather
+// than letting it land in ne2.
+
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "minimax/mm3-dit-graph.h"   // mm3_dit_ln, mm3_dit_attn_f32, weights, config
+
+// ── LoRA sites ──────────────────────────────────────────────────────────────
+
+// delta = (alpha/rank) * B @ A, added to the base projection's output.
+// a: [in, rank]   b: [rank, out]   — ggml order, so both are 2-D with ne2 == 1.
+struct MM3TrainLora {
+    ggml_tensor * a     = nullptr;
+    ggml_tensor * b     = nullptr;
+    float         scale = 1.0f;   // alpha / rank
+    bool          on() const { return a && b; }
+};
+
+struct MM3TrainBlockAdapters {
+    MM3TrainLora qkv, attn_out, ff_in, ff_out;
+};
+
+struct MM3TrainAdapters {
+    std::vector<MM3TrainBlockAdapters> blk;
+    MM3TrainLora                       proj_in, proj_out;
+};
+
+// y = W x  (+ scale * B(A x) when the site is active).
+//
+// W is the frozen base in its GGUF type; x is [in, S]. The LoRA branch runs in
+// F32. Kept as one helper so every site is identical and a site cannot silently
+// be left un-adapted.
+static ggml_tensor * mm3_dt_linear(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x,
+                                   const MM3TrainLora & lo) {
+    ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    if (!lo.on()) {
+        return y;
+    }
+    ggml_tensor * ax = ggml_mul_mat(ctx, lo.a, x);                    // [rank, S]
+    ggml_tensor * bx = ggml_mul_mat(ctx, lo.b, ax);                   // [out,  S]
+    return ggml_add(ctx, y, ggml_scale(ctx, bx, lo.scale));
+}
+
+// ── One trainable block: mirrors mm3_dit_block() op for op ──────────────────
+
+static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, const MM3DitBlock & w,
+                                  const MM3TrainBlockAdapters & ad, ggml_tensor * h,
+                                  ggml_tensor * positions) {
+    const int64_t E  = (int64_t) c.embedding_length;
+    const int64_t D  = (int64_t) c.head_dim;
+    const int64_t Nh = (int64_t) c.head_count;
+    const int64_t FI = (int64_t) c.ff_inner;
+    const int64_t S  = h->ne[1];
+
+    // ── self-attention ──
+    ggml_tensor * n   = mm3_dit_ln(ctx, h, w.attn_norm_w, w.attn_norm_b, c.layer_norm_eps);
+    ggml_tensor * qkv = mm3_dt_linear(ctx, w.attn_qkv, n, ad.qkv);   // [3E, S]
+
+    ggml_tensor * q = ggml_cont(ctx, ggml_view_2d(ctx, qkv, E, S, qkv->nb[1], 0));
+    ggml_tensor * k = ggml_cont(ctx, ggml_view_2d(ctx, qkv, E, S, qkv->nb[1], (size_t) E * qkv->nb[0]));
+    ggml_tensor * v = ggml_cont(ctx, ggml_view_2d(ctx, qkv, E, S, qkv->nb[1], (size_t) (2 * E) * qkv->nb[0]));
+
+    q = ggml_reshape_3d(ctx, q, D, Nh, S);
+    k = ggml_reshape_3d(ctx, k, D, Nh, S);
+    v = ggml_reshape_3d(ctx, v, D, Nh, S);
+
+    // Partial NeoX RoPE over rope_dim of head_dim, exactly as inference.
+    q = ggml_rope_ext(ctx, q, positions, NULL, (int) c.rope_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f,
+                      0.0f, 1.0f, 0.0f, 0.0f);
+    k = ggml_rope_ext(ctx, k, positions, NULL, (int) c.rope_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f,
+                      0.0f, 1.0f, 0.0f, 0.0f);
+
+    q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh]
+    k = ggml_permute(ctx, k, 0, 2, 1, 3);
+    v = ggml_permute(ctx, v, 0, 2, 1, 3);
+
+    // ALWAYS the manual path: flash-attn has no backward. The retained [S,S,Nh]
+    // softmax output is the S^2 term in the VRAM model.
+    ggml_tensor * attn = mm3_dit_attn_f32(ctx, q, k, v, 1.0f / sqrtf((float) D));
+    attn               = ggml_reshape_2d(ctx, attn, Nh * D, S);
+    h                  = ggml_add(ctx, h, mm3_dt_linear(ctx, w.attn_output, attn, ad.attn_out));
+
+    // ── feed-forward: GLU, VALUE half first (mm3.dit.glu_order = value_gate) ──
+    ggml_tensor * n2 = mm3_dit_ln(ctx, h, w.ffn_norm_w, w.ffn_norm_b, c.layer_norm_eps);
+    ggml_tensor * f  = ggml_add(ctx, mm3_dt_linear(ctx, w.ffn_in_w, n2, ad.ff_in), w.ffn_in_b);
+
+    ggml_tensor * val  = ggml_cont(ctx, ggml_view_2d(ctx, f, FI, S, f->nb[1], 0));
+    ggml_tensor * gate = ggml_cont(ctx, ggml_view_2d(ctx, f, FI, S, f->nb[1], (size_t) FI * f->nb[0]));
+    ggml_tensor * y    = ggml_mul(ctx, val, ggml_silu(ctx, gate));
+
+    y = ggml_add(ctx, mm3_dt_linear(ctx, w.ffn_out_w, y, ad.ff_out), w.ffn_out_b);
+    return ggml_add(ctx, h, y);
+}
+
+// ── Inputs ──────────────────────────────────────────────────────────────────
+
+struct MM3TrainInputs {
+    ggml_tensor * xt        = nullptr;  // [128,  S]  noised latents
+    ggml_tensor * cond      = nullptr;  // [2048, S]  conditioning (from the cache)
+    ggml_tensor * temb      = nullptr;  // [E, 1]     precomputed time embedding
+    ggml_tensor * positions = nullptr;  // [S+1] i32, 0..S  (time token occupies 0)
+    ggml_tensor * vtarget   = nullptr;  // [128,  S]  velocity target
+};
+
+// ── Full trainable forward: returns predicted velocity [128, S] ─────────────
+//
+// Mirrors mm3_dit_build(). Two conventions that are silent if broken and are
+// therefore taken from the inference graph rather than re-derived:
+//   * the time embedding is prepended as SEQUENCE token 0, so the latent frames
+//     sit at rope positions 1..S;
+//   * Fourier is cos-first — but `temb` arrives precomputed here, so that lives
+//     in the caller (shared with inference).
+static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                    const MM3TrainInputs & in) {
+    const MM3DitConfig &  c = m.synth_cfg.dit;
+    const MM3DitWeights & w = m.synth.dit;
+    const int64_t         S = in.xt->ne[1];
+    const int64_t         IC = (int64_t) c.in_channels;
+
+    // full = cat(x, zeros_like(x), cond) -> [2304, S]
+    ggml_tensor * zeros = ggml_scale(ctx, in.xt, 0.0f);
+    ggml_tensor * full  = ggml_concat(ctx, ggml_concat(ctx, in.xt, zeros, 0), in.cond, 0);
+
+    // preprocess_conv is Conv1d k=1 with a residual — i.e. a matmul plus x.
+    full = ggml_add(ctx, ggml_mul_mat(ctx, ggml_reshape_2d(ctx, w.preprocess_conv,
+                                                           w.preprocess_conv->ne[1], w.preprocess_conv->ne[2]),
+                                      full),
+                    full);
+
+    ggml_tensor * h = mm3_dt_linear(ctx, w.proj_in, full, ad.proj_in);   // [E, S]
+
+    // Time token at sequence position 0.
+    h = ggml_concat(ctx, in.temb, h, 1);                                 // [E, S+1]
+
+    for (size_t i = 0; i < w.blk.size(); i++) {
+        h = mm3_dt_block(ctx, c, w.blk[i], ad.blk[i], h, in.positions);
+    }
+
+    // Strip the time token, project out, postprocess residual.
+    h = ggml_cont(ctx, ggml_view_2d(ctx, h, h->ne[0], S, h->nb[1], h->nb[1]));
+    h = mm3_dt_linear(ctx, w.proj_out, h, ad.proj_out);                  // [IC, S]
+    h = ggml_add(ctx, ggml_mul_mat(ctx, ggml_reshape_2d(ctx, w.postprocess_conv,
+                                                        w.postprocess_conv->ne[1], w.postprocess_conv->ne[2]),
+                                   h),
+                 h);
+    GGML_ASSERT(h->ne[0] == IC);
+    return h;
+}
+
+// ── Loss ────────────────────────────────────────────────────────────────────
+//
+// Plain rectified-flow MSE against a caller-supplied velocity target:
+//
+//   sigma ~ 1 - sigmoid(logit_normal(mean, std))
+//   x_t   = sigma * noise + (1 - sigma) * x0
+//   loss  = mean((v_pred - v_target)^2)
+//
+// THE SIGN OF v_target IS NOT SETTLED IN THIS FILE, deliberately. Take it from
+// mm3-dit-graph.h's own Euler step (`x + (sigma_next - sigma) * v`, sigma RISING
+// 0->1) rather than from SimpleTuner, whose flow_matching_target_direction = -1
+// is stated against a different convention — and note that the DiT
+// output-negation trap (`mm3.dit.output_negated`, ComfyUI negates, diffusers and
+// this port do not) sits exactly here. Gate it before training anything: at high
+// sigma a frozen-model prediction must point from noise toward data. If the loss
+// is flat or rises, the sign is inverted.
+//
+// Deliberately NOT ported from the ACE trainer: the product loss and channel
+// balancing. Those were fitted to ACE's DCAE latents; MM3's DAV latents are a
+// different distribution (measured on real music: std ~2.15, absmax ~20).
+static ggml_tensor * mm3_dt_loss(ggml_context * ctx, ggml_tensor * pred, ggml_tensor * target) {
+    ggml_tensor * d = ggml_sub(ctx, pred, target);
+    return ggml_scale(ctx, ggml_sum(ctx, ggml_sqr(ctx, d)), 1.0f / (float) ggml_nelements(d));
+}
