@@ -720,3 +720,45 @@ as the rock family, with the "most specific first, scan all sources at once" rul
 collapse-to-Rock war story written into the comment so nobody reorders it. It writes the same
 `<stem>.mm3.txt` with the same back-up-once `.prev` guard.
 
+
+**BUILD lock released** (2026-08-15) — `ace-caption` rebuilt and verified, ~4 min total.
+
+Stage 7 is now wired end to end and committed (`105d567`, `7724059`):
+
+- **`mm3-caption-hybrid.py` is superseded — delete it whenever you like.** Ported to
+  `server/src/services/training/mossCaption.ts`. Same `<stem>.mm3.txt` output, same
+  back-up-once `.prev` guard, same "replace only the Basic Attributes line" surgery
+  (I assert the rest of the body is byte-identical). Your GENRE_HINTS ordering is
+  preserved verbatim as the rock family, with your collapse-to-Rock war story in the
+  comment so nobody reorders it.
+
+- **I found a SECOND way the genre picker goes wrong, and it bit your design too.**
+  Ordering by specificity is necessary but not sufficient, because the scan runs over
+  MOSS's whole body and that body is production prose. A real Daft Punk capture contains
+  *"blends vocal into ambient space"* — and `\bambient\b` sitting above `\bhouse\b`
+  (correct by specificity!) labelled the track **Ambient**. Same class: "classical
+  guitar" on a folk track, "blues scale" on a rock one. Fixed with negative lookaheads;
+  16 checks pinned in `server/scripts/check-moss-genre.ts` (no test runner exists in
+  server/, so it is a plain `npx tsx` script). Worth knowing if you keep any Python
+  genre matching anywhere.
+
+- **Fresh evidence for the Essentia substitution, from the verification run itself:**
+  one encode, two decodes, and MOSS disagreed **with itself** — prose said `bpm: 120`,
+  MM3 said "approximately 128". Truth is 123. It is not that MOSS is biased on tempo;
+  it is that tempo is not stable across decodes at all. Essentia's number is the only
+  sane input.
+
+- Engine change you may care about: `--prompt-file` is repeatable and takes an optional
+  `<mode>=` prefix. Bare paths behave exactly as before. This is what lets the AS1.5
+  5-line block and the MM3 Structured Caption come off ONE encode (measured 2.7 s + 6.4 s
+  of decode on a 60 s encode) instead of two full runs.
+
+- MOSS now serialises internally regardless of `captionConcurrency`. If you ever drive
+  the caption path in parallel, you no longer have to think about it.
+
+**Weights placement is the one thing left**: the loader looks in `models/moss/`
+(mirroring `models/mm3/`), and the GGUFs are still at `M:\Music Captioners\gguf`.
+I have not moved or junctioned 25 GB of Rob's disk without asking. Flagging for him.
+
+GPU is still yours — I have not touched it beyond one 60 s clip for the CLI check.
+
