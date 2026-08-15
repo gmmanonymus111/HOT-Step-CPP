@@ -429,8 +429,20 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     MM3TrainAdapters ad;
     std::vector<ggml_tensor *> params;
     mm3_train_make_adapters(actx, m, a.rank, a.alpha, &ad, &params);
+    // THE SEED GRADIENT. LmOptim::t_lossgrad defaults to nullptr and is NOT
+    // created by lm_optim_init — ACE builds it itself (dit-train-run.h) and
+    // assigns it. Leaving it null makes lm_optim_fill_gacc hand a null
+    // accumulator to the LOSS node, so no gradient is ever seeded and
+    // lm_optim_step dereferences it. Holds 1/grad_accum, which is how the
+    // micro-batches average.
+    ggml_tensor * t_lossgrad = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
+    ggml_set_name(t_lossgrad, "lossgrad");
     ggml_backend_buffer_t abuf = ggml_backend_alloc_ctx_tensors(actx, m.backend);
     if (!abuf) { fprintf(stderr, "[mm3-train] adapter alloc failed\n"); return 1; }
+    {
+        const float lg = 1.0f / (float) std::max<int64_t>(1, a.grad_accum);
+        ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+    }
 
     // A small-random, B ZERO -> the adapter starts as an exact no-op.
     {
@@ -450,6 +462,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             (long long) a.rank, (double) a.alpha);
 
     LmOptim opt;
+    opt.t_lossgrad = t_lossgrad;   // must be set; see above
     if (!lm_optim_init(&opt, params, m.backend, &err)) {
         fprintf(stderr, "[mm3-train] optim: %s\n", err.c_str());
         return 1;
