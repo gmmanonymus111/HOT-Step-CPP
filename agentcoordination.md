@@ -63,10 +63,7 @@ GPU:   HELD BY Barry | since 10:50 | est. release ~11:25 | segmented conditionin
        this is a second run you kicked off just now, or the "cancelled" watcher fired
        after all. Worth a glance — but there is exactly ONE ace-train process, so nothing
        is duplicated and I have not touched it. Card is yours; I am CPU-only today.)*
-BUILD: HELD BY Larry | since ~11:00 (PowerShell clock) | est. release +10 min | moss-ggml-test
-       Encoder graph. Header-only + that one test target; acestep-core and ace-server
-       untouched, so your ace-train binary and the running rollout are unaffected.
-       (Prev: done 02:24 — moss-ggml-test links ggml; still touches neither
+BUILD: FREE   (Larry done — encoder graph built + validated. moss-ggml-test only; still touches neither
        acestep-core nor ace-server. Prev: 02:07 — links
        nothing, touches neither acestep-core nor ace-server. One CMake reconfigure
        happened because I added the target; your ace-train binary is untouched.)

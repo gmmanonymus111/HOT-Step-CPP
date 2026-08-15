@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "moss/moss-encoder-graph.h"
 #include "moss/moss-mel.h"
 #include "moss/moss-model.h"
 
@@ -309,6 +310,65 @@ static bool test_load(const std::string & aud_gguf) {
     return sane;
 }
 
+// Feeds the FIXTURE mel rather than recomputing it, so the encoder is tested in
+// isolation from any frontend difference (the stored mel is bf16; recomputing in
+// fp32 would inject a ~1 ULP delta that has nothing to do with this graph).
+static bool test_encoder(const std::string & fixtures, const std::string & track,
+                         const moss::AudioTower & tower, ggml_backend_t backend) {
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    const std::string dir = fixtures + sep + track;
+    std::vector<float> mel;
+    if (!read_f32(dir + sep + "mel.f32", mel)) {
+        printf("  SKIP %-24s (no mel.f32)\n", track.c_str());
+        return true;
+    }
+    const int n_mels = (int) tower.hp.n_mels;
+    const int T = (int) (mel.size() / (size_t) n_mels);
+
+    moss::EncoderOutput eo;
+    if (!moss::moss_encode_audio(tower, mel.data(), n_mels, T, backend, &eo)) {
+        printf("  FAIL %-24s (encode failed)\n", track.c_str());
+        return false;
+    }
+
+    bool ok = true;
+    auto cmp = [&](const char * name, const std::vector<float> & got) {
+        std::vector<float> ref;
+        if (!read_f32(dir + sep + name + ".f32", ref)) {
+            printf("  SKIP %-20s %-22s (no fixture)\n", name, track.c_str());
+            return;
+        }
+        if (ref.size() != got.size()) {
+            printf("  FAIL %-20s %-22s size ref=%zu got=%zu\n", name, track.c_str(),
+                   ref.size(), got.size());
+            ok = false;
+            return;
+        }
+        double corr = 0, mx = 0, rel = 0;
+        stats(ref, got, &corr, &mx, &rel);
+        // The GGUF is f16 against fp32 dumps, so the bar is 0.999 (numpy, reading
+        // the same GGUF, reached 1.000000).
+        const bool good = corr >= 0.999;
+        printf("  %s %-20s %-22s corr=%.7f relRMSE=%.2e maxabs=%.2e\n",
+               good ? "OK  " : "FAIL", name, track.c_str(), corr, rel, mx);
+        ok = ok && good;
+    };
+
+    cmp("encoder_out", eo.encoder_out);
+    for (size_t k = 0; k < eo.deepstack_taps.size(); ++k) {
+        cmp(("encoder_deepstack_" + std::to_string(k)).c_str(), eo.deepstack_taps[k]);
+    }
+    cmp("adapter_out", eo.adapter_out);
+    for (size_t k = 0; k < eo.merger_out.size(); ++k) {
+        cmp(("deepstack_merger_" + std::to_string(k)).c_str(), eo.merger_out[k]);
+    }
+    return ok;
+}
+
 int main(int argc, char ** argv) {
     std::string fixtures, component = "all", models;
     for (int i = 1; i < argc; ++i) {
@@ -356,6 +416,32 @@ int main(int argc, char ** argv) {
 #endif
             printf("\n== audio tower loader ==\n");
             ok = test_load(models + sep + "moss-aud-f16.gguf") && ok;
+        }
+    }
+    if (component == "encoder" || component == "all") {
+        if (models.empty()) {
+            printf("\n== encoder == SKIP (pass --models <dir with moss-aud-f16.gguf>)\n");
+        } else {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            printf("\n== encoder graph (bar: corr >= 0.999) ==\n");
+            BackendPair bp = backend_init("MOSS");
+            moss::AudioTower tower;
+            if (bp.backend &&
+                moss::moss_load_audio_tower(&tower, (models + sep + "moss-aud-f16.gguf").c_str(),
+                                            bp.backend)) {
+                for (const std::string & t : tracks) {
+                    ok = test_encoder(fixtures, t, tower, bp.backend) && ok;
+                }
+                moss::moss_free_audio_tower(&tower);
+            } else {
+                printf("  FAIL could not load the audio tower\n");
+                ok = false;
+            }
+            backend_release(bp.backend, bp.cpu_backend);
         }
     }
     printf("\n%s\n", ok ? "ALL COMPONENTS PASSED" : "** PARITY FAILURE **");
