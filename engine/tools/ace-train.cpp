@@ -123,6 +123,8 @@ static void print_usage(void) {
             "  mm3-condition MiniMax-Music3 AR rollout -> flow-DiT conditioning cache.\n"
             "                --manifest <mm3_preprocess.json> --models <dir> --captions <dataset dir>\n"
             "                [--seed N] [--lm-quant Q] [--dit-quant Q; default Q2_K, never executed]\n"
+            "                [--segment-sec S] default 60; 0 = one rollout per song, which\n"
+            "                UNDER-COVERS long songs (the LM hits EOS early: 65%% on a 280 s track)\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -1427,8 +1429,9 @@ static int cmd_mm3_preprocess(int argc, char ** argv) {
 // fit the card alongside a desktop. Nothing here ever executes a DiT graph.
 static int cmd_mm3_condition(int argc, char ** argv) {
     std::string manifest_path, models_dir, captions_dir, dit_quant = "Q2_K", lm_quant;
-    int64_t     seed = 42;
-    bool        tf32 = false;
+    int64_t     seed        = 42;
+    double      segment_sec = 60.0;   // 0 = one rollout for the whole song
+    bool        tf32        = false;
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char * what) -> const char * {
@@ -1441,6 +1444,7 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--dit-quant")) dit_quant     = next("--dit-quant");
         else if (!strcmp(argv[i], "--lm-quant"))  lm_quant      = next("--lm-quant");
         else if (!strcmp(argv[i], "--seed"))      seed          = atoll(next("--seed"));
+        else if (!strcmp(argv[i], "--segment-sec")) segment_sec = atof(next("--segment-sec"));
         else if (!strcmp(argv[i], "--tf32"))      tf32          = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
         else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
@@ -1562,34 +1566,104 @@ static int cmd_mm3_condition(int argc, char ** argv) {
             fclose(cf);
         }
 
-        MM3SynthRequest req;
-        req.caption    = caption;
-        req.lyrics     = lyrics;
-        req.duration   = dur;
-        req.prompt     = mm3_assemble_prompt(req.caption, req.lyrics, &req.instrumental);
-        const int64_t frames_want = (int64_t) llround(dur * (double) FPS);
-        req.max_frames = std::min<int64_t>(frames_want, (int64_t) model.lm_cfg.max_audio_frames);
-        req.seed_in    = seed;
-        if (!mm3_request_tokenize(model, &tok, &req, &err)) {
-            fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: %s\n", idx, n_total, filename.c_str(), err.c_str());
-            n_fail++;
-            continue;
+        // ── segmented AR rollout ──
+        //
+        // A single rollout for a whole song UNDER-COVERS it: the LM emits EOS
+        // long before a 4-minute request is satisfied. Measured on this dataset,
+        // one-shot: sadie asked for 6990 frames and stopped at 4540 (65 % of the
+        // song), mercy_me 83 %, burn 84 %. Nothing is corrupt, but a third of
+        // some songs would silently have no conditioning and so could never be
+        // trained on. MM3's reference generates 30-40 s clips; 4.5 minutes in one
+        // unbroken rollout is far outside what it sustains.
+        //
+        // So roll out in segments and concatenate. This costs nothing musically:
+        // the conditioning is caption-derived and content-misaligned with the
+        // target audio by construction, so a seam every --segment-sec is no less
+        // faithful than the middle of a segment. Segment boundaries ARE recorded,
+        // so the trainer can decline to sample a window that straddles one.
+        //
+        // Lyrics are split proportionally across segments rather than repeated:
+        // handing every 60 s segment the whole song's lyrics would make each one
+        // try to sing all of them, giving implausibly dense vocal conditioning.
+        const int64_t frames_want = std::min<int64_t>((int64_t) llround(dur * (double) FPS),
+                                                      (int64_t) model.lm_cfg.max_audio_frames);
+        const int64_t seg_frames  = (segment_sec > 0.0)
+                                        ? std::max<int64_t>(1, (int64_t) llround(segment_sec * (double) FPS))
+                                        : frames_want;
+        const int64_t n_seg       = (frames_want + seg_frames - 1) / seg_frames;
+
+        std::vector<std::string> lyric_parts;
+        {
+            std::vector<std::string> lines;
+            size_t                   p = 0;
+            while (p <= lyrics.size()) {
+                size_t nl = lyrics.find('\n', p);
+                if (nl == std::string::npos) { lines.push_back(lyrics.substr(p)); break; }
+                lines.push_back(lyrics.substr(p, nl - p));
+                p = nl + 1;
+            }
+            lyric_parts.assign((size_t) n_seg, std::string());
+            for (size_t li = 0; li < lines.size(); li++) {
+                const size_t sidx = std::min<size_t>((size_t) n_seg - 1, li * (size_t) n_seg / std::max<size_t>(1, lines.size()));
+                if (!lyric_parts[sidx].empty()) lyric_parts[sidx] += "\n";
+                lyric_parts[sidx] += lines[li];
+            }
         }
 
-        MM3ArOptions aopt;
-        aopt.max_frames      = req.max_frames;
-        aopt.seed            = (uint64_t) seed;
-        aopt.collect_hiddens = true;
-        MM3ArResult ar;
-        const int64_t t0 = ggml_time_ms();
-        if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
-                         (int64_t) req.gen.ids_cond.size(), aopt, &ar, &err)) {
-            fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: AR: %s\n", idx, n_total, filename.c_str(),
-                    err.c_str());
+        std::vector<float>   hiddens;      // [F_total, LAY, H]
+        std::vector<int64_t> seg_bounds;   // frame index of each segment start
+        int64_t              F        = 0;
+        int64_t              n_eos    = 0;
+        bool                 song_ok  = true;
+        const int64_t        t0       = ggml_time_ms();
+
+        for (int64_t sg = 0; sg < n_seg && song_ok; sg++) {
+            const int64_t want = std::min<int64_t>(seg_frames, frames_want - sg * seg_frames);
+            if (want <= 0) break;
+
+            MM3SynthRequest req;
+            req.caption  = caption;
+            req.lyrics   = lyric_parts[(size_t) sg];
+            req.duration = (double) want / (double) FPS;
+            req.prompt   = mm3_assemble_prompt(req.caption, req.lyrics, &req.instrumental);
+            req.max_frames = want;
+            req.seed_in    = seed + sg;
+            if (!mm3_request_tokenize(model, &tok, &req, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s seg %lld: %s\n", idx, n_total,
+                        filename.c_str(), (long long) sg, err.c_str());
+                song_ok = false;
+                break;
+            }
+
+            MM3ArOptions aopt;
+            aopt.max_frames      = want;
+            // Per-segment seed: identical segments would otherwise produce
+            // identical conditioning, which is a degenerate signal to train on.
+            aopt.seed            = (uint64_t) (seed + sg);
+            aopt.collect_hiddens = true;
+            MM3ArResult ar;
+            if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
+                             (int64_t) req.gen.ids_cond.size(), aopt, &ar, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s seg %lld: AR: %s\n", idx, n_total,
+                        filename.c_str(), (long long) sg, err.c_str());
+                song_ok = false;
+                break;
+            }
+            seg_bounds.push_back(F);
+            hiddens.insert(hiddens.end(), ar.frame_hiddens.begin(), ar.frame_hiddens.end());
+            F += ar.n_frames;
+            if (ar.eos_hit) n_eos++;
+        }
+        if (!song_ok || F <= 0) {
             n_fail++;
             continue;
         }
         ar_ms_total += (double) (ggml_time_ms() - t0);
+        MM3ArResult ar;              // aggregate stand-in for the fields used below
+        ar.n_frames     = F;
+        ar.eos_hit      = n_eos > 0;
+        ar.total_ms     = (double) (ggml_time_ms() - t0);
+        ar.frame_hiddens.swap(hiddens);
 
         // ── condition encode, chunked ──
         //
@@ -1599,7 +1673,7 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         // non-integer (x3.4453125, truncated), so each chunk's destination
         // offset is taken from mm3_cond_latent_length() of its core start
         // rather than computed by multiplication.
-        const int64_t F     = ar.n_frames;
+        // F is the total across all segments, set by the rollout loop above.
         const int64_t L_all = mm3_cond_latent_length(model.synth_cfg.cond, F);
         const int64_t CHUNK = 3072, OVER = 128;
         std::vector<float> cond_all((size_t) (L_all * (int64_t) model.synth_cfg.cond.out_dim), 0.0f);
@@ -1652,12 +1726,24 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         yyjson_mut_obj_add_int(odoc, e, "cond_dim", CD);
         yyjson_mut_obj_add_int(odoc, e, "latent_frames", L_target);
         yyjson_mut_obj_add_bool(odoc, e, "eos_hit", ar.eos_hit);
+        // Latent index of each segment start. A training window that straddles
+        // one of these spans two independent rollouts, so the trainer should
+        // either skip it or accept the seam knowingly.
+        yyjson_mut_val * sb = yyjson_mut_arr(odoc);
+        for (int64_t fb : seg_bounds) {
+            yyjson_mut_arr_add_int(odoc, sb, mm3_cond_latent_length(model.synth_cfg.cond, fb));
+        }
+        yyjson_mut_obj_add_val(odoc, e, "segment_latent_starts", sb);
+        yyjson_mut_obj_add_int(odoc, e, "n_segments", (int64_t) seg_bounds.size());
         yyjson_mut_arr_append(oarr, e);
         n_ok++;
 
-        fprintf(stderr, "[mm3-condition] %zu/%zu ok %-42s F=%-5lld cond L=%-6lld (audio L=%lld) %.1fs\n",
-                idx, n_total, filename.c_str(), (long long) F, (long long) L_all, (long long) L_target,
-                ar.total_ms / 1000.0);
+        const double cover = L_target > 0 ? 100.0 * (double) std::min<int64_t>(L_all, L_target) / (double) L_target
+                                          : 0.0;
+        fprintf(stderr, "[mm3-condition] %zu/%zu ok %-42s F=%-5lld cond L=%-6lld (audio L=%-6lld %5.1f%%) "
+                        "%lld seg %.1fs\n",
+                idx, n_total, filename.c_str(), (long long) F, (long long) L_all, (long long) L_target, cover,
+                (long long) seg_bounds.size(), ar.total_ms / 1000.0);
     }
 
     yyjson_doc_free(doc);

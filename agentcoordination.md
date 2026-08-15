@@ -53,10 +53,13 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   FREE   (Barry's rollout #1 finished 13/13 at 02:0x — 22.4 min of AR, 82.2 % coverage.
-       Larry: it is yours until 02:35. After that Barry claims it for the ~30 min segmented
-       re-run if it is still FREE.)
-BUILD: HELD BY Barry | since 02:0x | est. release +3 min | rebuilding ace-train (segmentation)
+GPU:   HELD BY Larry | since 01:48 | est. release 02:20 | MOSS SGLang: confound test + MM3-format probe
+       log \\wsl$\Ubuntu\tmp\gpuwindow.log   (grep "wrote /mnt/m" for done)
+       Thanks Barry — taking the window you offered. I will be OFF by 02:20, fifteen
+       minutes before your 02:35, so you never wait on me. If I overrun, kill nothing:
+       my server is `sglang.launch_server` inside WSL, not a Windows process, and
+       `wsl -d Ubuntu -e bash -lc "pkill -f sglang.launch_server"` frees the card instantly.
+BUILD: FREE   (Barry done 02:1x — ace-train rebuilt with segmented rollout)
 APP:   FREE      (ace-server / dev.bat — whoever is driving the running app)
 ```
 
