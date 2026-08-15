@@ -51,7 +51,13 @@ struct MM3TrainSong {
     std::string name;
     std::string latents_path;    // f32 [128, L]
     std::string cond_path;       // f16 [L', 2048]
-    int64_t     L      = 0;      // usable latents = min(audio L, cond L')
+    // TWO lengths, and confusing them silently corrupts every channel but the
+    // first. The latents file is [128, L_audio] so L_audio is the ROW STRIDE;
+    // L is how much of it is usable (conditioning is almost always shorter, both
+    // from the rounding mismatch and from EOS-early rollouts). Seek with
+    // L_audio, sample crops within L.
+    int64_t     L_audio = 0;     // row stride of the latents file
+    int64_t     L       = 0;     // usable = min(audio L, cond L')
     int64_t     cond_dim = 0;
     std::vector<int64_t> seams;  // latent indices where one rollout segment ends
 };
@@ -128,7 +134,8 @@ static bool mm3_train_load_cache(const std::string & cache_dir, const std::strin
         s.latents_path = cache_dir + "/" + gs(pv, "latents");
         s.cond_path    = cache_dir + "/" + gs(it->second, "condition");
         s.cond_dim     = gi(it->second, "cond_dim");
-        s.L            = std::min<int64_t>(gi(pv, "latent_frames"), gi(it->second, "cond_latents"));
+        s.L_audio      = gi(pv, "latent_frames");
+        s.L            = std::min<int64_t>(s.L_audio, gi(it->second, "cond_latents"));
         yyjson_val * sb = yyjson_obj_get(it->second, "segment_latent_starts");
         if (sb && yyjson_is_arr(sb)) {
             yyjson_val * b; yyjson_arr_iter bi = yyjson_arr_iter_with(sb);
@@ -150,7 +157,8 @@ static bool mm3_train_read_crop(const MM3TrainSong & s, int64_t start, int64_t c
     if (!f) { if (err) *err = "cannot open " + s.latents_path; return false; }
     for (int64_t c = 0; c < IC; c++) {
         // channel c of the full [128, L] block, offset to the crop
-        if (fseek(f, (long) (((size_t) (c * s.L + start)) * sizeof(float)), SEEK_SET) != 0 ||
+        // stride is L_audio, NOT s.L — see the struct comment.
+        if (fseek(f, (long) (((size_t) (c * s.L_audio + start)) * sizeof(float)), SEEK_SET) != 0 ||
             fread(lat->data() + c * crop, sizeof(float), (size_t) crop, f) != (size_t) crop) {
             fclose(f); if (err) *err = "short read on " + s.latents_path; return false;
         }
@@ -211,4 +219,117 @@ static bool mm3_train_make_adapters(ggml_context * ctx, const MM3Model & m, int6
     mk(&ad->proj_in,  CC, E,  "dit.proj_in");
     mk(&ad->proj_out, E,  IC, "dit.proj_out");
     return true;
+}
+
+// ── Sigma / target ─────────────────────────────────────────────────────────
+//
+// Rectified flow, matching the scheduler this port already replicates:
+//   sigma = 1 - sigmoid(logit_normal(mean, std)),  x_t = sigma*noise + (1-sigma)*x0
+//
+// The velocity target's SIGN is the one thing the design doc refused to settle
+// on paper. mm3-dit-graph.h's Euler step is `x + (sigma_next - sigma) * v` with
+// sigma RISING 0->1, i.e. integrating from data toward noise; so the field it
+// wants is d(x)/d(sigma) = noise - x0. `--sign-check` verifies that empirically
+// against the alternative before any training happens.
+static inline float mm3_sigma_from(std::mt19937_64 & rng, float mean, float std_) {
+    std::normal_distribution<double> nd(mean, std_);
+    const double u = 1.0 / (1.0 + std::exp(-nd(rng)));
+    return (float) std::min(1.0, std::max(0.0, 1.0 - u));
+}
+
+// target = (noise - x0) when `positive`, else (x0 - noise).
+static void mm3_make_xt_target(const std::vector<float> & x0, const std::vector<float> & noise,
+                               float sigma, bool positive, std::vector<float> * xt,
+                               std::vector<float> * target) {
+    xt->resize(x0.size());
+    target->resize(x0.size());
+    for (size_t i = 0; i < x0.size(); i++) {
+        (*xt)[i]     = sigma * noise[i] + (1.0f - sigma) * x0[i];
+        (*target)[i] = positive ? (noise[i] - x0[i]) : (x0[i] - noise[i]);
+    }
+}
+
+// Deterministic Gaussian noise. NOT std::normal_distribution — its byte stream
+// is stdlib-dependent, which is trap #8 in the mm3-backend skill and would make
+// a "same seed" run unreproducible across builds. splitmix64 + Box-Muller.
+static void mm3_fill_noise_train(std::vector<float> * v, uint64_t seed) {
+    uint64_t s = seed;
+    auto nxt = [&]() -> double {
+        s += 0x9E3779B97F4A7C15ULL;
+        uint64_t z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z ^= (z >> 31);
+        return ((z >> 11) + 0.5) * (1.0 / 9007199254740992.0);
+    };
+    for (size_t i = 0; i < v->size(); i += 2) {
+        const double u1 = std::max(1e-12, nxt()), u2 = nxt();
+        const double r = std::sqrt(-2.0 * std::log(u1)), th = 6.283185307179586 * u2;
+        (*v)[i] = (float) (r * std::cos(th));
+        if (i + 1 < v->size()) (*v)[i + 1] = (float) (r * std::sin(th));
+    }
+}
+
+// ── One micro-step ─────────────────────────────────────────────────────────
+//
+// Builds forward -> loss (and backward when training), computes, returns the
+// loss. `backward == false` is the measurement path used by --sign-check and by
+// zero-adapter neutrality.
+static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapters & ad, LmOptim * opt,
+                            const std::vector<float> & xt_h, const std::vector<float> & cond_h,
+                            const std::vector<float> & tgt_h, const std::vector<float> & temb_h,
+                            int64_t crop, bool backward, float * loss_out, std::string * err) {
+    const MM3DitConfig & c  = m.synth_cfg.dit;
+    const int64_t        IC = (int64_t) c.in_channels;
+    const int64_t        CD = (int64_t) c.condition_dim;
+    const int64_t        E  = (int64_t) c.embedding_length;
+
+    const size_t     meta = ggml_tensor_overhead() * 262144 + ggml_graph_overhead_custom(262144, true);
+    ggml_init_params ip   = { meta, nullptr, true };
+    ggml_context *   ctx  = ggml_init(ip);
+    if (!ctx) { if (err) *err = "ggml_init failed"; return false; }
+
+    MM3TrainInputs in;
+    in.xt        = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
+    in.cond      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, CD);
+    in.temb      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, E);
+    in.positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, crop + 1);
+    in.vtarget   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
+    ggml_set_input(in.xt); ggml_set_input(in.cond); ggml_set_input(in.temb);
+    ggml_set_input(in.positions); ggml_set_input(in.vtarget);
+
+    ggml_tensor * pred = mm3_dt_forward(ctx, m, ad, in);
+    ggml_tensor * loss = mm3_dt_loss(ctx, pred, in.vtarget);
+    if (backward) ggml_set_loss(loss);
+    ggml_set_output(loss);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 262144, backward);
+    ggml_build_forward_expand(gf, loss);
+    if (backward) {
+        // AFTER the forward expansion — gacc is indexed by forward-node order.
+        std::vector<ggml_tensor *> gacc;
+        lm_optim_fill_gacc(opt, gf, &gacc);
+        ggml_build_backward_expand(ctx, gf, gacc.data());
+    }
+
+    ggml_backend_sched_reset(g.sched);
+    if (!ggml_backend_sched_alloc_graph(g.sched, gf)) {
+        ggml_free(ctx); if (err) *err = "sched_alloc_graph failed (out of VRAM?)"; return false;
+    }
+    ggml_backend_tensor_set(in.xt,      xt_h.data(),   0, xt_h.size()   * sizeof(float));
+    ggml_backend_tensor_set(in.cond,    cond_h.data(), 0, cond_h.size() * sizeof(float));
+    ggml_backend_tensor_set(in.vtarget, tgt_h.data(),  0, tgt_h.size()  * sizeof(float));
+    ggml_backend_tensor_set(in.temb,    temb_h.data(), 0, temb_h.size() * sizeof(float));
+    {
+        // Time token holds position 0, so latent frames are 1..crop.
+        std::vector<int32_t> pos((size_t) crop + 1);
+        for (int64_t i = 0; i <= crop; i++) pos[(size_t) i] = (int32_t) i;
+        ggml_backend_tensor_set(in.positions, pos.data(), 0, pos.size() * sizeof(int32_t));
+    }
+
+    const bool ok = ggml_backend_sched_graph_compute(g.sched, gf) == GGML_STATUS_SUCCESS;
+    if (ok && loss_out) ggml_backend_tensor_get(loss, loss_out, 0, sizeof(float));
+    ggml_free(ctx);
+    if (!ok && err) *err = "graph compute failed";
+    return ok;
 }
