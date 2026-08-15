@@ -1,7 +1,7 @@
 // ace-caption.cpp: MOSS-Music captioning CLI. Audio in, caption out.
 //
 // Usage:
-//   ace-caption --models <dir> --src-audio <file> [--mode prose|mm3|lyrics]
+//   ace-caption --models <dir> --src-audio <file> [--mode prose|mm3|lyrics[,...]]
 //               [--prompt "..."] [--prompt-file <path>] [-o <out.txt>]
 //               [--max-tokens N] [--max-seconds S]
 //               [--temperature T] [--rep-penalty R] [--freq-penalty F]
@@ -22,10 +22,16 @@
 // ── Cost shape ───────────────────────────────────────────────────────────────
 //
 // The encoder is prompt-independent: mel + 32 Whisper layers depend only on the
-// audio. Only the LM sees the prompt. A future batch mode should therefore
-// encode once and decode N times for N formats -- moss_encode_audio() already
-// returns exactly the struct that makes this possible. This CLI does one format
-// per invocation for simplicity; do not copy that shape into the pipeline.
+// audio. Only the LM sees the prompt. So --mode takes a COMMA-SEPARATED list and
+// runs one encode followed by N decodes:
+//
+//   ace-caption --mode prose,mm3,lyrics -o out.txt
+//     -> out.prose.txt, out.mm3.txt, out.lyrics.txt
+//
+// On a 4-minute track the encode is the expensive half, so asking for all three
+// together is far cheaper than three invocations. This is the shape the Training
+// Studio pipeline should use: dataset tracks want the AS1.5 caption AND the MM3
+// Structured Caption, and there is no reason to pay for the audio twice.
 
 #include <algorithm>
 #include <cmath>
@@ -235,15 +241,35 @@ int main(int argc, char ** argv) {
         return 2;
     }
 
+    // --prompt / --prompt-file override every mode; otherwise each mode picks its
+    // own built-in prompt. --modes takes a comma-separated list so all formats
+    // come off ONE encode (see the cost-shape note at the top).
+    std::string prompt_override = prompt;
     if (!prompt_file.empty()) {
-        if (!read_text_file(prompt_file, prompt)) {
+        if (!read_text_file(prompt_file, prompt_override)) {
             fprintf(stderr, "ace-caption: cannot read %s\n", prompt_file.c_str());
             return 1;
         }
     }
-    if (prompt.empty()) {
-        prompt = (mode == "mm3") ? PROMPT_MM3 : (mode == "lyrics") ? PROMPT_LYRICS : PROMPT_PROSE;
+    std::vector<std::string> modes;
+    {
+        std::string cur;
+        for (char c : mode) {
+            if (c == ',') {
+                if (!cur.empty()) { modes.push_back(cur); }
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()) { modes.push_back(cur); }
+        if (modes.empty()) { modes.push_back("prose"); }
     }
+    auto prompt_for_mode = [](const std::string & m) -> std::string {
+        if (m == "mm3") { return PROMPT_MM3; }
+        if (m == "lyrics") { return PROMPT_LYRICS; }
+        return PROMPT_PROSE;
+    };
 
     // ---- audio: any format -> 16 kHz mono ---------------------------------
     std::string audio_path = src, tmp_wav;
@@ -360,9 +386,14 @@ int main(int argc, char ** argv) {
             (double) pcm.size() / 16000.0, frames, eo.n_tokens,
             (double) eo.n_tokens / ((double) pcm.size() / 16000.0));
 
-    // ---- prompt assembly --------------------------------------------------
+    // ---- prompt assembly (per mode) ---------------------------------------
+    // Everything from here down runs once PER OUTPUT MODE, but `eo` above is
+    // computed once and shared: the encoder is prompt-independent, so N formats
+    // cost one encode plus N decodes rather than N full passes. On a 4-minute
+    // track the encode is the expensive half, so asking for prose+mm3+lyrics
+    // together is far cheaper than three invocations.
+    auto build_ids = [&](const std::string & user_prompt, std::vector<int32_t> & ids) -> bool {
     // Mirrors processing_moss_music.py::_build_default_prompt.
-    std::vector<int32_t> ids;
     bool ok = true;
     ok = ok && push_special(tok, "<|im_start|>", ids);
     push_text(tok, "system\nYou are a helpful assistant.", ids);
@@ -410,13 +441,19 @@ int main(int argc, char ** argv) {
         }
     }
     ids.push_back((int32_t) tower.hp.audio_eos_id);
-    push_text(tok, "\n" + prompt, ids);
+    push_text(tok, "\n" + user_prompt, ids);
     ok = ok && push_special(tok, "<|im_end|>", ids);
     push_text(tok, "\n", ids);
     ok = ok && push_special(tok, "<|im_start|>", ids);
     push_text(tok, "assistant\n", ids);
-    if (!ok) {
-        return 1;
+    return ok;
+    };  // build_ids
+
+    // Runs one output mode against the shared EncoderOutput.
+    auto run_mode = [&](const std::string & user_prompt, std::string & out_text) -> bool {
+    std::vector<int32_t> ids;
+    if (!build_ids(user_prompt, ids)) {
+        return false;
     }
 
     // ---- join tensors -----------------------------------------------------
@@ -445,12 +482,18 @@ int main(int argc, char ** argv) {
     if (!moss::moss_lm_kv_init(&kv, lm, T + max_tokens + 8, bp.backend)) {
         fprintf(stderr, "ace-caption: kv init failed (needs %lld positions)\n",
                 (long long) (T + max_tokens + 8));
-        return 1;
+        return false;
     }
+    // The cache is per-mode: each mode has its own prompt and therefore its own
+    // KV contents. Only `eo` is shared.
+    struct KvGuard {
+        moss::LmKv * p;
+        ~KvGuard() { moss::moss_lm_kv_free(p); }
+    } kv_guard{ &kv };
 
     std::vector<float> logits;
     if (!moss::moss_lm_eval(lm, kv, ids, audio_vals, merge, text_mask, bp.backend, &logits)) {
-        return 1;
+        return false;
     }
 
     // --top-k-debug: dump the first generated position's top-N as a stable,
@@ -473,11 +516,8 @@ int main(int argc, char ** argv) {
             printf("%d\t%.6f\t%s\n", idx[(size_t) i], logits[(size_t) idx[(size_t) i]],
                    piece.c_str());
         }
-        moss::moss_lm_kv_free(&kv);
-        moss::moss_free_lm(&lm);
-        moss::moss_free_audio_tower(&tower);
-        backend_release(bp.backend, bp.cpu_backend);
-        return 0;
+        out_text.clear();
+        return true;   // caller exits; --top-k-debug is a diagnostic, not a caption
     }
 
     const int32_t eos = (int32_t) 151645;   // <|im_end|>
@@ -500,24 +540,61 @@ int main(int argc, char ** argv) {
         }
     }
 
-    const std::string text = detokenize(tok, gen);
-    if (out_path.empty()) {
-        printf("%s\n", text.c_str());
-    } else {
-        FILE * f = fopen(out_path.c_str(), "wb");
-        if (!f) {
-            fprintf(stderr, "ace-caption: cannot write %s\n", out_path.c_str());
-            return 1;
+    out_text = detokenize(tok, gen);
+    return true;
+    };  // run_mode
+
+    // ---- run every requested mode off the one encode ----------------------
+    int rc = 0;
+    for (size_t mi = 0; mi < modes.size(); ++mi) {
+        const std::string & mname = modes[mi];
+        const std::string p = prompt_override.empty() ? prompt_for_mode(mname)
+                                                      : prompt_override;
+        std::string text;
+        const double t0 = (double) clock() / CLOCKS_PER_SEC;
+        if (!run_mode(p, text)) {
+            fprintf(stderr, "ace-caption: mode '%s' failed\n", mname.c_str());
+            rc = 1;
+            break;
         }
-        fwrite(text.data(), 1, text.size(), f);
-        fputc('\n', f);
-        fclose(f);
-        fprintf(stderr, "[MOSS] wrote %s (%zu tokens)\n", out_path.c_str(), gen.size());
+        const double el = (double) clock() / CLOCKS_PER_SEC - t0;
+        if (top_k_debug > 0) {
+            break;   // diagnostic already printed
+        }
+
+        if (out_path.empty()) {
+            if (modes.size() > 1) {
+                printf("===== %s =====\n", mname.c_str());
+            }
+            printf("%s\n", text.c_str());
+        } else {
+            // One mode -> -o is the file. Several -> -o is a prefix, and each
+            // mode appends its own suffix, so a caller can ask for all formats
+            // in one invocation and get predictable filenames.
+            std::string dst = out_path;
+            if (modes.size() > 1) {
+                const size_t dot = out_path.find_last_of('.');
+                const std::string stem = (dot == std::string::npos) ? out_path
+                                                                    : out_path.substr(0, dot);
+                const std::string ext = (dot == std::string::npos) ? ".txt"
+                                                                   : out_path.substr(dot);
+                dst = stem + "." + mname + ext;
+            }
+            FILE * f = fopen(dst.c_str(), "wb");
+            if (!f) {
+                fprintf(stderr, "ace-caption: cannot write %s\n", dst.c_str());
+                rc = 1;
+                break;
+            }
+            fwrite(text.data(), 1, text.size(), f);
+            fputc('\n', f);
+            fclose(f);
+            fprintf(stderr, "[MOSS] %-7s -> %s (%.1fs)\n", mname.c_str(), dst.c_str(), el);
+        }
     }
 
-    moss::moss_lm_kv_free(&kv);
     moss::moss_free_lm(&lm);
     moss::moss_free_audio_tower(&tower);
     backend_release(bp.backend, bp.cpu_backend);
-    return 0;
+    return rc;
 }
