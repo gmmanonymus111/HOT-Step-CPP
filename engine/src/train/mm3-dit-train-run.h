@@ -175,11 +175,12 @@ static bool mm3_train_read_crop(const MM3TrainSong & s, int64_t start, int64_t c
         fclose(g); if (err) *err = "short read on " + s.cond_path; return false;
     }
     fclose(g);
-    // f16 [crop, CD] -> f32 [CD, crop]: the graph wants channel-major.
-    for (int64_t t = 0; t < crop; t++) {
-        for (int64_t c = 0; c < CD; c++) {
-            (*cond)[(size_t) (c * crop + t)] = ggml_fp16_to_fp32(half[(size_t) (t * CD + c)]);
-        }
+    // NO transpose. The cache stores [crop, CD] and the graph's cond tensor is
+    // ne0=CD, ne1=crop -- which is the SAME memory order. An earlier version
+    // transposed here and then also declared the tensor transposed, i.e. wrong
+    // twice, and ggml_concat caught it.
+    for (size_t i = 0; i < half.size(); i++) {
+        (*cond)[i] = ggml_fp16_to_fp32(half[i]);
     }
     return true;
 }
@@ -275,47 +276,70 @@ static void mm3_fill_noise_train(std::vector<float> * v, uint64_t seed) {
 // Builds forward -> loss (and backward when training), computes, returns the
 // loss. `backward == false` is the measurement path used by --sign-check and by
 // zero-adapter neutrality.
-static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapters & ad, LmOptim * opt,
+static bool mm3_train_micro(MM3Model & m, ggml_backend_sched_t sched, const MM3TrainAdapters & ad,
+                            LmOptim * opt,
                             const std::vector<float> & xt_h, const std::vector<float> & cond_h,
                             const std::vector<float> & tgt_h, const std::vector<float> & fourier_h,
                             int64_t crop, bool backward, float * loss_out, std::string * err) {
     const MM3DitConfig & c  = m.synth_cfg.dit;
     const int64_t        IC = (int64_t) c.in_channels;
     const int64_t        CD = (int64_t) c.condition_dim;
-    (void) c;
+    const int64_t        E  = (int64_t) c.embedding_length;
 
-    const size_t     meta = ggml_tensor_overhead() * 262144 + ggml_graph_overhead_custom(262144, true);
+    // Node budget. The backward graph is ~6.1k nodes at crop 344 and scales
+    // with crop and depth, so 32k is generous; 262144 was not "safe", it made
+    // the graph hash enormous while the TENSOR arena stayed too small for the
+    // backward pass to allocate into. When ggml_new_tensor runs out of arena it
+    // returns NULL, the expansion keeps going, and the crash lands later in
+    // alloc/compute with no message -- which is exactly what happened.
+    const size_t MAX_NODES = 32768;
+    const size_t meta = ggml_tensor_overhead() * (MAX_NODES * 4)
+                      + ggml_graph_overhead_custom(MAX_NODES, true)
+                      + (size_t) 32 * 1024 * 1024;
     ggml_init_params ip   = { meta, nullptr, true };
     ggml_context *   ctx  = ggml_init(ip);
     if (!ctx) { if (err) *err = "ggml_init failed"; return false; }
 
     MM3TrainInputs in;
     in.xt        = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
-    in.cond      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, CD);
+    in.cond      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, CD, crop);
     in.fourier   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (int64_t) c.fourier_dim, 1);
     in.positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, crop + 1);
     in.vtarget   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
+    in.seq_zeros = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, E, crop + 1);
     ggml_set_input(in.xt); ggml_set_input(in.cond); ggml_set_input(in.fourier);
-    ggml_set_input(in.positions); ggml_set_input(in.vtarget);
+    ggml_set_input(in.positions); ggml_set_input(in.vtarget); ggml_set_input(in.seq_zeros);
 
+    if (!in.xt || !in.cond || !in.fourier || !in.positions || !in.vtarget || !in.seq_zeros) {
+        ggml_free(ctx); if (err) *err = "input tensor alloc failed (ctx arena too small)";
+        return false;
+    }
     ggml_tensor * pred = mm3_dt_forward(ctx, m, ad, in);
     ggml_tensor * loss = mm3_dt_loss(ctx, pred, in.vtarget);
     if (backward) ggml_set_loss(loss);
     ggml_set_output(loss);
 
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 262144, backward);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, MAX_NODES, backward);
+    if (!gf) { ggml_free(ctx); if (err) *err = "ggml_new_graph_custom failed"; return false; }
     ggml_build_forward_expand(gf, loss);
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] fwd expanded, %d nodes\n", ggml_graph_n_nodes(gf));
     if (backward) {
         // AFTER the forward expansion — gacc is indexed by forward-node order.
         std::vector<ggml_tensor *> gacc;
         lm_optim_fill_gacc(opt, gf, &gacc);
+        if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] gacc %zu entries\n", gacc.size());
         ggml_build_backward_expand(ctx, gf, gacc.data());
+        if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] bwd expanded, %d nodes\n", ggml_graph_n_nodes(gf));
     }
 
-    ggml_backend_sched_reset(g.sched);
-    if (!ggml_backend_sched_alloc_graph(g.sched, gf)) {
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "pre-reset");
+    ggml_backend_sched_reset(sched);
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post-reset");
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "pre-alloc");
+    if (!ggml_backend_sched_alloc_graph(sched, gf)) {
         ggml_free(ctx); if (err) *err = "sched_alloc_graph failed (out of VRAM?)"; return false;
     }
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post-alloc, uploading");
     ggml_backend_tensor_set(in.xt,      xt_h.data(),   0, xt_h.size()   * sizeof(float));
     ggml_backend_tensor_set(in.cond,    cond_h.data(), 0, cond_h.size() * sizeof(float));
     ggml_backend_tensor_set(in.vtarget, tgt_h.data(),  0, tgt_h.size()  * sizeof(float));
@@ -326,10 +350,18 @@ static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapter
         for (int64_t i = 0; i <= crop; i++) pos[(size_t) i] = (int32_t) i;
         ggml_backend_tensor_set(in.positions, pos.data(), 0, pos.size() * sizeof(int32_t));
     }
+    {
+        std::vector<float> z((size_t) (E * (crop + 1)), 0.0f);
+        ggml_backend_tensor_set(in.seq_zeros, z.data(), 0, z.size() * sizeof(float));
+    }
 
-    const bool ok = ggml_backend_sched_graph_compute(g.sched, gf) == GGML_STATUS_SUCCESS;
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "uploaded, computing");
+    const bool ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "computed");
     if (ok && loss_out) ggml_backend_tensor_get(loss, loss_out, 0, sizeof(float));
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "loss read");
     ggml_free(ctx);
+    if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "ctx freed");
     if (!ok && err) *err = "graph compute failed";
     return ok;
 }
@@ -378,6 +410,17 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
 
     const MM3DitConfig & c  = m.synth_cfg.dit;
     const int64_t        IC = (int64_t) c.in_channels;
+
+    // The trainer gets its OWN scheduler. g_mm3_dit.sched is sized
+    // MM3_DIT_MAX_NODES*2 = 8192 for the inference graph; a backward graph is
+    // 6084 nodes at crop 128 alone and grows with depth, so reusing it runs
+    // right up against the limit and shares split state with inference for no
+    // benefit. Sized generously — the cost is bookkeeping, not VRAM.
+    BackendPair tbp{};
+    tbp.backend     = m.backend;
+    tbp.cpu_backend = m.cpu_backend;
+    ggml_backend_sched_t tsched = backend_sched_new(tbp, 65536);
+    if (!tsched) { fprintf(stderr, "[mm3-train] scheduler alloc failed\n"); return 1; }
 
     // Adapter parameters in their own context + backend buffer.
     const size_t     n_sites = (m.synth.dit.blk.size() * 4 + 2) * 2;
@@ -451,11 +494,11 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
             float lp = 0.0f, ln = 0.0f;
             mm3_make_xt_target(x0, noise, sigma, true,  &xt, &tgt);
-            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &lp, &err)) {
+            if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &lp, &err)) {
                 fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
             }
             mm3_make_xt_target(x0, noise, sigma, false, &xt, &tgt);
-            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &ln, &err)) {
+            if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &ln, &err)) {
                 fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
             }
             sum_pos += lp; sum_neg += ln;
@@ -476,9 +519,25 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     }
 
     // ── training ──
-    const bool positive = true;   // set by --sign-check; see the verdict it prints
+    // MEASURED, not derived. --sign-check on alk3_crimson, sigma 0.9, adapter at
+    // zero, 6 crops:
+    //
+    //     target = (noise - x0)   mean loss 11.167
+    //     target = (x0 - noise)   mean loss  3.593   <- 67.8% lower, all 6 agree
+    //
+    // I had argued from mm3-dit-graph.h's Euler step (`x + (sigma_next - sigma)*v`
+    // with sigma rising 0->1) that it should be (noise - x0). That was WRONG.
+    // SimpleTuner's flow_matching_target_direction = -1.0 agrees with the
+    // measurement. Re-run --sign-check before ever flipping this.
+    //
+    // The margin is also the strongest evidence the rest of the path is right: a
+    // stock DiT could not score 3.59 against one target and 11.17 against its
+    // negation unless the conditioning, the crop alignment and the forward were
+    // all actually working.
+    const bool positive = false;  // (x0 - noise)
     for (int64_t step = 1; step <= a.steps; step++) {
         double acc = 0.0;
+        lm_optim_zero_grad(&opt);   // accumulators are per optimizer window
         for (int64_t g = 0; g < a.grad_accum; g++) {
             const MM3TrainSong * s; int64_t st;
             sample_crop(&s, &st);
@@ -491,15 +550,17 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
             mm3_make_xt_target(x0, noise, sigma, positive, &xt, &tgt);
             float lv = 0.0f;
-            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err)) {
+            if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err)) {
                 fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
             }
             acc += lv;
         }
         LmStepStats st{};
-        if (!lm_optim_step(&opt, g_mm3_dit.sched, &st)) {
+        if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "pre optim step");
+        if (!lm_optim_step(&opt, tsched, &st)) {
             fprintf(stderr, "[mm3-train] optimizer step failed\n"); return 1;
         }
+        if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post optim step");
         fprintf(stderr, "[mm3-train] step %4lld  loss %.5f  |g| %.4f  lr %.2e\n", (long long) step,
                 acc / (double) a.grad_accum, (double) st.grad_norm, (double) st.lr);
     }

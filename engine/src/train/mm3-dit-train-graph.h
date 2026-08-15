@@ -85,6 +85,52 @@ static ggml_tensor * mm3_dt_linear(ggml_context * ctx, ggml_tensor * w, ggml_ten
     return ggml_add(ctx, y, ggml_scale(ctx, bx, lo.scale));
 }
 
+// ── LayerNorm, rebuilt from ops that HAVE a backward ────────────────────────
+//
+// **GGML_OP_NORM HAS NO BACKWARD.** ggml_compute_backward supports RMS_NORM but
+// not NORM, so mm3_dit_ln() — which inference uses — cannot appear in a
+// trainable graph. It aborts at ggml.c with "unsupported ggml op for backward
+// pass: NORM" only once the backward is expanded, i.e. after the whole forward
+// has built and looked fine.
+//
+// This is the real reason ACE's DiT trains and a naive MM3 mirror does not: ACE
+// uses rms_norm, MM3 uses LayerNorm. The design note that said "LayerNorm, so
+// ACE's rms_norm trap does not apply" was right about the trap and wrong about
+// the consequence.
+//
+// The identity that avoids a vendored ggml patch:
+//
+//     LayerNorm(x) = (x - mean(x)) / sqrt(var(x) + eps)
+//     RMSNorm(y)   = y / sqrt(mean(y^2) + eps)
+//     with y = x - mean(x),  mean(y^2) == var(x)
+//     =>  LayerNorm(x) == RMSNorm(x - mean(x))
+//
+// SUB, MEAN and RMS_NORM all have backward, so the composite is differentiable.
+// ggml_mean reduces over ne0 to [1, ne1], which broadcasts back through ggml_sub.
+static ggml_tensor * mm3_dt_ln(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, ggml_tensor * b,
+                               float eps) {
+    // ggml_repeat is NOT cosmetic. ggml_mean gives [1, S]; subtracting it from
+    // [E, S] relies on broadcast, and SUB's backward does not reduce the
+    // gradient back down, so it aborts on
+    //   GGML_ASSERT(!src1_needs_grads || ggml_are_same_shape(src1, grads[isrc1]))
+    // Materialising the mean to [E, S] makes the shapes match and hands the
+    // reduction to REPEAT's backward (REPEAT_BACK), which does it correctly.
+    //
+    // The norm's gamma/beta do NOT need this: they are frozen, so src1 never
+    // needs a gradient and the broadcast is harmless there.
+    // sum_rows/E, NOT ggml_mean. GGML_OP_MEAN's backward is
+    //   ggml_add1_or_set(..., scale(grad, 1/ne0))
+    // and ggml_add1 asserts its operand is a SCALAR — so MEAN is only
+    // differentiable when it reduces to one value, never row-wise. SUM_ROWS'
+    // backward is a plain ggml_repeat and is correct for our [E,S] -> [1,S].
+    const int64_t E_       = x->ne[0];
+    ggml_tensor * mean     = ggml_repeat(ctx, ggml_scale(ctx, ggml_sum_rows(ctx, x), 1.0f / (float) E_), x);
+    ggml_tensor * centered = ggml_sub(ctx, x, mean);
+    ggml_tensor * n        = ggml_rms_norm(ctx, centered, eps);
+    n                      = ggml_mul(ctx, n, w);
+    return ggml_add(ctx, n, b);
+}
+
 // ── One trainable block: mirrors mm3_dit_block() op for op ──────────────────
 
 static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, const MM3DitBlock & w,
@@ -97,7 +143,7 @@ static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, co
     const int64_t S  = h->ne[1];
 
     // ── self-attention ──
-    ggml_tensor * n   = mm3_dit_ln(ctx, h, w.attn_norm_w, w.attn_norm_b, c.layer_norm_eps);
+    ggml_tensor * n   = mm3_dt_ln(ctx, h, w.attn_norm_w, w.attn_norm_b, c.layer_norm_eps);
     ggml_tensor * qkv = mm3_dt_linear(ctx, w.attn_qkv, n, ad.qkv);   // [3E, S]
 
     ggml_tensor * q = ggml_cont(ctx, ggml_view_2d(ctx, qkv, E, S, qkv->nb[1], 0));
@@ -125,7 +171,7 @@ static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, co
     h                  = ggml_add(ctx, h, mm3_dt_linear(ctx, w.attn_output, attn, ad.attn_out));
 
     // ── feed-forward: GLU, VALUE half first (mm3.dit.glu_order = value_gate) ──
-    ggml_tensor * n2 = mm3_dit_ln(ctx, h, w.ffn_norm_w, w.ffn_norm_b, c.layer_norm_eps);
+    ggml_tensor * n2 = mm3_dt_ln(ctx, h, w.ffn_norm_w, w.ffn_norm_b, c.layer_norm_eps);
     ggml_tensor * f  = ggml_add(ctx, mm3_dt_linear(ctx, w.ffn_in_w, n2, ad.ff_in), w.ffn_in_b);
 
     ggml_tensor * val  = ggml_cont(ctx, ggml_view_2d(ctx, f, FI, S, f->nb[1], 0));
@@ -139,8 +185,13 @@ static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, co
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
 struct MM3TrainInputs {
-    ggml_tensor * xt        = nullptr;  // [128,  S]  noised latents
-    ggml_tensor * cond      = nullptr;  // [2048, S]  conditioning (from the cache)
+    // LAYOUTS ARE THE INFERENCE GRAPH'S, NOT THE OBVIOUS ONES. mm3-dit-graph.h
+    // takes latents as [S, 128] (torch memory order) and TRANSPOSES them
+    // in-graph, while conditioning arrives already channel-first as [2048, S].
+    // Getting either backwards asserts inside ggml_concat rather than training
+    // something subtly wrong, which is the one mercy here.
+    ggml_tensor * xt        = nullptr;  // [S, 128]   noised latents, torch order
+    ggml_tensor * cond      = nullptr;  // [2048, S]  conditioning, channel-first
     // [fourier_dim, 1] host-computed Fourier features, cos-first — NOT the final
     // embedding. The two-layer MLP that turns these into [E,1] runs IN-GRAPH,
     // exactly as mm3_dit_build does. Passing a host-computed [E,1] instead would
@@ -148,7 +199,13 @@ struct MM3TrainInputs {
     // moment either changed.
     ggml_tensor * fourier   = nullptr;
     ggml_tensor * positions = nullptr;  // [S+1] i32, 0..S  (time token occupies 0)
-    ggml_tensor * vtarget   = nullptr;  // [128,  S]  velocity target
+    // [E, S+1] of zeros, uploaded each micro-step. GGML_OP_CONCAT HAS NO
+    // BACKWARD (docs/TRAINING.md flags the same thing for the ACE trainer:
+    // "CONCAT has no backward (use ACC)"), and the time-token prepend sits
+    // downstream of proj_in's LoRA, so it genuinely needs one. Two ggml_acc
+    // writes into this canvas replace it; ACC has a proper backward.
+    ggml_tensor * seq_zeros = nullptr;
+    ggml_tensor * vtarget   = nullptr;  // [S, 128]   velocity target, torch order
 };
 
 // ── Full trainable forward: returns predicted velocity [128, S] ─────────────
@@ -163,12 +220,17 @@ static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, cons
                                     const MM3TrainInputs & in) {
     const MM3DitConfig &  c = m.synth_cfg.dit;
     const MM3DitWeights & w = m.synth.dit;
-    const int64_t         S = in.xt->ne[1];
+    // ne[0], NOT ne[1]: xt arrives in torch order [S, 128], so the sequence
+    // length is the FASTEST axis. Reading ne[1] silently yields 128 and the
+    // whole graph builds at the wrong length — it fails later, in the loss,
+    // looking like a target-shape problem. mm3_dit_build takes ne[0] too.
+    const int64_t         S = in.xt->ne[0];
     const int64_t         IC = (int64_t) c.in_channels;
 
-    // full = cat(x, zeros_like(x), cond) -> [2304, S]
-    ggml_tensor * zeros = ggml_scale(ctx, in.xt, 0.0f);
-    ggml_tensor * full  = ggml_concat(ctx, ggml_concat(ctx, in.xt, zeros, 0), in.cond, 0);
+    // [S, 128] -> [128, S], then cat(x, zeros_like(x), cond) -> [2304, S].
+    ggml_tensor * x     = ggml_cont(ctx, ggml_transpose(ctx, in.xt));
+    ggml_tensor * zeros = ggml_scale(ctx, x, 0.0f);
+    ggml_tensor * full  = ggml_concat(ctx, ggml_concat(ctx, x, zeros, 0), in.cond, 0);
 
     // preprocess_conv is Conv1d k=1 with a residual — i.e. a matmul plus x.
     full = ggml_add(ctx, ggml_mul_mat(ctx, ggml_reshape_2d(ctx, w.preprocess_conv,
@@ -185,8 +247,15 @@ static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, cons
     temb               = ggml_add(ctx, ggml_mul_mat(ctx, w.time_embd_w[1], temb), w.time_embd_b[1]);
 
     // Time token at sequence position 0 — this is what shifts every latent
-    // frame's RoPE position by one.
-    h = ggml_concat(ctx, temb, h, 1);                                    // [E, S+1]
+    // frame's RoPE position by one. Built with ACC rather than CONCAT so it
+    // is differentiable; see MM3TrainInputs::seq_zeros.
+    {
+        ggml_tensor * canvas = in.seq_zeros;
+        canvas = ggml_acc(ctx, canvas, temb, canvas->nb[1], canvas->nb[2], canvas->nb[3], 0);
+        canvas = ggml_acc(ctx, canvas, h,    canvas->nb[1], canvas->nb[2], canvas->nb[3],
+                          canvas->nb[1]);   // one row in: latents start at position 1
+        h = canvas;                                                      // [E, S+1]
+    }
 
     for (size_t i = 0; i < w.blk.size(); i++) {
         h = mm3_dt_block(ctx, c, w.blk[i], ad.blk[i], h, in.positions);
@@ -200,7 +269,8 @@ static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, cons
                                    h),
                  h);
     GGML_ASSERT(h->ne[0] == IC);
-    return h;
+    // Back to torch memory order, matching both inference and vtarget.
+    return ggml_cont(ctx, ggml_transpose(ctx, h));   // [S, 128]
 }
 
 // ── Loss ────────────────────────────────────────────────────────────────────

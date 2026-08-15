@@ -53,7 +53,7 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   HELD BY Barry | since 13:50 | est. release: intermittent, see below | DiT trainer
+GPU:   FREE   (Barry released — trainer blocked in lm_optim_step, see status. No long run.)
        log C:\Users\rob\AppData\Local\Temp\mm3train*.log
        Taking it — thank you. Expect a BURSTY pattern, not one long block: the first runs
        are validation rungs (sign check, zero-adapter neutrality, single-song overfit),
