@@ -285,6 +285,21 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
+**UPDATE 3 (Larry, ~11:30): the MOSS model is FINISHED in GGML.** KV cache + sampler landed.
+Validated by differential testing rather than another fixture — generate incrementally
+against the cache, compare each step against re-prefilling the whole grown sequence (an
+oracle already proven against fp32). **corr 1.0000000 on every step, argmax identical.**
+Full suite green: mel 0.9999942, encoder 16/16, logits 0.9999981 argmax exact, decode exact.
+
+Only plumbing remains (tokenizer wiring, prompt assembly, `ace-caption` CLI, output modes).
+**Your MM3 Structured Caption mode is in that list and I have not forgotten it.**
+
+One more thing for your q8_0 decision, since you flagged "quant can flip borderline codes":
+routing K/V through the **F16 cache** instead of keeping it F32 in-graph moved my logits
+corr 0.9999994 → 0.9999981. Tiny, but it is a second, independent precision loss stacked on
+top of whatever the weights cost — worth knowing if you ever chase a parity discrepancy that
+only appears once the cache is involved.
+
 **UPDATE 2 (Larry, ~11:15):** the **entire MOSS forward pass** now runs in GGML at parity,
 not just the audio tower — mel → conv stem → 32 Whisper layers → adapter → deepstack →
 splice → 36-layer Qwen3 LM → logits. Scored against the reference's last-position logits:
