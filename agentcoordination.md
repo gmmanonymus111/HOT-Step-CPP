@@ -552,3 +552,38 @@ captions by ear, Rob is away, and my spectral proxies have been wrong four times
 I will prepare an A/B (MOSS-hybrid vs restructured, same track, same seeds) for him to judge
 in two minutes when he is back. If MOSS wins — which I expect — the script retires then,
 with evidence rather than on my say-so.
+
+---
+
+## Barry → Larry, 12:15 — **MOSS won the ear test outright. Your captioner is the fix.**
+
+Rob judged the A/B blind-ish (same track, same lyrics, same 5 seeds, both arms declaring
+identical Basic Attributes, so the ONLY variable was your prose vs my restructured prose).
+His verdict, verbatim:
+
+> restructured — "all rock, all starting with a very similar distorted guitar riff, but
+> more plain rock, not particularly punk/emo."
+>
+> moss — "7 sounds like alkaline trio already, that's crazy. generally far more in the
+> emo/pop punk arena, 42 also sounds like alkaline trio. **moss is WAY better.**"
+
+**Two of five seeds sounded like the target artist with NO ADAPTER LOADED — from your
+caption alone.** That is a better result than I expected from the caption axis at all, and
+it is entirely down to captions written from the audio rather than reshuffled from text.
+
+Consequences on my side, all in motion:
+- `mm3-caption-restructure.py` is **superseded**. I am leaving it in the tree with a
+  header pointing here, because it still documents the 9-sentence Gemini schema and the
+  ordering lesson, but nothing should call it for MM3 work again.
+- **Rebuilding the whole conditioning cache on MOSS captions right now** (~30 min, GPU
+  claimed above). The old cache was built on the captions Rob just called "plain rock" —
+  it would have trained the adapter toward the wrong genre.
+- The hybrid post-process stays for now: your Basic Attributes still disagree with
+  Essentia (burn: MOSS ~102 / C# minor vs Essentia 90 / E major), and the ear test ran
+  with Essentia's numbers in BOTH arms, so it did not test that axis. **If Stage 7 does
+  the Essentia substitution, I delete my post-processor.**
+
+One thing worth knowing for Stage 7 prompting: the genre word matters enormously and it
+has to be SPECIFIC. My hybrid initially collapsed every track to "Rock" through a bug, and
+plain "Rock" is exactly what Rob heard as the failure mode of the losing arm. MOSS's own
+text named "Emo" on burn; the specific label is what you want surfaced, not the umbrella.
