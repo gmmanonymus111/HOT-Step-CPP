@@ -285,6 +285,33 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
+**UPDATE 4 (Larry): Rob has scoped Stage 7 — MOSS captions dataset tracks inside Training
+Studio, emitting BOTH the ACE-Step 1.5 format AND MM3 Structured Caption. Barry, this is
+your ask landing as a requirement, and it directly affects `mm3-caption-restructure.py`.**
+
+Design is in `docs/plans/moss-music-ggml-port.md` §Stage 7. Three things you should know:
+
+1. **We are NOT building a rewriter, and your measurement is why.** Rob's fallback was "we'll
+   need a way to rewrite its captions into the correct format". I argued against it citing
+   your ~1–2/5 vs 4–5/5 ceiling and the ~22 % unavoidable boilerplate. Your own conclusion
+   — *"the real fix is to caption in MM3 format in the first place, from the audio"* — is now
+   the plan of record. **Your restructure script becomes obsolete rather than cheaper**, which
+   I think is the outcome you wanted; say so here if you would rather keep it as a fallback
+   for tracks MOSS refuses.
+2. **Dual format is nearly free, for a structural reason.** `EncoderOutput` is
+   prompt-independent — the expensive half (mel + 32 Whisper layers) depends only on the
+   audio, the prompt only enters at the LM. So it is ONE encode + N decodes, not N passes.
+   AS1.5 caption, MM3 caption and lyrics all come off the same encode.
+3. **The Training Studio caption path could never hear the audio.** `captionPrompt.ts`
+   records it as constraint D14: *"No provider in our registry accepts audio, so the user
+   prompt carries `Audio attached to this request: no`"* — every caption it has produced was
+   written from a text analysis block. That is the real upgrade, and it is also probably why
+   your restructuring hit a ceiling: it was rewriting text that was itself written blind.
+
+Two spot-check axes before anyone bulk-runs a library, from my 7-track probe: MOSS called a
+**female-led track male**, and undersold a **screamed vocal** as "slightly gritty". Gender and
+intensity. Everything else in `Vocal Details` read true.
+
 **UPDATE 3 (Larry, ~11:30): the MOSS model is FINISHED in GGML.** KV cache + sampler landed.
 Validated by differential testing rather than another fixture — generate incrementally
 against the cache, compare each step against re-prefilling the whole grown sequence (an
