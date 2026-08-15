@@ -406,6 +406,9 @@ static void mm3_train_fourier(const std::vector<float> & fourier_w, float t, std
     }
 }
 
+static bool mm3_train_export(const MM3TrainAdapters & ad, const MM3Model & m, int64_t rank, float alpha,
+                             const std::string & path, std::string * err);
+
 // ── Driver ─────────────────────────────────────────────────────────────────
 
 static int mm3_train_dit_run(const MM3TrainArgs & a) {
@@ -647,5 +650,90 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         fprintf(stderr, "[mm3-train] step %4lld  loss %.5f  |g| %.4f  lr %.2e\n", (long long) step,
                 acc / (double) a.grad_accum, (double) st.grad_norm, (double) st.lr);
     }
+
+    if (!a.out_dir.empty()) {
+        pm_mkdir_p(a.out_dir);
+        const std::string out = a.out_dir + "/mm3_lora.safetensors";
+        if (!mm3_train_export(ad, m, a.rank, a.alpha, out, &err)) {
+            fprintf(stderr, "[mm3-train] export failed: %s\n", err.c_str());
+            return 1;
+        }
+        fprintf(stderr, "[mm3-train] load it with: MM3_ADAPTER=%s\n", out.c_str());
+    }
     return 0;
+}
+
+// ── Export ─────────────────────────────────────────────────────────────────
+//
+// Writes the trained LoRA as a single safetensors file in the COMFYUI form,
+// because that is the one mm3-adapter.h parses whose QKV is FUSED — exactly how
+// this trainer parameterises it. The diffusers form splits q/k/v into three
+// modules and would need the fused factor decomposed, which is not possible in
+// general.
+//
+// Round-tripping through mm3-adapter.h is the permanent gate: an adapter this
+// writes must load back and reproduce the trainer's own loss.
+//
+// ggml ne order is reversed vs torch, so a:[in, rank] IS torch [rank, in] and
+// b:[rank, out] IS torch [out, rank] — the bytes need no transposition.
+static bool mm3_train_export(const MM3TrainAdapters & ad, const MM3Model & m, int64_t rank, float alpha,
+                             const std::string & path, std::string * err) {
+    struct Ent { std::string name; const ggml_tensor * t; };
+    std::vector<Ent> ents;
+
+    auto add_site = [&](const MM3TrainLora & lo, const std::string & mod) {
+        if (!lo.on()) return;
+        ents.push_back({ mod + ".lora_A.weight", lo.a });
+        ents.push_back({ mod + ".lora_B.weight", lo.b });
+    };
+    const std::string P = "diffusion_model.diffusion_transformer.";
+    for (size_t i = 0; i < ad.blk.size(); i++) {
+        const std::string b = P + "transformer.layers." + std::to_string(i);
+        add_site(ad.blk[i].qkv,      b + ".self_attn.to_qkv");
+        add_site(ad.blk[i].attn_out, b + ".self_attn.to_out");
+        add_site(ad.blk[i].ff_in,    b + ".ff.ff.0.proj");
+        add_site(ad.blk[i].ff_out,   b + ".ff.ff.2");
+    }
+    add_site(ad.proj_in,  P + "transformer.project_in");
+    add_site(ad.proj_out, P + "transformer.project_out");
+
+    // header + payload
+    std::string hdr = "{";
+    size_t      off = 0;
+    std::vector<std::vector<float>> blobs;
+    blobs.reserve(ents.size());
+    for (const Ent & e : ents) {
+        const int64_t n0 = e.t->ne[0], n1 = e.t->ne[1];   // ggml
+        const size_t  nb = (size_t) (n0 * n1) * sizeof(float);
+        blobs.emplace_back((size_t) (n0 * n1), 0.0f);
+        ggml_backend_tensor_get(e.t, blobs.back().data(), 0, nb);
+        char buf[512];
+        // torch shape is the ggml ne reversed
+        snprintf(buf, sizeof(buf),
+                 "%s\"%s\":{\"dtype\":\"F32\",\"shape\":[%lld,%lld],\"data_offsets\":[%zu,%zu]}",
+                 off ? "," : "", e.name.c_str(), (long long) n1, (long long) n0, off, off + nb);
+        hdr += buf;
+        off += nb;
+    }
+    // Per-module alpha, so the loader's alpha/rank scaling matches training.
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf), ",\"__metadata__\":{\"format\":\"pt\",\"hot_step_mm3_lora\":\"1\","
+                                   "\"rank\":\"%lld\",\"alpha\":\"%.6f\"}",
+                 (long long) rank, (double) alpha);
+        hdr += buf;
+    }
+    hdr += "}";
+    while ((8 + hdr.size()) % 8) hdr += " ";
+
+    FILE * f = hs_fopen(path, "wb");
+    if (!f) { if (err) *err = "cannot write " + path; return false; }
+    const uint64_t hlen = (uint64_t) hdr.size();
+    fwrite(&hlen, sizeof(hlen), 1, f);
+    fwrite(hdr.data(), 1, hdr.size(), f);
+    for (const auto & b : blobs) fwrite(b.data(), sizeof(float), b.size(), f);
+    fclose(f);
+    fprintf(stderr, "[mm3-train] exported %zu tensors -> %s\n", ents.size(), path.c_str());
+    (void) m;
+    return true;
 }
