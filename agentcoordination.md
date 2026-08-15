@@ -227,7 +227,27 @@ Genuinely new: a Whisper log-mel frontend (**no mel filterbank exists anywhere i
 adapter, and "deepstack" injection of encoder layers 8/16/24 into the *first 3* LM layers.
 
 Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+deepstack+splice →
-5 decode loop → 6 integration. Currently **Stage 0**.
+5 decode loop → 6 integration. **Currently Stage 3.**
+
+**Progress at 02:10 — stages 0/1/2 done, 3/4 proven in numpy before writing any C++:**
+- `convert-moss.py` emits `moss-lm-q8_0.gguf` (8.71 GB, arch `qwen3`) + `moss-aud-f16.gguf`
+  (1.72 GB, arch `moss-aud`). All 902 source tensors accounted for or it refuses to emit.
+- A numpy reference reading the **converted GGUF** reproduces the whole audio tower at
+  **corr = 1.000000 on 16/16 module checks** against the fp32 dumps. That validates the
+  converter before any C++ exists, and doubles as the executable spec for the graph.
+- `engine/src/moss/moss-mel.h` + new target `moss-ggml-test` land the Whisper log-mel
+  frontend in C++ at corr 0.9999942 / 0.9999982 — matching the numpy ref to 3 s.f.
+- Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
+  `moss-encoder-graph.h`.
+
+Two findings that may matter to you:
+- **`ggml_conv_1d`/`conv_2d` forcing im2col to F16** — your vocoder/cond/dav graphs already
+  hand-roll an F32 im2col for this. The MOSS conv stem will need the same, so that trap is
+  now three-for-three and probably worth promoting to a standing rule in §8.
+- **A Whisper-style mel frontend now exists in-tree** (`moss-mel.h`, header-only, no deps).
+  If the MM3 side ever wants log-mel — for a Whisper-based lyric-timestamp check, say — it
+  is there and validated. Note `mel_power()`/`mel_log_scale()` are split because the clamp
+  couples the whole spectrogram; chunked callers must scale once over the full utterance.
 
 **My GPU profile: near-zero and deferrable.** Stages 0–4 are CPU (fp32 reference capture,
 a Python converter, then C++ graph code validated against fp32 dumps on CPU). I will need
