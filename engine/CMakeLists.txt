@@ -563,9 +563,9 @@ link_ggml_backends(sa3-ggml-test)
 
 # moss-ggml-test: parity tests for the MOSS-Music captioning port vs fp32
 # fixtures (engine/tools/moss-numpy-ref.py documents the same maths in numpy).
-# Header-only so far, so it needs no core lib.
 add_executable(moss-ggml-test tools/moss-ggml-test.cpp)
 target_include_directories(moss-ggml-test PRIVATE src)
+link_ggml_backends(moss-ggml-test)
 
 # bs-roformer-test: parity test for the GGML BS-RoFormer (SuperSep StableStep
 # separation) vs PyTorch goldens. See scripts/dump_bs_roformer_goldens.py.

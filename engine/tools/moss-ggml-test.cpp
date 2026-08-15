@@ -4,7 +4,13 @@
 // dump, report correlation + max abs diff, exit nonzero if anything misses.
 //
 // Usage:
-//   moss-ggml-test --fixtures <dir> [--component mel|all]
+//   moss-ggml-test --fixtures <dir> [--models <dir>] [--component mel|load|all]
+//
+// SET GGML_BACKEND=CPU FOR PARITY RUNS. backend_init() picks the best device,
+// which means a bare invocation quietly takes ~1.6 GB of VRAM just to hold
+// weights it never runs a graph on. Parity work does not need the GPU and this
+// box shares one card between two agents, so:
+//   GGML_BACKEND=CPU moss-ggml-test --fixtures ... --models ...
 //
 // The fixture dir is produced by capture_fixtures.py and holds one subdir per
 // track, each with raw little-endian f32 dumps plus manifest.json:
@@ -23,8 +29,10 @@
 // the fp32 rerun, so the bar here is 0.9999 -- except for mel, whose reference
 // is stored bf16 (MelConfig.mel_dtype), where 0.9999 is still comfortably met.
 
-#include "moss/moss-mel.h"
-
+// <string> MUST precede backend.h: backend.h uses std::wstring in its Windows
+// CUDA-diagnostics path but does not include <string> itself, so it only
+// compiles when a prior header happens to pull it in. Keeping the std headers
+// first here avoids depending on that accident.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,6 +41,10 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "backend.h"
+#include "moss/moss-mel.h"
+#include "moss/moss-model.h"
 
 static const double PASS_CORR = 0.9999;
 
@@ -271,21 +283,51 @@ static bool test_mel(const std::string & fixtures, const std::string & track) {
     return ok;
 }
 
+static bool test_load(const std::string & aud_gguf) {
+    // backend_init hands out a REFCOUNTED shared backend. Releasing it with
+    // ggml_backend_free would leave the cached pointer dangling for the next
+    // caller -- see the note in bs-roformer-ggml.h. Always backend_release.
+    BackendPair bp = backend_init("MOSS");
+    if (!bp.backend) {
+        fprintf(stderr, "  FAIL could not init a backend\n");
+        return false;
+    }
+    moss::AudioTower tower;
+    bool sane = false;
+    if (moss::moss_load_audio_tower(&tower, aud_gguf.c_str(), bp.backend)) {
+        moss::moss_print_audio_hparams(tower);
+        const moss::AudioHParams & h = tower.hp;
+        sane = h.n_layer == 32 && h.d_model == 1280 && h.n_head == 20 &&
+               h.n_ffn == 5120 && h.n_mels == 128 && h.deepstack_layers.size() == 3 &&
+               tower.blocks.size() == 32 && tower.deepstack.size() == 3 &&
+               h.tokens_per_second > 12.49f && h.tokens_per_second < 12.51f;
+        printf("  %s load  %zu blocks, %zu deepstack mergers, all tensors resident\n",
+               sane ? "OK  " : "FAIL", tower.blocks.size(), tower.deepstack.size());
+        moss::moss_free_audio_tower(&tower);
+    }
+    backend_release(bp.backend, bp.cpu_backend);
+    return sane;
+}
+
 int main(int argc, char ** argv) {
-    std::string fixtures, component = "all";
+    std::string fixtures, component = "all", models;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--fixtures" && i + 1 < argc) {
             fixtures = argv[++i];
         } else if (a == "--component" && i + 1 < argc) {
             component = argv[++i];
+        } else if (a == "--models" && i + 1 < argc) {
+            models = argv[++i];
         } else {
-            fprintf(stderr, "usage: moss-ggml-test --fixtures <dir> [--component mel|all]\n");
+            fprintf(stderr, "usage: moss-ggml-test --fixtures <dir> [--models <dir>] "
+                            "[--component mel|load|all]\n");
             return 2;
         }
     }
     if (fixtures.empty()) {
-        fprintf(stderr, "usage: moss-ggml-test --fixtures <dir> [--component mel|all]\n");
+        fprintf(stderr, "usage: moss-ggml-test --fixtures <dir> [--models <dir>] "
+                        "[--component mel|load|all]\n");
         return 2;
     }
 
@@ -301,6 +343,19 @@ int main(int argc, char ** argv) {
         printf("== mel frontend (bar: corr >= %.4f) ==\n", PASS_CORR);
         for (const std::string & t : tracks) {
             ok = test_mel(fixtures, t) && ok;
+        }
+    }
+    if (component == "load" || component == "all") {
+        if (models.empty()) {
+            printf("\n== loader == SKIP (pass --models <dir with moss-aud-f16.gguf>)\n");
+        } else {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            printf("\n== audio tower loader ==\n");
+            ok = test_load(models + sep + "moss-aud-f16.gguf") && ok;
         }
     }
     printf("\n%s\n", ok ? "ALL COMPONENTS PASSED" : "** PARITY FAILURE **");
