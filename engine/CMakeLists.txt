@@ -567,6 +567,12 @@ add_executable(moss-ggml-test tools/moss-ggml-test.cpp)
 target_include_directories(moss-ggml-test PRIVATE src)
 link_ggml_backends(moss-ggml-test)
 
+# ace-caption: MOSS-Music captioning CLI (audio -> caption / MM3 caption / lyrics).
+# Complements ace-understand, which does the same job through ACE's own VAE+FSQ+LM.
+add_executable(ace-caption tools/ace-caption.cpp)
+target_link_libraries(ace-caption PRIVATE acestep-core)
+link_ggml_backends(ace-caption)
+
 # bs-roformer-test: parity test for the GGML BS-RoFormer (SuperSep StableStep
 # separation) vs PyTorch goldens. See scripts/dump_bs_roformer_goldens.py.
 add_executable(bs-roformer-test tools/bs-roformer-test.cpp)
