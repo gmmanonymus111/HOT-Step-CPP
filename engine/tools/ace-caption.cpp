@@ -373,8 +373,39 @@ int main(int argc, char ** argv) {
     // patches convert_tokens_to_ids with an alias map precisely because the
     // tokenizer cannot resolve them. Ids come from the GGUF KVs instead.
     ids.push_back((int32_t) tower.hp.audio_bos_id);
-    for (int i = 0; i < eo.n_tokens; ++i) {
-        ids.push_back((int32_t) tower.hp.audio_token_id);
+    {
+        // TIME MARKERS. Every `every_s` seconds the elapsed second count is
+        // written into the audio stream as ordinary digit tokens, splitting the
+        // <|AUDIO|> run into segments.
+        //
+        // THIS IS NOT OPTIONAL. SGLang's processor -- the runtime MOSS's authors
+        // recommend -- always emits them. The HF processor has the identical
+        // routine but `from_pretrained` pops `enable_time_marker` defaulting to
+        // FALSE (its __init__ signature says True), so the Transformers path
+        // silently feeds the model an out-of-distribution token stream. That is
+        // what makes the HF path confidently wrong rather than noisy: on a 30 s
+        // clip of Daft Punk it answers "Arabic pop" where SGLang answers
+        // "Eurodance". Omit these and the port reproduces the wrong reference.
+        const int every_s = 2;
+        const double tps = (double) tower.hp.tokens_per_second;   // 12.5
+        const int every_tok = (int) (tps * every_s);              // 25
+        const int total_s = (int) ((double) eo.n_tokens / tps);
+        int consumed = 0;
+        for (int second = every_s; second <= total_s; second += every_s) {
+            const int marker_pos = (second / every_s) * every_tok;
+            for (int i = consumed; i < marker_pos && i < eo.n_tokens; ++i) {
+                ids.push_back((int32_t) tower.hp.audio_token_id);
+            }
+            consumed = std::min(marker_pos, eo.n_tokens);
+            // The second count as decimal digits, each its own ordinary token.
+            const std::string digits = std::to_string(second);
+            for (char d : digits) {
+                push_text(tok, std::string(1, d), ids);
+            }
+        }
+        for (int i = consumed; i < eo.n_tokens; ++i) {
+            ids.push_back((int32_t) tower.hp.audio_token_id);
+        }
     }
     ids.push_back((int32_t) tower.hp.audio_eos_id);
     push_text(tok, "\n" + prompt, ids);
