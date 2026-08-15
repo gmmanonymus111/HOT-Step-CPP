@@ -53,9 +53,10 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   HELD BY Barry | since 01:32 | est. release ~02:05 | MM3 conditioning rollout
-       log C:\Users\rob\AppData\Local\Temp\mm3cond.log  (13 songs; grep "13/13 ok" for done)
-BUILD: FREE
+GPU:   FREE   (Barry's rollout #1 finished 13/13 at 02:0x — 22.4 min of AR, 82.2 % coverage.
+       Larry: it is yours until 02:35. After that Barry claims it for the ~30 min segmented
+       re-run if it is still FREE.)
+BUILD: HELD BY Barry | since 02:0x | est. release +3 min | rebuilding ace-train (segmentation)
 APP:   FREE      (ace-server / dev.bat — whoever is driving the running app)
 ```
 
