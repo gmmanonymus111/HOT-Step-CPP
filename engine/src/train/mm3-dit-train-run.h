@@ -437,11 +437,35 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     // micro-batches average.
     ggml_tensor * t_lossgrad = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
     ggml_set_name(t_lossgrad, "lossgrad");
+    // THE SAME TRAP, and this one is the actual segfault: LmOptim::t_adamw is
+    // also nullptr by default and also NOT created by lm_optim_init. ACE builds
+    // both in its own static context. lm_optim_step writes the 7 AdamW
+    // hyper-parameters into it UNCONDITIONALLY near the end
+    // (ggml_backend_tensor_set(o->t_adamw, p7, ...)), so a null lands as a
+    // write through a null tensor -- after the graph has built and computed,
+    // which is why the crash looked like it was in the optimizer maths.
+    // {alpha, beta1, beta2, eps, wd, beta1_hat, beta2_hat}
+    ggml_tensor * t_adamw = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 7);
+    ggml_set_name(t_adamw, "adamw_params");
+    // FOUR host-owned scalars in total, not two. LmOptim declares t_adamw,
+    // t_lossgrad, t_clip and t_eps as nullptr and lm_optim_init creates NONE of
+    // them -- the caller owns them (ACE builds all four in its ctx_static).
+    // Every one is written or read inside lm_optim_step, so a missing one is a
+    // null dereference AFTER the graph has computed, which is why this looked
+    // like a fault in the optimizer maths rather than missing setup.
+    ggml_tensor * t_clip = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
+    ggml_tensor * t_eps  = ggml_new_tensor_1d(actx, GGML_TYPE_F32, 1);
+    ggml_set_name(t_clip, "grad_clip");
+    ggml_set_name(t_eps, "eps");
     ggml_backend_buffer_t abuf = ggml_backend_alloc_ctx_tensors(actx, m.backend);
     if (!abuf) { fprintf(stderr, "[mm3-train] adapter alloc failed\n"); return 1; }
     {
         const float lg = 1.0f / (float) std::max<int64_t>(1, a.grad_accum);
         ggml_backend_tensor_set(t_lossgrad, &lg, 0, sizeof(float));
+        const float clip = 1.0f;    // global-norm clip, as the ACE trainer
+        const float eps  = 1e-6f;   // Newton-Schulz / norm epsilon
+        ggml_backend_tensor_set(t_clip, &clip, 0, sizeof(float));
+        ggml_backend_tensor_set(t_eps,  &eps,  0, sizeof(float));
     }
 
     // A small-random, B ZERO -> the adapter starts as an exact no-op.
@@ -463,6 +487,10 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
 
     LmOptim opt;
     opt.t_lossgrad = t_lossgrad;   // must be set; see above
+    opt.t_adamw    = t_adamw;      // ditto -- lm_optim_step writes into it
+    opt.t_clip     = t_clip;
+    opt.t_eps      = t_eps;
+    opt.grad_clip  = 1.0f;
     if (!lm_optim_init(&opt, params, m.backend, &err)) {
         fprintf(stderr, "[mm3-train] optim: %s\n", err.c_str());
         return 1;
