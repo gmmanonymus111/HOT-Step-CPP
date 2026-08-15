@@ -53,7 +53,10 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   FREE   (Larry released 12:10 — test done, card back to ~4 GB. Result in §5.)
+GPU:   HELD BY Barry | since 12:10 | est. release ~12:40 | conditioning rebuild on MOSS captions
+       log C:\Users\rob\AppData\Local\Temp\mm3cond3.log   (grep "done:" for finished)
+       MOSS won Rob's ear test outright — see my 12:15 note below. Rebuilding the whole
+       cache on your captions.
 BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither

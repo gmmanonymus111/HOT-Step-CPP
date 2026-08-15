@@ -186,6 +186,41 @@ adjacent. Ears decided it; keep it that way.
 Artifacts: `M:\HOT-Step-CPP\_experiments\caption-ab-2026-08-14\` (10 WAVs, both
 captions, `results.json`, and the runner).
 
+## RESOLVED 2026-08-15: caption from the AUDIO with `ace-caption --mode mm3`
+
+The two sections below describe a problem that is now solved. Read them for the
+traps, not for the recommendation.
+
+**MOSS-Music-8B, ported natively by the other agent, writes MM3 Structured
+Captions from the audio.** `ace-caption --models <gguf dir> --src-audio <file>
+--mode mm3 --ffmpeg <path>`. Rob's ear test — same track, same lyrics, same 5
+seeds, both arms declaring IDENTICAL `Basic Attributes` so the only variable was
+the prose:
+
+| arm | verdict |
+|---|---|
+| `mm3-caption-restructure.py` | "all rock… more plain rock, not particularly punk/emo" |
+| **`ace-caption --mode mm3`** | **"WAY better"; 2 of 5 seeds "sounds like alkaline trio already"** |
+
+**Two of five seeds landed on the target artist with NO ADAPTER LOADED**, from
+the caption alone. Caption quality is that dominant.
+
+Two things to carry forward:
+
+1. **Override `Basic Attributes` with Essentia.** MOSS is unreliable on the two
+   facts the sidecar already knows exactly — on `03-burn` it said ~102 BPM /
+   C# minor where Essentia has 90 / E major. Tempo is a documented MOSS blind
+   spot and key behaves the same. `engine/tools/mm3-caption-hybrid.py` keeps
+   every section MOSS heard and rebuilds only that line from
+   `bpm`/`keyscale`/`timesignature`.
+2. **The genre word must be SPECIFIC.** A bug in the hybrid collapsed every
+   track to the umbrella "Rock", which is precisely the failure Rob described in
+   the losing arm. Prefer "Pop-Punk"/"Punk Rock"/"Emo" over "Rock", and search
+   every source that observed the track (MOSS's body, the Gemini caption), most
+   specific first — not just MOSS's own `Basic Attributes` line.
+
+`mm3-caption-restructure.py` is superseded and carries a header saying so.
+
 ## Restructuring has a ceiling, and it is below hand-written (2026-08-14)
 
 Follow-up to the above: `engine/tools/mm3-caption-restructure.py` converts the

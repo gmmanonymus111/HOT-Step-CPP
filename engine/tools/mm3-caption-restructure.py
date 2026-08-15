@@ -1,5 +1,33 @@
 #!/usr/bin/env python3
-"""mm3-caption-restructure.py — ACE-style dataset captions -> MM3 Structured Captions.
+"""mm3-caption-restructure.py — ACE captions -> MM3 Structured Captions. **SUPERSEDED.**
+
+    ================================================================
+    DO NOT USE FOR MM3 WORK. Use `ace-caption --mode mm3` instead,
+    then `mm3-caption-hybrid.py` for the Essentia Basic Attributes.
+    ================================================================
+
+Superseded 2026-08-15 by MOSS-Music-8B captioning the audio directly. Rob's ear
+test, same track / lyrics / 5 seeds, both arms declaring IDENTICAL Basic
+Attributes so the only variable was the prose:
+
+    this script  "all rock, all starting with a very similar distorted guitar
+                  riff, but more plain rock, not particularly punk/emo"
+    MOSS         "7 sounds like alkaline trio already, that's crazy... 42 also
+                  sounds like alkaline trio. MOSS is WAY better."
+
+Two of five MOSS seeds sounded like the target artist with NO ADAPTER LOADED.
+The ceiling this file has is exactly the one predicted in its own notes below:
+it can only reorder prose written for a different model, and it can never write
+Vocal Details because the source text never described the voice.
+
+Kept in the tree rather than deleted because it still documents two things worth
+having: the fixed 9-sentence schema of Training Studio's Gemini captions, and
+the ordering lesson (Instrument Lifecycle `Primary:` must lead with whatever
+opens the track). Both are recorded in .claude/skills/mm3-captioning/SKILL.md.
+
+--- original header follows ---
+
+ACE-style dataset captions -> MM3 Structured Captions.
 
 WHY THIS EXISTS (measured 2026-08-14, see .claude/skills/mm3-captioning/SKILL.md):
 a good 219-word ACE caption, rich in content, produced the WRONG GENRE on 4 of 5
