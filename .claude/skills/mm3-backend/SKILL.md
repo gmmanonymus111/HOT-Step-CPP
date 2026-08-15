@@ -83,6 +83,40 @@ does this; `engine/server.cmd` does not).
     (returns on process exit — not a leak).
 12. The LM GGUF is **not interchangeable with stock Qwen3-8B GGUFs** (extended 200 k vocab,
     untied head) and llama.cpp alone cannot run music generation.
+13. **`read_wav_buf` returns INTERLEAVED `[T,2]`; the DAV encoder wants PLANAR `[L:T][R:T]`.**
+    Use `audio_io_read_wav_buf` (audio-io.h), which de-interleaves — never the raw reader.
+    `mm3-preprocess` sliced the raw reader's output as `{p, p+T}` and made "left" the FIRST HALF
+    of the song with L/R alternating. Since L≈R, that duplicates every sample: an exact **2×
+    time stretch, one octave down**. Every cached target was the song in slow motion and five
+    LoRA runs learned to generate slow motion (2026-08-15, fixed 82b2852).
+14. **VERIFY PREPROCESSING BY DECODING A TARGET AND LISTENING — metadata cannot catch this
+    class of bug.** #13 survived a full day because `T` is PER-CHANNEL frames, so
+    `latent_frames / duration` stayed at exactly 86.1328 Hz and *every* arithmetic check on the
+    manifest passed. The DAV parity gate passed too (it is fed `encode_ref.py`'s planar dump).
+    The manifest was written by the same buggy code being checked, so it corroborated itself.
+    One listen to a decoded target found it. `POST /mm3/voc-decode?frames=N` with raw f32
+    `[128,N]` returns a WAV — there is no excuse not to.
+    Objective version of the same gate: encode a **440 Hz sine** and measure what comes back
+    (was 220.0 Hz, i.e. ratio 0.5000; correct is 440.0 Hz / 1.0000). A pure tone cannot be
+    argued with, and it brackets which stage is at fault.
+15. **Rob's ear beat every metric, twice.** He called "slow motion, too deep" on the first
+    adapter and again on the third; both times it was explained away as regression-to-the-mean
+    (which produces a genuinely similar description) and five runs of hyperparameter tuning
+    followed on corrupt data. When the user reports a *physical* symptom — speed, pitch,
+    duration — treat it as literal and test it literally before reaching for a statistical
+    explanation.
+16. **Gate every trained adapter on `||delta||/||W||` BEFORE any ear test.** Healthy LoRA
+    merges move weights 1–5% Frobenius; at lr 5e-4 × 8k steps ours hit median 17% (max 34%)
+    and at scale 1.0 that is a damaged model, not a strong style — jumbled inside a single
+    689-latent window, invariant to rank/crop/CFG (AdamW makes total movement ≈ lr×steps
+    regardless of rank, which is why every knob "did nothing"). Measure against the ComfyUI
+    f16 checkpoint (`mm3-weights/comfy/diffusion_models/`), whose keys match the export
+    directly; target median ≤5%. SimpleTuner's reference recipe is lr 5e-5.
+17. **Training crops must not straddle conditioning-rollout seams.** `mm3-condition` builds
+    the cache from independent 60 s segments; a crop across a seam pairs continuous audio
+    with conditioning that jumps to an unrelated rollout mid-window — teaching "conditioning
+    lies, smooth over it" (mean-collapse pressure). The seams were parsed and never consulted
+    for a week (~13% of crops at 689, 27% at 1378); fixed 5117281 with reject-and-retry.
 
 ## Performance budget (RTX 5090, f16, 12 s clip ≈ 12.4 s wall ≈ 1.0× realtime)
 
