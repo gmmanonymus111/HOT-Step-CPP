@@ -1781,6 +1781,7 @@ static int cmd_mm3_condition(int argc, char ** argv) {
 static int cmd_mm3_train_dit(int argc, char ** argv) {
     MM3TrainArgs a;
     bool tf32 = false;
+    bool bwd_outprod = false;   // --bwd outprod restores the slow CPU path
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char * w) -> const char * {
             if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", w); exit(2); }
@@ -1811,6 +1812,22 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
 #else
         setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+    // THE mul_mat BACKWARD REFORMULATION. Without it every LoRA weight gradient
+    // is an OUT_PROD, ggml-cuda cannot take it, and all 146 of them run on the
+    // CPU with a round trip each way -- measured as 292 backend crossings and
+    // 46 s per step at crop 344 while the GPU sat at 6%. engine/patches/
+    // mm-backward.patch rewrites out_prod(W, transpose(grad)) into the provably
+    // identical mul_mat(cont(transpose(W)), grad), which CUDA does implement.
+    //
+    // Must be set BEFORE any backward is built: the patch latches it into a
+    // static on first use. Same call ACE's train-lm/train-dit make for --bwd mm.
+    if (!bwd_outprod) {
+#ifdef _WIN32
+        _putenv("GGML_BACKWARD_MM=1");
+#else
+        setenv("GGML_BACKWARD_MM", "1", 1);
 #endif
     }
     return mm3_train_dit_run(a);

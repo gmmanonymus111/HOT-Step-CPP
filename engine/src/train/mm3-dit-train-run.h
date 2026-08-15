@@ -340,6 +340,33 @@ static bool mm3_train_micro(MM3Model & m, ggml_backend_sched_t sched, const MM3T
         ggml_free(ctx); if (err) *err = "sched_alloc_graph failed (out of VRAM?)"; return false;
     }
     if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post-alloc, uploading");
+    // MM3_TRAIN_SPLITS=1: after allocation, walk the graph and report every
+    // point where the assigned backend CHANGES. That is what a "split" is, and
+    // naming the op on each side of the boundary says which node is dragging
+    // work off the GPU. All eleven ops this graph uses have CUDA kernels, so
+    // the cause is placement, not a missing implementation.
+    if (getenv("MM3_TRAIN_SPLITS")) {
+        ggml_backend_t prev = nullptr;
+        int changes = 0;
+        std::map<std::string, int> culprit;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+            ggml_tensor * nd = ggml_graph_node(gf, i);
+            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, nd);
+            if (b && prev && b != prev) {
+                changes++;
+                culprit[std::string(ggml_op_name(nd->op)) + " -> " +
+                        std::string(ggml_backend_name(b))]++;
+            }
+            if (b) prev = b;
+        }
+        fprintf(stderr, "[splits] %d backend changes over %d nodes\n", changes,
+                ggml_graph_n_nodes(gf));
+        int shown = 0;
+        for (auto it = culprit.begin(); it != culprit.end() && shown < 12; ++it, ++shown) {
+            fprintf(stderr, "[splits]   %5d x  %s\n", it->second, it->first.c_str());
+        }
+    }
+
     ggml_backend_tensor_set(in.xt,      xt_h.data(),   0, xt_h.size()   * sizeof(float));
     ggml_backend_tensor_set(in.cond,    cond_h.data(), 0, cond_h.size() * sizeof(float));
     ggml_backend_tensor_set(in.vtarget, tgt_h.data(),  0, tgt_h.size()  * sizeof(float));
