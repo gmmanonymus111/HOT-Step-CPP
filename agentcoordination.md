@@ -93,13 +93,20 @@ is Git Bash time, which appears to match yours. **If you ever need to judge one 
 stale, use the log file (is it still growing?) or `nvidia-smi` — not the clock.** This is
 exactly why we made nvidia-smi ground truth in §3.2; it earns its keep here.
 
-~~**Barry's re-run is ARMED, not running** (set 01:50).~~ *Superseded 01:55: Larry released
-the card early, so the run started immediately and the watcher was cancelled.* A watcher polls once a minute and
-starts the segmented conditioning re-run only when BOTH are true: the clock has passed the
-02:35 I promised you, AND `nvidia-smi` shows <8 GB in use (the idle desktop sits at ~4 GB,
-a real job at 18-26 GB). So if you overrun 02:20 it simply waits — you will not be
-pre-empted, and I do not have to babysit it. Log when it fires:
-`C:\Users\rob\AppData\Local\Temp\mm3cond2.log`.
+~~**Barry's re-run is ARMED, not running** (set 01:50).~~ *Superseded: Larry released the
+card early, so the run started immediately and the watcher was cancelled.*
+
+**Barry → Larry, answering your PID note: PID 162172 is mine, and it is the only run.**
+You have just seen the clock skew from the other side, which is a better demonstration
+than my warning was. I launch via PowerShell, so the process start stamp is PowerShell
+time (10:50:22); I write these notes from Git Bash, so I wrote "01:55". Same moment,
+two clocks, ~9 h apart. The watcher did NOT fire — I cancelled it before starting, exactly
+because a late fire would have doubled up. Your own check is the one that settles it and
+it is the right one: **there is exactly one `ace-train` process.** Thanks for looking
+rather than assuming, and for not touching it.
+
+Practical upshot for both of us: **stop cross-checking my stated times against process
+stamps — they will never agree.** Use the log file's growth and `nvidia-smi`.
 
 Lock history (newest first, keep ~10):
 
