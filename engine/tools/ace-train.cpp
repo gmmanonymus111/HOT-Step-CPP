@@ -1320,8 +1320,27 @@ static int cmd_mm3_preprocess(int argc, char ** argv) {
             continue;
         }
 
-        // Read the transcode back. It is already 44.1 kHz stereo f32, so
-        // read_wav_buf takes it verbatim — no in-engine resample.
+        // Read the transcode back. It is already 44.1 kHz stereo f32, so there
+        // is no in-engine resample.
+        //
+        // USE audio_io_read_wav_buf, NOT read_wav_buf. The raw reader returns
+        // INTERLEAVED [T,2] (see the header comment in wav.h); the encoder
+        // wants PLANAR [L:T][R:T]. This call site used to take the raw reader's
+        // output and slice it as { p, p + T }, which silently made "left" the
+        // FIRST HALF of the song with L and R alternating, and "right" the
+        // second half. Because L ~= R in most music, alternating them
+        // duplicates every sample -- an exact 2x time stretch, exactly one
+        // octave down. Every cached training target was the song in slow
+        // motion, and five LoRA runs learned to produce slow motion.
+        //
+        // Nothing caught it for a day because T is PER-CHANNEL frames, so
+        // latent_frames / duration still came out at exactly 86.1328 Hz and
+        // every arithmetic check passed. The DAV encoder's own parity gate
+        // passed too -- it is fed encode_ref.py's dump, which really is planar.
+        // The encoder was never wrong; only this wiring into it was.
+        //
+        // Judge preprocessing by DECODING A TARGET AND LISTENING TO IT. That
+        // found this in one listen after metadata checks found nothing.
         FILE * wf = hs_fopen(tmp_wav, "rb");
         if (!wf) { fprintf(stderr, "[mm3-preprocess] cannot reopen temp wav\n"); fail_n++; continue; }
         fseek(wf, 0, SEEK_END);
@@ -1331,7 +1350,7 @@ static int cmd_mm3_preprocess(int argc, char ** argv) {
         const bool           wread = fread(wbuf.data(), 1, (size_t) wsz, wf) == (size_t) wsz;
         fclose(wf);
         int      T = 0, got_sr = 0;
-        float *  planar = wread ? read_wav_buf(wbuf.data(), wbuf.size(), &T, &got_sr) : nullptr;
+        float *  planar = wread ? audio_io_read_wav_buf(wbuf.data(), wbuf.size(), &T, &got_sr) : nullptr;
         if (!planar || T <= 0) {
             fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: cannot decode transcode\n", idx, n_samples,
                     filename.c_str());
