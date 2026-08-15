@@ -277,12 +277,12 @@ static void mm3_fill_noise_train(std::vector<float> * v, uint64_t seed) {
 // zero-adapter neutrality.
 static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapters & ad, LmOptim * opt,
                             const std::vector<float> & xt_h, const std::vector<float> & cond_h,
-                            const std::vector<float> & tgt_h, const std::vector<float> & temb_h,
+                            const std::vector<float> & tgt_h, const std::vector<float> & fourier_h,
                             int64_t crop, bool backward, float * loss_out, std::string * err) {
     const MM3DitConfig & c  = m.synth_cfg.dit;
     const int64_t        IC = (int64_t) c.in_channels;
     const int64_t        CD = (int64_t) c.condition_dim;
-    const int64_t        E  = (int64_t) c.embedding_length;
+    (void) c;
 
     const size_t     meta = ggml_tensor_overhead() * 262144 + ggml_graph_overhead_custom(262144, true);
     ggml_init_params ip   = { meta, nullptr, true };
@@ -292,10 +292,10 @@ static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapter
     MM3TrainInputs in;
     in.xt        = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
     in.cond      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, CD);
-    in.temb      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, E);
+    in.fourier   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (int64_t) c.fourier_dim, 1);
     in.positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, crop + 1);
     in.vtarget   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, crop, IC);
-    ggml_set_input(in.xt); ggml_set_input(in.cond); ggml_set_input(in.temb);
+    ggml_set_input(in.xt); ggml_set_input(in.cond); ggml_set_input(in.fourier);
     ggml_set_input(in.positions); ggml_set_input(in.vtarget);
 
     ggml_tensor * pred = mm3_dt_forward(ctx, m, ad, in);
@@ -319,7 +319,7 @@ static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapter
     ggml_backend_tensor_set(in.xt,      xt_h.data(),   0, xt_h.size()   * sizeof(float));
     ggml_backend_tensor_set(in.cond,    cond_h.data(), 0, cond_h.size() * sizeof(float));
     ggml_backend_tensor_set(in.vtarget, tgt_h.data(),  0, tgt_h.size()  * sizeof(float));
-    ggml_backend_tensor_set(in.temb,    temb_h.data(), 0, temb_h.size() * sizeof(float));
+    ggml_backend_tensor_set(in.fourier, fourier_h.data(), 0, fourier_h.size() * sizeof(float));
     {
         // Time token holds position 0, so latent frames are 1..crop.
         std::vector<int32_t> pos((size_t) crop + 1);
@@ -332,4 +332,17 @@ static bool mm3_train_micro(MM3Model & m, MM3DitGraph & g, const MM3TrainAdapter
     ggml_free(ctx);
     if (!ok && err) *err = "graph compute failed";
     return ok;
+}
+
+// Host-side Fourier features for timestep t, cos-first, computed in double.
+// Byte-for-byte the same formula as mm3-dit-graph.h's inference path — if that
+// ever changes, this must follow or training and inference silently diverge.
+static void mm3_train_fourier(const std::vector<float> & fourier_w, float t, std::vector<float> * out) {
+    const size_t H = fourier_w.size();
+    out->assign(2 * H, 0.0f);
+    for (size_t i = 0; i < H; i++) {
+        const double a = 2.0 * 3.14159265358979323846 * (double) t * (double) fourier_w[i];
+        (*out)[i]     = (float) std::cos(a);
+        (*out)[H + i] = (float) std::sin(a);
+    }
 }

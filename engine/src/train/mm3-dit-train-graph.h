@@ -141,7 +141,12 @@ static ggml_tensor * mm3_dt_block(ggml_context * ctx, const MM3DitConfig & c, co
 struct MM3TrainInputs {
     ggml_tensor * xt        = nullptr;  // [128,  S]  noised latents
     ggml_tensor * cond      = nullptr;  // [2048, S]  conditioning (from the cache)
-    ggml_tensor * temb      = nullptr;  // [E, 1]     precomputed time embedding
+    // [fourier_dim, 1] host-computed Fourier features, cos-first — NOT the final
+    // embedding. The two-layer MLP that turns these into [E,1] runs IN-GRAPH,
+    // exactly as mm3_dit_build does. Passing a host-computed [E,1] instead would
+    // duplicate that MLP on the host and silently diverge from inference the
+    // moment either changed.
+    ggml_tensor * fourier   = nullptr;
     ggml_tensor * positions = nullptr;  // [S+1] i32, 0..S  (time token occupies 0)
     ggml_tensor * vtarget   = nullptr;  // [128,  S]  velocity target
 };
@@ -152,8 +157,8 @@ struct MM3TrainInputs {
 // therefore taken from the inference graph rather than re-derived:
 //   * the time embedding is prepended as SEQUENCE token 0, so the latent frames
 //     sit at rope positions 1..S;
-//   * Fourier is cos-first — but `temb` arrives precomputed here, so that lives
-//     in the caller (shared with inference).
+//   * Fourier is cos-first, computed on the host in double by the caller and
+//     handed in as `in.fourier`; the MLP over it runs here.
 static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
                                     const MM3TrainInputs & in) {
     const MM3DitConfig &  c = m.synth_cfg.dit;
@@ -173,8 +178,15 @@ static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, cons
 
     ggml_tensor * h = mm3_dt_linear(ctx, w.proj_in, full, ad.proj_in);   // [E, S]
 
-    // Time token at sequence position 0.
-    h = ggml_concat(ctx, in.temb, h, 1);                                 // [E, S+1]
+    // Timestep embedding: two-layer MLP with a SiLU between, over the host's
+    // Fourier features. Mirrors mm3_dit_build.
+    ggml_tensor * temb = ggml_add(ctx, ggml_mul_mat(ctx, w.time_embd_w[0], in.fourier), w.time_embd_b[0]);
+    temb               = ggml_silu(ctx, temb);
+    temb               = ggml_add(ctx, ggml_mul_mat(ctx, w.time_embd_w[1], temb), w.time_embd_b[1]);
+
+    // Time token at sequence position 0 — this is what shifts every latent
+    // frame's RoPE position by one.
+    h = ggml_concat(ctx, temb, h, 1);                                    // [E, S+1]
 
     for (size_t i = 0; i < w.blk.size(); i++) {
         h = mm3_dt_block(ctx, c, w.blk[i], ad.blk[i], h, in.positions);
