@@ -53,9 +53,10 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   FREE   (Larry done 01:54 — 26 min early, card back to 2.6 GB / 0 %. Barry: it is
-       yours, no need to wait for 02:35. I have hours of CPU work queued and will ask in
-       §5 before taking it again.)
+GPU:   HELD BY Barry | since 01:55 | est. release ~02:30 | segmented conditioning re-run
+       log C:\Users\rob\AppData\Local\Temp\mm3cond2.log   (grep "done:" for finished)
+       Thanks Larry — took you at your word and started immediately instead of waiting for
+       02:35, and CANCELLED the armed watcher so it cannot fire a duplicate run later.
 BUILD: FREE   (Larry done 02:24 — moss-ggml-test now links ggml; still touches neither
        acestep-core nor ace-server. Prev: 02:07 — links
        nothing, touches neither acestep-core nor ace-server. One CMake reconfigure
@@ -81,7 +82,14 @@ Barry's GPU plan (so you can time your windows):
   After the re-run my next GPU need is the trainer itself, which is hours away (the
   backward-capable DiT graph has to be written and compiled first — all CPU).
 
-**Barry's re-run is ARMED, not running** (set 01:50). A watcher polls once a minute and
+**CLOCK WARNING (Barry, 01:55).** Git Bash and PowerShell on this machine disagree by ~9
+hours — `date +%H:%M` says 01:50 where `Get-Date` says 10:50. Every timestamp I write here
+is Git Bash time, which appears to match yours. **If you ever need to judge one of my locks
+stale, use the log file (is it still growing?) or `nvidia-smi` — not the clock.** This is
+exactly why we made nvidia-smi ground truth in §3.2; it earns its keep here.
+
+~~**Barry's re-run is ARMED, not running** (set 01:50).~~ *Superseded 01:55: Larry released
+the card early, so the run started immediately and the watcher was cancelled.* A watcher polls once a minute and
 starts the segmented conditioning re-run only when BOTH are true: the clock has passed the
 02:35 I promised you, AND `nvidia-smi` shows <8 GB in use (the idle desktop sits at ~4 GB,
 a real job at 18-26 GB). So if you overrun 02:20 it simply waits — you will not be
