@@ -7,7 +7,14 @@
 //
 // docs/plans/2026-07-27-preprocess-implementation.md §3.1
 
-#include "minimax/mm3-dav-encode.h"  // MM3 DAV encoder (training-only; not in ace-server)
+// MM3 training path. mm3-dav-encode.h is training-only (audio -> target
+// latents); the rest are the same headers ace-server uses, included here for the
+// conditioning rollout (mm3-condition). All header-only static APIs.
+#include "minimax/mm3-dav-encode.h"
+#include "minimax/mm3-tokenizer.h"
+#include "minimax/mm3-request.h"
+#include "minimax/mm3-ar-loop.h"
+#include "minimax/mm3-cond-graph.h"
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
 #include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
@@ -113,6 +120,9 @@ static void print_usage(void) {
             "                --dataset <dataset.json> --enc <mm3-enc-*.gguf> --out <dir>\n"
             "                [--ffmpeg <path>] [--max-duration <sec>] [--tf32 on|off]\n"
             "                Audio is transcoded at 44100 Hz (NOT the ACE path's 48000).\n"
+            "  mm3-condition MiniMax-Music3 AR rollout -> flow-DiT conditioning cache.\n"
+            "                --manifest <mm3_preprocess.json> --models <dir> --captions <dataset dir>\n"
+            "                [--seed N] [--lm-quant Q] [--dit-quant Q; default Q2_K, never executed]\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -1387,6 +1397,298 @@ static int cmd_mm3_preprocess(int argc, char ** argv) {
     return (fail_n && !ok_n) ? 1 : rc;
 }
 
+// ─── mm3-condition ──────────────────────────────────────────────────────────
+//
+// Training path step 3b: the flow DiT's CONDITIONING, cached per song.
+//
+//   ace-train mm3-condition --manifest <mm3_preprocess.json> --models <dir>
+//                           --captions <dataset dir> [--seed N] [--dit-quant Q]
+//
+// Per song: caption + lyrics -> AR rollout (LM + depth decoder) -> frame_hiddens
+// -> condition encoder -> condition, stored f16 beside the latents.
+//
+// ── The thing to understand before trusting this output ─────────────────────
+//
+// The rollout is SAMPLED FROM THE CAPTION. It is not, and cannot be, derived
+// from the training audio: MiniMax ships no audio->code encoder, so there are no
+// ground-truth codes for a real song and the conditioning cannot be
+// teacher-forced (see docs/plans/2026-08-14-mm3-training-feasibility.md). The
+// conditioning therefore matches the target only in caption, lyrics and
+// duration — never in musical content. That is a property of the release, not a
+// shortcut here, and it is why the DiT can learn the target's timbre/production
+// marginal but not its note content.
+//
+// ── Why the DiT is loaded at a tiny quant ───────────────────────────────────
+//
+// mm3_load_parts' `rest` covers cond+dit+voc, and only `cond` is used here. The
+// DiT is dead weight, so its role is pointed at the smallest quant on disk:
+// f16 is 4.8 GB against Q2_K's 0.83 GB, and at f16 the LM (17 GB) + depth +
+// DiT + KV (288 kB/position, ~2 GB at 6990 frames) + compute headroom does not
+// fit the card alongside a desktop. Nothing here ever executes a DiT graph.
+static int cmd_mm3_condition(int argc, char ** argv) {
+    std::string manifest_path, models_dir, captions_dir, dit_quant = "Q2_K", lm_quant;
+    int64_t     seed = 42;
+    bool        tf32 = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--manifest"))  manifest_path = next("--manifest");
+        else if (!strcmp(argv[i], "--models"))    models_dir    = next("--models");
+        else if (!strcmp(argv[i], "--captions"))  captions_dir  = next("--captions");
+        else if (!strcmp(argv[i], "--dit-quant")) dit_quant     = next("--dit-quant");
+        else if (!strcmp(argv[i], "--lm-quant"))  lm_quant      = next("--lm-quant");
+        else if (!strcmp(argv[i], "--seed"))      seed          = atoll(next("--seed"));
+        else if (!strcmp(argv[i], "--tf32"))      tf32          = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (manifest_path.empty() || models_dir.empty() || captions_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-condition: --manifest, --models and --captions are required\n");
+        return 2;
+    }
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+
+    // ── manifest ──
+    FILE * mf = hs_fopen(manifest_path, "rb");
+    if (!mf) { fprintf(stderr, "cannot open %s\n", manifest_path.c_str()); return 1; }
+    fseek(mf, 0, SEEK_END);
+    const long msz = ftell(mf);
+    fseek(mf, 0, SEEK_SET);
+    std::string mbuf((size_t) msz, '\0');
+    if (fread(&mbuf[0], 1, (size_t) msz, mf) != (size_t) msz) { fclose(mf); fprintf(stderr, "short read\n"); return 1; }
+    fclose(mf);
+
+    yyjson_doc * doc = yyjson_read(mbuf.c_str(), mbuf.size(), 0);
+    if (!doc) { fprintf(stderr, "%s is not valid JSON\n", manifest_path.c_str()); return 1; }
+    yyjson_val * mroot = yyjson_doc_get_root(doc);
+    yyjson_val * arr   = yyjson_obj_get(mroot, "samples");
+    if (!arr || !yyjson_is_arr(arr)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "manifest has no `samples` array\n");
+        return 1;
+    }
+    std::string out_dir = manifest_path;
+    {
+        size_t s = out_dir.find_last_of("/\\");
+        out_dir  = (s == std::string::npos) ? std::string(".") : out_dir.substr(0, s);
+    }
+    if (!pm_mkdir_p(out_dir + "/condition")) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "cannot create %s/condition\n", out_dir.c_str());
+        return 1;
+    }
+
+    // ── model: LM + depth + rest, DiT pinned tiny ──
+    static MM3Model model;
+    std::string     roles[MM3_R_COUNT];
+    roles[MM3_R_DIT] = dit_quant;
+    mm3_discover(&model, models_dir.c_str(), lm_quant, roles);
+    std::string err;
+    if (!mm3_load_parts(&model, /*lm*/ true, /*depth*/ true, /*rest*/ true, &err)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "[mm3-condition] load failed: %s\n", err.c_str());
+        return 1;
+    }
+    fprintf(stderr, "[mm3-condition] lm=%s dit=%s (unused) cond=%s\n",
+            model.lm_file.name.c_str(), model.role_file[MM3_R_DIT].name.c_str(),
+            model.role_file[MM3_R_COND].name.c_str());
+
+    MM3Tokenizer tok;
+    if (!mm3_tokenizer_load(model, &tok, &err)) {
+        fprintf(stderr, "[mm3-condition] tokenizer: %s\n", err.c_str());
+        return 1;
+    }
+
+    const int64_t H   = (int64_t) model.lm_cfg.embedding_length;
+    const int64_t LAY = (int64_t) model.lm_cfg.num_codebooks;   // 8 = LM hidden + 7 depth
+    const int64_t FPS = (int64_t) model.lm_cfg.frame_rate;
+
+    yyjson_mut_doc * odoc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * oroot = yyjson_mut_obj(odoc);
+    yyjson_mut_doc_set_root(odoc, oroot);
+    yyjson_mut_val * oarr = yyjson_mut_arr(odoc);
+
+    size_t idx = 0, n_ok = 0, n_fail = 0;
+    double ar_ms_total = 0.0;
+    const size_t n_total = yyjson_arr_size(arr);
+
+    yyjson_val *    s;
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    while ((s = yyjson_arr_iter_next(&it))) {
+        idx++;
+        auto js = [&](const char * k) -> std::string {
+            yyjson_val * v = yyjson_obj_get(s, k);
+            return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+        };
+        const std::string id       = js("id");
+        const std::string filename = js("filename");
+        const std::string lyrics   = js("lyrics");
+        yyjson_val *      vL       = yyjson_obj_get(s, "latent_frames");
+        const int64_t     L_target = vL ? (int64_t) yyjson_get_int(vL) : 0;
+        yyjson_val *      vD       = yyjson_obj_get(s, "duration_sec");
+        const double      dur      = vD ? yyjson_get_num(vD) : 0.0;
+
+        // The MM3 caption lives beside the audio as <stem>.mm3.txt, NOT in the
+        // sidecar (see mm3-caption-restructure.py). Refuse rather than silently
+        // fall back to the ACE caption: an ACE caption produces the wrong genre
+        // (measured), so a silent fallback would poison the cache invisibly.
+        std::string stem = filename;
+        {
+            size_t d = stem.find_last_of('.');
+            if (d != std::string::npos) stem = stem.substr(0, d);
+        }
+        const std::string cap_path = captions_dir + "/" + stem + ".mm3.txt";
+        FILE *            cf       = hs_fopen(cap_path, "rb");
+        if (!cf) {
+            fprintf(stderr, "[mm3-condition] %zu/%zu SKIP %s: no %s.mm3.txt\n", idx, n_total,
+                    filename.c_str(), stem.c_str());
+            n_fail++;
+            continue;
+        }
+        std::string caption;
+        {
+            char   b[8192];
+            size_t r;
+            while ((r = fread(b, 1, sizeof(b), cf)) > 0) caption.append(b, r);
+            fclose(cf);
+        }
+
+        MM3SynthRequest req;
+        req.caption    = caption;
+        req.lyrics     = lyrics;
+        req.duration   = dur;
+        req.prompt     = mm3_assemble_prompt(req.caption, req.lyrics, &req.instrumental);
+        const int64_t frames_want = (int64_t) llround(dur * (double) FPS);
+        req.max_frames = std::min<int64_t>(frames_want, (int64_t) model.lm_cfg.max_audio_frames);
+        req.seed_in    = seed;
+        if (!mm3_request_tokenize(model, &tok, &req, &err)) {
+            fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: %s\n", idx, n_total, filename.c_str(), err.c_str());
+            n_fail++;
+            continue;
+        }
+
+        MM3ArOptions aopt;
+        aopt.max_frames      = req.max_frames;
+        aopt.seed            = (uint64_t) seed;
+        aopt.collect_hiddens = true;
+        MM3ArResult ar;
+        const int64_t t0 = ggml_time_ms();
+        if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
+                         (int64_t) req.gen.ids_cond.size(), aopt, &ar, &err)) {
+            fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: AR: %s\n", idx, n_total, filename.c_str(),
+                    err.c_str());
+            n_fail++;
+            continue;
+        }
+        ar_ms_total += (double) (ggml_time_ms() - t0);
+
+        // ── condition encode, chunked ──
+        //
+        // MM3_COND_MAX_FRAMES is 4096 and a 280 s song is ~6990 frames, so long
+        // songs need more than one pass. Chunks carry OVERLAP frames of context
+        // on each side and keep only their core; the frame->latent map is
+        // non-integer (x3.4453125, truncated), so each chunk's destination
+        // offset is taken from mm3_cond_latent_length() of its core start
+        // rather than computed by multiplication.
+        const int64_t F     = ar.n_frames;
+        const int64_t L_all = mm3_cond_latent_length(model.synth_cfg.cond, F);
+        const int64_t CHUNK = 3072, OVER = 128;
+        std::vector<float> cond_all((size_t) (L_all * (int64_t) model.synth_cfg.cond.out_dim), 0.0f);
+        const int64_t      CD = (int64_t) model.synth_cfg.cond.out_dim;
+        bool               cond_ok = true;
+
+        for (int64_t start = 0; start < F && cond_ok; start += CHUNK) {
+            const int64_t lead  = std::min<int64_t>(OVER, start);
+            const int64_t begin = start - lead;
+            const int64_t want  = std::min<int64_t>(CHUNK + lead + OVER, F - begin);
+            std::vector<float> part;
+            int64_t            pl = 0;
+            if (!mm3_cond_encode(model, ar.frame_hiddens.data() + (size_t) (begin * LAY * H), want, part, &pl,
+                                 &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: cond: %s\n", idx, n_total, filename.c_str(),
+                        err.c_str());
+                cond_ok = false;
+                break;
+            }
+            const int64_t l_dst  = mm3_cond_latent_length(model.synth_cfg.cond, start);
+            const int64_t l_skip = mm3_cond_latent_length(model.synth_cfg.cond, begin + lead) -
+                                   mm3_cond_latent_length(model.synth_cfg.cond, begin);
+            const int64_t l_core = std::min<int64_t>(pl - l_skip, L_all - l_dst);
+            if (l_core > 0) {
+                memcpy(cond_all.data() + (size_t) (l_dst * CD), part.data() + (size_t) (l_skip * CD),
+                       (size_t) (l_core * CD) * sizeof(float));
+            }
+        }
+        if (!cond_ok) {
+            n_fail++;
+            continue;
+        }
+
+        // f16 on disk: this is conditioning, not a gradient target, and it
+        // halves a cache that is already the largest artifact in the pipeline.
+        std::vector<ggml_fp16_t> half(cond_all.size());
+        ggml_fp32_to_fp16_row(cond_all.data(), half.data(), (int) cond_all.size());
+        const std::string cp = out_dir + "/condition/" + id + ".f16";
+        FILE *            of = hs_fopen(cp, "wb");
+        if (!of) { fprintf(stderr, "[mm3-condition] cannot write %s\n", cp.c_str()); n_fail++; continue; }
+        fwrite(half.data(), sizeof(ggml_fp16_t), half.size(), of);
+        fclose(of);
+
+        yyjson_mut_val * e = yyjson_mut_obj(odoc);
+        yyjson_mut_obj_add_strcpy(odoc, e, "id", id.c_str());
+        yyjson_mut_obj_add_strcpy(odoc, e, "filename", filename.c_str());
+        yyjson_mut_obj_add_strcpy(odoc, e, "condition", ("condition/" + id + ".f16").c_str());
+        yyjson_mut_obj_add_int(odoc, e, "cond_frames", F);
+        yyjson_mut_obj_add_int(odoc, e, "cond_latents", L_all);
+        yyjson_mut_obj_add_int(odoc, e, "cond_dim", CD);
+        yyjson_mut_obj_add_int(odoc, e, "latent_frames", L_target);
+        yyjson_mut_obj_add_bool(odoc, e, "eos_hit", ar.eos_hit);
+        yyjson_mut_arr_append(oarr, e);
+        n_ok++;
+
+        fprintf(stderr, "[mm3-condition] %zu/%zu ok %-42s F=%-5lld cond L=%-6lld (audio L=%lld) %.1fs\n",
+                idx, n_total, filename.c_str(), (long long) F, (long long) L_all, (long long) L_target,
+                ar.total_ms / 1000.0);
+    }
+
+    yyjson_doc_free(doc);
+
+    yyjson_mut_obj_add_str(odoc, oroot, "kind", "mm3_condition");
+    yyjson_mut_obj_add_int(odoc, oroot, "version", 1);
+    yyjson_mut_obj_add_int(odoc, oroot, "seed", seed);
+    yyjson_mut_obj_add_strcpy(odoc, oroot, "lm", model.lm_file.name.c_str());
+    yyjson_mut_obj_add_str(odoc, oroot, "dtype", "f16");
+    yyjson_mut_obj_add_uint(odoc, oroot, "n_ok", (uint64_t) n_ok);
+    yyjson_mut_obj_add_uint(odoc, oroot, "n_failed", (uint64_t) n_fail);
+    yyjson_mut_obj_add_val(odoc, oroot, "samples", oarr);
+
+    const std::string opath = out_dir + "/mm3_condition.json";
+    size_t            olen  = 0;
+    char *            ojson = yyjson_mut_write(odoc, YYJSON_WRITE_PRETTY, &olen);
+    int               rc    = 0;
+    if (ojson) {
+        FILE * o = hs_fopen(opath, "wb");
+        if (o) { fwrite(ojson, 1, olen, o); fclose(o); } else { rc = 1; }
+        free(ojson);
+    } else {
+        rc = 1;
+    }
+    yyjson_mut_doc_free(odoc);
+
+    fprintf(stderr, "[mm3-condition] done: %zu ok, %zu failed, %.1f min of AR -> %s\n", n_ok, n_fail,
+            ar_ms_total / 60000.0, opath.c_str());
+    return (n_fail && !n_ok) ? 1 : rc;
+}
+
 static int cmd_train_lm(int argc, char ** argv) {
     LmTrainArgs      a;
     LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
@@ -1961,6 +2263,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-preprocess")) {
         return cmd_mm3_preprocess(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-condition")) {
+        return cmd_mm3_condition(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);
