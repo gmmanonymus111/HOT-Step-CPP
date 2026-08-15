@@ -216,16 +216,46 @@ struct MM3TrainInputs {
 //     sit at rope positions 1..S;
 //   * Fourier is cos-first, computed on the host in double by the caller and
 //     handed in as `in.fourier`; the MLP over it runs here.
+// ── Split points for gradient checkpointing ─────────────────────────────────
+//
+// mm3_dt_forward below is prologue -> block loop -> epilogue. Gradient
+// checkpointing (mm3-dit-train-ckpt.h) needs to rebuild ONE RANGE of blocks at
+// a time starting from a saved boundary, so the three parts are exposed
+// separately here and mm3_dt_forward is written in terms of them. Keeping one
+// definition of each part is the point: a checkpointed run that quietly
+// disagreed with the monolithic one would be worse than no checkpointing.
+//
+// The boundary between segments is the block-loop hidden state h [E, S+1] --
+// a single tensor, because MM3 has no cross-attention, no AdaLN and no
+// per-layer conditioning. Everything else a segment needs (positions, and the
+// conditioning that entered at proj_in) is either a graph input or already
+// folded into h.
+//
+// NOTE: unlike ACE's trainer, MM3's PROLOGUE CONTAINS A TRAINED PARAMETER
+// (ad.proj_in), so segment 0 must recompute the prologue inside its own
+// gradient graph rather than reading a frozen boundary.
+static ggml_tensor * mm3_dt_prologue(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                     const MM3TrainInputs & in);
+static ggml_tensor * mm3_dt_stack(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                  const MM3TrainInputs & in, ggml_tensor * h, int lo, int hi);
+static ggml_tensor * mm3_dt_epilogue(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                     ggml_tensor * h, int64_t S);
+
 static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
                                     const MM3TrainInputs & in) {
-    const MM3DitConfig &  c = m.synth_cfg.dit;
-    const MM3DitWeights & w = m.synth.dit;
     // ne[0], NOT ne[1]: xt arrives in torch order [S, 128], so the sequence
     // length is the FASTEST axis. Reading ne[1] silently yields 128 and the
     // whole graph builds at the wrong length — it fails later, in the loss,
     // looking like a target-shape problem. mm3_dit_build takes ne[0] too.
-    const int64_t         S = in.xt->ne[0];
-    const int64_t         IC = (int64_t) c.in_channels;
+    const int64_t S = in.xt->ne[0];
+    ggml_tensor * h = mm3_dt_prologue(ctx, m, ad, in);
+    h               = mm3_dt_stack(ctx, m, ad, in, h, 0, (int) m.synth.dit.blk.size());
+    return mm3_dt_epilogue(ctx, m, ad, h, S);
+}
+
+static ggml_tensor * mm3_dt_prologue(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                     const MM3TrainInputs & in) {
+    const MM3DitWeights & w = m.synth.dit;
 
     // [S, 128] -> [128, S], then cat(x, zeros_like(x), cond) -> [2304, S].
     ggml_tensor * x     = ggml_cont(ctx, ggml_transpose(ctx, in.xt));
@@ -256,10 +286,26 @@ static ggml_tensor * mm3_dt_forward(ggml_context * ctx, const MM3Model & m, cons
                           canvas->nb[1]);   // one row in: latents start at position 1
         h = canvas;                                                      // [E, S+1]
     }
+    return h;
+}
 
-    for (size_t i = 0; i < w.blk.size(); i++) {
-        h = mm3_dt_block(ctx, c, w.blk[i], ad.blk[i], h, in.positions);
+// Blocks [lo, hi). The whole point of the split: a checkpoint segment rebuilds
+// exactly this range, starting from a saved boundary instead of from block 0.
+static ggml_tensor * mm3_dt_stack(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                  const MM3TrainInputs & in, ggml_tensor * h, int lo, int hi) {
+    const MM3DitConfig &  c = m.synth_cfg.dit;
+    const MM3DitWeights & w = m.synth.dit;
+    for (int i = lo; i < hi; i++) {
+        h = mm3_dt_block(ctx, c, w.blk[(size_t) i], ad.blk[(size_t) i], h, in.positions);
     }
+    return h;
+}
+
+static ggml_tensor * mm3_dt_epilogue(ggml_context * ctx, const MM3Model & m, const MM3TrainAdapters & ad,
+                                     ggml_tensor * h, int64_t S) {
+    const MM3DitConfig &  c = m.synth_cfg.dit;
+    const MM3DitWeights & w = m.synth.dit;
+    const int64_t         IC = (int64_t) c.in_channels;
 
     // Strip the time token, project out, postprocess residual.
     h = ggml_cont(ctx, ggml_view_2d(ctx, h, h->ne[0], S, h->nb[1], h->nb[1]));

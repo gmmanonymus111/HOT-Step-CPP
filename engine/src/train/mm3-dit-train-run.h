@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "train/mm3-dit-train-graph.h"
+#include "train/mm3-dit-train-ckpt.h"
 #include "train/lm-optim.h"
 
 // One cached song: target latents + conditioning + where the seams are.
@@ -76,6 +77,24 @@ struct MM3TrainArgs {
     bool        sign_check = false;
     int64_t     eval_every = 0;     // 0 = off
     int64_t     eval_n     = 24;    // fixed tuples in the eval set
+    // Eval window length, INDEPENDENT of the training crop. Pinned so that a
+    // run at crop 1378 is still measurable against one at crop 689 -- otherwise
+    // changing the crop silently changes the eval and destroys the only
+    // cross-run yardstick we have. 0 = follow the training crop (old behaviour).
+    int64_t     eval_crop  = 689;
+    // "random" samples the crop start uniformly, covering the whole song.
+    // "beginning" always starts at 0, which is what SimpleTuner's
+    // truncation_mode default does (it keeps the head of each clip).
+    std::string crop_mode  = "random";
+    // Gradient checkpointing. 0/1 = off (one monolithic graph). >1 splits the
+    // block stack into that many segments, cutting peak attention memory by
+    // roughly the same factor for about one extra forward pass of compute.
+    // Required for crop 2584 (30 s), which needs ~30.8 GB monolithic.
+    int64_t     ckpt_segments = 0;
+    // Run BOTH paths on the same micro-batch and report the difference. This is
+    // the acceptance gate: a checkpointed run that silently disagreed with the
+    // monolithic one is worse than no checkpointing.
+    bool        ckpt_verify   = false;
     std::string only_song;          // restrict to one song (overfit test)
 };
 
@@ -598,12 +617,34 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     std::mt19937_64 rng(a.seed);
     std::vector<float> x0, cond, noise, xt, tgt, fourier;
 
+    const bool crop_from_start = (a.crop_mode == "beginning");
     auto sample_crop = [&](const MM3TrainSong ** song, int64_t * start) {
         for (;;) {
             const MM3TrainSong & s = songs[rng() % songs.size()];
             if (s.L <= a.crop) continue;
-            *song  = &s;
-            *start = (int64_t) (rng() % (uint64_t) (s.L - a.crop));
+            *song = &s;
+            // Draw the position even when we discard it, so the rng stream --
+            // and therefore the whole training trajectory -- stays aligned
+            // between the two modes. Otherwise "beginning" would also silently
+            // reshuffle which songs get picked, confounding the comparison.
+            const int64_t r = (int64_t) (rng() % (uint64_t) (s.L - a.crop));
+            // REJECT crops that straddle a rollout seam. The conditioning cache
+            // is built from INDEPENDENT 60 s rollout segments; at a seam it
+            // jumps to an unrelated rollout mid-crop while the audio target
+            // flows on. Training on that teaches "conditioning sometimes lies,
+            // smooth over it" -- direct pressure toward ignoring conditioning.
+            // The design doc specified this rejection; the seams were parsed
+            // and then never consulted. At crop 689 ~13% of uniform crops
+            // straddle; at 1378 it is ~27%. Retry rather than clamp, so the
+            // position distribution stays uniform over the valid set.
+            if (!crop_from_start) {
+                bool straddles = false;
+                for (int64_t seam : s.seams) {
+                    if (seam > r && seam < r + a.crop) { straddles = true; break; }
+                }
+                if (straddles) continue;
+            }
+            *start = crop_from_start ? 0 : r;
             return;
         }
     };
@@ -650,6 +691,11 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     // It draws from its OWN rng. Reusing the training rng would consume draws
     // and change the training trajectory, which would silently break the
     // controlled comparison this exists to support.
+    // Eval window is PINNED (a.eval_crop), not the training crop. A run at crop
+    // 1378 must still be comparable to one at 689; if the eval followed the
+    // training crop, changing it would move the yardstick with the thing being
+    // measured and every crop experiment would be uninterpretable.
+    const int64_t EC = a.eval_crop > 0 ? a.eval_crop : a.crop;
     struct MM3EvalItem { const MM3TrainSong * song; int64_t start; float sigma; uint64_t nseed; };
     std::vector<MM3EvalItem> evalset;
     if (a.eval_every > 0) {
@@ -657,18 +703,20 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         for (int64_t i = 0; i < a.eval_n; i++) {
             const MM3TrainSong * s = nullptr;
             for (;;) {
-                const MM3TrainSong & c = songs[erng() % songs.size()];
-                if (c.L > a.crop) { s = &c; break; }
+                const MM3TrainSong & cand = songs[erng() % songs.size()];
+                if (cand.L > EC) { s = &cand; break; }
             }
             MM3EvalItem it;
             it.song  = s;
-            it.start = (int64_t) (erng() % (uint64_t) (s->L - a.crop));
+            it.start = (int64_t) (erng() % (uint64_t) (s->L - EC));
             it.sigma = (float) ((i + 0.5) / (double) a.eval_n);
             it.nseed = 0xE0A1ULL + (uint64_t) i;
             evalset.push_back(it);
         }
-        fprintf(stderr, "[mm3-train] eval set: %lld fixed crops, sigma on a stratified grid, every %lld steps\n",
-                (long long) evalset.size(), (long long) a.eval_every);
+        fprintf(stderr, "[mm3-train] eval set: %lld fixed crops of %lld frames (%.1f s), sigma on a "
+                        "stratified grid, every %lld steps\n",
+                (long long) evalset.size(), (long long) EC, (double) EC / 86.1328125,
+                (long long) a.eval_every);
     }
 
     // Forward-only pass over the eval set. Reports the mean plus three sigma
@@ -680,13 +728,13 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         double sum = 0.0, band[3] = {0, 0, 0};
         int    cnt[3] = {0, 0, 0};
         for (const MM3EvalItem & it : evalset) {
-            if (!mm3_train_read_crop(*it.song, it.start, a.crop, IC, &ex0, &econd, &err)) return false;
+            if (!mm3_train_read_crop(*it.song, it.start, EC, IC, &ex0, &econd, &err)) return false;
             enoise.resize(ex0.size());
             mm3_fill_noise_train(&enoise, it.nseed);
             mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - it.sigma, &efour);
             mm3_make_xt_target(ex0, enoise, it.sigma, positive_target, &ext, &etgt);
             float lv = 0.0f;
-            if (!mm3_train_micro(m, tsched, ad, &opt, ext, econd, etgt, efour, a.crop, false, &lv, &err))
+            if (!mm3_train_micro(m, tsched, ad, &opt, ext, econd, etgt, efour, EC, false, &lv, &err))
                 return false;
             sum += lv;
             const int b = it.sigma < 0.33f ? 0 : (it.sigma < 0.67f ? 1 : 2);
@@ -743,6 +791,63 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         return 0;
     }
 
+    // ── gradient checkpointing ──
+    MM3CkptPlan ckpt_plan;
+    MM3CkptBufs ckpt_bufs;
+    const bool  use_ckpt = a.ckpt_segments > 1;
+    if (use_ckpt || a.ckpt_verify) {
+        const int n_blk = (int) m.synth.dit.blk.size();
+        ckpt_plan = mm3_ckpt_plan(n_blk, (int) std::max<int64_t>(2, a.ckpt_segments));
+        if (!mm3_ckpt_alloc(&ckpt_bufs, m.backend, (int64_t) m.synth_cfg.dit.embedding_length,
+                            a.crop + 1, ckpt_plan.segments, &err)) {
+            fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+        }
+        fprintf(stderr, "[mm3-train] gradient checkpointing: %d segments over %d blocks, "
+                        "boundaries [%lld, %lld] f32\n",
+                ckpt_plan.segments, n_blk, (long long) m.synth_cfg.dit.embedding_length,
+                (long long) (a.crop + 1));
+    }
+
+    // ACCEPTANCE GATE. Same crop, same noise, same sigma, both paths. If these
+    // disagree beyond float noise the port is wrong and nothing trained with it
+    // can be trusted -- so this refuses to continue rather than warn.
+    if (a.ckpt_verify) {
+        const MM3TrainSong * s; int64_t st;
+        sample_crop(&s, &st);
+        if (!mm3_train_read_crop(*s, st, a.crop, IC, &x0, &cond, &err)) {
+            fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+        }
+        noise.resize(x0.size());
+        mm3_fill_noise_train(&noise, a.seed * 7919 + 1);
+        const float sigma = mm3_sigma_from(rng, a.logit_mean, a.logit_std);
+        mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
+        mm3_make_xt_target(x0, noise, sigma, positive_target, &xt, &tgt);
+
+        float l_mono = 0.0f, l_ckpt = 0.0f;
+        lm_optim_zero_grad(&opt);
+        if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &l_mono, &err)) {
+            fprintf(stderr, "[mm3-train] verify (monolithic): %s\n", err.c_str()); return 1;
+        }
+        lm_optim_zero_grad(&opt);
+        if (!mm3_train_micro_ckpt(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, ckpt_plan,
+                                  &ckpt_bufs, &l_ckpt, &err)) {
+            fprintf(stderr, "[mm3-train] verify (checkpointed): %s\n", err.c_str()); return 1;
+        }
+        lm_optim_zero_grad(&opt);
+        const double rel = std::fabs((double) l_mono - (double) l_ckpt)
+                         / std::max(1e-9, std::fabs((double) l_mono));
+        fprintf(stderr, "[ckpt-verify] monolithic %.7f | checkpointed %.7f | rel %.3e (%d segments)\n",
+                (double) l_mono, (double) l_ckpt, rel, ckpt_plan.segments);
+        if (rel > 1e-4) {
+            fprintf(stderr, "[ckpt-verify] FAIL — the two paths disagree. The port is wrong; "
+                            "do not train with --ckpt-segments.\n");
+            mm3_ckpt_free(&ckpt_bufs);
+            return 1;
+        }
+        fprintf(stderr, "[ckpt-verify] PASS\n");
+        if (!use_ckpt) { mm3_ckpt_free(&ckpt_bufs); return 0; }
+    }
+
     // ── training ──
     // The target sign is `positive_target`, declared above with its evidence.
     //
@@ -766,9 +871,11 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
             mm3_make_xt_target(x0, noise, sigma, positive_target, &xt, &tgt);
             float lv = 0.0f;
-            if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err)) {
-                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
-            }
+            const bool mok = use_ckpt
+                ? mm3_train_micro_ckpt(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, ckpt_plan,
+                                       &ckpt_bufs, &lv, &err)
+                : mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err);
+            if (!mok) { fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1; }
             acc += lv;
         }
         LmStepStats st{};
@@ -793,6 +900,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             return 1;
         }
         fprintf(stderr, "[mm3-train] load it with: MM3_ADAPTER=%s\n", out.c_str());
+        mm3_ckpt_free(&ckpt_bufs);
     }
     return 0;
 }

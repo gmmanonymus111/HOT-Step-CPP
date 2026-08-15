@@ -139,6 +139,19 @@ static void print_usage(void) {
             "                --logit-mean changes which sigmas it is measured at. Reports\n"
             "                three sigma bands — a fix that only moves the high band has\n"
             "                learned the genre marginal again.  [--eval-n K] default 24\n"
+            "                [--eval-crop F] default 689; PINNED independently of --crop so a\n"
+            "                run at a different crop is still comparable. 0 = follow --crop.\n"
+            "                [--crop-mode random|beginning] default random, which covers the\n"
+            "                whole song. `beginning` always starts at 0 — what SimpleTuner's\n"
+            "                truncation_mode does, so it only ever sees each track's head.\n"
+            "                [--ckpt-segments N] gradient checkpointing over the block stack.\n"
+            "                Peak attention is n_blk*n_heads*S^2*4 B, so crop 2584 (30 s) needs\n"
+            "                ~30.8 GB monolithic and is impossible without this; 6 segments\n"
+            "                make it ~5.1 GB for ~1 extra forward. ggml's flash-attn has no\n"
+            "                backward, so this is the ONLY lever.\n"
+            "                [--ckpt-verify] run both paths on one micro-batch and compare.\n"
+            "                Gate before trusting any checkpointed run; exits non-zero on\n"
+            "                disagreement. With no --ckpt-segments it verifies and exits.\n"
             "                [--sign-check] measure the velocity target's sign, train nothing\n"
             "                [--bwd outprod] restore the slow CPU mul_mat backward (510x slower)\n"
             "                [--tf32 on|off] default off\n"
@@ -1850,6 +1863,13 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         // logit_mean happens to draw, so it changes meaning when that changes.
         else if (!strcmp(argv[i], "--eval-every")) a.eval_every = atoll(next("--eval-every"));
         else if (!strcmp(argv[i], "--eval-n"))     a.eval_n     = atoll(next("--eval-n"));
+        // Keep this PINNED across crop experiments. Default 689 so every run
+        // stays comparable to runs 06/07; 0 means "follow --crop", which makes
+        // the eval move with the variable under test.
+        else if (!strcmp(argv[i], "--eval-crop"))  a.eval_crop  = atoll(next("--eval-crop"));
+        else if (!strcmp(argv[i], "--crop-mode"))  a.crop_mode  = next("--crop-mode");
+        else if (!strcmp(argv[i], "--ckpt-segments")) a.ckpt_segments = atoll(next("--ckpt-segments"));
+        else if (!strcmp(argv[i], "--ckpt-verify"))   a.ckpt_verify   = true;
         else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
         else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
