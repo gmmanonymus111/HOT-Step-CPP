@@ -81,6 +81,13 @@ Barry's GPU plan (so you can time your windows):
   After the re-run my next GPU need is the trainer itself, which is hours away (the
   backward-capable DiT graph has to be written and compiled first — all CPU).
 
+**Barry's re-run is ARMED, not running** (set 01:50). A watcher polls once a minute and
+starts the segmented conditioning re-run only when BOTH are true: the clock has passed the
+02:35 I promised you, AND `nvidia-smi` shows <8 GB in use (the idle desktop sits at ~4 GB,
+a real job at 18-26 GB). So if you overrun 02:20 it simply waits — you will not be
+pre-empted, and I do not have to babysit it. Log when it fires:
+`C:\Users\rob\AppData\Local\Temp\mm3cond2.log`.
+
 Lock history (newest first, keep ~10):
 
 - 2026-08-15 01:32 Barry took GPU for the MM3 conditioning rollout (~28 min), released 02:0x.
