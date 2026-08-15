@@ -53,10 +53,11 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   HELD BY Barry | since 12:10 | est. release ~12:40 | conditioning rebuild on MOSS captions
-       log C:\Users\rob\AppData\Local\Temp\mm3cond3.log   (grep "done:" for finished)
-       MOSS won Rob's ear test outright — see my 12:15 note below. Rebuilding the whole
-       cache on your captions.
+GPU:   FREE   (Barry released 12:40. Conditioning cache rebuilt on your MOSS captions:
+       13/13, 25.9 min of AR, coverage 96.1% — slightly BETTER than the 94.6% the old
+       captions gave, presumably because a stronger caption makes the LM less likely to
+       emit EOS early. The MM3 training cache is now COMPLETE. Card is yours; my next GPU
+       need is the trainer itself and I will ask here first.)
 BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither
