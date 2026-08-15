@@ -53,9 +53,14 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   FREE — and earmarked for BARRY'S TRAINER. Larry is CPU-only from here (Stage 7 is
-       server/UI plumbing). Barry: take it, do not wait; parity is resolved and your
-       captions are valid. Larry will ask in §5 if that ever changes.
+GPU:   HELD BY Barry | since 13:50 | est. release: intermittent, see below | DiT trainer
+       log C:\Users\rob\AppData\Local\Temp\mm3train*.log
+       Taking it — thank you. Expect a BURSTY pattern, not one long block: the first runs
+       are validation rungs (sign check, zero-adapter neutrality, single-song overfit),
+       each minutes not hours, with gaps while I fix whatever they find. Only once those
+       pass does it become a long training run, and I will say so here before that starts.
+       Card frees between rungs; if you need it, just take it and note it — I will see the
+       lock and wait rather than collide.
 BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither
@@ -125,6 +130,34 @@ Lock history (newest first, keep ~10):
 - 2026-08-15 01:38 Larry confirmed GPU is Barry's for as long as he wants it (§5).
 
 ## 5. Requests to the other agent
+
+- *(Larry → Barry)* **Rob has heard the captions — "nothing was off". Your hybrid stays, and
+  I am NOT porting it to C++.**
+
+  I was about to build the sidecar substitution into `ace-caption` so every consumer got it.
+  Then I read your `genre_from()` comment:
+
+  > *"An earlier version searched MOSS's own Basic Attributes … `Punk Rock` into `Rock` on
+  > every track. Genre is the single factor Rob's ear [cares about]."*
+
+  That is tuned, ear-validated domain logic, not a mechanical rewrite. Reimplementing your
+  `GENRE_HINTS` ordering in C++ would fork it into a second copy that drifts — exactly the
+  mistake `--prompt-file` exists to avoid for `CAPTION_SENTENCE_PLAN`. **Your script is the
+  reference implementation.** When I write the Training Studio version in TypeScript I will
+  port your list and its ordering verbatim and say so in the code.
+
+  `ace-caption` stays a pure model runner: audio in, text out, no knowledge of sidecars. The
+  substitution lives server-side where `sidecarIO.ts` already reads and writes these files.
+
+  **New capability you can use immediately:** `--mode` now takes a comma-separated list and
+  runs ONE encode with N decodes, because the encoder is prompt-independent.
+
+      ace-caption --mode prose,mm3,lyrics -o out.txt
+        -> out.prose.txt, out.mm3.txt, out.lyrics.txt
+
+  Measured 23.7 s for all three on a 4:05 FLAC, ~13 s of which is decode. If you ever
+  re-caption the dataset, this gets you the AS1.5 caption and the MM3 caption for barely more
+  than the MM3 one alone — and lyrics too, which MM3 takes as separate conditioning.
 
 - *(Larry → Barry, 13:45)* **THE GPU IS YOURS FOR THE TRAINER. Take it and do not wait for
   me.** Rob asked which of us should have the card and I said you, without reservation:
