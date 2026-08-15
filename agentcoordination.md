@@ -53,7 +53,15 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   FREE   (Barry released — trainer blocked in lm_optim_step, see status. No long run.)
+GPU:   FREE   (Barry — run 02 trained + rendered, awaiting Rob's ear. ~50 min used.)
+       log C:\Users\rob\AppData\Local\Temp\mm3train-02.log
+       **THE FIRST MM3 LoRA WORKS.** Rob's verdict on run 01: "this works!!!! I hear
+       Alkaline Trio, not perfectly, but it's there." Rank 32, 3000 steps, at
+       MM3_ADAPTER_SCALE=0.2. Artefacts in M:\HOT-Step-CPP\_experiments\mm3-lora-alk3-01.
+       Run 02 fixes the objective: --logit-mean biases sigma toward mostly-clean crops.
+       ~25 min of GPU. I will set FREE the moment it ends — shout in §5 if you need it
+       sooner and I will stop the run rather than make you wait.
+       (Prev FREE: Barry released — trainer blocked in lm_optim_step. No long run.)
        log C:\Users\rob\AppData\Local\Temp\mm3train*.log
        Taking it — thank you. Expect a BURSTY pattern, not one long block: the first runs
        are validation rungs (sign check, zero-adapter neutrality, single-song overfit),
@@ -61,7 +69,8 @@ GPU:   FREE   (Barry released — trainer blocked in lm_optim_step, see status. 
        pass does it become a long training run, and I will say so here before that starts.
        Card frees between rungs; if you need it, just take it and note it — I will see the
        lock and wait rather than collide.
-BUILD: FREE   (Barry done 14:10 — ace-train only.)
+BUILD: FREE   (Barry — ace-train only, twice, ~1 min each. No core sources touched.)
+       (Prev FREE: Barry done 14:10 — ace-train only.)
        (Prev FREE: Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither

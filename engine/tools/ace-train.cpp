@@ -126,6 +126,23 @@ static void print_usage(void) {
             "                [--seed N] [--lm-quant Q] [--dit-quant Q; default Q2_K, never executed]\n"
             "                [--segment-sec S] default 60; 0 = one rollout per song, which\n"
             "                UNDER-COVERS long songs (the LM hits EOS early: 65%% on a 280 s track)\n"
+            "  mm3-train-dit MiniMax-Music3 flow-DiT LoRA training.\n"
+            "                --cache <dir from mm3-condition> --models <dir> --out <dir>\n"
+            "                [--rank 32] [--alpha 32] [--lr 1e-4] [--steps 200] [--crop 689]\n"
+            "                [--grad-accum 1] [--seed 42] [--song <id> : overfit one song]\n"
+            "                [--logit-mean M] default 0; POSITIVE biases sigma toward 0, i.e.\n"
+            "                toward mostly-clean crops. Raise it (~+1.0..+1.5) or the run\n"
+            "                spends most steps near pure noise learning only the genre mean.\n"
+            "                [--logit-std S] default 1\n"
+            "                [--eval-every N] fixed holdout, sigma on a stratified grid, forward\n"
+            "                only. Comparable ACROSS runs; training loss is not, because\n"
+            "                --logit-mean changes which sigmas it is measured at. Reports\n"
+            "                three sigma bands — a fix that only moves the high band has\n"
+            "                learned the genre marginal again.  [--eval-n K] default 24\n"
+            "                [--sign-check] measure the velocity target's sign, train nothing\n"
+            "                [--bwd outprod] restore the slow CPU mul_mat backward (510x slower)\n"
+            "                [--tf32 on|off] default off\n"
+            "                Writes <out>/mm3_lora.safetensors; load with MM3_ADAPTER=<path>.\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -1798,6 +1815,22 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--grad-accum")) a.grad_accum = atoll(next("--grad-accum"));
         else if (!strcmp(argv[i], "--seed"))       a.seed       = (uint64_t) atoll(next("--seed"));
         else if (!strcmp(argv[i], "--song"))       a.only_song  = next("--song");
+        // Sigma is 1 - sigmoid(N(mean, std)), so a POSITIVE mean pushes sigma
+        // toward 0, i.e. toward crops that are mostly REAL AUDIO. That is the
+        // knob that decides what the run can learn at all. At mean 0 most steps
+        // land near sigma 1 (near-pure noise), where the only signal available
+        // is the caption marginal -- and because our conditioning is sampled
+        // from the caption rather than teacher-forced from the target, those
+        // steps can only ever teach "what does this genre average to". Run 01
+        // did exactly that: loss fell 2% over 3000 steps and the adapter was
+        // only usable at scale 0.2 because most of what it learned was the mean.
+        else if (!strcmp(argv[i], "--logit-mean")) a.logit_mean = (float) atof(next("--logit-mean"));
+        else if (!strcmp(argv[i], "--logit-std"))  a.logit_std  = (float) atof(next("--logit-std"));
+        // Fixed stratified-sigma holdout. This is the ONLY number comparable
+        // between runs -- training loss is measured at whatever sigmas
+        // logit_mean happens to draw, so it changes meaning when that changes.
+        else if (!strcmp(argv[i], "--eval-every")) a.eval_every = atoll(next("--eval-every"));
+        else if (!strcmp(argv[i], "--eval-n"))     a.eval_n     = atoll(next("--eval-n"));
         else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
         else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }

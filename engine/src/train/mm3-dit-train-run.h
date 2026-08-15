@@ -74,6 +74,8 @@ struct MM3TrainArgs {
     float       logit_mean = 0.0f;
     float       logit_std  = 1.0f;
     bool        sign_check = false;
+    int64_t     eval_every = 0;     // 0 = off
+    int64_t     eval_n     = 24;    // fixed tuples in the eval set
     std::string only_song;          // restrict to one song (overfit test)
 };
 
@@ -556,6 +558,25 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     fprintf(stderr, "[mm3-train] %zu LoRA tensors, rank %lld, alpha %.1f\n", params.size(),
             (long long) a.rank, (double) a.alpha);
 
+    // Report the sigma distribution this run will actually see, by sampling it
+    // rather than by quoting logit_mean. sigma near 0 means the crop is mostly
+    // REAL AUDIO and the step can learn "render this content in this style";
+    // sigma near 1 is near-pure noise, where the only learnable signal is the
+    // caption marginal. `frac<0.5` is therefore the fraction of steps that can
+    // teach style at all -- it is 0.5 at the default mean of 0.
+    {
+        std::mt19937_64 probe(12345);
+        double sum = 0.0; int lo = 0;
+        const int N = 20000;
+        for (int i = 0; i < N; i++) {
+            const float s = mm3_sigma_from(probe, a.logit_mean, a.logit_std);
+            sum += s;
+            if (s < 0.5f) lo++;
+        }
+        fprintf(stderr, "[mm3-train] sigma: logit_mean %.2f std %.2f -> mean sigma %.3f, %.1f%% below 0.5\n",
+                (double) a.logit_mean, (double) a.logit_std, sum / N, 100.0 * lo / N);
+    }
+
     LmOptim opt;
     opt.t_lossgrad = t_lossgrad;   // must be set; see above
     opt.t_adamw    = t_adamw;      // ditto -- lm_optim_step writes into it
@@ -585,6 +606,97 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             *start = (int64_t) (rng() % (uint64_t) (s.L - a.crop));
             return;
         }
+    };
+
+    // MEASURED, not derived. --sign-check on alk3_crimson, sigma 0.9, adapter at
+    // zero, 6 crops:
+    //
+    //     target = (noise - x0)   mean loss 11.167
+    //     target = (x0 - noise)   mean loss  3.593   <- 67.8% lower, all 6 agree
+    //
+    // I had argued from mm3-dit-graph.h's Euler step (`x + (sigma_next - sigma)*v`
+    // with sigma rising 0->1) that it should be (noise - x0). That was WRONG.
+    // SimpleTuner's flow_matching_target_direction = -1.0 agrees with the
+    // measurement. Re-run --sign-check before ever flipping this.
+    //
+    // The margin is also the strongest evidence the rest of the path is right: a
+    // stock DiT could not score 3.59 against one target and 11.17 against its
+    // negation unless the conditioning, the crop alignment and the forward were
+    // all actually working.
+    //
+    // Declared HERE rather than at the loop because the eval below must score
+    // against the same target; two different signs would make eval and training
+    // loss silently incomparable.
+    const bool positive_target = false;  // (x0 - noise)
+
+    // ── eval set ────────────────────────────────────────────────────────────
+    //
+    // Training loss cannot answer "is this run better than the last one", for
+    // two reasons that both bit run 01/02:
+    //
+    //   1. It is measured at sigmas drawn from logit_normal(logit_mean), so
+    //      CHANGING logit_mean changes the loss surface itself. Run 02's 1.53
+    //      and run 01's 2.01 are not the same quantity and must never be
+    //      subtracted.
+    //   2. Most of it is an irreducible floor. The target is (x0 - noise) and
+    //      the noise term is unguessable, so a large constant sits under every
+    //      number and DIVIDES OUT any real improvement when read as a percent.
+    //
+    // The fix is a fixed eval set with sigma on a STRATIFIED GRID rather than
+    // sampled: (i + 0.5)/N across (0,1), the same grid for every run whatever
+    // logit_mean is. Same songs, same crops, same noise, same sigmas => the
+    // number is comparable across runs and across configurations.
+    //
+    // It draws from its OWN rng. Reusing the training rng would consume draws
+    // and change the training trajectory, which would silently break the
+    // controlled comparison this exists to support.
+    struct MM3EvalItem { const MM3TrainSong * song; int64_t start; float sigma; uint64_t nseed; };
+    std::vector<MM3EvalItem> evalset;
+    if (a.eval_every > 0) {
+        std::mt19937_64 erng(a.seed ^ 0xE7A1ULL);
+        for (int64_t i = 0; i < a.eval_n; i++) {
+            const MM3TrainSong * s = nullptr;
+            for (;;) {
+                const MM3TrainSong & c = songs[erng() % songs.size()];
+                if (c.L > a.crop) { s = &c; break; }
+            }
+            MM3EvalItem it;
+            it.song  = s;
+            it.start = (int64_t) (erng() % (uint64_t) (s->L - a.crop));
+            it.sigma = (float) ((i + 0.5) / (double) a.eval_n);
+            it.nseed = 0xE0A1ULL + (uint64_t) i;
+            evalset.push_back(it);
+        }
+        fprintf(stderr, "[mm3-train] eval set: %lld fixed crops, sigma on a stratified grid, every %lld steps\n",
+                (long long) evalset.size(), (long long) a.eval_every);
+    }
+
+    // Forward-only pass over the eval set. Reports the mean plus three sigma
+    // bands, because WHERE the loss moves is the actual diagnostic: the whole
+    // point of logit_mean is to buy improvement at LOW sigma, and a run that
+    // only improves the high band has learned the genre marginal again.
+    std::vector<float> ex0, econd, enoise, ext, etgt, efour;
+    auto run_eval = [&](int64_t at_step) -> bool {
+        double sum = 0.0, band[3] = {0, 0, 0};
+        int    cnt[3] = {0, 0, 0};
+        for (const MM3EvalItem & it : evalset) {
+            if (!mm3_train_read_crop(*it.song, it.start, a.crop, IC, &ex0, &econd, &err)) return false;
+            enoise.resize(ex0.size());
+            mm3_fill_noise_train(&enoise, it.nseed);
+            mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - it.sigma, &efour);
+            mm3_make_xt_target(ex0, enoise, it.sigma, positive_target, &ext, &etgt);
+            float lv = 0.0f;
+            if (!mm3_train_micro(m, tsched, ad, &opt, ext, econd, etgt, efour, a.crop, false, &lv, &err))
+                return false;
+            sum += lv;
+            const int b = it.sigma < 0.33f ? 0 : (it.sigma < 0.67f ? 1 : 2);
+            band[b] += lv; cnt[b]++;
+        }
+        fprintf(stderr, "[mm3-eval] step %4lld  loss %.5f   sigma<0.33 %.5f | 0.33-0.67 %.5f | >0.67 %.5f\n",
+                (long long) at_step, sum / (double) evalset.size(),
+                cnt[0] ? band[0] / cnt[0] : 0.0, cnt[1] ? band[1] / cnt[1] : 0.0,
+                cnt[2] ? band[2] / cnt[2] : 0.0);
+        return true;
     };
 
     // ── sign check ──
@@ -632,22 +744,13 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     }
 
     // ── training ──
-    // MEASURED, not derived. --sign-check on alk3_crimson, sigma 0.9, adapter at
-    // zero, 6 crops:
+    // The target sign is `positive_target`, declared above with its evidence.
     //
-    //     target = (noise - x0)   mean loss 11.167
-    //     target = (x0 - noise)   mean loss  3.593   <- 67.8% lower, all 6 agree
-    //
-    // I had argued from mm3-dit-graph.h's Euler step (`x + (sigma_next - sigma)*v`
-    // with sigma rising 0->1) that it should be (noise - x0). That was WRONG.
-    // SimpleTuner's flow_matching_target_direction = -1.0 agrees with the
-    // measurement. Re-run --sign-check before ever flipping this.
-    //
-    // The margin is also the strongest evidence the rest of the path is right: a
-    // stock DiT could not score 3.59 against one target and 11.17 against its
-    // negation unless the conditioning, the crop alignment and the forward were
-    // all actually working.
-    const bool positive = false;  // (x0 - noise)
+    // Eval at step 0 too: that is the UNTRAINED baseline every later number is
+    // read against, and without it a run can only be compared to other runs.
+    if (a.eval_every > 0 && !run_eval(0)) {
+        fprintf(stderr, "[mm3-train] eval failed: %s\n", err.c_str()); return 1;
+    }
     for (int64_t step = 1; step <= a.steps; step++) {
         double acc = 0.0;
         lm_optim_zero_grad(&opt);   // accumulators are per optimizer window
@@ -661,7 +764,7 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             mm3_fill_noise_train(&noise, a.seed * 7919 + (uint64_t) (step * a.grad_accum + g));
             const float sigma = mm3_sigma_from(rng, a.logit_mean, a.logit_std);
             mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
-            mm3_make_xt_target(x0, noise, sigma, positive, &xt, &tgt);
+            mm3_make_xt_target(x0, noise, sigma, positive_target, &xt, &tgt);
             float lv = 0.0f;
             if (!mm3_train_micro(m, tsched, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err)) {
                 fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
@@ -676,6 +779,10 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         if (getenv("MM3_TRAIN_TRACE")) fprintf(stderr, "[trace] %s\n", "post optim step");
         fprintf(stderr, "[mm3-train] step %4lld  loss %.5f  |g| %.4f  lr %.2e\n", (long long) step,
                 acc / (double) a.grad_accum, (double) st.grad_norm, (double) st.lr);
+
+        if (a.eval_every > 0 && step % a.eval_every == 0 && !run_eval(step)) {
+            fprintf(stderr, "[mm3-train] eval failed: %s\n", err.c_str()); return 1;
+        }
     }
 
     if (!a.out_dir.empty()) {
