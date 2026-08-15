@@ -15,6 +15,7 @@
 #include "minimax/mm3-request.h"
 #include "minimax/mm3-ar-loop.h"
 #include "minimax/mm3-cond-graph.h"
+#include "train/mm3-dit-train-run.h"   // MM3 flow-DiT LoRA trainer
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
 #include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
@@ -1775,6 +1776,49 @@ static int cmd_mm3_condition(int argc, char ** argv) {
     return (n_fail && !n_ok) ? 1 : rc;
 }
 
+
+// ─── mm3-train-dit ──────────────────────────────────────────────────────────
+static int cmd_mm3_train_dit(int argc, char ** argv) {
+    MM3TrainArgs a;
+    bool tf32 = false;
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * w) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value
+", w); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--cache"))      a.cache_dir  = next("--cache");
+        else if (!strcmp(argv[i], "--models"))     a.models_dir = next("--models");
+        else if (!strcmp(argv[i], "--out"))        a.out_dir    = next("--out");
+        else if (!strcmp(argv[i], "--rank"))       a.rank       = atoll(next("--rank"));
+        else if (!strcmp(argv[i], "--alpha"))      a.alpha      = (float) atof(next("--alpha"));
+        else if (!strcmp(argv[i], "--lr"))         a.lr         = (float) atof(next("--lr"));
+        else if (!strcmp(argv[i], "--steps"))      a.steps      = atoll(next("--steps"));
+        else if (!strcmp(argv[i], "--crop"))       a.crop       = atoll(next("--crop"));
+        else if (!strcmp(argv[i], "--grad-accum")) a.grad_accum = atoll(next("--grad-accum"));
+        else if (!strcmp(argv[i], "--seed"))       a.seed       = (uint64_t) atoll(next("--seed"));
+        else if (!strcmp(argv[i], "--song"))       a.only_song  = next("--song");
+        else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
+        else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s
+", argv[i]); return 2; }
+    }
+    if (a.cache_dir.empty() || a.models_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-train-dit: --cache and --models are required
+");
+        return 2;
+    }
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+    return mm3_train_dit_run(a);
+}
+
 static int cmd_train_lm(int argc, char ** argv) {
     LmTrainArgs      a;
     LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
@@ -2352,6 +2396,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-condition")) {
         return cmd_mm3_condition(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-train-dit")) {
+        return cmd_mm3_train_dit(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);

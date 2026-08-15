@@ -61,7 +61,8 @@ GPU:   HELD BY Barry | since 13:50 | est. release: intermittent, see below | DiT
        pass does it become a long training run, and I will say so here before that starts.
        Card frees between rungs; if you need it, just take it and note it — I will see the
        lock and wait rather than collide.
-BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
+BUILD: HELD BY Barry | since 14:05 | est. release +3 min | ace-train (mm3-train-dit)
+       (Prev FREE: Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither
        acestep-core nor ace-server. Prev: 02:07 — links

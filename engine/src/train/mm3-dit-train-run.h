@@ -346,3 +346,157 @@ static void mm3_train_fourier(const std::vector<float> & fourier_w, float t, std
         (*out)[H + i] = (float) std::sin(a);
     }
 }
+
+// ── Driver ─────────────────────────────────────────────────────────────────
+
+static int mm3_train_dit_run(const MM3TrainArgs & a) {
+    std::string err;
+
+    std::vector<MM3TrainSong> songs;
+    if (!mm3_train_load_cache(a.cache_dir, a.only_song, &songs, &err)) {
+        fprintf(stderr, "[mm3-train] %s\n", err.c_str());
+        return 1;
+    }
+    int64_t usable = 0;
+    for (const auto & s : songs) if (s.L > a.crop) usable++;
+    fprintf(stderr, "[mm3-train] %zu song(s), %lld with >= %lld latents\n", songs.size(),
+            (long long) usable, (long long) a.crop);
+    if (!usable) { fprintf(stderr, "[mm3-train] no song is longer than the crop\n"); return 1; }
+
+    // DiT only. The LM and depth decoder produced the conditioning cache and are
+    // not needed again; everything this loop reads is on disk.
+    static MM3Model m;
+    mm3_discover(&m, a.models_dir.c_str());
+    if (!mm3_load_parts(&m, /*lm*/ false, /*depth*/ false, /*rest*/ true, &err)) {
+        fprintf(stderr, "[mm3-train] load: %s\n", err.c_str());
+        return 1;
+    }
+    if (!mm3_dit_prepare(m, &g_mm3_dit, &err)) {
+        fprintf(stderr, "[mm3-train] dit prepare: %s\n", err.c_str());
+        return 1;
+    }
+
+    const MM3DitConfig & c  = m.synth_cfg.dit;
+    const int64_t        IC = (int64_t) c.in_channels;
+
+    // Adapter parameters in their own context + backend buffer.
+    const size_t     n_sites = (m.synth.dit.blk.size() * 4 + 2) * 2;
+    ggml_init_params aip     = { (n_sites + 16) * ggml_tensor_overhead(), nullptr, true };
+    ggml_context *   actx    = ggml_init(aip);
+    MM3TrainAdapters ad;
+    std::vector<ggml_tensor *> params;
+    mm3_train_make_adapters(actx, m, a.rank, a.alpha, &ad, &params);
+    ggml_backend_buffer_t abuf = ggml_backend_alloc_ctx_tensors(actx, m.backend);
+    if (!abuf) { fprintf(stderr, "[mm3-train] adapter alloc failed\n"); return 1; }
+
+    // A small-random, B ZERO -> the adapter starts as an exact no-op.
+    {
+        std::mt19937_64 rng(a.seed);
+        std::normal_distribution<float> nd(0.0f, 0.02f);
+        for (ggml_tensor * t : params) {
+            const size_t n = (size_t) ggml_nelements(t);
+            std::vector<float> v(n, 0.0f);
+            const char * nm = ggml_get_name(t);
+            if (nm && strlen(nm) > 2 && nm[strlen(nm) - 1] == 'A') {
+                for (size_t i = 0; i < n; i++) v[i] = nd(rng);
+            }
+            ggml_backend_tensor_set(t, v.data(), 0, n * sizeof(float));
+        }
+    }
+    fprintf(stderr, "[mm3-train] %zu LoRA tensors, rank %lld, alpha %.1f\n", params.size(),
+            (long long) a.rank, (double) a.alpha);
+
+    LmOptim opt;
+    if (!lm_optim_init(&opt, params, m.backend, &err)) {
+        fprintf(stderr, "[mm3-train] optim: %s\n", err.c_str());
+        return 1;
+    }
+    opt.lr = a.lr;
+
+    std::mt19937_64 rng(a.seed);
+    std::vector<float> x0, cond, noise, xt, tgt, fourier;
+
+    auto sample_crop = [&](const MM3TrainSong ** song, int64_t * start) {
+        for (;;) {
+            const MM3TrainSong & s = songs[rng() % songs.size()];
+            if (s.L <= a.crop) continue;
+            *song  = &s;
+            *start = (int64_t) (rng() % (uint64_t) (s.L - a.crop));
+            return;
+        }
+    };
+
+    // ── sign check ──
+    //
+    // With the adapter at zero the model is the stock DiT. At high sigma it must
+    // score better against the CORRECT velocity target than the negated one; a
+    // model that can denoise cannot be indifferent to the direction.
+    if (a.sign_check) {
+        double sum_pos = 0.0, sum_neg = 0.0;
+        const int N = 6;
+        for (int i = 0; i < N; i++) {
+            const MM3TrainSong * s; int64_t st;
+            sample_crop(&s, &st);
+            if (!mm3_train_read_crop(*s, st, a.crop, IC, &x0, &cond, &err)) {
+                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+            }
+            noise.resize(x0.size());
+            mm3_fill_noise_train(&noise, a.seed * 1000 + i);
+            const float sigma = 0.9f;                       // high noise
+            mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
+            float lp = 0.0f, ln = 0.0f;
+            mm3_make_xt_target(x0, noise, sigma, true,  &xt, &tgt);
+            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &lp, &err)) {
+                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+            }
+            mm3_make_xt_target(x0, noise, sigma, false, &xt, &tgt);
+            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, false, &ln, &err)) {
+                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+            }
+            sum_pos += lp; sum_neg += ln;
+            fprintf(stderr, "[sign-check] %d/%d  (noise-x0) %.5f   (x0-noise) %.5f\n", i + 1, N, lp, ln);
+        }
+        const double mp = sum_pos / N, mn = sum_neg / N;
+        fprintf(stderr, "\n[sign-check] mean loss: (noise - x0) %.5f | (x0 - noise) %.5f\n", mp, mn);
+        const double rel = std::fabs(mp - mn) / std::max(1e-9, std::max(mp, mn));
+        if (rel < 0.05) {
+            fprintf(stderr, "[sign-check] INCONCLUSIVE — the two targets differ by only %.1f%%. A model "
+                            "that can denoise should not be indifferent; suspect the conditioning, the "
+                            "crop alignment or the forward, NOT the sign.\n", 100.0 * rel);
+            return 1;
+        }
+        fprintf(stderr, "[sign-check] VERDICT: target = %s  (%.1f%% lower loss)\n",
+                mp < mn ? "(noise - x0)" : "(x0 - noise)", 100.0 * rel);
+        return 0;
+    }
+
+    // ── training ──
+    const bool positive = true;   // set by --sign-check; see the verdict it prints
+    for (int64_t step = 1; step <= a.steps; step++) {
+        double acc = 0.0;
+        for (int64_t g = 0; g < a.grad_accum; g++) {
+            const MM3TrainSong * s; int64_t st;
+            sample_crop(&s, &st);
+            if (!mm3_train_read_crop(*s, st, a.crop, IC, &x0, &cond, &err)) {
+                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+            }
+            noise.resize(x0.size());
+            mm3_fill_noise_train(&noise, a.seed * 7919 + (uint64_t) (step * a.grad_accum + g));
+            const float sigma = mm3_sigma_from(rng, a.logit_mean, a.logit_std);
+            mm3_train_fourier(g_mm3_dit.fourier_w, 1.0f - sigma, &fourier);
+            mm3_make_xt_target(x0, noise, sigma, positive, &xt, &tgt);
+            float lv = 0.0f;
+            if (!mm3_train_micro(m, g_mm3_dit, ad, &opt, xt, cond, tgt, fourier, a.crop, true, &lv, &err)) {
+                fprintf(stderr, "[mm3-train] %s\n", err.c_str()); return 1;
+            }
+            acc += lv;
+        }
+        LmStepStats st{};
+        if (!lm_optim_step(&opt, g_mm3_dit.sched, &st)) {
+            fprintf(stderr, "[mm3-train] optimizer step failed\n"); return 1;
+        }
+        fprintf(stderr, "[mm3-train] step %4lld  loss %.5f  |g| %.4f  lr %.2e\n", (long long) step,
+                acc / (double) a.grad_accum, (double) st.grad_norm, (double) st.lr);
+    }
+    return 0;
+}
