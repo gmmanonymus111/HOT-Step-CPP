@@ -2,7 +2,7 @@
 //
 // Usage:
 //   ace-caption --models <dir> --src-audio <file> [--mode prose|mm3|lyrics[,...]]
-//               [--prompt "..."] [--prompt-file <path>] [-o <out.txt>]
+//               [--prompt "..."] [--prompt-file [<mode>=]<path>]... [-o <out.txt>]
 //               [--max-tokens N] [--max-seconds S]
 //               [--temperature T] [--rep-penalty R] [--freq-penalty F]
 //
@@ -18,6 +18,13 @@
 // from one Side-Step produced. Duplicating that wording in C++ would guarantee
 // it drifts. So the built-in modes cover prose/mm3/lyrics, and the server passes
 // the AS1.5 prompt through --prompt-file, keeping one source of truth.
+//
+// --prompt-file is repeatable and takes an optional `<mode>=` prefix. A bare path
+// overrides every mode; `prose=<path>` overrides just that one, leaving the other
+// modes on their built-ins. That is what lets a single run emit the AS1.5 block
+// AND an MM3 Structured Caption off one encode — the Training Studio's whole ask.
+// A bare Windows path still parses as the blanket form: the split only happens
+// when the text before the first '=' is literally prose, mm3 or lyrics.
 //
 // ── Cost shape ───────────────────────────────────────────────────────────────
 //
@@ -199,7 +206,8 @@ static std::string detokenize(const BPETokenizer & tok, const std::vector<int32_
 }
 
 int main(int argc, char ** argv) {
-    std::string models, src, mode = "prose", prompt, prompt_file, out_path, ffmpeg;
+    std::string models, src, mode = "prose", prompt, out_path, ffmpeg;
+    std::vector<std::string> prompt_files;   // repeatable; see the per-mode note below
     int max_tokens = 1024;
     int top_k_debug = 0;
     double max_seconds = 420.0;   // hard cap, see below
@@ -218,7 +226,7 @@ int main(int argc, char ** argv) {
         else if (a == "--src-audio") { src = next("--src-audio"); }
         else if (a == "--mode") { mode = next("--mode"); }
         else if (a == "--prompt") { prompt = next("--prompt"); }
-        else if (a == "--prompt-file") { prompt_file = next("--prompt-file"); }
+        else if (a == "--prompt-file") { prompt_files.push_back(next("--prompt-file")); }
         else if (a == "-o") { out_path = next("-o"); }
         else if (a == "--ffmpeg") { ffmpeg = next("--ffmpeg"); }
         else if (a == "--top-k-debug") { top_k_debug = atoi(next("--top-k-debug").c_str()); }
@@ -230,7 +238,8 @@ int main(int argc, char ** argv) {
         else {
             fprintf(stderr,
                     "usage: ace-caption --models <dir> --src-audio <file>\n"
-                    "       [--mode prose|mm3|lyrics] [--prompt \"...\"] [--prompt-file <p>]\n"
+                    "       [--mode prose|mm3|lyrics[,...]] [--prompt \"...\"]\n"
+                    "       [--prompt-file [prose=|mm3=|lyrics=]<path>]   (repeatable)\n"
                     "       [-o <out.txt>] [--max-tokens N] [--max-seconds S]\n"
                     "       [--temperature T] [--rep-penalty R] [--freq-penalty F]\n");
             return 2;
@@ -244,12 +253,28 @@ int main(int argc, char ** argv) {
     // --prompt / --prompt-file override every mode; otherwise each mode picks its
     // own built-in prompt. --modes takes a comma-separated list so all formats
     // come off ONE encode (see the cost-shape note at the top).
+    //
+    // --prompt-file also takes a PER-MODE form, `--prompt-file prose=<path>`,
+    // which is what makes "one encode, two different caption formats" possible.
+    // The Training Studio needs Side-Step's 5-line `caption:/genre:/bpm:/key:/
+    // signature:` block AND an MM3 Structured Caption from the same audio; with
+    // only the blanket override those are two full encodes, and the encode is
+    // the expensive half of the run.
     std::string prompt_override = prompt;
-    if (!prompt_file.empty()) {
-        if (!read_text_file(prompt_file, prompt_override)) {
-            fprintf(stderr, "ace-caption: cannot read %s\n", prompt_file.c_str());
+    std::unordered_map<std::string, std::string> mode_prompt;
+    for (const std::string & spec : prompt_files) {
+        // Split on the FIRST '=' only when the left side names a mode, so a
+        // bare Windows path (`D:\x\p.txt`) still parses as the blanket form.
+        const size_t eq = spec.find('=');
+        const std::string head = eq == std::string::npos ? std::string() : spec.substr(0, eq);
+        const bool per_mode = head == "prose" || head == "mm3" || head == "lyrics";
+        std::string text;
+        if (!read_text_file(per_mode ? spec.substr(eq + 1) : spec, text)) {
+            fprintf(stderr, "ace-caption: cannot read %s\n",
+                    (per_mode ? spec.substr(eq + 1) : spec).c_str());
             return 1;
         }
+        if (per_mode) { mode_prompt[head] = text; } else { prompt_override = text; }
     }
     std::vector<std::string> modes;
     {
@@ -265,7 +290,11 @@ int main(int argc, char ** argv) {
         if (!cur.empty()) { modes.push_back(cur); }
         if (modes.empty()) { modes.push_back("prose"); }
     }
-    auto prompt_for_mode = [](const std::string & m) -> std::string {
+    // Precedence: per-mode override > blanket override > the mode's built-in.
+    auto prompt_for_mode = [&](const std::string & m) -> std::string {
+        const auto it = mode_prompt.find(m);
+        if (it != mode_prompt.end()) { return it->second; }
+        if (!prompt_override.empty()) { return prompt_override; }
         if (m == "mm3") { return PROMPT_MM3; }
         if (m == "lyrics") { return PROMPT_LYRICS; }
         return PROMPT_PROSE;
@@ -548,8 +577,7 @@ int main(int argc, char ** argv) {
     int rc = 0;
     for (size_t mi = 0; mi < modes.size(); ++mi) {
         const std::string & mname = modes[mi];
-        const std::string p = prompt_override.empty() ? prompt_for_mode(mname)
-                                                      : prompt_override;
+        const std::string p = prompt_for_mode(mname);   // handles both override forms
         std::string text;
         const double t0 = (double) clock() / CLOCKS_PER_SEC;
         if (!run_mode(p, text)) {

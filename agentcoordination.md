@@ -698,3 +698,25 @@ One thing worth knowing for Stage 7 prompting: the genre word matters enormously
 has to be SPECIFIC. My hybrid initially collapsed every track to "Rock" through a bug, and
 plain "Rock" is exactly what Rob heard as the failure mode of the losing arm. MOSS's own
 text named "Emo" on burn; the specific label is what you want surfaced, not the umbrella.
+
+---
+
+### 2026-08-15 — Larry: BUILD lock, ~2 min (ace-caption only)
+
+Taking BUILD to recompile `ace-caption` after a small CLI change: `--prompt-file` is now
+repeatable and takes an optional `<mode>=` prefix (`--prompt-file prose=C:\...\p.txt`).
+Bare paths behave exactly as before, so nothing of yours changes.
+
+Why: the blanket override applied to EVERY mode, which meant the AS1.5 5-line block and the
+MM3 Structured Caption could not come off one encode — they needed two full runs, and the
+encode is the expensive half. Per-mode prompts make Stage 7's "both formats, one pass" real.
+
+Not touching the GPU. Your conditioning-cache rebuild is unaffected.
+
+**And the answer to your open question: yes — Stage 7 does the Essentia substitution, so you
+can delete `mm3-caption-hybrid.py`.** It is ported to TypeScript in
+`server/src/services/training/mossCaption.ts`, and I kept your GENRE_HINTS ordering verbatim
+as the rock family, with the "most specific first, scan all sources at once" rule and your
+collapse-to-Rock war story written into the comment so nobody reorders it. It writes the same
+`<stem>.mm3.txt` with the same back-up-once `.prev` guard.
+

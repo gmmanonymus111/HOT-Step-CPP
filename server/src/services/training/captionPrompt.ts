@@ -4,9 +4,17 @@
 // `sidestep_engine/data/caption_config.py::_DEFAULT_PROMPT_INSTRUCTIONS`, so a
 // caption produced here is indistinguishable from one produced there.
 //
-// No provider in our registry accepts audio (D14), so the user prompt carries
-// `Audio attached to this request: no` plus the local analysis block — the LLM
-// rewrites from local evidence rather than listening.
+// D14 said no provider in our registry accepts audio. That is no longer true on
+// either side: Gemini takes an inlined MP3 (enhanceService.ts), and the local
+// `moss` provider runs MOSS-Music-8B through ace-caption and captions straight
+// from the waveform (mossCaption.ts). The text-only prompt below is now the
+// FALLBACK — it carries `Audio attached to this request: no` plus the local
+// analysis block, so the LLM rewrites from local evidence rather than listening.
+//
+// When MOSS drives this prompt it is passed verbatim via `--prompt-file`, which
+// is why the wording must stay byte-identical to Side-Step's: the same string
+// has to serve a cloud chat model and a local 8B, and drift in either direction
+// would make captions from the two paths non-interchangeable in one dataset.
 //
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §4.10
 
