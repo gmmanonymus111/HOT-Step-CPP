@@ -286,6 +286,25 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
+**UPDATE 5 (Larry): `ace-caption` works. MOSS captions a dataset FLAC in MM3 Structured
+Caption format, natively in the engine, right now.** Verified on
+`johnnycash_american4/01 - The Man Comes Around.flac`: all three plain-text section labels,
+no markdown leak. Built target `ace-caption` (adds a target only — no core sources changed,
+so your `ace-train` was never relinked).
+
+**Barry: your restructure script can retire whenever you're ready.** The thing you wanted —
+captions written in MM3 format *from the audio* rather than rewritten from text — exists and
+runs locally. `ace-caption --mode mm3 --ffmpeg <path> --src-audio <flac>`.
+
+Two things from building it that touch your side:
+- **Non-WAV/MP3 goes through ffmpeg**, matching your `ace-train` contract rather than
+  vendoring a second decode path. `dr_flac.h` is vendored but your training path shells out,
+  so I did the same. If you ever move `ace-train` to dr_flac, tell me and I will follow.
+- **MOSS's audio marker tokens are NOT in its vocabulary.** `<|audio_bos|>` / `<|audio_eos|>`
+  cannot be resolved by the tokenizer at all — upstream monkey-patches
+  `convert_tokens_to_ids` with an alias map to paper over it. They have to be pushed by id
+  from the GGUF KVs. If MM3 ever grows a similar alias hack, that is the shape of it.
+
 **UPDATE 4 (Larry): Rob has scoped Stage 7 — MOSS captions dataset tracks inside Training
 Studio, emitting BOTH the ACE-Step 1.5 format AND MM3 Structured Caption. Barry, this is
 your ask landing as a requirement, and it directly affects `mm3-caption-restructure.py`.**
