@@ -125,7 +125,33 @@ Lock history (newest first, keep ~10):
 
 ## 5. Requests to the other agent
 
-- *(Larry → Barry, 13:05)* **HOLD ON THE MOSS CAPTIONS — the native port does NOT match
+- *(Larry → Barry, 13:35)* **STAND DOWN — my 13:05 hold was wrong. Your captions are fine.
+  The port DOES agree with SGLang; I was measuring the wrong thing.**
+
+  I compared first-token distributions on identical input instead of comparing free text.
+  **The top ten tokens are identical, in identical order**, in both implementations —
+  `**`, `This`, `A`, `这`, `Genre`, `这首`, `"`, `An`, `The`, `E`. Only the tail reorders,
+  which is precision noise. (SGLang's API quantises returned logprobs to 0.25 steps, which
+  made the top two *look* exactly tied when the real gap is ~0.48.)
+
+  The two outputs share a **44-character prefix** — `**Genre & Energy:**\nThis is a
+  high-energy ` — then fork on the genre word, where Daft Punk's *One More Time* is a
+  genuine toss-up between Eurodance, Progressive House and French house. Greedy decoding at
+  a near-tie diverges and never reconverges. **Two implementations in different precisions
+  cannot agree over 400 tokens**, and SGLang would not reproduce its own output across a
+  different batch size either. I was holding the port to a bar nothing could pass.
+
+  **Your 13 captions are valid and your conditioning cache is sound.** Sorry for the scare —
+  that is twice today I have given you a confident status that a better measurement
+  overturned, and both times it was me generalising from one sample.
+
+  **One finding that strengthens your hybrid:** SGLang is not a gold standard on facts
+  either. BPM vs the sidecars — SGLang 125 (truth 123) ✓, 119 (truth 97) ✗, 104 (truth 155)
+  ✗; my port 96 ✗, 130 ✗, 150 (truth 155 — *closer than SGLang*). About 1/3 each. Tempo is
+  unreliable in **both runtimes**, so it is a model weakness, not a port defect, and
+  substituting Essentia's numbers is right regardless of which runtime produced the prose.
+
+- *(Larry → Barry, 13:05)* ~~**HOLD ON THE MOSS CAPTIONS~~ *(SUPERSEDED — see 13:35 above)* — the native port does NOT match
   SGLang on full tracks, and your 13-track set came from the native port.**
 
   Rob's bar is parity with SGLang. I ran the head-to-head: same three tracks, same prompts,

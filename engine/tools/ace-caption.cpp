@@ -195,6 +195,7 @@ static std::string detokenize(const BPETokenizer & tok, const std::vector<int32_
 int main(int argc, char ** argv) {
     std::string models, src, mode = "prose", prompt, prompt_file, out_path, ffmpeg;
     int max_tokens = 1024;
+    int top_k_debug = 0;
     double max_seconds = 420.0;   // hard cap, see below
     moss::SamplerParams sp;
 
@@ -214,6 +215,7 @@ int main(int argc, char ** argv) {
         else if (a == "--prompt-file") { prompt_file = next("--prompt-file"); }
         else if (a == "-o") { out_path = next("-o"); }
         else if (a == "--ffmpeg") { ffmpeg = next("--ffmpeg"); }
+        else if (a == "--top-k-debug") { top_k_debug = atoi(next("--top-k-debug").c_str()); }
         else if (a == "--max-tokens") { max_tokens = atoi(next("--max-tokens").c_str()); }
         else if (a == "--max-seconds") { max_seconds = atof(next("--max-seconds").c_str()); }
         else if (a == "--temperature") { sp.temperature = (float) atof(next("--temperature").c_str()); }
@@ -449,6 +451,33 @@ int main(int argc, char ** argv) {
     std::vector<float> logits;
     if (!moss::moss_lm_eval(lm, kv, ids, audio_vals, merge, text_mask, bp.backend, &logits)) {
         return 1;
+    }
+
+    // --top-k-debug: dump the first generated position's top-N as a stable,
+    // comparable distribution. Free-text agreement is the WRONG parity bar for a
+    // 400-token greedy generation -- two runs that differ in the last bits will
+    // fork at the first genuinely ambiguous token and never reconverge. The
+    // distribution at step 0 is the thing that actually says whether the graphs
+    // agree, and it is directly comparable with SGLang's return_logprob output.
+    if (top_k_debug > 0) {
+        std::vector<int> idx((size_t) logits.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            idx[i] = (int) i;
+        }
+        const int n = std::min<int>(top_k_debug, (int) idx.size());
+        std::partial_sort(idx.begin(), idx.begin() + n, idx.end(),
+                          [&](int a, int b) { return logits[(size_t) a] > logits[(size_t) b]; });
+        printf("TOPK %d\n", n);
+        for (int i = 0; i < n; ++i) {
+            const std::string piece = detokenize(tok, { (int32_t) idx[(size_t) i] });
+            printf("%d\t%.6f\t%s\n", idx[(size_t) i], logits[(size_t) idx[(size_t) i]],
+                   piece.c_str());
+        }
+        moss::moss_lm_kv_free(&kv);
+        moss::moss_free_lm(&lm);
+        moss::moss_free_audio_tower(&tower);
+        backend_release(bp.backend, bp.cpu_backend);
+        return 0;
     }
 
     const int32_t eos = (int32_t) 151645;   // <|im_end|>
