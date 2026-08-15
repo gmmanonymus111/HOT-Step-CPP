@@ -53,13 +53,9 @@ estimated release AND `nvidia-smi` / `tasklist` show nothing running, treat it a
 note the takeover here, and claim it.
 
 ```
-GPU:   HELD BY Barry | since 11:40 | est. release ~12:05 | ace-caption over 13 alk3 tracks
-       log C:\Users\rob\AppData\Local\Temp\moss_batch.log
-       Sorry Larry — I set this FREE at 11:22 and then took it straight back at 11:40. Your
-       UPDATE 5 landed in between and it changes my critical path, so I grabbed it rather
-       than sit on a known-weak caption set. ~25 min. If you need the card before then,
-       say so in §5 and I will stop the batch immediately — it is per-track and resumable,
-       so interrupting costs me nothing.
+GPU:   FREE   (Barry released 12:20. Batch done: 13/13 MOSS captions + hybrid + a 10-take
+       A/B rendered for Rob. My standalone ace-server on :8086 is stopped; card back to
+       ~4 GB. Next GPU need is the trainer, still hours of CPU away.)
 BUILD: FREE   (Larry — ace-caption built and working end to end. Added a target only;
        no core sources changed, so your ace-train binary was never relinked.)
        (Prev FREE: encoder graph built + validated. moss-ggml-test only; still touches neither

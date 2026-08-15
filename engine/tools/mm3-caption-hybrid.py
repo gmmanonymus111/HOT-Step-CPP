@@ -49,21 +49,32 @@ def parse_key(keyscale):
     return (m.group(1), m.group(2).lower()) if m else (None, None)
 
 
-def genre_from(moss_basic, moss_all, fallback):
-    """Prefer a genre MOSS named — it heard the track. Search its Basic
-    Attributes first, then the whole caption, then the sidecar."""
-    for hay in (moss_basic, moss_all):
-        for pat, label in GENRE_HINTS:
-            if re.search(pat, hay, re.I):
-                return label
+def genre_from(moss_all, gemini_caption, fallback):
+    """Most SPECIFIC genre named by any source that actually observed the track.
+
+    GENRE_HINTS is ordered most-specific first, and this scans that list against
+    everything at once. An earlier version searched MOSS's own Basic Attributes
+    line first and returned on the first hit, which meant a generic "rock" there
+    beat "Emo" in MOSS's body and "punk rock" in the Gemini caption — turning
+    `Punk Rock` into `Rock` on every track. Genre is the single factor Rob's ear
+    test showed dominates MM3 adherence, so that was not cosmetic.
+
+    Both sources are used deliberately: MOSS heard the audio, and the Gemini
+    caption was also written from the audio. The sidecar `genre` field is the
+    weak fallback — it is usually just "Rock".
+    """
+    hay = (moss_all or "") + "\n" + (gemini_caption or "")
+    for pat, label in GENRE_HINTS:
+        if re.search(pat, hay, re.I):
+            return label
     return fallback or "Alternative Rock"
 
 
-def build_basic(sample, moss_basic, moss_all):
+def build_basic(sample, moss_all):
     bpm = int(round(float(sample.get("bpm") or 0)))
     key, scale = parse_key(sample.get("keyscale", ""))
     sig = (sample.get("timesignature") or "4/4").strip()
-    genre = genre_from(moss_basic, moss_all, sample.get("genre"))
+    genre = genre_from(moss_all, sample.get("caption"), sample.get("genre"))
     parts = []
     if bpm:
         parts.append(f"bpm is {bpm}.")
@@ -100,14 +111,19 @@ def main():
             # Metadata rather than dropping the facts on the floor.
             print(f"  ! {stem}: no Basic Attributes line, inserting one", file=sys.stderr)
             gi = next((i for i, l in enumerate(lines) if l.strip() == "Global Metadata"), -1)
-            lines.insert(gi + 1, build_basic(s, "", moss))
+            lines.insert(gi + 1, build_basic(s, moss))
         else:
-            lines[bi] = build_basic(s, lines[bi], moss)
+            lines[bi] = build_basic(s, moss)
         out = "\n".join(lines)
 
         dst = os.path.join(root, stem + ".mm3.txt")
         if not args.dry_run:
-            if os.path.isfile(dst):
+            # Back up ONCE. Re-running used to overwrite .prev with the previous
+            # HYBRID output, destroying the original (restructured) caption on
+            # the second run — the same clobber class as the --force guard in
+            # mm3-caption-restructure.py. The backup is only interesting as the
+            # pre-hybrid state, so never replace it.
+            if os.path.isfile(dst) and not os.path.isfile(dst + ".prev"):
                 os.replace(dst, dst + ".prev")
             with open(dst, "w", encoding="utf-8") as fh:
                 fh.write(out)
