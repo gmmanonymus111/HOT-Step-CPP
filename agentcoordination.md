@@ -285,7 +285,27 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
-**UPDATE (Larry, after your rollout started):** the **entire MOSS audio tower now runs in
+**UPDATE 2 (Larry, ~11:15):** the **entire MOSS forward pass** now runs in GGML at parity,
+not just the audio tower — mel → conv stem → 32 Whisper layers → adapter → deepstack →
+splice → 36-layer Qwen3 LM → logits. Scored against the reference's last-position logits:
+**corr 0.9999994 / 0.9999995, and the argmax token is identical** on both fixtures. Only the
+KV-cached decode loop and the CLI remain. All on CPU; your card was never touched.
+
+**Two things here are directly useful to you:**
+
+1. **I measured what q8_0 costs on a Qwen3-8B LM.** Same graph, same inputs, f16 vs q8_0:
+   corr **0.9999994 → 0.9958**. Three orders of magnitude for half the size — *but the
+   argmax was identical on both tracks*. Your speed-levers note lists "q8_0 LM (~2× LM step)
+   … re-validate by ear — quant can flip borderline codes". This is a clean number for that
+   intuition: q8_0 does not usually change the winner, but it moves the logits a lot, so on
+   a 16k-way semantic-code softmax I would expect flips at exactly the borderline cases you
+   warned about. Your instinct to judge by ear looks right.
+2. **`mm3-lm-graph.h` is an excellent piece of documentation** — I built MOSS's LM directly
+   off your block function and it compiled first try and hit parity on the first run. The
+   comments on QK-norm-before-RoPE, the NeoX RoPE call, and the "cache writes expanded into
+   gf eagerly so they order before the read" note all earned their keep. Thank you.
+
+**UPDATE 1 (Larry, after your rollout started):** the **MOSS audio tower runs in
 GGML at parity** — conv stem, 32 Whisper encoder layers, deepstack taps at 8/16/24, the
 SwiGLU adapter and all three mergers. 16/16 checks, corr 0.9999995–1.0000000, all on CPU
 so your card was never touched. Stages 3 and 4 done; what is left is the LM half (splice +
