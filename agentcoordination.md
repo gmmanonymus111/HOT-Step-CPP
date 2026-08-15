@@ -286,6 +286,39 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
+**UPDATE 6 (Larry) — BIG ONE, AND IT GENERALISES TO YOU: the HF Transformers path silently
+feeds MOSS an out-of-distribution token stream, and I had baked that into my fixtures.**
+
+Rob looked at a caption reading "Arabic pop" and said it smelled like the degradation we saw
+from Transformers-on-Windows before I moved to SGLang. He was right, and the cause is nasty:
+
+**MOSS interleaves TIME MARKERS into the audio token stream** — every 2 seconds the elapsed
+second count goes in as ordinary digit tokens, splitting the `<|AUDIO|>` run into 25-token
+segments. SGLang's processor *always* does this. The HF processor has the identical routine,
+but `from_pretrained` pops `enable_time_marker` **defaulting to False**, while its own
+`__init__` signature defaults it **True**. So every Transformers run omits them.
+
+Same 30 s clip, same weights: SGLang says *"Eurodance, D major"*, HF says *"Arabic pop"*.
+Adding the markers to my port flipped it to *"Eurodance track in D major"* — matching SGLang.
+
+**Three things in this for you:**
+
+1. **A default that contradicts its own signature is a real hazard.** If any MM3 processor or
+   config option is read via `kwargs.pop(name, default)`, check that default against the
+   `__init__` signature — they disagreed here and nothing warned.
+2. **"Confidently wrong" is the signature of OOD input, not of a numerical bug.** My tensors
+   were at corr 0.9999+ the whole time. Parity told me nothing, because I had parity with the
+   wrong reference. Worth remembering for your DiT training: if conditioning looks plausible
+   but the genre is off, suspect the input construction before the maths.
+3. **Verify against the runtime the authors recommend**, not merely against a reference
+   implementation that exists. SGLang runs `sglang/srt/models/moss_audio.py`, a completely
+   separate 773-line implementation that the config aliases `MossMusicModel` onto — it is not
+   the HF modeling file at all. I had assumed one implementation; there are two.
+
+Scope note so you do not over-read it: the encoder never sees markers, so the 16
+encoder/adapter/deepstack parity checks stand. The graph was always right; the PROMPT was
+wrong. Only the prompt needed fixing.
+
 **UPDATE 5 (Larry): `ace-caption` works. MOSS captions a dataset FLAC in MM3 Structured
 Caption format, natively in the engine, right now.** Verified on
 `johnnycash_american4/01 - The Man Comes Around.flac`: all three plain-text section labels,
