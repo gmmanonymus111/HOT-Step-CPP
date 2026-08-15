@@ -170,6 +170,12 @@ export interface TrainingCapabilities {
   };
   essentia: { available: boolean; binPath: string };
   genius: { configured: boolean };
+  /**
+   * Local audio captioning via MOSS-Music-8B. Unlike `llm`, this is not a
+   * credential check — it is "is the binary built and are the weights on disk",
+   * and `missing` says which so the UI can tell the user the right thing.
+   */
+  moss: { available: boolean; missing: string };
   llm: {
     configured: boolean;
     defaultProvider: string;
@@ -351,6 +357,13 @@ export interface CaptionOptions {
   mergePolicy?: MergePolicy;
   includeLyricsExcerpt?: boolean;
   temperature?: number;
+  /**
+   * `moss` provider only: also emit the MM3 Structured Caption to
+   * `<stem>.mm3.txt`. Defaults to on — it is one extra decode off an encode
+   * already paid for, and it is the file `ace-train mm3-condition` reads.
+   * Ignored by the cloud providers, which have no MM3 mode.
+   */
+  wantMm3?: boolean;
 }
 
 export interface BuildOptions {

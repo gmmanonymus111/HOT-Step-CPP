@@ -102,13 +102,42 @@ export const MOSS_REP_PENALTY = 1.05;
 export const MOSS_FREQ_PENALTY = 0.3;
 
 /**
+ * MOSS runs strictly one at a time, enforced HERE rather than at the call sites.
+ *
+ * The caption path is governed by `captionLimiter`, whose concurrency is
+ * user-configurable (`config.labeling.captionConcurrency`) and which several
+ * people will reasonably raise — for a cloud provider, N parallel API calls is
+ * exactly the right thing to do. For MOSS it is fatal: each run is a separate
+ * process loading ~8.1 GB of LM plus 1.6 GB of audio tower, so concurrency 2
+ * exceeds a 5090 before either run reaches the first decode. Serialising inside
+ * the module means raising the limiter stays safe for the cloud providers it was
+ * meant for, and no future caller has to know this.
+ */
+let mossQueue: Promise<unknown> = Promise.resolve();
+
+function serialised<T>(body: () => Promise<T>): Promise<T> {
+  const run = mossQueue.then(body, body);
+  // Keep the chain alive after a rejection, and never leak the rejection into
+  // the next waiter — it must see a settled predecessor, not a failed one.
+  mossQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/**
  * One encode, N decodes. Returns the text per requested mode.
  *
  * The encoder (mel + 32 Whisper layers) is prompt-independent, so asking for
  * prose+mm3 together costs one audio pass and two short decodes rather than two
  * full runs. That is the whole reason `--mode` takes a list.
  */
-export async function runMossCaption(
+export function runMossCaption(
+  audioPath: string,
+  opts: MossRunOptions,
+): Promise<Partial<Record<MossMode, string>>> {
+  return serialised(() => runMossCaptionInner(audioPath, opts));
+}
+
+async function runMossCaptionInner(
   audioPath: string,
   opts: MossRunOptions,
 ): Promise<Partial<Record<MossMode, string>>> {

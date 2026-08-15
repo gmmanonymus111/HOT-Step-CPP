@@ -1087,6 +1087,9 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
           model: opts.model,
           includeLyricsExcerpt: opts.includeLyricsExcerpt !== false,
           temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.45,
+          // MOSS only — costs one extra decode off the same encode and writes
+          // <stem>.mm3.txt, which is what `ace-train mm3-condition` reads.
+          wantMm3: opts.wantMm3 !== false,
           signal: job.controller.signal,
           log: (level, message) => emitLog(job, level, `${sample.filename}: ${message}`),
         }));

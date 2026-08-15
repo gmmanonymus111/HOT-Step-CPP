@@ -505,6 +505,12 @@ export interface TrainingCapabilities {
   };
   essentia: { available: boolean; binPath: string };
   genius: { configured: boolean };
+  /**
+   * Local audio captioning via MOSS-Music-8B. Not a credential check — it is
+   * "binary built + weights on disk", and `missing` names which one is absent
+   * so the panel can say "download the GGUF" rather than "rebuild the engine".
+   */
+  moss: { available: boolean; missing: string };
   llm: {
     configured: boolean;
     defaultProvider: string;

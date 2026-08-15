@@ -68,6 +68,7 @@ import {
   scanPreview as scanPreviewFolder, ScanLimitError,
 } from '../services/training/datasetScan.js';
 import { isInside, trainingBaseDir } from '../services/training/paths.js';
+import { resolveMossPaths } from '../services/training/mossCaption.js';
 import { deleteLabel, deleteLabels, patchLabel, readLabel } from '../services/training/labelStore.js';
 import { listDatasetsWithAssets } from '../services/training/datasetAssets.js';
 import { createDatasetFromFolder, DatasetCreateError } from '../services/training/datasetCreate.js';
@@ -180,6 +181,9 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
     essentia: { available: false, binPath: config.essentia.bin },
     genius: { configured: false },
     llm: { configured: false, defaultProvider: config.lireek.defaultProvider, providers: [] },
+    // Local audio captioning. Probed synchronously below — it is two fs.existsSync
+    // calls, not a subprocess, so it cannot hang this endpoint.
+    moss: { available: false, missing: '' },
     preprocess: {
       available: false, binPath: '', ditModels: [], vaeModels: [], textEncoders: [],
       defaultDit: '', defaultVae: '', defaultTextEnc: '', modelsCachedAt: 0,
@@ -208,6 +212,16 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
 
   try { caps.essentia.available = essentiaAvailable(); } catch { /* stays false */ }
   try { caps.genius.configured = !!config.lireek.geniusAccessToken; } catch { /* stays false */ }
+
+  // `missing` is surfaced rather than swallowed: the two failure modes are
+  // "binary not built" and "weights not downloaded", and the user's next action
+  // is completely different for each. A bare `available: false` would send
+  // everyone to rebuild the engine when the usual cause is the 8 GB GGUF.
+  try {
+    const probe = resolveMossPaths();
+    if ('paths' in probe) caps.moss.available = true;
+    else caps.moss.missing = probe.missing;
+  } catch (err: any) { caps.moss.missing = String(err?.message || err).slice(0, 200); }
 
   try {
     const providers = await listProviders();
