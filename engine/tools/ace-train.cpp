@@ -1783,8 +1783,7 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
     bool tf32 = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char * w) -> const char * {
-            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value
-", w); exit(2); }
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", w); exit(2); }
             return argv[++i];
         };
         if      (!strcmp(argv[i], "--cache"))      a.cache_dir  = next("--cache");
@@ -1801,12 +1800,10 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
         else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
-        else { fprintf(stderr, "ace-train: unknown option %s
-", argv[i]); return 2; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
     }
     if (a.cache_dir.empty() || a.models_dir.empty()) {
-        fprintf(stderr, "ace-train mm3-train-dit: --cache and --models are required
-");
+        fprintf(stderr, "ace-train mm3-train-dit: --cache and --models are required\n");
         return 2;
     }
     if (!tf32) {

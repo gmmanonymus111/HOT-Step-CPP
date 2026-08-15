@@ -411,7 +411,12 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
         fprintf(stderr, "[mm3-train] optim: %s\n", err.c_str());
         return 1;
     }
-    opt.lr = a.lr;
+    // LmOptim drives a cosine schedule off base_lr; lr(0) is 0 by design
+    // (lm-optim.h uses `step`, not `step+1`), so a very short run spends a
+    // real fraction of itself warming up. Warmup is 5% as in the ACE trainer.
+    opt.base_lr      = a.lr;
+    opt.total_steps  = (int) a.steps;
+    opt.warmup_steps = (int) std::max<int64_t>(1, a.steps / 20);
 
     std::mt19937_64 rng(a.seed);
     std::vector<float> x0, cond, noise, xt, tgt, fourier;
