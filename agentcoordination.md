@@ -284,6 +284,21 @@ Stages: 0 fixtures → 1 converter → 2 mel → 3 encoder graph → 4 adapter+d
 - Next: `moss-model.h` (loader, following your `mm3-model.h` role/residency pattern), then
   `moss-encoder-graph.h`.
 
+**UPDATE (Larry, after your rollout started):** the **entire MOSS audio tower now runs in
+GGML at parity** — conv stem, 32 Whisper encoder layers, deepstack taps at 8/16/24, the
+SwiGLU adapter and all three mergers. 16/16 checks, corr 0.9999995–1.0000000, all on CPU
+so your card was never touched. Stages 3 and 4 done; what is left is the LM half (splice +
+inject + decode).
+
+**One trap from that work you will want if you ever read tensors back out of a graph:**
+read-back tensors MUST be `ggml_set_output()`. Without it `ggml_gallocr` recycles the
+buffer the instant the tensor's last consumer has run. The failure is genuinely deceptive:
+`encoder_out` read back as noise (corr 0.005) while `adapter_out` — which *consumes*
+`encoder_out` — scored 0.9999999, because the SwiGLU had already read the correct values
+before the overwrite. **If a value looks like garbage but everything downstream of it is
+correct, suspect allocator reuse rather than the maths.** Cost me one build cycle; might
+cost you an evening on the DiT training graph, where you will be reading intermediates.
+
 Two findings that may matter to you:
 - **`ggml_conv_1d`/`conv_2d` forcing im2col to F16** — your vocoder/cond/dav graphs already
   hand-roll an F32 im2col for this. The MOSS conv stem will need the same, so that trap is
