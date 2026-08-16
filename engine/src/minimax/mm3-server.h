@@ -1455,6 +1455,11 @@ static void mm3_handle_synth_e2e(const httplib::Request & req, httplib::Response
     const MM3LmConfig & lc  = g_mm3.lm_cfg;
     const int64_t       NCB = (int64_t) lc.num_codebooks - 1;
 
+    // Sampler plugins are deliberately NOT wired here. This is a bring-up /
+    // parity endpoint: its whole job is to reproduce the reference arithmetic
+    // against the fixtures, and `gr.plugins` left empty is exactly that. Adding
+    // them would give the parity harness a way to silently stop measuring
+    // parity. Production selection lives on POST /mm3/synth (mm3-request.h).
     MM3GenRequest gr;
     gr.prompt     = mm3_json_str(root, "prompt");
     gr.max_frames = mm3_json_i64(root, "max_frames", 300);

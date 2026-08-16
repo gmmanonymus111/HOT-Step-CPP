@@ -197,6 +197,19 @@ async function capabilities(): Promise<BackendCapabilities> {
       models: true,
       lm: false,
       plugins: false,
+      // The one subsystem on this list that stopped being false. MM3's flow DiT
+      // now runs the SAME Lua solvers/schedulers/guidance as ACE, via the
+      // convention bridge in engine minimax/mm3-plugins.h — no plugin was
+      // modified and no plugin API was widened.
+      //
+      // `plugins` stays false on purpose: it picks ACE's Generation dropdown,
+      // and MM3 needs the generic one for its steps/cfg extension knobs. The
+      // plugin controls render alongside those, gated on THIS flag.
+      //
+      // Still opt-in per request (params.mm3SamplerPlugins): the picks are
+      // shared global UI state, so defaulting them on would move every render
+      // off the parity-proven native flow loop without anyone asking.
+      samplerPlugins: true,
       adapters: false,
       // Model-agnostic post stages: the VST chain reads the rate from the WAV,
       // mastering reads and writes it, and SA3 is natively 44.1 kHz — none of
@@ -251,6 +264,33 @@ async function capabilities(): Promise<BackendCapabilities> {
         min: 1.0,
         max: 5.0,
         step: 0.1,
+      },
+      {
+        // Backend-NEUTRAL key: BackendGenerationDropdown reads it to decide
+        // whether to render the shared solver/scheduler/guidance pickers, and
+        // that component must stay free of MM3-specific names. Any future
+        // backend claiming features.samplerPlugins declares the same key.
+        key: 'samplerPluginsEnabled',
+        type: 'toggle',
+        label: 'Sampler Plugins',
+        hint: 'Drive the flow sampler with the shared Lua solver/scheduler/guidance '
+            + 'plugins instead of MiniMax-Music3\'s own Euler loop. Off is the tested '
+            + 'default; on is experimental — the plugins were written and tuned against '
+            + 'the ACE-Step DiT, and stochastic solvers in particular can disturb the '
+            + 'window seams this backend stitches across.',
+        default: false,
+      },
+      {
+        key: 'mm3FlowShift',
+        type: 'slider',
+        label: 'Schedule Shift',
+        hint: 'Timestep warp passed to a scheduler plugin. 1.0 matches MiniMax-Music3\'s '
+            + 'own schedule; higher spends more steps near the noisy end. Does nothing '
+            + 'unless Sampler Plugins is on AND a schedule other than Native is picked.',
+        default: 1.0,
+        min: 0.5,
+        max: 6.0,
+        step: 0.05,
       },
     ],
   };

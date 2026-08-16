@@ -87,9 +87,14 @@ export interface MinimaxParamMapping {
  * The caption field list is IDENTICAL to translateParams.ts:49 on purpose: the
  * UI has one "what to generate" text field and both backends must read the
  * same one, or switching backends would silently change which box matters.
- * Everything ACE-specific (adapters, solver/scheduler/guidance, LM knobs,
- * task modes, latents, bpm/keyscale/timesignature, negative prompt) is ignored
- * — MM3 has no wire slot for any of it.
+ * Everything ACE-specific (adapters, LM knobs, task modes, latents,
+ * bpm/keyscale/timesignature, negative prompt) is ignored — MM3 has no wire
+ * slot for any of it.
+ *
+ * The solver/scheduler/guidance picks are the exception, and only since the
+ * sampler-plugin bridge landed: the SAME Lua plugins now drive both DiTs, so
+ * those three fields DO travel — but only on explicit opt-in. See
+ * mapMinimaxSamplerPlugins below for why that gate exists.
  */
 export function mapMinimaxParams(params: any): MinimaxParamMapping {
   const notes: string[] = [];
@@ -124,6 +129,8 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
     notes.push(`batchSize ${requestedBatch} requested — MiniMax-Music3 v1 generates 1 track per job (capability manifest: batch.max = 1)`);
   }
 
+  const samplerPlugins = mapMinimaxSamplerPlugins(params, notes);
+
   return {
     req: {
       caption,
@@ -148,9 +155,63 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
       // LRC timestamps ride the same toggle ACE uses (skipLrc inverted).
       // Instrumentals are filtered engine-side, so no check is needed here.
       get_lrc: params.skipLrc !== true,
+      ...samplerPlugins,
     },
     notes,
   };
+}
+
+/**
+ * Sampler-plugin fields for the /mm3/synth request, or {} when the user has
+ * not opted in.
+ *
+ * OPT-IN IS DELIBERATE, and it is the whole reason this is a separate function
+ * rather than three lines in the mapping above. The solver/guidance/scheduler
+ * pickers are shared global state: the UI always holds a value for them (ACE
+ * defaults to euler + apg), so forwarding them unconditionally would move EVERY
+ * MiniMax-Music3 render off the native flow loop the moment this shipped —
+ * silently, and for users who never asked for it. `guidance_mode: "apg"` in
+ * particular is not MM3's plain CFG; it is a different algorithm.
+ *
+ * So the picks only travel when `samplerPluginsEnabled` is on. Off (the default)
+ * is byte-for-byte today's behaviour. The key is backend-neutral on purpose:
+ * it is a declared extension knob, and BackendGenerationDropdown reads it to
+ * decide whether to show the pickers at all — that component must not learn any
+ * MM3-specific names.
+ *
+ * Names are ACE's throughout — see translateParams.ts:128-130, 273, 300. The
+ * engine takes the same spellings, so this is a pass-through, not a mapping.
+ */
+function mapMinimaxSamplerPlugins(params: any, notes: string[]): Partial<Mm3SynthRequest> {
+  if (!params.samplerPluginsEnabled) return {};
+
+  const out: Partial<Mm3SynthRequest> = {};
+  if (params.inferMethod) out.infer_method = params.inferMethod;
+  if (params.scheduler) out.scheduler = params.scheduler;
+  if (params.guidanceMode) out.guidance_mode = params.guidanceMode;
+
+  if (Number.isFinite(Number(params.mm3FlowShift))
+      && Number(params.mm3FlowShift) > 0 && Number(params.mm3FlowShift) <= 20) {
+    out.flow_shift = Number(params.mm3FlowShift);
+  }
+  if (Number.isFinite(Number(params.apgNormThreshold))
+      && Number(params.apgNormThreshold) >= 0 && Number(params.apgNormThreshold) <= 100) {
+    out.apg_norm_threshold = Number(params.apgNormThreshold);
+  }
+  if (params.pluginParams && Object.keys(params.pluginParams).length > 0) {
+    out.plugin_params = params.pluginParams;
+  }
+
+  if (Object.keys(out).length === 0) {
+    notes.push('sampler plugins enabled but nothing selected — running the native MiniMax-Music3 flow loop');
+    return {};
+  }
+  notes.push(
+    `sampler plugins: solver=${out.infer_method ?? '(native euler)'}, `
+    + `scheduler=${out.scheduler ?? '(native)'}, guidance=${out.guidance_mode ?? '(native cfg)'}`
+    + ' — this leaves the parity-proven default path',
+  );
+  return out;
 }
 
 // ── Progress ─────────────────────────────────────────────────────────────────
@@ -272,6 +333,15 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       `[MM3] Job ${sub.job_id} submitted — ${sub.prompt_tokens} prompt tokens, ${sub.max_frames} frames `
       + `(${sub.duration.toFixed(1)}s), seed ${sub.seed}, ${sub.steps} steps, cfg ${sub.cfg_flow}`
       + `${sub.instrumental ? ', instrumental' : ''}`);
+    // Echoed by the engine only when a plugin was actually selected — the
+    // difference between "I picked a solver" and "a solver ran".
+    if (sub.sampler_plugins) {
+      const sp = sub.sampler_plugins;
+      log('INFO',
+        `[MM3] Sampler plugins in force — solver=${sp.solver || '(native euler)'}, `
+        + `scheduler=${sp.scheduler || '(native)'}, guidance=${sp.guidance || '(native cfg)'}, `
+        + `shift=${sp.shift}, ${sp.n_params} declared param(s)`);
+    }
 
     // ── Progress ticker ──
     // GET /job (polled by pollUntilDone) gives the ACE-phase mapping; this adds

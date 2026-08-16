@@ -136,6 +136,71 @@ does this; `engine/server.cmd` does not).
     already degrade per-request with an empty registry. Any future boot-time hard-exit must
     ask "can MM3 still serve?" first.
 
+## Sampler plugins: shared with ACE (built 2026-08-16 — NOT YET COMPILED OR HEARD)
+
+The same Lua solver / scheduler / guidance plugins that drive the ACE DiT now
+drive MM3's flow DiT. No plugin was modified and no plugin API was widened —
+the plugin layer never had an ACE dependency (every `lua_call_*` entry point
+takes raw `float *` + counts + a param map); what was ACE-specific was the
+sampler, not the plugins. Bridge: **`engine/src/minimax/mm3-plugins.h`**.
+
+Two conventions differ, and both mappings are exact:
+
+1. **Time runs the other way.** ACE `t` descends 1→0 with `xt -= vt*dt`; MM3
+   `sigma` ascends 0→1 with `x += dsigma*v`. Substituting `sigma = 1-t` and
+   `v_ace = -v_mm3` makes them the same expression — *including the terminal
+   step*, where MM3's last increment `(1 - sigma[steps-1])*v` is character-for-
+   character ACE's engine-owned `x0 = xt - t_curr*vt`. MM3's steps+1 sigma array
+   IS ACE's "N timesteps + engine-owned final step".
+2. **The latents are transposed.** ACE is time-major `[T][Oc]`, MM3 is
+   channel-major `[C=128][L]`. This is NOT cosmetic: `apg_forward` normalises
+   per channel over time and indexes `[t*Oc+c]` to do it, so a channel-major
+   buffer would be grouped along neither axis. The bridge transposes into the
+   ACE view before any plugin sees a buffer. 4 transposes/step of 88k floats
+   against two 2.4B forwards — free.
+
+**Opt-in, and that is load-bearing.** Empty selection == the native arithmetic,
+expression for expression, so the parity fixtures still cover the default path.
+This holds even for `infer_method=euler` (Lua computes in double and rounds on
+store; the native loop is float throughout — they can differ in the last ulp).
+Server-side the picks only travel when `params.samplerPluginsEnabled` is on,
+because solver/guidance are shared global UI state and ACE defaults them to
+euler + apg — forwarding blindly would move every MM3 render off the native
+loop silently, and `guidance_mode: "apg"` is a genuinely different algorithm
+from MM3's plain CFG.
+
+Not supported: **owns_loop solvers** (11 of them, mostly MDMAchine's — they'd
+bypass the per-step overlap blend and break every window seam; engine warns and
+falls back, and `SamplerPluginControls.tsx` filters them out of the dropdown),
+**postprocess plugins** (they replace ACE's tiled VAE decode), **`composite:`
+schedulers** (built by `sampler-schedule.h` from ACE's own globals), and the
+**legacy sideband params** (`stork_substeps` etc., read from `g_hotstep_params`).
+
+State resets **per window**, not per song: one 200-frame window == one ACE
+"generation", so `MM3PluginRun::begin_window()` resets APG momentum and solver
+history. Momentum leaking across a seam would smear one window's guidance
+history onto the next one's first step, right where the overlap machinery is
+trying to hide the join. Stochastic solvers are the open risk — they inject
+noise that fights the overlap blend; test the seams by ear.
+
+Wire fields (mm3-request.h, all optional): `infer_method`, `scheduler`,
+`guidance_mode`, `flow_shift` (default 1.0 = MM3's own hardcoded shift; only
+consulted with a scheduler plugin), `apg_norm_threshold`, `plugin_params`.
+`POST /mm3/synth` echoes `sampler_plugins` back **only when something was
+selected** — that is how you tell "I picked a solver" from "a solver ran".
+Capability: `features.samplerPlugins` (distinct from `features.plugins`, which
+selects WHICH Generation dropdown renders — MM3 needs the generic one for its
+steps/cfg knobs, so it is `plugins: false, samplerPlugins: true`).
+
+**Status: written, TypeScript type-checks clean on both tiers, C++ NOT compiled
+and no audio generated.** Validate in this order: (1) `dev-rebuild.bat`;
+(2) a generation with no plugins selected, confirming it is bit-identical to a
+pre-change render on the same seed — that is the parity guarantee, and it is
+the only claim here that can be checked without ears; (3) `linear` scheduler
+alone, which should be near-identical to native (MM3's schedule IS shift=1
+linear, differing only in float32 linspace rounding); (4) a solver, listening
+specifically at window seams on a >8 s clip.
+
 ## Performance budget (RTX 5090, f16, 12 s clip ≈ 12.4 s wall ≈ 1.0× realtime)
 
 AR 25.5 ms/frame (LM step 15.3 — bandwidth-bound; depth 9.2 — launch-bound tiny matmuls, 37 % of

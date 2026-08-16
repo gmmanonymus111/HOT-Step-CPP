@@ -42,6 +42,11 @@ async function capabilities(): Promise<BackendCapabilities> {
       models: true,
       lm: true,
       plugins: true,
+      // ACE is where the Lua sampler plugins came from; its own Generation
+      // dropdown already renders the controls, so this flag changes nothing
+      // here. It exists so MM3 can claim the capability without also claiming
+      // ACE's dropdown (see the field docs in ../types.ts).
+      samplerPlugins: true,
       adapters: true,
       postProcess: true,
       stableStep: true,

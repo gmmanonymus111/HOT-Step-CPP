@@ -612,6 +612,19 @@ static bool mm3_req_str(yyjson_val * root, const char * key, std::string * out, 
 //   get_lrc      bool, default false — lyric timestamps (LRC) from the
 //                alignment heads; costs the manual attention path on 3 of
 //                36 LM layers, and is a no-op on an instrumental
+//   infer_method       string, default "" — Lua solver plugin name (ACE's field
+//                      name, shared registry). "" = native Euler.
+//   scheduler          string, default "" — Lua scheduler plugin. "" = native
+//                      inverted-linspace sigmas.
+//   guidance_mode      string, default "" — Lua guidance plugin, or "apg" for
+//                      the native APG path. "" = plain CFG, MM3's own.
+//   flow_shift         number in (0, 20], default 1.0 — timestep warp handed to
+//                      a scheduler plugin. Ignored without one.
+//   apg_norm_threshold number in [0, 100], default 2.5
+//   plugin_params      object {"pluginName:key": value}, default {}
+//
+//   The five plugin fields are ALL optional and all default to the native
+//   path, which is the one the parity fixtures cover. See mm3-plugins.h.
 static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3SynthRequest * out, std::string * err) {
     *out = MM3SynthRequest{};
 
@@ -733,6 +746,80 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
         }
     }
 
+    // ── Sampler plugins (mm3-plugins.h) ──
+    // Field names are ACE's on purpose: one UI control set, one wire vocabulary,
+    // and a request that can be moved between backends without translation.
+    // ALL OPTIONAL. Absent or empty == the native, parity-proven flow loop, so
+    // every existing caller keeps the arithmetic the fixtures were built on.
+    MM3PluginSel plug;
+    if (!mm3_req_str(root, "infer_method", &plug.solver, &present, err)) {
+        return false;
+    }
+    if (!mm3_req_str(root, "scheduler", &plug.scheduler, &present, err)) {
+        return false;
+    }
+    if (!mm3_req_str(root, "guidance_mode", &plug.guidance, &present, err)) {
+        return false;
+    }
+
+    // MM3's own scheduler is hardcoded shift=1 upstream, so the default
+    // reproduces it. Only consulted when a scheduler plugin is named.
+    double shift = 1.0;
+    if (!mm3_req_num(root, "flow_shift", &shift, &present, err)) {
+        return false;
+    }
+    if (!(shift > 0.0) || shift > 20.0) {
+        if (err) {
+            *err = "\"flow_shift\" must be in (0, 20]";
+        }
+        return false;
+    }
+    plug.shift = (float) shift;
+
+    double apg_thr = 2.5;
+    if (!mm3_req_num(root, "apg_norm_threshold", &apg_thr, &present, err)) {
+        return false;
+    }
+    if (apg_thr < 0.0 || apg_thr > 100.0) {
+        if (err) {
+            *err = "\"apg_norm_threshold\" must be in [0, 100]";
+        }
+        return false;
+    }
+    plug.apg_norm_threshold = (float) apg_thr;
+
+    // Declared plugin params: {"pluginName:key": value}. Same shape and same
+    // coercion as parse_server_fields() in hot-step-server.cpp — a mismatch
+    // would make the SAME UI control mean different things per backend.
+    {
+        yyjson_val * pp_obj = yyjson_obj_get(root, "plugin_params");
+        if (pp_obj && !yyjson_is_null(pp_obj)) {
+            if (!yyjson_is_obj(pp_obj)) {
+                if (err) {
+                    *err = "\"plugin_params\" must be an object";
+                }
+                return false;
+            }
+            yyjson_obj_iter it;
+            yyjson_obj_iter_init(pp_obj, &it);
+            yyjson_val * k;
+            while ((k = yyjson_obj_iter_next(&it))) {
+                yyjson_val * v = yyjson_obj_iter_get_val(k);
+                std::string  vs;
+                if (yyjson_is_str(v)) {
+                    vs = yyjson_get_str(v);
+                } else if (yyjson_is_real(v)) {
+                    vs = std::to_string(yyjson_get_real(v));
+                } else if (yyjson_is_int(v)) {
+                    vs = std::to_string(yyjson_get_int(v));
+                } else if (yyjson_is_bool(v)) {
+                    vs = yyjson_get_bool(v) ? "true" : "false";
+                }
+                plug.params[std::string(yyjson_get_str(k))] = vs;
+            }
+        }
+    }
+
     out->prompt = mm3_assemble_prompt(out->caption, out->lyrics, &out->instrumental);
 
     out->gen            = MM3GenRequest{};
@@ -741,6 +828,7 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
     out->gen.seed       = seed;
     out->gen.steps      = (int) nsteps;
     out->gen.cfg_flow   = (float) cfg;
+    out->gen.plugins    = plug;
     return true;
 }
 

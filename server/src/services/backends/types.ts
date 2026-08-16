@@ -52,6 +52,22 @@ export interface BackendFeatureCapabilities {
   models: boolean;
   lm: boolean;
   plugins: boolean;
+  /** The Lua sampler plugins (solvers, schedulers, guidance) actually RUN on
+   *  this backend's denoiser.
+   *
+   *  Deliberately separate from `plugins`, which by now means something
+   *  narrower than its name suggests: it selects WHICH Generation dropdown the
+   *  UI renders (ACE's plugin-registry one vs the generic seed + declared
+   *  extensions one) and rides herd on the ACE-VAE-coupled post stages. MM3
+   *  needs the generic dropdown for its own steps/cfg knobs AND the plugin
+   *  controls, so it wants `plugins: false` with `samplerPlugins: true` —
+   *  a combination the single flag could not express.
+   *
+   *  Engine side: ACE runs them natively (hot-step-sampler.h); MM3 runs them
+   *  through the convention bridge in minimax/mm3-plugins.h. Postprocess
+   *  plugins are NOT covered — those replace ACE's tiled VAE decode and have no
+   *  MM3 analogue. */
+  samplerPlugins: boolean;
   adapters: boolean;
   /** The model-agnostic post-processing stages run for this backend: the VST
    *  chain and reference mastering, both of which read the sample rate from

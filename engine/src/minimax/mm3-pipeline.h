@@ -97,6 +97,7 @@
 #include "mm3-cond-graph.h"
 #include "mm3-dit-graph.h"
 #include "mm3-model.h"
+#include "mm3-plugins.h"
 #include "mm3-tokenizer.h"
 #include "mm3-vocoder-graph.h"
 
@@ -148,11 +149,16 @@ using MM3ProgressCb = std::function<void(const MM3GenProgress &)>;
 //   cond         2048*L floats, torch [1, L, 2048] order. Uploaded once.
 //   prev_latent  128*prev_stride floats, channel-major, the previous window's
 //                carry. Only [0, overlap) of each channel is read.
+//   plugins      optional Lua solver/scheduler/guidance override (mm3-plugins.h).
+//                nullptr, or a run with `active == false`, leaves EVERY
+//                expression below exactly as the fixtures proved it — the
+//                plugin path is a branch, never a rewrite of the default.
 static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const float * cond, int64_t L, int steps,
                                   float cfg_scale, int64_t overlap, const float * prev_latent, int64_t prev_stride,
                                   std::vector<float> & out_latents, MM3FlowStats * stats,
                                   const std::function<void(int, int)> & on_step,
-                                  const std::function<bool()> & should_cancel, std::string * err) {
+                                  const std::function<bool()> & should_cancel, std::string * err,
+                                  MM3PluginRun * plugins = nullptr) {
     if (L <= 0 || L > MM3_DIT_MAX_FRAMES) {
         if (err) {
             *err = "frames must be in 1.." + std::to_string(MM3_DIT_MAX_FRAMES);
@@ -186,11 +192,100 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
     out_latents.assign((size_t) N, 0.0f);
     memcpy(out_latents.data(), noise, (size_t) N * sizeof(float));
 
+    // ── Plugin path (opt-in) ────────────────────────────────────────────────
+    // `use_plugins` false => the original arithmetic, untouched. See
+    // mm3-plugins.h for the sigma<->t and channel-major<->time-major mappings.
+    const bool use_plugins = plugins && plugins->active;
+
     std::vector<float> sigmas, timesteps;
-    mm3_flow_sigmas(steps, &sigmas, &timesteps);
+    if (plugins && plugins->scheduler) {
+        mm3_plugins_schedule(*plugins, steps, &sigmas, &timesteps);
+    } else {
+        mm3_flow_sigmas(steps, &sigmas, &timesteps);
+    }
 
     std::vector<float> pred_c((size_t) N);
     std::vector<float> pred_u((size_t) N);
+
+    // Plugin-only scratch. Left empty (zero allocation) on the native path.
+    std::vector<float> v_guided, pred_c2, pred_u2, v_scratch;
+    bool               sub_eval_failed = false;
+    std::string        sub_eval_err;
+    int                cur_step   = 0;
+    float              cur_dt_ace = 0.0f;
+
+    SolverModelFn   model_fn;
+    PostStepModelFn eval_cond_fn, eval_uncond_fn;
+
+    if (use_plugins) {
+        // One window == one ACE "generation" for state purposes: momentum and
+        // solver history reset here, never across the seam.
+        plugins->begin_window(N);
+        v_guided.assign((size_t) N, 0.0f);
+
+        const bool multi_eval    = plugins->solver && plugins->solver->needs_model;
+        const bool wants_post    = plugins->guidance && plugins->guidance->has_post_step;
+        if (multi_eval || wants_post) {
+            pred_c2.assign((size_t) N, 0.0f);
+            pred_u2.assign((size_t) N, 0.0f);
+            v_scratch.assign((size_t) N, 0.0f);
+        }
+
+        // Multi-eval solvers (Heun, RK4, UniPC, DOPRI5…) re-evaluate the model
+        // at an intermediate (xt, t). That is two more full 2.4B forwards per
+        // call — budget accordingly; they are charged to stats->forwards.
+        //
+        // `cond` is deliberately null in every sub-evaluation: the conditioning
+        // is already resident, uploaded by the step-0 conditional pass which
+        // always precedes any solver call. Re-uploading would cost a host->device
+        // copy per sub-evaluation for a value that cannot have changed.
+        if (multi_eval) {
+            model_fn = [&](const float * xt_ace, float t_val) {
+                const float sig = 1.0f - t_val;
+                mm3_plug_from_ace_view(xt_ace, plugins->cm_tmp.data(), C, L, /*negate=*/false);
+                if (!mm3_dit_run(m, &g_mm3_dit, plugins->cm_tmp.data(), nullptr, 1.0f, sig, L, pred_c2.data(),
+                                 &sub_eval_err) ||
+                    !mm3_dit_run(m, &g_mm3_dit, plugins->cm_tmp.data(), nullptr, 0.0f, sig, L, pred_u2.data(),
+                                 &sub_eval_err)) {
+                    sub_eval_failed = true;
+                    return;
+                }
+                plugins->extra_forwards += 2;
+                // Leaves the guided velocity in plugins->tm_v — which IS the
+                // vt_buf the solver was handed. Same contract as ACE's
+                // evaluate_velocity, momentum update included.
+                mm3_plugins_guide(*plugins, pred_c2.data(), pred_u2.data(), cfg_scale, C, L, cur_step, steps, t_val,
+                                  cur_dt_ace, v_scratch.data());
+            };
+        }
+
+        // post_step() evaluates ONE branch at a time and writes it into the
+        // buffers the plugin reads as vt_cond / vt_uncond (tm_c / tm_u).
+        if (wants_post) {
+            eval_cond_fn = [&](const float * xt_ace, float t_val) {
+                const float sig = 1.0f - t_val;
+                mm3_plug_from_ace_view(xt_ace, plugins->cm_tmp.data(), C, L, /*negate=*/false);
+                if (!mm3_dit_run(m, &g_mm3_dit, plugins->cm_tmp.data(), nullptr, 1.0f, sig, L, pred_c2.data(),
+                                 &sub_eval_err)) {
+                    sub_eval_failed = true;
+                    return;
+                }
+                plugins->extra_forwards += 1;
+                mm3_plug_to_ace_view(pred_c2.data(), plugins->tm_c.data(), C, L, /*negate=*/true);
+            };
+            eval_uncond_fn = [&](const float * xt_ace, float t_val) {
+                const float sig = 1.0f - t_val;
+                mm3_plug_from_ace_view(xt_ace, plugins->cm_tmp.data(), C, L, /*negate=*/false);
+                if (!mm3_dit_run(m, &g_mm3_dit, plugins->cm_tmp.data(), nullptr, 0.0f, sig, L, pred_u2.data(),
+                                 &sub_eval_err)) {
+                    sub_eval_failed = true;
+                    return;
+                }
+                plugins->extra_forwards += 1;
+                mm3_plug_to_ace_view(pred_u2.data(), plugins->tm_u.data(), C, L, /*negate=*/true);
+            };
+        }
+    }
 
     const auto t_all  = std::chrono::steady_clock::now();
     double     fwd_ms = 0.0, first_ms = 0.0, last_ms = 0.0;
@@ -234,10 +329,53 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
         last_ms = ms;
 
         const float dsigma = sigmas[(size_t) i + 1] - sigmas[(size_t) i];
-        for (int64_t j = 0; j < N; j++) {
-            const float u = pred_u[(size_t) j];
-            const float v = u + cfg_scale * (pred_c[(size_t) j] - u);
-            out_latents[(size_t) j] += dsigma * v;
+        if (!use_plugins) {
+            for (int64_t j = 0; j < N; j++) {
+                const float u = pred_u[(size_t) j];
+                const float v = u + cfg_scale * (pred_c[(size_t) j] - u);
+                out_latents[(size_t) j] += dsigma * v;
+            }
+        } else {
+            // Everything a plugin sees is in the ACE convention: t descending,
+            // velocity sign-flipped, latents time-major. mm3-plugins.h owns the
+            // mapping and its proof.
+            const float t_ace      = 1.0f - sigmas[(size_t) i];
+            const float t_next_ace = 1.0f - sigmas[(size_t) i + 1];
+            cur_step               = i;
+            cur_dt_ace             = t_ace - t_next_ace;  // == dsigma, exactly
+
+            mm3_plugins_guide(*plugins, pred_c.data(), pred_u.data(), cfg_scale, C, L, i, steps, t_ace, cur_dt_ace,
+                              v_guided.data());
+
+            if (plugins->solver && i < steps - 1) {
+                // The solver contract reserves the final step for the engine.
+                mm3_plugins_solver_step(*plugins, out_latents.data(), C, L, t_ace, t_next_ace, i, model_fn);
+            } else {
+                // Native Euler, and — at i == steps-1 — the engine-owned final
+                // step. Those are the SAME expression here: dsigma is
+                // 1 - sigma[steps-1] == t_ace, so `x += dsigma * v_mm3` is
+                // ACE's `x0 = x - t_curr * v_ace` with the signs cancelled.
+                for (int64_t j = 0; j < N; j++) {
+                    out_latents[(size_t) j] += dsigma * v_guided[(size_t) j];
+                }
+            }
+
+            // MM3 always runs both CFG branches, so the "CFG must be live" half
+            // of ACE's gate is unconditionally true; only the final-step
+            // exclusion carries over.
+            if (plugins->guidance && plugins->guidance->has_post_step && i < steps - 1) {
+                mm3_plugins_post_step(*plugins, out_latents.data(), C, L, t_next_ace, i, steps, cur_dt_ace,
+                                      eval_cond_fn, eval_uncond_fn);
+            }
+
+            // A sub-evaluation cannot report failure through the void-returning
+            // solver/post_step callbacks, so it latches and is collected here.
+            if (sub_eval_failed) {
+                if (err) {
+                    *err = sub_eval_err.empty() ? "plugin sub-evaluation failed" : sub_eval_err;
+                }
+                return false;
+            }
         }
 
         if (on_step) {
@@ -264,9 +402,12 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
     }
 
     const double total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_all).count();
+    // Multi-eval solvers and post_step() add forwards that a flat 2/step count
+    // would hide, making a Heun run look as cheap as an Euler one.
+    const int64_t n_forwards = (int64_t) steps * 2 + (use_plugins ? plugins->extra_forwards : 0);
     if (stats) {
         stats->steps         = steps;
-        stats->forwards      = steps * 2;
+        stats->forwards      = (int) n_forwards;
         stats->total_ms      = total_ms;
         stats->forward_ms    = fwd_ms;
         stats->first_ms      = first_ms;
@@ -274,9 +415,10 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
         stats->compute_bytes = g_mm3_dit.compute_bytes;
     }
     fprintf(stderr,
-            "[MM3-Flow] Window: L=%lld, ov=%lld, %d steps, cfg %.2f -> %.0f ms (%.0f ms/step, %.0f ms/forward)\n",
-            (long long) L, (long long) overlap, steps, (double) cfg_scale, total_ms, total_ms / (double) steps,
-            fwd_ms / (double) (steps * 2));
+            "[MM3-Flow] Window: L=%lld, ov=%lld, %d steps, cfg %.2f, %lld forwards -> %.0f ms (%.0f ms/step, %.0f "
+            "ms/forward)\n",
+            (long long) L, (long long) overlap, steps, (double) cfg_scale, (long long) n_forwards, total_ms,
+            total_ms / (double) steps, fwd_ms / (double) (n_forwards > 0 ? n_forwards : 1));
     return true;
 }
 
@@ -324,6 +466,11 @@ struct MM3GenRequest {
     uint64_t seed       = 42;
     int      steps      = 30;
     float    cfg_flow   = 1.7f;
+
+    // Lua solver/scheduler/guidance overrides shared with the ACE sampler
+    // (mm3-plugins.h). All-empty — the default — runs the parity-proven native
+    // path, so a caller that knows nothing about plugins is unaffected.
+    MM3PluginSel plugins;
 
     // Parity mode: replay the reference's own AR codes instead of sampling.
     // Iteration-indexed, entry 0 is the un-emitted iteration (see mm3-ar-loop.h).
@@ -540,6 +687,12 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
     std::vector<float> cond;
     std::vector<float> noise;
 
+    // Resolve the plugin selection ONCE per song, not once per window: the
+    // lookup logs what will run, and repeating it per window would spam the
+    // engine log with the same three lines for every 200-frame chunk. The
+    // per-window state reset lives in MM3PluginRun::begin_window instead.
+    MM3PluginRun plugin_run = mm3_plugins_resolve(req.plugins);
+
     for (int64_t k = 0; k < NW; k++) {
         const int64_t cs  = starts[(size_t) k];
         const int64_t ce  = (cs + win_frames < F) ? cs + win_frames : F;
@@ -590,7 +743,7 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
         };
         if (!mm3_flow_sample_chunk(m, noise.data(), cond.data(), L, req.steps, req.cfg_flow, overlap,
                                    overlap > 0 ? prev_latent.data() : nullptr, prev_len, lat, &fstats, on_step,
-                                   req.should_cancel, err)) {
+                                   req.should_cancel, err, &plugin_run)) {
             return false;
         }
         out->flow_ms += fstats.total_ms;

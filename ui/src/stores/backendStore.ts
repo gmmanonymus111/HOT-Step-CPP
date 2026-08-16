@@ -40,6 +40,13 @@ export interface BackendFeatureCapabilities {
   models: boolean;
   lm: boolean;
   plugins: boolean;
+  /** The Lua sampler plugins (solvers, schedulers, guidance) actually RUN on
+   *  this backend's denoiser. Distinct from `plugins`, which selects WHICH
+   *  Generation dropdown renders — MiniMax-Music3 needs the generic one for its
+   *  own knobs while still running the plugins, so it reports
+   *  `plugins: false, samplerPlugins: true`. Optional here because a backend
+   *  registered by an older server won't send it. */
+  samplerPlugins?: boolean;
   adapters: boolean;
   /** Model-agnostic post stages (VST chain, reference mastering) run for this
    *  backend. Separate from `plugins`, which also gates the ACE-VAE-coupled

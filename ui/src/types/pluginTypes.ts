@@ -33,6 +33,11 @@ export interface PluginInfo {
   needs_model?: boolean;
   stateful?: boolean;
   stochastic?: boolean;
+  /** Full-loop solver: defines sample() and drives its own iteration instead of
+   *  a per-step step(). The engine has always served this field
+   *  (lua-plugin-registry.h:303); it was simply never typed here. Backends
+   *  other than ACE cannot run these — see SamplerPluginControls.tsx. */
+  owns_loop?: boolean;
   params: PluginParamSchema[];
 }
 

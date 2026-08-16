@@ -149,6 +149,31 @@ export interface Mm3SynthRequest {
    *  to the AR stage (forces the manual attention path) and is ignored
    *  for instrumentals. */
   get_lrc?: boolean;
+
+  // ── Sampler plugins (engine: minimax/mm3-plugins.h) ───────────────────────
+  // The SAME Lua solver/scheduler/guidance plugins the ACE DiT uses, driving
+  // MM3's flow DiT through a convention adapter. Field names are ACE's, so one
+  // UI control set feeds both backends.
+  //
+  // Every one of these is optional and every one defaults to MM3's native,
+  // parity-proven flow loop. Omit them and nothing changes — which is why the
+  // server only sends them when the user has explicitly opted in.
+
+  /** Lua solver plugin name. Full-loop (owns_loop) solvers are not supported on
+   *  MM3 yet — the engine warns and falls back to native Euler. */
+  infer_method?: string;
+  /** Lua scheduler plugin name. */
+  scheduler?: string;
+  /** Lua guidance plugin name, or "apg" for the native APG path. */
+  guidance_mode?: string;
+  /** Timestep warp handed to a scheduler plugin, (0, 20]. Default 1.0, which is
+   *  what MM3's own hardcoded schedule uses. Ignored without a scheduler. */
+  flow_shift?: number;
+  /** APG per-channel norm clip, [0, 100]. Default 2.5. */
+  apg_norm_threshold?: number;
+  /** Declared plugin params, {"pluginName:key": value} — the same map and the
+   *  same coercion rules as the ACE path's `plugin_params`. */
+  plugin_params?: Record<string, string>;
 }
 
 export interface Mm3SynthResponse {
@@ -163,6 +188,16 @@ export interface Mm3SynthResponse {
   steps: number;
   cfg_flow: number;
   wav_bits: number;
+  /** Present only when a sampler plugin was actually selected. Absent means the
+   *  native flow loop ran — which is what makes this the honest answer to "did
+   *  my picks reach the engine?". */
+  sampler_plugins?: {
+    solver: string;
+    scheduler: string;
+    guidance: string;
+    shift: number;
+    n_params: number;
+  };
 }
 
 /** MM3-native stage detail. `stage` is the real MM3 vocabulary

@@ -552,6 +552,18 @@ static void mm3_handle_synth(const httplib::Request & hreq, httplib::Response & 
     yyjson_mut_obj_add_uint(o, orot, "steps", req.gen.steps);
     yyjson_mut_obj_add_real(o, orot, "cfg_flow", (double) req.gen.cfg_flow);
     yyjson_mut_obj_add_uint(o, orot, "wav_bits", req.wav_bits);
+    // Echo the sampler-plugin selection back. Absent from the response == the
+    // native flow loop ran, which is the answer to "did my picks actually
+    // reach the engine?" without reading the engine log.
+    if (req.gen.plugins.any()) {
+        yyjson_mut_val * pl = yyjson_mut_obj(o);
+        yyjson_mut_obj_add_strcpy(o, pl, "solver", req.gen.plugins.solver.c_str());
+        yyjson_mut_obj_add_strcpy(o, pl, "scheduler", req.gen.plugins.scheduler.c_str());
+        yyjson_mut_obj_add_strcpy(o, pl, "guidance", req.gen.plugins.guidance.c_str());
+        yyjson_mut_obj_add_real(o, pl, "shift", (double) req.gen.plugins.shift);
+        yyjson_mut_obj_add_uint(o, pl, "n_params", req.gen.plugins.params.size());
+        yyjson_mut_obj_add_val(o, orot, "sampler_plugins", pl);
+    }
     char * json = yyjson_mut_write(o, 0, NULL);
     yyjson_mut_doc_free(o);
     res.set_content(json ? json : "{}", "application/json");

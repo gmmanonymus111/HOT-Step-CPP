@@ -21,6 +21,7 @@ import React from 'react';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { SeedControl } from './SeedControl';
+import { SamplerPluginControls } from './SamplerPluginControls';
 import { Slider } from '../shared/Slider';
 
 const inputClasses =
@@ -105,6 +106,18 @@ export const BackendGenerationDropdown: React.FC = () => {
           </div>
         );
       })}
+
+      {/* Shared Lua sampler plugins, for a backend that runs them but does not
+          render ACE's GenerationDropdown. Two conditions, both necessary: the
+          backend must claim the capability, AND the user must have switched on
+          the declared `samplerPluginsEnabled` knob above — the picks are shared
+          global state, so showing live pickers that are not being sent would be
+          a lie in the other direction. */}
+      {capabilities?.features?.samplerPlugins && !!gp.backendParams?.samplerPluginsEnabled && (
+        <div className="pt-2 border-t border-zinc-300 dark:border-white/10">
+          <SamplerPluginControls />
+        </div>
+      )}
 
       {extensions.length === 0 && !supportsSeed && (
         <p className="text-[11px] text-zinc-500 leading-relaxed">
