@@ -117,6 +117,15 @@ does this; `engine/server.cmd` does not).
     with conditioning that jumps to an unrelated rollout mid-window — teaching "conditioning
     lies, smooth over it" (mean-collapse pressure). The seams were parsed and never consulted
     for a week (~13% of crops at 689, 27% at 1378); fixed 5117281 with reject-and-retry.
+18. **An MM3-only install must not kill the server at boot.** The startup gates in
+    `hot-step-server.cpp` (`registry_scan` empty → exit 1; partial ACE synth without LM →
+    exit 1) predate MM3 and knew nothing about it: a user with only `models/mm3/*.gguf` got a
+    dead engine → empty model dropdowns for BOTH backends + the MM3 "weights missing" CTA,
+    while the Model Manager (Node disk scan, checks subdirs) said everything was installed
+    (GitHub issue #118). Both gates now fall through when `mm3_weights_present()`
+    (mm3-model.h — filename-only probe of `<models>` + `<models>/mm3`) is true; ACE handlers
+    already degrade per-request with an empty registry. Any future boot-time hard-exit must
+    ask "can MM3 still serve?" first.
 
 ## Performance budget (RTX 5090, f16, 12 s clip ≈ 12.4 s wall ≈ 1.0× realtime)
 

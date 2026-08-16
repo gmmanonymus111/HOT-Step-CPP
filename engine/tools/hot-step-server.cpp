@@ -3170,8 +3170,20 @@ int main(int argc, char ** argv) {
     // scan models directory (reads GGUF metadata only)
     fprintf(stderr, "[Server] Scanning models in %s\n", models_dir);
     if (!registry_scan(&g_registry, models_dir)) {
-        fprintf(stderr, "[Server] ERROR: no models found in %s\n", models_dir);
-        return 1;
+        // HOT-STEP: an MM3-only install (mm3-*.gguf in <models>/mm3/ or the
+        // root) has nothing the ACE registry recognizes, but the server must
+        // still boot to serve /mm3/*. Exiting here left the Node tier with a
+        // dead engine: empty model dropdowns for BOTH backends and an MM3
+        // "weights missing" CTA while the Model Manager showed them installed
+        // (GitHub issue #118). ACE endpoints degrade per-request instead.
+        if (mm3_weights_present(models_dir)) {
+            fprintf(stderr,
+                    "[Server] No ACE-Step models in %s — MiniMax-Music3 weights found, continuing MM3-only\n",
+                    models_dir);
+        } else {
+            fprintf(stderr, "[Server] ERROR: no models found in %s\n", models_dir);
+            return 1;
+        }
     }
 
     // Also scan the onnx/ subdirectory for ONNX models (TRT acceleration)
@@ -3268,6 +3280,13 @@ int main(int argc, char ** argv) {
         }
         if (have_lm) {
             fprintf(stderr, "[Server] WARNING: /synth unavailable, missing: %s\n", missing);
+        } else if (mm3_weights_present(models_dir)) {
+            // HOT-STEP: same MM3-only concession as the scan gate above — a
+            // partial ACE install (e.g. DiT without LM) must not kill the
+            // process when MiniMax-Music3 can still serve.
+            fprintf(stderr,
+                    "[Server] WARNING: ACE pipeline unusable (missing: %s) — continuing for MiniMax-Music3\n",
+                    missing);
         } else {
             fprintf(stderr, "[Server] ERROR: no usable pipeline, synth missing: %s\n", missing);
             return 1;

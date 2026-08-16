@@ -890,6 +890,33 @@ static void mm3_enumerate(const MM3Model & m, const char * role, std::vector<MM3
     });
 }
 
+// Boot-time probe: does <models_dir> (or its mm3/ subdir — the same two
+// directories mm3_discover searches) hold ANY mm3-*.gguf? Filename check only,
+// no header reads. The server's startup gates use this to stay alive on an
+// MM3-only install instead of exiting over an empty ACE registry — a dead
+// process can't serve /mm3/*, and /mm3/props is where a partial or broken MM3
+// install gets reported accurately.
+static bool mm3_weights_present(const char * models_dir) {
+    if (!models_dir || !models_dir[0]) {
+        return false;
+    }
+    const std::string root    = models_dir;
+    const std::string dirs[2] = { root + MM3_SEP "mm3", root };
+    for (const auto & dir : dirs) {
+        std::vector<std::string> names;
+        mm3_list_dir(dir, &names);
+        for (const auto & n : names) {
+            // mm3-<role>-<quant>.gguf: at least one char between the prefix
+            // and the extension, mirroring mm3_enumerate's bounds.
+            if (n.size() > 9 && n.compare(0, 4, "mm3-") == 0 &&
+                n.compare(n.size() - 5, 5, ".gguf") == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Locate the GGUFs and probe them. Called once at server start; cheap
 // (mmap + header parse, no weight reads). Safe to call when nothing is there —
 // MM3 is simply reported unavailable.

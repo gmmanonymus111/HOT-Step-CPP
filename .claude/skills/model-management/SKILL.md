@@ -152,7 +152,7 @@ Download mechanics: HuggingFace URL `https://huggingface.co/{repo}/resolve/main/
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `[Server] ERROR: no GGUF models found` + engine exit 1; Node retries 3x then gives up | Empty/wrong models dir (`ACESTEPCPP_MODELS`), or nothing classifiable | Point at the right dir / install models; restart |
+| `[Server] ERROR: no models found` + engine exit 1; Node retries 3x then gives up | Empty/wrong models dir (`ACESTEPCPP_MODELS`), or nothing classifiable — and no MM3 weights either. Since the issue-#118 fix, MM3 weights (`mm3-*.gguf` at root or in `mm3/`) keep the server alive MM3-only ("No ACE-Step models … continuing MM3-only") | Point at the right dir / install models; restart |
 | `[Registry] WARNING: skipping X (unknown architecture)` | GGUF header lacks a recognized `general.architecture` | Convert via `convert.py`, or it's not an ACE-Step GGUF |
 | `[Server] WARNING: /synth unavailable, missing: VAE` (etc.) | Partial install — synth needs DiT+Text-Enc+VAE together | Download the missing role (Model Manager quick-start pack) |
 | `[GGUF] FATAL: '<f>' is truncated or corrupt ... file is only N bytes` | Interrupted download / prematurely renamed `.part` | Delete and re-download |
