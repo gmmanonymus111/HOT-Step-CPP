@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { datasetSampleId, jobsDir } from './paths.js';
 import type { TagPosition, TrainingDatasetRow, TrainingSample } from './types.js';
+import { normalizeKeyscale, normalizeTimeSignature } from './metadataVocab.js';
 
 export interface PreprocessManifestSample {
   id: string;
@@ -115,8 +116,11 @@ export function buildPreprocessManifest(
       // Mirrors datasetBuilder: an empty lyric field is the instrumental marker.
       lyrics: s.lyrics.trim() ? s.lyrics : '[Instrumental]',
       bpm: s.bpm ?? 0,
-      keyscale: s.key,
-      timesignature: s.signature,
+      // Same FSM-vocabulary normalisation datasetBuilder applies. The manifest
+      // keys the conditioning cache, so a raw "4/4" here both conditions on an
+      // unreachable token AND forks the cache key from the dataset.json path.
+      keyscale: normalizeKeyscale(s.key),
+      timesignature: normalizeTimeSignature(s.signature),
       duration: Math.round(s.duration),
       language: s.language,
       isInstrumental: s.isInstrumental,

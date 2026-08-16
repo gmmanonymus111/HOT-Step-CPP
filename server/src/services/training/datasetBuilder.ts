@@ -15,6 +15,7 @@ import { loadSidecarMetadata } from './datasetScan.js';
 import { normalizeLanguage } from '../languageCodes.js';
 import * as audioMeta from './audioMeta.js';
 import type { TrainingDatasetRow, TrainingSample } from './types.js';
+import { normalizeKeyscale, normalizeTimeSignature } from './metadataVocab.js';
 
 /** Keys this builder owns and therefore rewrites on every build. */
 const OWNED_SAMPLE_KEYS = [
@@ -138,8 +139,11 @@ export async function buildDataset(
       // previous dataset.json had rather than blanking it.
       formatted_lyrics: priorString('formatted_lyrics'),
       bpm: parseBpmValue(meta.bpm),
-      keyscale: meta.key || '',
-      timesignature: meta.signature || '',
+      // Normalised to the FSM's vocabulary, not written through raw: the sidecar
+      // holds "F# Major" / "4/4" for humans, but the LM can only ever emit
+      // "F# major" / "4", so the raw forms would train it on unreachable tokens.
+      keyscale: normalizeKeyscale(meta.key),
+      timesignature: normalizeTimeSignature(meta.signature),
       duration,
       // Sidecars carry no `language:` line in the real corpus — don't downgrade
       // a known language to 'unknown' on a rebuild.
