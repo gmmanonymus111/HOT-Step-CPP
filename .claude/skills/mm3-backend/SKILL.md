@@ -117,6 +117,15 @@ does this; `engine/server.cmd` does not).
     with conditioning that jumps to an unrelated rollout mid-window — teaching "conditioning
     lies, smooth over it" (mean-collapse pressure). The seams were parsed and never consulted
     for a week (~13% of crops at 689, 27% at 1378); fixed 5117281 with reject-and-retry.
+18. **Filter groups at EXPORT, never constrain them at TRAINING.** Measured (runs 09/10,
+    matched ~2.6% delta, same groups): full-set training + MLPV surgery = coherent with
+    clear lyrics; `--target mlpv` trained-from-scratch = intrusions and jumble, with LESS
+    style at matched delta. Gradient denied its natural pathway (q,k routing) emulates it
+    destructively through the remaining groups, so "safe-group" deltas from a constrained
+    run carry structure-entangled content the base attention cannot support. The winning
+    recipe: train ALL sites at modest delta, then zero q,k rows + proj heads in the export
+    (`groupfilter.py` pattern — q,k rows are B[0:4096] of the fused qkv; ablation-proven:
+    q,k = structure poison, proj_in/out = seed-dependent fuzz, MLP+V+out = timbre).
 18. **An MM3-only install must not kill the server at boot.** The startup gates in
     `hot-step-server.cpp` (`registry_scan` empty → exit 1; partial ACE synth without LM →
     exit 1) predate MM3 and knew nothing about it: a user with only `models/mm3/*.gguf` got a
