@@ -148,3 +148,6 @@ docker-compose.override.yml
 # MiniMax music-caption-rewriter vendored content (no formal upstream license;
 # author-sanctioned for local skill-dir use only — see the skill's PROVENANCE.md)
 .claude/skills/mm3-captioning/upstream/
+
+# Inter-agent coordination scratchpad — local working notes, not a project doc
+agentcoordination.md
