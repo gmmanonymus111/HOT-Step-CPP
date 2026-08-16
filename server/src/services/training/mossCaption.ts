@@ -188,12 +188,21 @@ async function runMossCaptionInner(
 
     const out: Partial<Record<MossMode, string>> = {};
     for (const mode of opts.modes) {
-      // `-o out.txt --mode a,b` writes out.a.txt / out.b.txt, never out.txt.
-      const p = path.join(work, `out.${mode}.txt`);
-      if (fs.existsSync(p)) {
-        const text = fs.readFileSync(p, 'utf8').trim();
-        if (text) out[mode] = text;
-      }
+      // `-o out.txt --mode a,b` writes out.a.txt / out.b.txt — but with a SINGLE
+      // mode ace-caption writes the bare `-o` path with no infix. Reading only
+      // the suffixed name silently yields no caption for single-mode calls: the
+      // run costs a full encode, exits 0, and returns nothing. Try both.
+      const text = [`out.${mode}.txt`, 'out.txt']
+        .map(n => path.join(work, n))
+        .filter(p => fs.existsSync(p))
+        .map(p => fs.readFileSync(p, 'utf8').trim())
+        .find(t => t.length > 0);
+      if (text) out[mode] = text;
+    }
+    if (Object.keys(out).length === 0) {
+      // Never fail silently. A zero-output run means the CLI contract moved, and
+      // the caller must not mistake it for "the model had nothing to say".
+      opts.log?.('warn', `MOSS produced no output for modes: ${opts.modes.join(',')}`);
     }
     return out;
   } finally {
