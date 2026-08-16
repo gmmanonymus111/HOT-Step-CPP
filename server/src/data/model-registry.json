@@ -214,6 +214,15 @@
         "supersep-rt-cudnn-heuristic",
         "supersep-rt-cudnn-ops"
       ]
+    },
+    {
+      "id": "moss-captioning",
+      "name": "Local Captioning (MOSS)",
+      "description": "Caption your own tracks locally in the Training Studio — MOSS listens to the audio instead of rewriting text. Also emits MM3 Structured Captions.",
+      "fileIds": [
+        "moss-lm-q8_0",
+        "moss-aud-f16"
+      ]
     }
   ],
   "files": [
@@ -3431,6 +3440,70 @@
       "description": "MiniMax-Music3 DAC-style vocoder — decodes latents to 44.1 kHz stereo. Never quantised (bandwidth-bound frontend); this f16 file serves every quant combination. Full precision — the reference quality bar. This file is ~0.2 GB.",
       "tags": [
         "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-lm-q8_0",
+      "filename": "moss-lm-q8_0.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Captioner LM (Q8_0)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q8_0",
+      "sizeBytes": 8709513792,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music-8B-Instruct language model — writes the caption from what the audio encoder heard. Near-lossless and half the size of F16; the recommended default. Requires moss-aud-f16 as well; this file is ~8.1 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-lm-f16",
+      "filename": "moss-lm-f16.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Captioner LM (F16)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "F16",
+      "sizeBytes": 16388039232,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music-8B-Instruct language model at full precision — the reference quality bar, and what the parity fixtures were captured against. Requires moss-aud-f16 as well; this file is ~15.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-aud-f16",
+      "filename": "moss-aud-f16.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Audio Tower (F16)",
+      "scale": null,
+      "variant": "aud",
+      "quant": "F16",
+      "sizeBytes": 1724480640,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music audio encoder — 32-layer Whisper-style tower plus the SwiGLU adapter and deepstack mergers that inject audio into the LM. F16 only, never quantised: the adapter output runs ~770x hotter than the encoder's, so quantisation error lands straight in the LM's input embeddings. Required by every moss-lm file; ~1.6 GB.",
+      "tags": [
+        "required"
       ],
       "companions": [
         {

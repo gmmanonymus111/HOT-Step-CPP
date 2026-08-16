@@ -421,7 +421,10 @@ export interface AdapterFile {
 export interface RegistryFile {
   id: string;
   filename: string;
-  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime' | 'mm3';
+  // 'moss' is the odd one out: an ANALYSIS model (audio -> caption), not a
+  // generation component. It is in this registry because it downloads the same
+  // way, but nothing in the generation pipeline reads it.
+  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime' | 'mm3' | 'moss';
   subdir?: string;
   displayName: string;
   scale?: 'standard' | 'xl' | null;
