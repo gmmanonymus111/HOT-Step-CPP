@@ -21,51 +21,66 @@
 import { parseLooseObject } from './sidecarIO.js';
 
 /**
- * The nine caption sentences, in order, without their leading `- `.
+ * The dimensions an ACE-Step caption covers, in order.
  *
  * Lyric Studio's metadata planner reuses this so the captions it invents for a
- * new song describe the same nine things, in the same order, as the captions a
- * sound adapter was trained on (see `lireek/prompts.ts`). Keep the wording here
- * byte-identical to Side-Step — `CAPTION_INSTRUCTIONS` is rebuilt from it.
+ * new song describe the same things, in the same order, as the captions a sound
+ * adapter was trained on (see `lireek/prompts.ts`). `CAPTION_INSTRUCTIONS` is
+ * rebuilt from it, so the two can never drift.
+ *
+ * ── Why this replaced Side-Step's nine-sentence plan (2026-08-16) ────────────
+ *
+ * The previous version was a copy of Side-Step's `caption_config.py`, which
+ * mandates EXACTLY nine sentences, one per prescribed dimension. Measured
+ * against the 32 reference captions in ACE-Step's own
+ * `examples/text2music/*.json`, that is nothing like what the model was trained
+ * on:
+ *
+ *   reference captions   median 31 words, median 2 sentences (range 23-107 / 2-5)
+ *   nine-sentence plan   ~150-200 words, nine sentences, always
+ *   captions in the reference set with 9+ sentences   0 of 32
+ *   captions in the reference set stating BPM or key  0 of 32
+ *
+ * The length was not the only harm. A nine-sentence quota is a heavy
+ * instruction-following load, and on an 8B local captioner it measurably
+ * crowded out the audio: MOSS described a 2Pac track as "a high-energy Electro
+ * House track... four-on-the-floor... festival-oriented production" while its
+ * OWN `genre:` field in the same response correctly said `Hip-Hop`. Asked for
+ * two sentences of what it heard, there is no quota left to pad.
  */
-export const CAPTION_SENTENCE_PLAN: readonly string[] = [
-  'Sentence 1: identify the core genre/subgenre, tempo feel, groove character, and overall intensity without restating exact metadata fields.',
-  'Sentence 2: describe drum design and groove, including kick, snare/clap, hats, percussion, swing, syncopation, and pulse.',
-  'Sentence 3: describe the bass design and low-end behavior, including weight, tone, movement, rhythm, sustain, and kick interaction.',
-  'Sentence 4: describe harmony and melody, including chords, tonal center, motifs, riffs, leads, pads, stabs, arps, or vocal hooks.',
-  'Sentence 5: describe sound design and timbre, including synth character, source type, texture, brightness, distortion, saturation, envelopes, layering, and spectral character.',
-  'Sentence 6: describe mix treatment and space, including reverb, delay, compression, transient shape, filtering, automation, density, and only clearly audible spatial placement if confidence is high.',
-  'Sentence 7: describe the opening section and buildup in detail, including which elements are introduced first and how tension is created.',
-  'Sentence 8: describe the drop and any break section in detail, including what the drop contains, what hits hardest, and which elements are removed or exposed during the break.',
-  'Sentence 9: describe the late-song payoff, climax, or outro in detail, including how the track escalates, peaks, resolves, strips back, or closes.',
+export const CAPTION_DIMENSIONS: readonly string[] = [
+  'genre and subgenre, named plainly',
+  'the instruments actually present, named concretely',
+  'vocal character (or state that the track is instrumental and name what carries the lead line)',
+  'mood and atmosphere',
+  'production style and sonic character',
 ];
 
 export const CAPTION_INSTRUCTIONS: string =
-  "Write high-quality structured music dataset metadata grounded in the song's " +
-  'audible content. If audio is attached, analyze the actual audio first and use ' +
-  'title, artist, and lyrics only as weak secondary context.\n\n' +
+  "Write music dataset metadata grounded in the song's audible content. If audio " +
+  'is attached, describe what you actually HEAR and use title, artist, and lyrics ' +
+  'only as weak secondary context.\n\n' +
   'Return EXACTLY 5 lines in plain text and nothing else. Each field must start at ' +
   'the beginning of its own new line. Never place two fields on the same line.\n\n' +
   'Use this exact output template:\n' +
-  'caption: <single-line paragraph with EXACTLY 9 complete sentences>\n' +
+  'caption: <2 to 4 sentences on one line>\n' +
   "genre: <comma-separated genre/style tags, e.g. 'bass house, electro house'>\n" +
   'bpm: <estimated BPM as integer, e.g. 120>\n' +
-  "key: <musical key, e.g. 'C minor' or 'F# major'>\n" +
-  "signature: <time signature, e.g. '4/4'>\n\n" +
+  "key: <note plus lowercase mode, e.g. 'C minor' or 'F# major'>\n" +
+  "signature: <numerator only — one of 2, 3, 4, 6>\n\n" +
   'Caption rules:\n' +
-  '- The caption must be one line with exactly 9 complete sentences.\n' +
+  '- The caption is 2 to 4 sentences, roughly 25 to 60 words, on a single line. Reference captions average about 30 words; a longer caption is not a better one, and padding it with invented detail is worse than stopping.\n' +
+  '- Cover these, woven into flowing description rather than listed:\n' +
+  CAPTION_DIMENSIONS.map(s => `    - ${s}\n`).join('') +
+  '- NEVER state BPM, key, or time signature in the caption text. They have dedicated fields below, and repeating them in the caption does not match how this model was trained.\n' +
+  '- The genre you name in the caption MUST agree with the `genre:` field. Contradicting yourself between the two is worse than naming neither.\n' +
+  '- Name things concretely: `808 bass`, `brushed snare`, `detuned saw lead`, `palm-muted guitar`, `upright piano` — not `interesting textures` or `lush soundscapes`.\n' +
+  "- No vague imagery or stacked adjectives ('neon skies, electric hearts'), no marketing copy, and no listener-reaction language ('keeps you moving', 'emotionally resonant').\n" +
+  "- Avoid generic openings like 'This track is' when more specific wording can be used immediately.\n" +
+  '- If the track is instrumental, say so and name the instrument carrying the lead line.\n' +
   '- Start `caption:` on line 1, `genre:` on line 2, `bpm:` on line 3, `key:` on line 4, and `signature:` on line 5.\n' +
   '- Do not merge fields together. For example, do not output `genre: ... bpm: ... key: ...` on one line.\n' +
   '- Do not use markdown, bullets, numbering, code fences, labels before the template, or commentary after the template.\n' +
-  '- Write for machine-learning training metadata, not for reviews, marketing copy, or listener-facing blurbs.\n' +
-  '- Prioritize musically useful descriptors: groove, drum pattern, bass design, harmonic density, melodic motifs, instrumentation, synthesis, timbre, texture, dynamics, stereo space, effects, and arrangement.\n' +
-  '- Use concrete audio evidence such as syncopated hats, sidechained bass, plucked synth lead, saturated kick, washed reverb tails, filtered risers, wide stereo pads, chopped vocal textures, dry upfront drums, or distorted reese bass when applicable.\n' +
-  "- Avoid vague or low-value phrases such as 'nice vibe', 'good energy', 'keeps you moving', 'hard to resist', 'captivating journey', 'atmospheric progression', 'listeners feel', or 'emotionally resonant' unless backed by specific sonic detail.\n" +
-  "- Avoid generic openings like 'This track is' when more specific wording can be used immediately.\n" +
-  '- Keep explicit metadata in the dedicated fields, not in the caption: do not state exact BPM numbers, key names, or time signatures in the caption unless absolutely necessary for a rare musically specific point.\n' +
-  '- Mention stereo width, panning, depth, or imaging only when those traits are clearly audible with high confidence; if uncertain, prefer safer mix descriptors such as dry, wet, dense, open, compressed, bright, dark, upfront, distant, or saturated.\n' +
-  '- If you mention a buildup, drop, break, climax, or outro, specify what changes musically: which layers enter, which layers drop out, which filters open, how percussion changes, how the bass changes, or how the energy is reshaped.\n' +
-  CAPTION_SENTENCE_PLAN.map(s => `- ${s}\n`).join('') +
   '- Do not mention the artist name or song title in the caption.\n' +
   '- If audio is not attached or a field cannot be determined from available evidence, write N/A for that field instead of guessing.';
 
