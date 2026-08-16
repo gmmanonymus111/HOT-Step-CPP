@@ -412,6 +412,131 @@ export function correctFactsInProse(caption: string, facts: LocalFacts): string 
 
 // ── The Training Studio entry point ──────────────────────────────────────
 
+// ── Batch prefetch ───────────────────────────────────────────────────────
+
+/**
+ * Results from a `--src-list` run, keyed by audio path, consumed once.
+ *
+ * The alternative was restructuring `labelingQueue` to caption in bulk, which
+ * would have meant duplicating its per-sample merge policy, error marking,
+ * progress and cancellation. Prefetching instead keeps every one of those
+ * per-sample behaviours exactly as they are: the queue still walks samples one
+ * at a time, but the expensive part is already done.
+ */
+const batchCache = new Map<string, Partial<Record<MossMode, string>>>();
+
+/** Drop anything left over. Call when a job ends, however it ends. */
+export function clearMossBatch(): void {
+  batchCache.clear();
+}
+
+/**
+ * Caption every track in one `ace-caption` process, holding the model across
+ * them. Failure is non-fatal: an empty cache just means each sample falls back
+ * to its own run, which is slower but produces identical output.
+ */
+export async function prepareMossBatch(
+  audioPaths: string[],
+  opts: {
+    wantMm3?: boolean; wantLyrics?: boolean; maxSeconds?: number;
+    signal?: AbortSignal; log?: (level: 'info' | 'warn', message: string) => void;
+  } = {},
+): Promise<void> {
+  clearMossBatch();
+  if (audioPaths.length < 2) return;   // one track cannot amortise anything
+
+  const modes: MossMode[] = ['prose'];
+  if (opts.wantMm3) modes.push('mm3');
+  if (opts.wantLyrics) modes.push('lyrics');
+
+  try {
+    const results = await runMossBatch(audioPaths, {
+      modes, prompts: { prose: CAPTION_INSTRUCTIONS },
+      maxSeconds: opts.maxSeconds, signal: opts.signal, log: opts.log,
+    });
+    for (const [audioPath, modeText] of results) batchCache.set(audioPath, modeText);
+    opts.log?.('info', `MOSS: captioned ${results.size}/${audioPaths.length} tracks in one load`);
+  } catch (err: any) {
+    if ((err as NodeJS.ErrnoException)?.name === 'AbortError') throw err;
+    opts.log?.('warn', `MOSS batch failed (${String(err?.message || err).slice(0, 160)}) — falling back to per-track runs`);
+  }
+}
+
+/**
+ * One process, N tracks. Returns a map of audio path -> per-mode text.
+ *
+ * Output bases are numbered (`t0`, `t1`, …) rather than derived from filenames:
+ * dataset filenames collide across albums, and two tracks resolving to the same
+ * base would silently overwrite one caption with another's.
+ */
+async function runMossBatch(
+  audioPaths: string[],
+  opts: MossRunOptions,
+): Promise<Map<string, Partial<Record<MossMode, string>>>> {
+  return serialised(async () => {
+    const resolved = resolveMossPaths();
+    if ('missing' in resolved) throw new Error(`MOSS captioning unavailable: ${resolved.missing}`);
+    const { exe, modelsDir } = resolved.paths;
+
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'hs_mossb_'));
+    try {
+      const bases = audioPaths.map((_, i) => path.join(work, `t${i}`));
+      fs.writeFileSync(
+        path.join(work, 'list.txt'),
+        audioPaths.map((p, i) => `${p}\t${bases[i]}`).join('\n'),
+        'utf8',
+      );
+
+      const args: string[] = [
+        '--models', modelsDir,
+        '--src-list', path.join(work, 'list.txt'),
+        '--mode', opts.modes.join(','),
+        '--temperature', String(opts.temperature ?? MOSS_TEMPERATURE),
+        '--rep-penalty', String(opts.repPenalty ?? MOSS_REP_PENALTY),
+        '--freq-penalty', String(opts.freqPenalty ?? MOSS_FREQ_PENALTY),
+      ];
+      if (opts.maxTokens) args.push('--max-tokens', String(opts.maxTokens));
+      if (opts.maxSeconds) args.push('--max-seconds', String(opts.maxSeconds));
+      const ffmpeg = getFFmpegPath();
+      if (ffmpeg) args.push('--ffmpeg', ffmpeg);
+      for (const [mode, text] of Object.entries(opts.prompts ?? {})) {
+        if (!text?.trim()) continue;
+        const pf = path.join(work, `prompt.${mode}.txt`);
+        fs.writeFileSync(pf, text, 'utf8');
+        args.push('--prompt-file', `${mode}=${pf}`);
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        // A non-zero exit means SOME file failed, not that all did — the CLI
+        // captions every readable track first. So resolve either way and let the
+        // per-file read below decide what actually landed.
+        execFile(exe, args,
+          { timeout: 6 * 60 * 60_000, maxBuffer: 64 * 1024 * 1024, signal: opts.signal },
+          (error) => {
+            if (error && (error as NodeJS.ErrnoException).name === 'AbortError') { reject(error); return; }
+            resolve();
+          });
+      });
+
+      const out = new Map<string, Partial<Record<MossMode, string>>>();
+      audioPaths.forEach((audioPath, i) => {
+        const modeText: Partial<Record<MossMode, string>> = {};
+        for (const mode of opts.modes) {
+          const text = [`${bases[i]}.${mode}.txt`, `${bases[i]}.txt`]
+            .filter(p => fs.existsSync(p))
+            .map(p => fs.readFileSync(p, 'utf8').trim())
+            .find(t => t.length > 0);
+          if (text) modeText[mode] = text;
+        }
+        if (Object.keys(modeText).length > 0) out.set(audioPath, modeText);
+      });
+      return out;
+    } finally {
+      try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* tmp */ }
+    }
+  });
+}
+
 export interface MossCaptionResult {
   /** Side-Step's 5-line block, unparsed — the caller runs parseStructuredResponse. */
   prose?: string;
@@ -442,10 +567,16 @@ export async function captionWithMoss(
   if (opts.wantMm3) modes.push('mm3');
   if (opts.wantLyrics) modes.push('lyrics');
 
-  const raw = await runMossCaption(audioPath, {
+  // Prefetched by prepareMossBatch, if the caller ran one. Deleted on read so a
+  // retry of the same sample re-runs the model rather than replaying a stale
+  // result — and so the map cannot grow across a long job.
+  const prefetched = batchCache.get(audioPath);
+  if (prefetched) batchCache.delete(audioPath);
+
+  const raw = prefetched ?? await runMossCaption(audioPath, {
     modes,
-    // CAPTION_INSTRUCTIONS is byte-identical to Side-Step's caption_config.py.
-    // It is passed by file rather than restated in C++ so the two can't drift.
+    // The AS1.5 prompt is passed by file rather than restated in C++ so the two
+    // can't drift; it is the same string the cloud providers get.
     prompts: { prose: CAPTION_INSTRUCTIONS },
     maxSeconds: opts.maxSeconds,
     signal: opts.signal,

@@ -39,6 +39,7 @@ import { buildDataset } from './datasetBuilder.js';
 import * as audioMeta from './audioMeta.js';
 import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
 import type { AceRequest } from '../aceClient.js';
+import { prepareMossBatch, clearMossBatch } from './mossCaption.js';
 import type {
   BuildOptions, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, MergePolicy,
   TrainingDatasetRow, TrainingJobKind, TrainingJobStatus, TrainingJobSummary,
@@ -1077,6 +1078,22 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
     pushLog(`[Training] Caption job ${job.id} started — ${job.total} files (${opts.provider})`);
     emitProgress(job);
 
+    // MOSS only: caption the whole dataset in ONE process, holding the ~10 GB
+    // model across tracks instead of reloading it per sample. The pooled loop
+    // below is unchanged — it consumes the prefetched results and keeps all its
+    // per-sample merge policy, error marking, progress and cancellation.
+    //
+    // Scoped to this job, i.e. one dataset. A bulk run interleaves captioning
+    // with LM/DiT training per dataset, and holding the captioner resident while
+    // a trainer wants the card is the wrong trade — the process exits here.
+    if (opts.provider === 'moss') {
+      await prepareMossBatch(targets.map(s => s.audioPath), {
+        wantMm3: opts.wantMm3 !== false,
+        signal: job.controller.signal,
+        log: (level, message) => emitLog(job, level, message),
+      });
+    }
+
     await runPooled(job, targets, captionLimiter.spec.concurrency, async (sample) => {
       job.currentSampleId = sample.sampleId;
       markProcessing(job, ds, sample);
@@ -1115,6 +1132,11 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
   } catch (err: any) {
     if (isCancelled(job)) return;
     finishJob(job, 'failed', err?.message || 'Caption job failed');
+  } finally {
+    // However this ended — done, failed, cancelled — the prefetched captions are
+    // scoped to this job. Leaving them would let a later job for the same file
+    // replay a stale result instead of re-running the model.
+    clearMossBatch();
   }
 }
 

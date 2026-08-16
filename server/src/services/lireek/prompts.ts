@@ -775,7 +775,7 @@ Return ONLY a JSON object with exactly this format:
 {
   "subject": "one sentence describing what this new song should be about",
   "bpm": 120,
-  "key": "C Major",
+  "key": "C minor",
   "caption": "genre, instruments, emotion, atmosphere, timbre, vocal characteristics, production style",
   "duration": 217,
   "structure": "I-V-C-V-C-B-C-O"
@@ -795,8 +795,8 @@ BPM:
 - Genre norms for reference: ballads ~60-80, pop ~100-130, rock ~110-140, punk ~150-180, EDM ~120-150, hip-hop ~80-100, folk ~90-120
 
 KEY:
-- Pick a musical key that fits the artist and genre (e.g. "C Major", "A Minor", "F# Minor", "Bb Major")
-- Use standard key notation: note name + Major/Minor
+- Pick a musical key that fits the artist and genre (e.g. "C minor", "A minor", "F# minor", "Bb major")
+- Key notation is note name + LOWERCASE mode: "C minor", "F# major". ACE-Step's metadata FSM only accepts lowercase major/minor, so "C Major" is out of vocabulary.
 - Vary the key across generations — try not to repeat recently used keys
 - Consider the artist's typical tonal palette
 
@@ -1174,7 +1174,7 @@ Return ONLY a valid JSON object with exactly these keys:
   "title": "Song Title",
   "bpm": 120,
   "key": "C minor",
-  "time_signature": "4/4",
+  "time_signature": "4",
   "duration": 210
 }
 
@@ -1239,14 +1239,14 @@ Choose a realistic tempo (30-300) that fits the genre:
 - Drum & Bass: 160-180, Reggae: 60-90, Jazz: 80-140
 
 === KEY ===
-Use standard notation: note name + Major/Minor (e.g. "C Major", "A Minor", "F# Minor", "Bb Major").
+Use note name + LOWERCASE mode (e.g. "C minor", "A minor", "F# minor", "Bb major") — the metadata FSM rejects capitalised modes.
 Match the key to the emotional intent:
 - Major keys: brighter, more optimistic
 - Minor keys: darker, more introspective
 - Common emotional associations: C major (pure, optimistic), D major (triumphant), A minor (melancholic), E minor (romantic sadness), F# minor (passionate longing)
 
 === TIME SIGNATURE ===
-- "4/4": Standard (vast majority of popular music)
+- "4": Standard 4/4 (vast majority of popular music). Emit the NUMERATOR ONLY — the FSM accepts 2, 3, 4, 6, not "4/4".
 - "3/4": Waltz/ballad feel, flowing
 - "6/8": Compound meter, each beat divides into 3
 - "5/4" or "7/8": Complex/progressive (use sparingly)
