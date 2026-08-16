@@ -152,6 +152,9 @@ static void print_usage(void) {
             "                [--ckpt-verify] run both paths on one micro-batch and compare.\n"
             "                Gate before trusting any checkpointed run; exits non-zero on\n"
             "                disagreement. With no --ckpt-segments it verifies and exits.\n"
+            "                [--export-every N] snapshot mm3_lora_step<N>.safetensors along the\n"
+            "                way. For the delta ladder: measure each with relnorm, ear-test the\n"
+            "                1-5%% band (0.074%% proven inaudible, 17%% proven destroyed).\n"
             "                [--sign-check] measure the velocity target's sign, train nothing\n"
             "                [--bwd outprod] restore the slow CPU mul_mat backward (510x slower)\n"
             "                [--tf32 on|off] default off\n"
@@ -1870,6 +1873,7 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--crop-mode"))  a.crop_mode  = next("--crop-mode");
         else if (!strcmp(argv[i], "--ckpt-segments")) a.ckpt_segments = atoll(next("--ckpt-segments"));
         else if (!strcmp(argv[i], "--ckpt-verify"))   a.ckpt_verify   = true;
+        else if (!strcmp(argv[i], "--export-every"))  a.export_every  = atoll(next("--export-every"));
         else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
         else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }

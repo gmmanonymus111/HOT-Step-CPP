@@ -95,6 +95,13 @@ struct MM3TrainArgs {
     // the acceptance gate: a checkpointed run that silently disagreed with the
     // monolithic one is worse than no checkpointing.
     bool        ckpt_verify   = false;
+    // Snapshot export every N steps -> <out>/mm3_lora_step<N>.safetensors.
+    // Exists for the DELTA LADDER: the audible-style band is bracketed between
+    // 0.074% relative delta (SimpleTuner 200-step reference: provably harmless,
+    // provably inaudible) and ~17% (ours: audibly destroyed). Nobody has ever
+    // rendered the 1-5% band. Snapshots + offline relnorm.py let one run
+    // produce the whole ladder; at ~0.2 s/step that is minutes, not their 15 h.
+    int64_t     export_every  = 0;
     std::string only_song;          // restrict to one song (overfit test)
 };
 
@@ -889,6 +896,15 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
 
         if (a.eval_every > 0 && step % a.eval_every == 0 && !run_eval(step)) {
             fprintf(stderr, "[mm3-train] eval failed: %s\n", err.c_str()); return 1;
+        }
+        if (a.export_every > 0 && step % a.export_every == 0 && step < a.steps && !a.out_dir.empty()) {
+            pm_mkdir_p(a.out_dir);
+            char snap[64];
+            snprintf(snap, sizeof(snap), "/mm3_lora_step%lld.safetensors", (long long) step);
+            const std::string sp = a.out_dir + snap;
+            if (!mm3_train_export(ad, m, a.rank, a.alpha, sp, &err)) {
+                fprintf(stderr, "[mm3-train] snapshot export failed: %s\n", err.c_str()); return 1;
+            }
         }
     }
 
