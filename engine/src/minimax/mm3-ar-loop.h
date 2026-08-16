@@ -250,10 +250,24 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
         max_frames = (int64_t) c.max_audio_frames;
     }
     const bool forced = opt.forced_semantic != nullptr;
+    // SEMANTIC-ONLY forcing: forced_semantic without forced_acoustic. The
+    // semantic code (content and structure -- what happens when) is pinned to
+    // the real audio, while the depth decoder SAMPLES the 7 acoustic codebooks
+    // (timbre -- what it sounds like) from its own distribution.
+    //
+    // This exists because fully-aligned conditioning was measured to be the
+    // wrong training signal for a style adapter: it describes the target so
+    // completely that the base DiT can render it without the LoRA learning
+    // anything, and the LoRA then contributes nothing at inference, where
+    // conditioning comes from the LM instead. Sampling the acoustic half keeps
+    // the conditioning anchored in time but leaves TIMBRE unspecified, so the
+    // adapter has to store it. It also keeps the acoustic codes on the LM's own
+    // manifold, which is what inference will actually feed the DiT.
+    const bool forced_ac_given = forced && opt.forced_acoustic != nullptr;
     if (forced) {
-        if (!opt.forced_acoustic || opt.forced_len <= 0) {
+        if (opt.forced_len <= 0) {
             if (err) {
-                *err = "forced replay needs both forced_semantic and forced_acoustic, and a positive length";
+                *err = "forced replay needs forced_semantic and a positive forced_len";
             }
             return false;
         }
@@ -446,9 +460,11 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
         out->host_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_host0).count();
 
         // ── depth decoder: the seven acoustic codes and their hidden states ──
-        const int32_t * forced_ac = forced ? opt.forced_acoustic + it * NC : nullptr;
+        // Semantic-only forcing keeps the RNG alive so the depth decoder samples
+        // the acoustic codebooks; full forcing passes null and replays them.
+        const int32_t * forced_ac = forced_ac_given ? opt.forced_acoustic + it * NC : nullptr;
         if (!mm3_depth_decode_frame(m, hidden.data(), hidden.data() + H, semantic, forced_ac, &frame, err,
-                                    forced ? nullptr : &rng, TOPK)) {
+                                    forced_ac_given ? nullptr : &rng, TOPK)) {
             return false;
         }
         out->depth_ms += frame.ms;

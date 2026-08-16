@@ -130,10 +130,18 @@ static void print_usage(void) {
             "                [n_iter, 8], row 0 = un-emitted warm-up) from the RVQ encoder\n"
             "                instead of sampling from the caption. One replay per song, so\n"
             "                no segments and no seams; --segment-sec is then ignored.\n"
+            "                [--codes-mode full|semantic] default full. `semantic` pins only\n"
+            "                the semantic code (content/structure) and SAMPLES the 7 acoustic\n"
+            "                codebooks, leaving timbre unspecified so a style adapter must\n"
+            "                learn it. Full alignment describes the target so completely that\n"
+            "                the adapter learns nothing (measured: identical to base).\n"
             "  mm3-train-dit MiniMax-Music3 flow-DiT LoRA training.\n"
             "                --cache <dir from mm3-condition> --models <dir> --out <dir>\n"
             "                [--rank 32] [--alpha 32] [--lr 1e-4] [--steps 200] [--crop 689]\n"
-            "                [--grad-accum 1] [--seed 42] [--song <id> : overfit one song]\n"
+            "                [--grad-accum 1] [--seed 42]\n"
+            "                [--song <substring>] overfit one song. Matches a SUBSTRING OF THE\n"
+            "                FILENAME, not the cache id -- passing an id gives the unhelpful\n"
+            "                \"no usable songs in the cache\".\n"
             "                [--logit-mean M] default 0; POSITIVE biases sigma toward 0, i.e.\n"
             "                toward mostly-clean crops. Raise it (~+1.0..+1.5) or the run\n"
             "                spends most steps near pure noise learning only the genre mean.\n"
@@ -1530,7 +1538,8 @@ static bool load_forced_codes(const std::string & path, int64_t NC, std::vector<
 }
 
 static int cmd_mm3_condition(int argc, char ** argv) {
-    std::string manifest_path, models_dir, captions_dir, codes_dir, dit_quant = "Q2_K", lm_quant;
+    std::string manifest_path, models_dir, captions_dir, codes_dir, codes_mode = "full";
+    std::string dit_quant = "Q2_K", lm_quant;
     int64_t     seed        = 42;
     double      segment_sec = 60.0;   // 0 = one rollout for the whole song
     bool        tf32        = false;
@@ -1544,6 +1553,7 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--models"))    models_dir    = next("--models");
         else if (!strcmp(argv[i], "--captions"))  captions_dir  = next("--captions");
         else if (!strcmp(argv[i], "--codes"))     codes_dir     = next("--codes");
+        else if (!strcmp(argv[i], "--codes-mode")) codes_mode   = next("--codes-mode");
         else if (!strcmp(argv[i], "--dit-quant")) dit_quant     = next("--dit-quant");
         else if (!strcmp(argv[i], "--lm-quant"))  lm_quant      = next("--lm-quant");
         else if (!strcmp(argv[i], "--seed"))      seed          = atoll(next("--seed"));
@@ -1775,7 +1785,14 @@ static int cmd_mm3_condition(int argc, char ** argv) {
             aopt.seed            = (uint64_t) seed;
             aopt.collect_hiddens = true;
             aopt.forced_semantic = fsem.data();
-            aopt.forced_acoustic = fac.data();
+            // --codes-mode semantic pins CONTENT (what happens when) to the real
+            // audio but lets the depth decoder sample TIMBRE from its own
+            // distribution. Full alignment describes the target so completely
+            // that the base DiT can render it without the adapter learning
+            // anything -- measured 2026-08-16: aligned conditioning trained an
+            // adapter that was audibly identical to base. Leaving timbre
+            // unspecified is what forces the adapter to store it.
+            aopt.forced_acoustic = (codes_mode == "semantic") ? nullptr : fac.data();
             aopt.forced_len      = n_iter;
             MM3ArResult arf;
             if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
