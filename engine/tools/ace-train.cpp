@@ -126,6 +126,10 @@ static void print_usage(void) {
             "                [--seed N] [--lm-quant Q] [--dit-quant Q; default Q2_K, never executed]\n"
             "                [--segment-sec S] default 60; 0 = one rollout per song, which\n"
             "                UNDER-COVERS long songs (the LM hits EOS early: 65%% on a 280 s track)\n"
+            "                [--codes <dir>] ALIGNED mode: teacher-force <id>.codes (int32\n"
+            "                [n_iter, 8], row 0 = un-emitted warm-up) from the RVQ encoder\n"
+            "                instead of sampling from the caption. One replay per song, so\n"
+            "                no segments and no seams; --segment-sec is then ignored.\n"
             "  mm3-train-dit MiniMax-Music3 flow-DiT LoRA training.\n"
             "                --cache <dir from mm3-condition> --models <dir> --out <dir>\n"
             "                [--rank 32] [--alpha 32] [--lr 1e-4] [--steps 200] [--crop 689]\n"
@@ -1484,8 +1488,49 @@ static int cmd_mm3_preprocess(int argc, char ** argv) {
 // f16 is 4.8 GB against Q2_K's 0.83 GB, and at f16 the LM (17 GB) + depth +
 // DiT + KV (288 kB/position, ~2 GB at 6990 frames) + compute headroom does not
 // fit the card alongside a desktop. Nothing here ever executes a DiT graph.
+// Load a teacher-forcing code stream: int32 little-endian, [n_iter, 8], one row
+// per AR ITERATION with columns [semantic, acoustic1..7].
+//
+// Row 0 is the WARM-UP iteration: it is fed back into the LM but emits no audio,
+// so the file carries one more row than there are frames (audio frame j pairs
+// with row j+1). That is the reference's own indexing, and getting it wrong
+// degrades conditioning parity 49x while passing every per-module check — see
+// trap 4 and the off-by-one note in mm3-ar-loop.h.
+static bool load_forced_codes(const std::string & path, int64_t NC, std::vector<int32_t> & sem,
+                              std::vector<int32_t> & ac, int64_t * n_iter, std::string * err) {
+    FILE * f = hs_fopen(path, "rb");
+    if (!f) { *err = "cannot open " + path; return false; }
+    fseek(f, 0, SEEK_END);
+    const long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    const int64_t stride = NC + 1;
+    if (sz <= 0 || (size_t) sz % (sizeof(int32_t) * (size_t) stride) != 0) {
+        fclose(f);
+        *err = path + ": size " + std::to_string(sz) + " is not a multiple of " + std::to_string(stride) +
+               " int32 columns";
+        return false;
+    }
+    std::vector<int32_t> raw((size_t) sz / sizeof(int32_t));
+    const bool           ok = fread(raw.data(), 1, (size_t) sz, f) == (size_t) sz;
+    fclose(f);
+    if (!ok) { *err = "short read on " + path; return false; }
+
+    const int64_t rows = (int64_t) raw.size() / stride;
+    if (rows < 2) { *err = path + " has " + std::to_string(rows) + " rows, needs >= 2 (warm-up + 1 frame)"; return false; }
+    sem.resize((size_t) rows);
+    ac.resize((size_t) (rows * NC));
+    for (int64_t r = 0; r < rows; r++) {
+        sem[(size_t) r] = raw[(size_t) (r * stride)];
+        for (int64_t c = 0; c < NC; c++) {
+            ac[(size_t) (r * NC + c)] = raw[(size_t) (r * stride + 1 + c)];
+        }
+    }
+    *n_iter = rows;
+    return true;
+}
+
 static int cmd_mm3_condition(int argc, char ** argv) {
-    std::string manifest_path, models_dir, captions_dir, dit_quant = "Q2_K", lm_quant;
+    std::string manifest_path, models_dir, captions_dir, codes_dir, dit_quant = "Q2_K", lm_quant;
     int64_t     seed        = 42;
     double      segment_sec = 60.0;   // 0 = one rollout for the whole song
     bool        tf32        = false;
@@ -1498,6 +1543,7 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         if      (!strcmp(argv[i], "--manifest"))  manifest_path = next("--manifest");
         else if (!strcmp(argv[i], "--models"))    models_dir    = next("--models");
         else if (!strcmp(argv[i], "--captions"))  captions_dir  = next("--captions");
+        else if (!strcmp(argv[i], "--codes"))     codes_dir     = next("--codes");
         else if (!strcmp(argv[i], "--dit-quant")) dit_quant     = next("--dit-quant");
         else if (!strcmp(argv[i], "--lm-quant"))  lm_quant      = next("--lm-quant");
         else if (!strcmp(argv[i], "--seed"))      seed          = atoll(next("--seed"));
@@ -1674,7 +1720,77 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         bool                 song_ok  = true;
         const int64_t        t0       = ggml_time_ms();
 
-        for (int64_t sg = 0; sg < n_seg && song_ok; sg++) {
+        // ── ALIGNED (teacher-forced) conditioning ────────────────────────────
+        //
+        // With --codes the conditioning stops being sampled from the caption and
+        // becomes derived from THE ACTUAL AUDIO, via an RVQ encoder run offline
+        // (docs/plans/2026-08-16-mm3-rvq-encoder-plan.md). Frame j of the
+        // conditioning now describes frame j of the target instead of merely
+        // sharing its caption, which is the entire point of the exercise.
+        //
+        // Three consequences, all good:
+        //   - ONE replay covers the whole song (max_audio_frames 9000 ~ 6 min),
+        //     so there are no segments and no seams. The seam machinery below
+        //     and trap 17's reject-and-retry become vestigial for these caches.
+        //   - No EOS risk: the loop is driven by the code stream, not by the LM
+        //     deciding it is finished, so the under-coverage that forced
+        //     segmentation in the sampled path cannot occur.
+        //   - Lyrics are passed WHOLE rather than split proportionally; there is
+        //     no segment to apportion them across.
+        if (!codes_dir.empty()) {
+            std::vector<int32_t> fsem, fac;
+            int64_t              n_iter = 0;
+            const int64_t        NC     = LAY - 1;   // 8 layers = LM hidden + 7 acoustic
+            if (!load_forced_codes(codes_dir + "/" + id + ".codes", NC, fsem, fac, &n_iter, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu SKIP %s: %s\n", idx, n_total, filename.c_str(),
+                        err.c_str());
+                n_fail++;
+                continue;
+            }
+            // The KV cache is 288 kB/position, so an over-long stream is a VRAM
+            // failure rather than a quality one. Clamp and say so.
+            if (n_iter - 1 > (int64_t) model.lm_cfg.max_audio_frames) {
+                fprintf(stderr, "[mm3-condition] %s: %lld frames clamped to max_audio_frames %lld\n",
+                        filename.c_str(), (long long) (n_iter - 1),
+                        (long long) model.lm_cfg.max_audio_frames);
+                n_iter = (int64_t) model.lm_cfg.max_audio_frames + 1;
+            }
+
+            MM3SynthRequest req;
+            req.caption    = caption;
+            req.lyrics     = lyrics;
+            req.duration   = (double) (n_iter - 1) / (double) FPS;
+            req.prompt     = mm3_assemble_prompt(req.caption, req.lyrics, &req.instrumental);
+            req.max_frames = n_iter - 1;
+            req.seed_in    = seed;
+            if (!mm3_request_tokenize(model, &tok, &req, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: tokenize: %s\n", idx, n_total,
+                        filename.c_str(), err.c_str());
+                n_fail++;
+                continue;
+            }
+
+            MM3ArOptions aopt;
+            aopt.max_frames      = n_iter - 1;
+            aopt.seed            = (uint64_t) seed;
+            aopt.collect_hiddens = true;
+            aopt.forced_semantic = fsem.data();
+            aopt.forced_acoustic = fac.data();
+            aopt.forced_len      = n_iter;
+            MM3ArResult arf;
+            if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
+                             (int64_t) req.gen.ids_cond.size(), aopt, &arf, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: forced AR: %s\n", idx, n_total,
+                        filename.c_str(), err.c_str());
+                n_fail++;
+                continue;
+            }
+            seg_bounds.push_back(0);
+            hiddens.swap(arf.frame_hiddens);
+            F = arf.n_frames;
+        }
+
+        for (int64_t sg = 0; sg < n_seg && song_ok && codes_dir.empty(); sg++) {
             const int64_t want = std::min<int64_t>(seg_frames, frames_want - sg * seg_frames);
             if (want <= 0) break;
 
@@ -1792,6 +1908,11 @@ static int cmd_mm3_condition(int argc, char ** argv) {
         }
         yyjson_mut_obj_add_val(odoc, e, "segment_latent_starts", sb);
         yyjson_mut_obj_add_int(odoc, e, "n_segments", (int64_t) seg_bounds.size());
+        // The trainer must be able to tell the two cache kinds apart without
+        // guessing: an aligned cache pairs conditioning with the SAME music as
+        // the target, a sampled one only shares its caption. They warrant
+        // different expectations, and mixing them silently would be its own trap.
+        yyjson_mut_obj_add_bool(odoc, e, "aligned", !codes_dir.empty());
         yyjson_mut_arr_append(oarr, e);
         n_ok++;
 
