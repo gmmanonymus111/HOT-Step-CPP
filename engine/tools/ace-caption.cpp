@@ -45,7 +45,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -206,7 +208,7 @@ static std::string detokenize(const BPETokenizer & tok, const std::vector<int32_
 }
 
 int main(int argc, char ** argv) {
-    std::string models, src, mode = "prose", prompt, out_path, ffmpeg;
+    std::string models, src, mode = "prose", prompt, out_path, ffmpeg, src_list;
     std::vector<std::string> prompt_files;   // repeatable; see the per-mode note below
     int max_tokens = 1024;
     int top_k_debug = 0;
@@ -227,6 +229,7 @@ int main(int argc, char ** argv) {
         else if (a == "--mode") { mode = next("--mode"); }
         else if (a == "--prompt") { prompt = next("--prompt"); }
         else if (a == "--prompt-file") { prompt_files.push_back(next("--prompt-file")); }
+        else if (a == "--src-list") { src_list = next("--src-list"); }
         else if (a == "-o") { out_path = next("-o"); }
         else if (a == "--ffmpeg") { ffmpeg = next("--ffmpeg"); }
         else if (a == "--top-k-debug") { top_k_debug = atoi(next("--top-k-debug").c_str()); }
@@ -245,9 +248,43 @@ int main(int argc, char ** argv) {
             return 2;
         }
     }
-    if (models.empty() || src.empty()) {
-        fprintf(stderr, "ace-caption: --models and --src-audio are required\n");
+    if (models.empty() || (src.empty() && src_list.empty())) {
+        fprintf(stderr, "ace-caption: --models and one of --src-audio / --src-list are required\n");
         return 2;
+    }
+
+    // ---- the work list ----------------------------------------------------
+    // Each entry is (audio path, output base). --src-list is TAB-separated:
+    //   D:\a\01.flac<TAB>D:\out\01
+    // The caller supplies the output base explicitly rather than it being derived
+    // from the audio stem, because dataset filenames collide across albums and a
+    // derived name would silently overwrite one track's caption with another's.
+    std::vector<std::pair<std::string, std::string>> jobs;
+    if (!src_list.empty()) {
+        std::string listing;
+        if (!read_text_file(src_list, listing)) {
+            fprintf(stderr, "ace-caption: cannot read %s\n", src_list.c_str());
+            return 1;
+        }
+        std::string line;
+        std::istringstream ls(listing);
+        while (std::getline(ls, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) { line.pop_back(); }
+            if (line.empty()) { continue; }
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) {
+                const size_t dot = line.find_last_of('.');
+                jobs.emplace_back(line, dot == std::string::npos ? line : line.substr(0, dot));
+            } else {
+                jobs.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+            }
+        }
+        if (jobs.empty()) {
+            fprintf(stderr, "ace-caption: --src-list %s has no entries\n", src_list.c_str());
+            return 1;
+        }
+    } else {
+        jobs.emplace_back(src, out_path);
     }
 
     // --prompt / --prompt-file override every mode; otherwise each mode picks its
@@ -301,29 +338,32 @@ int main(int argc, char ** argv) {
     };
 
     // ---- audio: any format -> 16 kHz mono ---------------------------------
-    std::string audio_path = src, tmp_wav;
-    if (!ends_with_ci(src, ".wav") && !ends_with_ci(src, ".mp3")) {
-        if (ffmpeg.empty()) {
-            fprintf(stderr, "ace-caption: %s is not WAV/MP3; pass --ffmpeg <path>\n",
-                    src.c_str());
-            return 1;
+    // A lambda, not straight-line code, because the model load below must happen
+    // ONCE and every source file then reuses it (see the --src-list note above).
+    // Returns false on a bad file so a batch run can skip it and carry on rather
+    // than throwing away a loaded 8 GB model over one unreadable track.
+    auto load_pcm = [&](const std::string & path, std::vector<float> & pcm) -> bool {
+        std::string audio_path = path, tmp_wav;
+        if (!ends_with_ci(path, ".wav") && !ends_with_ci(path, ".mp3")) {
+            if (ffmpeg.empty()) {
+                fprintf(stderr, "ace-caption: %s is not WAV/MP3; pass --ffmpeg <path>\n",
+                        path.c_str());
+                return false;
+            }
+            if (!transcode_to_wav16k(ffmpeg, path, tmp_wav)) {
+                return false;
+            }
+            audio_path = tmp_wav;
         }
-        if (!transcode_to_wav16k(ffmpeg, src, tmp_wav)) {
-            return 1;
+        int T_in = 0, sr = 0;
+        float * planar = audio_read(audio_path.c_str(), &T_in, &sr);  // planar [L:T][R:T]
+        if (!tmp_wav.empty()) {
+            remove(tmp_wav.c_str());
         }
-        audio_path = tmp_wav;
-    }
-    int T_in = 0, sr = 0;
-    float * planar = audio_read(audio_path.c_str(), &T_in, &sr);  // planar [L:T][R:T]
-    if (!tmp_wav.empty()) {
-        remove(tmp_wav.c_str());
-    }
-    if (!planar || T_in <= 0) {
-        fprintf(stderr, "ace-caption: cannot read audio %s\n", src.c_str());
-        return 1;
-    }
-    std::vector<float> pcm;
-    {
+        if (!planar || T_in <= 0) {
+            fprintf(stderr, "ace-caption: cannot read audio %s\n", path.c_str());
+            return false;
+        }
         int T16 = T_in;
         float * res = planar;
         bool owned = false;
@@ -333,7 +373,7 @@ int main(int argc, char ** argv) {
             if (!res) {
                 fprintf(stderr, "ace-caption: resample %d -> 16000 failed\n", sr);
                 free(planar);
-                return 1;
+                return false;
             }
         }
         // A 9:57 track pushed 78 GB through WDDM shared-memory spill on a 32 GB
@@ -345,15 +385,16 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[MOSS] input is %.0f s; using the first %.0f s (--max-seconds)\n",
                     (double) T16 / 16000.0, max_seconds);
         }
-        pcm.resize((size_t) T_use);
+        pcm.assign((size_t) T_use, 0.0f);
         for (int t = 0; t < T_use; ++t) {
             pcm[(size_t) t] = 0.5f * (res[t] + res[T16 + t]);   // planar L/R -> mono
         }
         if (owned) {
             free(res);
         }
-    }
-    free(planar);
+        free(planar);
+        return true;
+    };
 
     // ---- models -----------------------------------------------------------
     const std::string sep =
@@ -397,6 +438,31 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // ---- per-file loop ----------------------------------------------------
+    // The model is loaded ABOVE this line and reused for every entry. That is the
+    // whole point of --src-list: on a warm cache the load costs ~4.6 s against
+    // ~6 s of actual decoding, so re-spawning per track spent roughly 40 % of a
+    // bulk run re-reading 8.3 GB it had just discarded.
+    //
+    // Scope is deliberately ONE DATASET, not the whole bulk run: a bulk job
+    // interleaves captioning with LM/DiT training per dataset, and holding ~10 GB
+    // of captioner resident while a trainer wants the card is the wrong trade.
+    // The process exits between datasets and the memory goes back.
+    int batch_rc = 0;
+    for (size_t ji = 0; ji < jobs.size(); ++ji) {
+    const std::string & src_file = jobs[ji].first;
+    const std::string & out_file = jobs[ji].second;
+    if (jobs.size() > 1) {
+        fprintf(stderr, "[MOSS] (%zu/%zu) %s\n", ji + 1, jobs.size(), src_file.c_str());
+    }
+    std::vector<float> pcm;
+    if (!load_pcm(src_file, pcm)) {
+        // Skip, don't abort: one unreadable track must not cost the whole batch
+        // the model load it has already paid for.
+        batch_rc = 1;
+        continue;
+    }
+
     // ---- mel + encode -----------------------------------------------------
     moss::MelParams mp;
     mp.sample_rate = (int) tower.hp.sample_rate;
@@ -408,8 +474,9 @@ int main(int argc, char ** argv) {
     std::vector<float> mel = moss::log_mel(pcm.data(), pcm.size(), mp, &frames);
     moss::EncoderOutput eo;
     if (!moss::moss_encode_audio(tower, mel.data(), mp.n_mels, frames, bp.backend, &eo)) {
-        fprintf(stderr, "ace-caption: encode failed\n");
-        return 1;
+        fprintf(stderr, "ace-caption: encode failed for %s\n", src_file.c_str());
+        batch_rc = 1;
+        continue;
     }
     fprintf(stderr, "[MOSS] %.1f s audio -> %d mel frames -> %d audio tokens (%.2f/s)\n",
             (double) pcm.size() / 16000.0, frames, eo.n_tokens,
@@ -590,7 +657,7 @@ int main(int argc, char ** argv) {
             break;   // diagnostic already printed
         }
 
-        if (out_path.empty()) {
+        if (out_file.empty()) {
             if (modes.size() > 1) {
                 printf("===== %s =====\n", mname.c_str());
             }
@@ -599,13 +666,13 @@ int main(int argc, char ** argv) {
             // One mode -> -o is the file. Several -> -o is a prefix, and each
             // mode appends its own suffix, so a caller can ask for all formats
             // in one invocation and get predictable filenames.
-            std::string dst = out_path;
+            std::string dst = out_file;
             if (modes.size() > 1) {
-                const size_t dot = out_path.find_last_of('.');
-                const std::string stem = (dot == std::string::npos) ? out_path
-                                                                    : out_path.substr(0, dot);
+                const size_t dot = out_file.find_last_of('.');
+                const std::string stem = (dot == std::string::npos) ? out_file
+                                                                    : out_file.substr(0, dot);
                 const std::string ext = (dot == std::string::npos) ? ".txt"
-                                                                   : out_path.substr(dot);
+                                                                   : out_file.substr(dot);
                 dst = stem + "." + mname + ext;
             }
             FILE * f = fopen(dst.c_str(), "wb");
@@ -620,9 +687,18 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[MOSS] %-7s -> %s (%.1fs)\n", mname.c_str(), dst.c_str(), el);
         }
     }
+    if (rc != 0) {
+        batch_rc = rc;
+    }
+    if (top_k_debug > 0) {
+        break;   // diagnostic mode is single-shot by design
+    }
+    }   // ---- end per-file loop ----------------------------------------------
 
     moss::moss_free_lm(&lm);
     moss::moss_free_audio_tower(&tower);
     backend_release(bp.backend, bp.cpu_backend);
-    return rc;
+    // Non-zero if ANY file failed, but only after every other file has been
+    // captioned — a batch reports partial failure, it does not discard good work.
+    return batch_rc;
 }
