@@ -591,7 +591,14 @@ link_ggml_backends(ace-midi)
 # docs/plans/2026-07-27-preprocess-implementation.md). Standalone tool: every
 # engine module it uses is header-only, so no acestep-core link is needed.
 add_executable(ace-train tools/ace-train.cpp)
-target_link_libraries(ace-train PRIVATE yyjson)
+# lua54 is not used by the trainer directly. It is needed because ace-train
+# includes minimax/mm3-request.h, which reaches lua-plugin.h transitively via
+# mm3-pipeline.h -> mm3-plugins.h, and lua54 is what carries vendor/lua on its
+# PUBLIC include path. Every other target that pulls this chain gets it by
+# linking acestep-core; ace-train deliberately does not link acestep-core (the
+# comment above), so it has to name lua54 itself. Without this the build fails
+# with "Cannot open include file: 'lua.h'" from lua-plugin.h.
+target_link_libraries(ace-train PRIVATE yyjson lua54)
 link_ggml_backends(ace-train)
 
 # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
