@@ -1187,18 +1187,30 @@ router.post('/datasets/:id/enhance/caption', async (req: Request, res: Response)
 
     const body = (req.body || {}) as CaptionOptions;
     const providerName = body.provider || config.lireek.defaultProvider;
-    let provider;
-    try {
-      provider = getProvider(providerName);
-    } catch (err: any) {
-      res.status(400).json({ error: err.message });
-      return;
-    }
-    if (!provider.isAvailable()) {
-      res.status(503).json({
-        error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
-      });
-      return;
+    // MOSS is not in the LLM registry — it is a local binary, not a chat API — so
+    // it must be admitted BEFORE getProvider(), which throws on an unknown id.
+    // Its availability check is "binary built + weights on disk", and the failure
+    // message has to say which, since neither is fixed in Settings → AI Services.
+    if (providerName === 'moss') {
+      const probe = resolveMossPaths();
+      if ('missing' in probe) {
+        res.status(503).json({ error: `MOSS captioning is not available: ${probe.missing}` });
+        return;
+      }
+    } else {
+      let provider;
+      try {
+        provider = getProvider(providerName);
+      } catch (err: any) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      if (!provider.isAvailable()) {
+        res.status(503).json({
+          error: `Provider ${providerName} is not available. Check API keys in Settings → AI Services.`,
+        });
+        return;
+      }
     }
 
     const samples = await buildSamples(ds);
