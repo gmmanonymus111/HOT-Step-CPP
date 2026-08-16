@@ -102,6 +102,9 @@ struct MM3TrainArgs {
     // rendered the 1-5% band. Snapshots + offline relnorm.py let one run
     // produce the whole ladder; at ~0.2 s/step that is minutes, not their 15 h.
     int64_t     export_every  = 0;
+    // "all" = every site (run-09 behaviour). "mlpv" = timbre-only: MLPs +
+    // attention V + to_out; no q,k (structure poison), no proj heads (fuzz).
+    std::string target        = "all";
     std::string only_song;          // restrict to one song (overfit test)
 };
 
@@ -218,8 +221,19 @@ static bool mm3_train_read_crop(const MM3TrainSong & s, int64_t start, int64_t c
 // Allocate LoRA A/B for every site. A is init'd small-random and B ZERO, so the
 // adapter starts as an exact no-op — which is also validation rung 2: a fresh
 // adapter must leave the forward bit-identical.
+//
+// `mlpv` restricts training to the timbre groups, from the run-09 group
+// ablation (Rob's ears, 2026-08-16, all at 2.85% median delta / scale 1.0):
+//   full set        -> "no apparent coherence, random clips"
+//   minus proj_out  -> still a mess            (q,k routing is the poison)
+//   minus q,k       -> coherent but "radio tuning" fuzz   (proj heads)
+//   MLP+V+out only  -> coherent, CLEAR LYRICS, stable; style under-dosed
+// So: no proj_in/proj_out sites at all, and the fused qkv trains V rows only
+// via out_mask. Filtering at export would waste the optimizer's budget on
+// deltas we discard; excluding here concentrates ALL fitting in what ships.
 static bool mm3_train_make_adapters(ggml_context * ctx, const MM3Model & m, int64_t rank, float alpha,
-                                    MM3TrainAdapters * ad, std::vector<ggml_tensor *> * params) {
+                                    bool mlpv, MM3TrainAdapters * ad,
+                                    std::vector<ggml_tensor *> * params) {
     const MM3DitConfig & c = m.synth_cfg.dit;
     const int64_t E = (int64_t) c.embedding_length, FI = (int64_t) c.ff_inner;
     const int64_t CC = (int64_t) c.concat_channels, IC = (int64_t) c.in_channels;
@@ -237,16 +251,31 @@ static bool mm3_train_make_adapters(ggml_context * ctx, const MM3Model & m, int6
         params->push_back(lo->b);
     };
 
+    // ONE shared V-only mask for every block's qkv (identical shape [3E, 1]):
+    // rows [0, 2E) = q,k -> 0;  [2E, 3E) = v -> 1. NOT a param — it is a
+    // constant, and the chain rule through the mul is what freezes q,k.
+    // Row order q|k|v matches the fused base tensor; validated empirically by
+    // the MLPV merge-surgery ear test before being trusted here.
+    ggml_tensor * vmask = nullptr;
+    if (mlpv) {
+        vmask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3 * E, 1);
+        ggml_set_name(vmask, "dit.qkv_vmask");
+        ad->qkv_vmask = vmask;
+    }
+
     ad->blk.assign(m.synth.dit.blk.size(), MM3TrainBlockAdapters{});
     for (size_t i = 0; i < ad->blk.size(); i++) {
         const std::string p = "dit.blk." + std::to_string(i);
         mk(&ad->blk[i].qkv,      E,  3 * E,      (p + ".attn_qkv").c_str());
+        ad->blk[i].qkv.out_mask = vmask;   // nullptr unless mlpv
         mk(&ad->blk[i].attn_out, E,  E,          (p + ".attn_output").c_str());
         mk(&ad->blk[i].ff_in,    E,  2 * FI,     (p + ".ffn_in").c_str());
         mk(&ad->blk[i].ff_out,   FI, E,          (p + ".ffn_out").c_str());
     }
-    mk(&ad->proj_in,  CC, E,  "dit.proj_in");
-    mk(&ad->proj_out, E,  IC, "dit.proj_out");
+    if (!mlpv) {
+        mk(&ad->proj_in,  CC, E,  "dit.proj_in");
+        mk(&ad->proj_out, E,  IC, "dit.proj_out");
+    }
     return true;
 }
 
@@ -514,7 +543,8 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
     ggml_context *   actx    = ggml_init(aip);
     MM3TrainAdapters ad;
     std::vector<ggml_tensor *> params;
-    mm3_train_make_adapters(actx, m, a.rank, a.alpha, &ad, &params);
+    const bool target_mlpv = (a.target == "mlpv");
+    mm3_train_make_adapters(actx, m, a.rank, a.alpha, target_mlpv, &ad, &params);
     // THE SEED GRADIENT. LmOptim::t_lossgrad defaults to nullptr and is NOT
     // created by lm_optim_init — ACE builds it itself (dit-train-run.h) and
     // assigns it. Leaving it null makes lm_optim_fill_gacc hand a null
@@ -581,8 +611,17 @@ static int mm3_train_dit_run(const MM3TrainArgs & a) {
             ggml_backend_tensor_set(t, v.data(), 0, n * sizeof(float));
         }
     }
-    fprintf(stderr, "[mm3-train] %zu LoRA tensors, rank %lld, alpha %.1f\n", params.size(),
-            (long long) a.rank, (double) a.alpha);
+    // Fill the V-only mask AFTER buffer allocation. It is not a param, so the
+    // init loop above skipped it; an unfilled mask would be allocator garbage
+    // and silently random-mask the delta.
+    if (ad.qkv_vmask) {
+        const int64_t E3 = ad.qkv_vmask->ne[0];
+        std::vector<float> mv((size_t) E3, 0.0f);
+        for (int64_t i = 2 * (E3 / 3); i < E3; i++) mv[(size_t) i] = 1.0f;   // v rows only
+        ggml_backend_tensor_set(ad.qkv_vmask, mv.data(), 0, mv.size() * sizeof(float));
+    }
+    fprintf(stderr, "[mm3-train] %zu LoRA tensors, rank %lld, alpha %.1f, target %s\n", params.size(),
+            (long long) a.rank, (double) a.alpha, a.target.c_str());
 
     // Report the sigma distribution this run will actually see, by sampling it
     // rather than by quoting logit_mean. sigma near 0 means the crop is mostly

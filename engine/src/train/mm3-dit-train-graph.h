@@ -56,6 +56,15 @@
 struct MM3TrainLora {
     ggml_tensor * a     = nullptr;
     ggml_tensor * b     = nullptr;
+    // Optional [out, 1] constant 0/1 mask on the delta's OUTPUT channels.
+    // Used by --target mlpv to train the fused qkv's V rows only: masking the
+    // delta also masks the backward (chain rule), so the q,k rows of B receive
+    // zero gradient forever and stay at their zero init — the optimizer
+    // CANNOT spend budget on attention routing. Measured motivation (run 09
+    // group ablation, Rob's ears, 2026-08-16): q,k deltas scramble structure,
+    // proj_in/out inject seed-dependent "radio tuning" fuzz, while MLP+V+out
+    // carry timbre with clear lyrics.
+    ggml_tensor * out_mask = nullptr;
     float         scale = 1.0f;   // alpha / rank
     bool          on() const { return a && b; }
 };
@@ -67,6 +76,10 @@ struct MM3TrainBlockAdapters {
 struct MM3TrainAdapters {
     std::vector<MM3TrainBlockAdapters> blk;
     MM3TrainLora                       proj_in, proj_out;
+    // Shared V-only qkv mask when --target mlpv; owned by the adapter ctx,
+    // filled once after buffer allocation (it is not a param, so the param
+    // init loop never touches it).
+    ggml_tensor *                      qkv_vmask = nullptr;
 };
 
 // y = W x  (+ scale * B(A x) when the site is active).
@@ -82,6 +95,9 @@ static ggml_tensor * mm3_dt_linear(ggml_context * ctx, ggml_tensor * w, ggml_ten
     }
     ggml_tensor * ax = ggml_mul_mat(ctx, lo.a, x);                    // [rank, S]
     ggml_tensor * bx = ggml_mul_mat(ctx, lo.b, ax);                   // [out,  S]
+    if (lo.out_mask) {
+        bx = ggml_mul(ctx, bx, lo.out_mask);   // broadcast [out,1] over S
+    }
     return ggml_add(ctx, y, ggml_scale(ctx, bx, lo.scale));
 }
 

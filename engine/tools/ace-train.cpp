@@ -155,6 +155,10 @@ static void print_usage(void) {
             "                [--export-every N] snapshot mm3_lora_step<N>.safetensors along the\n"
             "                way. For the delta ladder: measure each with relnorm, ear-test the\n"
             "                1-5%% band (0.074%% proven inaudible, 17%% proven destroyed).\n"
+            "                [--target all|mlpv] mlpv trains ONLY the timbre groups: MLPs +\n"
+            "                attention V + to_out. No q,k (ablation-proven structure poison),\n"
+            "                no proj heads (seed-dependent fuzz). Concentrates the whole delta\n"
+            "                budget in what survives, instead of filtering at export.\n"
             "                [--sign-check] measure the velocity target's sign, train nothing\n"
             "                [--bwd outprod] restore the slow CPU mul_mat backward (510x slower)\n"
             "                [--tf32 on|off] default off\n"
@@ -1874,6 +1878,12 @@ static int cmd_mm3_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--ckpt-segments")) a.ckpt_segments = atoll(next("--ckpt-segments"));
         else if (!strcmp(argv[i], "--ckpt-verify"))   a.ckpt_verify   = true;
         else if (!strcmp(argv[i], "--export-every"))  a.export_every  = atoll(next("--export-every"));
+        else if (!strcmp(argv[i], "--target")) {
+            a.target = next("--target");
+            if (a.target != "all" && a.target != "mlpv") {
+                fprintf(stderr, "ace-train: --target must be all or mlpv\n"); return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
         else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
