@@ -353,6 +353,54 @@ export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
   return lines.join('\n');
 }
 
+/**
+ * Correct tempo/key claims that MOSS baked into CAPTION PROSE.
+ *
+ * `applyFactSubstitution` fixes the MM3 side by replacing a whole labelled line.
+ * The AS1.5 caption has no such line — the numbers are welded into the sentence
+ * ("A driving Electro House track in B minor at 120 BPM, this piece pulses…") —
+ * so a line replacement cannot reach them, and a caption that asserts the wrong
+ * tempo is worse than one that omits it: it is training data that disagrees with
+ * the `bpm` field sitting next to it in the same sidecar.
+ *
+ * Measured on the Daft Punk capture: caption prose said "120 BPM", the MM3
+ * section of the SAME encode said "approximately 128", truth is 123.
+ *
+ * Values are REWRITTEN rather than deleted. Deleting leaves "…track  , this
+ * piece…" and needs fragile comma surgery; rewriting keeps MOSS's sentence
+ * intact and makes it true. Only substitutes what local analysis actually knows,
+ * and only where the value differs — so a caption that happens to be right, or a
+ * dataset with no Essentia pass, is left completely alone.
+ *
+ * Chord spellings are untouched: the key pattern requires a space and a literal
+ * "major"/"minor", so "Bm7", "Gmaj7" and "A6" never match.
+ */
+export function correctFactsInProse(caption: string, facts: LocalFacts): string {
+  let out = caption;
+
+  const bpm = Math.round(Number(facts.bpm ?? 0));
+  if (bpm > 0) {
+    out = out.replace(/\b(\d{2,3})(\s*)(BPM|bpm)\b/g, (m, n, sp, unit) =>
+      Number(n) === bpm ? m : `${bpm}${sp}${unit}`);
+  }
+
+  const { key, scale } = parseKeyScale(facts.keyscale);
+  if (key && scale) {
+    const truth = `${key} ${scale}`;
+    // Replace only the FIRST key statement. Later ones are usually modulations
+    // ("shifts to D minor"), and rewriting those would produce "from F# minor to
+    // F# minor" — nonsense that reads as a transcription error in the dataset.
+    let done = false;
+    out = out.replace(/\b([A-G][#b]?)\s+(major|minor)\b/g, (m) => {
+      if (done) return m;
+      done = true;
+      return m.toLowerCase() === truth.toLowerCase() ? m : truth;
+    });
+  }
+
+  return out;
+}
+
 // ── The Training Studio entry point ──────────────────────────────────────
 
 export interface MossCaptionResult {

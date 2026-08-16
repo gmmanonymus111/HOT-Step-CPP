@@ -16,7 +16,7 @@ import { searchSongLyrics } from '../lireek/geniusService.js';
 import { getProvider } from '../lireek/llm/registry.js';
 import { sanitizeHeaders } from './lyricsSanitizer.js';
 import { buildUserPrompt, parseStructuredResponse, CAPTION_INSTRUCTIONS, CAPTION_TOP_P } from './captionPrompt.js';
-import { captionWithMoss } from './mossCaption.js';
+import { captionWithMoss, correctFactsInProse } from './mossCaption.js';
 import type { TrainingDatasetRow, TrainingSample } from './types.js';
 
 const MAX_CAPTION_CHARS = 4000;
@@ -276,24 +276,32 @@ async function captionWithMossProvider(
     log?: (level: 'info' | 'warn', message: string) => void;
   },
 ): Promise<Record<string, string>> {
+  // One fact set drives both corrections: the MM3 `Basic Attributes:` line and
+  // the tempo/key welded into the AS1.5 caption sentence.
+  const facts = {
+    bpm: sample.bpm,
+    keyscale: sample.key,
+    signature: sample.signature,
+    genre: sample.genre,
+    // The pre-existing caption counts as an observed source for genre picking
+    // only — it was written from audio too. It is never shown to MOSS.
+    observedCaption: sample.caption,
+  };
+
   const result = await captionWithMoss(
-    sample.audioPath,
-    {
-      bpm: sample.bpm,
-      keyscale: sample.key,
-      signature: sample.signature,
-      genre: sample.genre,
-      // The pre-existing caption counts as an observed source for genre picking
-      // only — it was written from audio too. It is never shown to MOSS.
-      observedCaption: sample.caption,
-    },
+    sample.audioPath, facts,
     { wantMm3: opts.wantMm3, signal: opts.signal, log: opts.log },
   );
 
   const out: Record<string, string> = {};
   if (result.prose?.trim()) {
     const parsed = parseStructuredResponse(result.prose);
-    if (parsed.caption) out.caption = cleanText(parsed.caption, MAX_CAPTION_CHARS);
+    if (parsed.caption) {
+      // MOSS welds tempo/key into the sentence ("...in B minor at 120 BPM..."),
+      // where the MM3 line-replacement cannot reach. Left alone, the caption
+      // would contradict the `bpm` field written beside it in the same sidecar.
+      out.caption = cleanText(correctFactsInProse(parsed.caption, facts), MAX_CAPTION_CHARS);
+    }
     if (parsed.genre) out.genre = cleanText(parsed.genre, 300);
     // BPM and key are deliberately NOT taken from MOSS — local analysis already
     // has them exactly, and MOSS is measurably wrong on both (burn: ~102 / C#
