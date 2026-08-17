@@ -194,6 +194,11 @@ server.tool(
       '',
       '## Step 2',
       'After generating the metadata JSON, call `build_lyrics_prompt` with the profile_id and your generated metadata values (subject, bpm, duration, structure, and optionally extra_instructions).',
+      '',
+      'The full chain is: `prepare_generation` → `build_lyrics_prompt` → write lyrics → ' +
+      '`prepare_mm3_caption` → write the MM3 caption → `save_generation`. The `caption` in this ' +
+      'metadata JSON is the ACE-Step one; the MiniMax-Music3 caption is a separate, differently ' +
+      'formatted field written later, once the lyrics exist.',
     ].filter(Boolean).join('\n');
 
     return { content: [{ type: 'text', text }] };
@@ -251,8 +256,83 @@ server.tool(
       '',
       '---',
       '',
-      'Write the lyrics following the system prompt rules. Then call `save_generation` to save the result — ' +
-      "include the `model` param with your own model name (e.g. 'Fable 5') so it is appended to the title.",
+      'Write the lyrics following the system prompt rules. Then call `prepare_mm3_caption` with the ' +
+      'finished lyrics to write the MiniMax-Music3 caption, and finally `save_generation` to save ' +
+      "everything — include the `model` param with your own model name (e.g. 'Fable 5') so it is " +
+      'appended to the title.',
+    ].join('\n');
+
+    return { content: [{ type: 'text', text }] };
+  }
+);
+
+// ── prepare_mm3_caption ─────────────────────────────────────────────────────
+//
+// MiniMax-Music3 is the second generation backend and takes a completely
+// different caption from ACE-Step's: a three-heading Structured Caption with
+// twelve fixed labels. The two are not interchangeable — an ACE caption fed to
+// MM3 lands off-genre (measured A/B, see prompts.ts). So a generation carries
+// BOTH, and this is the MCP counterpart of the dedicated MM3 caption call the
+// in-app pipeline makes in llm/orchestration.ts.
+//
+// Called AFTER the lyrics are written, on purpose: the Arrangement section is a
+// section-by-section timeline of this song, so it needs the real section tags.
+
+server.tool(
+  'prepare_mm3_caption',
+  'Prepare the prompts for writing this song\'s MiniMax-Music3 Structured Caption. Call this AFTER writing the lyrics and BEFORE save_generation — the caption describes the song section by section, so it needs the finished lyrics. Pass the result to save_generation as caption_mm3.',
+  {
+    profile_id: z.number().describe('Profile ID'),
+    lyrics: z.string().describe('The FINISHED lyrics, including their section tags'),
+    bpm: z.number().optional().describe('BPM from metadata generation'),
+    key: z.string().optional().describe('Musical key from metadata generation, e.g. "E minor"'),
+    caption: z.string().optional().describe('The ACE-Step caption planned for this song — used as evidence of the intended sound'),
+    subject: z.string().optional().describe('Song subject'),
+  },
+  async ({ profile_id, lyrics, bpm, key, caption, subject }) => {
+    const profile = db.getProfile(profile_id);
+    if (!profile) {
+      return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
+    }
+    const pd = profile.profile_data;
+
+    // Same live re-derivation as prepare_generation — the enrichment supplies
+    // the album's measured genres and time signature.
+    const set = db.getLyricsSet(profile.lyrics_set_id);
+    if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
+
+    const userPrompt = prompts.buildMm3CaptionPrompt(pd, {
+      lyrics,
+      aceCaption: caption,
+      subject,
+      bpm,
+      key,
+      signature: pd.audio_enrichment?.signatures?.[0],
+      instrumental: !lyrics.trim(),
+    });
+
+    const text = [
+      `# MM3 Structured Caption: ${profile.artist_name}`,
+      `**Profile ID:** ${profile_id}`,
+      '',
+      '---',
+      '',
+      '## System Prompt',
+      '```',
+      prompts.MM3_CAPTION_SYSTEM_PROMPT,
+      '```',
+      '',
+      '## User Prompt',
+      '```',
+      userPrompt,
+      '```',
+      '',
+      '---',
+      '',
+      'Write the Structured Caption, then call `save_generation` with it as the `caption_mm3` param ' +
+      '(alongside the normal `caption`). The `Basic Attributes:` line is rebuilt from the stored ' +
+      'bpm/key on save, so do not worry about getting those digits exactly right — but DO name a ' +
+      'specific genre, because that part is kept.',
     ].join('\n');
 
     return { content: [{ type: 'text', text }] };
@@ -272,10 +352,11 @@ server.tool(
     subject: z.string().optional().describe('Song subject'),
     bpm: z.number().optional().describe('BPM'),
     key: z.string().optional().describe('Musical key (e.g. "C Major")'),
-    caption: z.string().optional().describe('Audio style caption'),
+    caption: z.string().optional().describe('Audio style caption for the ACE-Step backend'),
+    caption_mm3: z.string().optional().describe('MiniMax-Music3 Structured Caption, from prepare_mm3_caption. A SEPARATE caption in MM3\'s own three-heading format — never a copy of `caption`.'),
     duration: z.number().optional().describe('Duration in seconds'),
   },
-  async ({ profile_id, lyrics, title, model, subject, bpm, key, caption, duration }) => {
+  async ({ profile_id, lyrics, title, model, subject, bpm, key, caption, caption_mm3, duration }) => {
     const profile = db.getProfile(profile_id);
     if (!profile) {
       return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
@@ -304,6 +385,27 @@ server.tool(
       }
     }
 
+    // The MM3 caption gets the SAME deterministic treatment as the in-app
+    // path: markdown stripped, and `Basic Attributes:` rebuilt from the
+    // bpm/key/signature we hold exactly rather than the digits the model typed.
+    let mm3Note = '';
+    let captionMm3 = '';
+    if (caption_mm3 && caption_mm3.trim()) {
+      const enrich = (() => {
+        const set = db.getLyricsSet(profile.lyrics_set_id);
+        return set ? prompts.computeAlbumEnrichment(set.songs) : null;
+      })();
+      captionMm3 = prompts.normalizeMm3Caption(caption_mm3, {
+        bpm, key, signature: enrich?.signatures?.[0], fallbackGenre: enrich?.genres?.[0],
+      });
+      const issues = prompts.validateMm3Caption(captionMm3);
+      mm3Note = issues.length
+        ? `\n⚠ MM3 caption saved WITH FORMAT ISSUES: ${issues.join('; ')} — fix it in the Lyric Studio UI or re-run prepare_mm3_caption`
+        : `\n🎛 MM3 caption saved (${captionMm3.split(/\s+/).length} words, format OK)`;
+    } else {
+      mm3Note = '\n⚠ No MM3 caption supplied — this song cannot be generated well on the MiniMax-Music3 backend. Call prepare_mm3_caption and re-save.';
+    }
+
     const saved = db.saveGeneration({
       profileId: profile_id,
       provider: 'mcp',
@@ -314,6 +416,7 @@ server.tool(
       bpm,
       key,
       caption,
+      captionMm3,
       duration,
     });
 
@@ -330,6 +433,7 @@ server.tool(
           `**BPM:** ${saved.bpm} | **Key:** ${saved.key} | **Duration:** ${saved.duration}s`,
           introNote,
           durationNote,
+          mm3Note,
           '',
           'The generation is now visible in the Lyric Studio UI.',
         ].join('\n'),
@@ -415,6 +519,7 @@ server.tool(
       bpm: parent.bpm,
       key: parent.key,
       caption: parent.caption,
+      captionMm3: parent.caption_mm3,
       duration: parent.duration,
       parentGenerationId: generation_id,
     });

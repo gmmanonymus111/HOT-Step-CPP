@@ -23,6 +23,8 @@ import { addToPlaylist } from '../components/lyric-studio/playlistStore';
 import type { GenerationParams } from '../types';
 import { resolveDuration } from '../utils/estimateDuration';
 import { createGenerationTimer, getGenerationTimeoutMinutes } from '../utils/generationTimer';
+import { captionForBackend } from '../utils/captionForBackend';
+import { useBackendStore } from './backendStore';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -926,7 +928,15 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
 
   // 2) Overlay content fields from the written song
   params.lyrics = gen.lyrics || '';
-  params.caption = gen.caption || '';
+  // Two captions on the generation, one caption field on the request — pick the
+  // one the backend that will actually render this was trained on.
+  //
+  // Read LIVE from backendStore rather than from `snapshot.backend`: the server
+  // routes on getActiveBackendId() at dequeue time and ignores the request's
+  // backend field entirely (routes/generate.ts), so a queue item submitted after
+  // the user switched backends runs on the NEW backend. Matching the snapshot
+  // here would hand MM3 the ACE caption in exactly that case.
+  params.caption = captionForBackend(gen, useBackendStore.getState().activeBackendId);
   params.title = gen.title || '';
   params.instrumental = false;
   params.duration = resolveDuration(gen.duration, gen.lyrics || '', gen.bpm || 120);

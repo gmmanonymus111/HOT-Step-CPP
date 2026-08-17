@@ -588,6 +588,328 @@ export function buildCaptionReplanPrompt(
   return lines.join('\n');
 }
 
+// ── MiniMax-Music3 Structured Caption ───────────────────────────────────────
+//
+// MM3 is the second generation backend and it does NOT want an ACE-Step
+// caption. It was trained on a three-heading "Structured Caption" whose twelve
+// labelled sub-fields are 100% consistent across all 1,000 reference captions
+// MiniMax ship (.claude/skills/mm3-captioning/upstream/templates/ — every one of
+// the 1,000 carries all twelve labels, verbatim). Adherence to that format is
+// the dominant lever on MM3 output, not a stylistic preference:
+//
+//   Controlled A/B, 2026-08-14 — one track, identical lyrics, 5 seeds per arm,
+//   f16/f16, no adapter. Arm A was a genuinely rich 219-word ACE-style caption
+//   already covering groove, per-instrument detail, timbre, mix and arrangement.
+//   Arm B was the SAME content restructured into this format. Verdict by ear:
+//   B better "by a massive margin" — most A takes were not even the right
+//   genre (1 of 5 was), B was on-genre throughout.
+//
+// So rich descriptive prose is NOT a substitute for the format, and a caption
+// written for ACE cannot be handed to MM3. Hence a second, separate field.
+//
+// Two rules below are load-bearing, and each one cost a wrong result before it
+// was understood:
+//
+//   * LEAD THE ARRANGEMENT WITH WHATEVER OPENS THE TRACK. A piano intro named
+//     two thirds of the way down a 503-word caption vanished from the audio;
+//     the same instrument named FIRST under Primary survived into it.
+//   * THE GENRE WORD MUST BE SPECIFIC. Collapsing "Pop-Punk" to the umbrella
+//     "Rock" is precisely the failure that produced flat plain-rock takes.
+//
+// This caption gets its OWN LLM call, made AFTER the lyrics exist, because its
+// Arrangement is a section-by-section timeline of THIS song and the lyric's
+// section tags are the only evidence of what that timeline is. The metadata
+// planner runs before a single lyric line has been written and cannot do it.
+//
+// Field lengths below are MEASURED over those 1,000 reference captions (median
+// words; whole caption runs 436-714 words, median 574) rather than guessed, so
+// a model that hits them produces something the same size and density as what
+// MM3 was actually trained on.
+
+/** The twelve labelled sub-fields of an MM3 Structured Caption, in order,
+ *  with the measured median word count of each across MiniMax's 1,000
+ *  reference captions. `heading` marks the three top-level lines. */
+export const MM3_CAPTION_FIELDS: ReadonlyArray<
+  { heading: string } | { label: string; words: number; what: string }
+> = [
+  { heading: 'Global Metadata' },
+  { label: 'Basic Attributes', words: 15, what: 'the fixed facts, in the exact shape shown below' },
+  { label: 'Global Emotional Progression', words: 62, what: 'how the emotional intensity moves from the opening through to the ending' },
+  { label: 'Application Scenarios & Imagery', words: 27, what: 'where this music would be heard, or the scene it paints' },
+  { label: 'Sonics & Production Profile', words: 59, what: 'soundstage width, frequency balance, dynamic aesthetic, production era and character' },
+  { heading: 'Vocal Details' },
+  { label: 'Vocal Gender & Timbre', words: 28, what: 'open with "Singer A (Male)." or "Singer A (Female).", then the texture, weight and register of the voice' },
+  { label: 'Vocal Style', words: 49, what: 'phrasing, delivery, dynamics, and how the performance changes across the song' },
+  { label: 'Harmony/Backing Vocals', words: 40, what: 'what harmony or backing exists and where it enters — state plainly when there is none' },
+  { label: 'Vocal FX', words: 47, what: 'processing on the voice: reverb, delay, doubling, saturation. Restraint is the norm' },
+  { heading: 'Arrangement' },
+  { label: 'Instrument Lifecycle Description (Primary/Secondary Layering)', words: 0, what: 'a bare label on its own line — Primary and Secondary follow it' },
+  { label: 'Primary', words: 35, what: 'the instruments carrying the harmonic and melodic weight, and when they are present. NAME WHATEVER OPENS THE TRACK FIRST' },
+  { label: 'Secondary', words: 45, what: 'the supporting layers, and which sections introduce or drop them' },
+  { label: 'Groove & Foundation Progression', words: 65, what: 'drums, bass and rhythmic feel, and how they develop section by section' },
+  { label: 'Embellishments, Textures & Spatial FX', words: 53, what: 'fills, risers, pads, transitions, ambience — or state plainly that there are none' },
+];
+
+/** The literal skeleton, rendered from MM3_CAPTION_FIELDS so the prompt and the
+ *  validator can never drift apart. */
+function mm3Skeleton(): string {
+  return MM3_CAPTION_FIELDS.map((f) => {
+    if ('heading' in f) return f.heading;
+    if (f.label === 'Basic Attributes') {
+      return 'Basic Attributes: bpm is <N>. key is <note>, and scale is <major|minor>. <Specific Genre>, in <time signature>.';
+    }
+    if (!f.words) return `${f.label}:`;
+    return `${f.label}: <${f.what}> (~${f.words} words)`;
+  }).join('\n');
+}
+
+export const MM3_CAPTION_SYSTEM_PROMPT = `You write Structured Captions for MiniMax-Music3, an AI music generator. This caption is the ONLY description the model receives: it alone decides the genre, the voice and the arrangement of the track that gets rendered. A caption that drifts off format produces off-genre music — that is measured, not theoretical.
+
+Return ONE caption in EXACTLY this shape. All three heading lines and all twelve labels are mandatory, in this order, spelled character-for-character as shown:
+
+${mm3Skeleton()}
+
+FORMAT RULES (mechanical — a violation breaks the model's expectations):
+- PLAIN TEXT ONLY. No markdown, no '#' headings, no '**bold**', no bullets or dashes at the start of lines, no code fences, no numbering.
+- One field per line. No blank lines anywhere, including between the three sections.
+- The heading lines "Global Metadata", "Vocal Details" and "Arrangement" stand alone with no colon and no text after them.
+- "Instrument Lifecycle Description (Primary/Secondary Layering):" is a bare label; its content is the "Primary:" and "Secondary:" lines beneath it.
+- Output the caption and NOTHING else — no preamble, no explanation, no closing remark.
+
+CONTENT RULES (musical — each one is a measured failure mode):
+- THE GENRE MUST BE SPECIFIC. Write "Pop-Punk", "Post-Hardcore", "Contemporary R&B", "Melodic Dubstep" — never the umbrella term "Rock", "Pop" or "Electronic" when a narrower one is true. Collapsing a genre to its umbrella is the single most reliable way to get a generic, wrong-sounding track. Two or three slash-joined genres are normal: "Synth-Pop / Mandopop".
+- NAME WHATEVER OPENS THE TRACK FIRST under "Primary:". An instrument mentioned late in a long caption does not survive into the audio; the one named first does. If the song opens on a solo piano, that piano is the first thing "Primary:" says.
+- Describe the song SECTION BY SECTION. The lyrics you are given carry section tags — [Intro], [Verse], [Chorus], [Bridge - Heavy Breakdown], [Outro] and so on. They are directives: they tell you what actually happens and when. Follow the real tags; do not invent a drop for a ballad or a quiet bridge for a thrash number.
+- NEVER quote, paraphrase or summarise the lyrics, and never state the song title, the artist or the band name. Use the lyrics only as evidence of the arrangement and the emotional arc.
+- Do NOT fabricate precision. If something is not supported by what you were given, describe it in broader terms instead of inventing an exact technique.
+- An instrumental track stays instrumental. Never add vocals that were not asked for.
+- Write concrete audio detail, not review copy. "The snare moves from rimclick to a full backbeat at the first chorus" is useful; "an emotionally resonant journey" is not.
+- English, roughly 450-650 words in total.`;
+
+/** Everything the MM3 caption call knows about the song being described. */
+export interface Mm3CaptionContext {
+  /** The ACE-Step caption planned for the same song — the best available
+   *  evidence of the intended sound, and the only place a vocal gender is
+   *  usually stated. Used as EVIDENCE, never restructured mechanically:
+   *  scripted restructuring of ACE captions was ear-tested five ways and
+   *  never reached the target genre (see docs in the mm3-captioning skill). */
+  aceCaption?: string;
+  subject?: string;
+  bpm?: number;
+  /** "E minor" / "Bb major" — as stored on the generation. */
+  key?: string;
+  /** "4/4", or a bare numerator ("4") as the training sidecars store it. */
+  signature?: string;
+  lyrics: string;
+  /** No lyrics were written — the track is instrumental. */
+  instrumental?: boolean;
+}
+
+/** Bracketed section tags in the order they appear, duplicates kept — the
+ *  Arrangement timeline is exactly this sequence. */
+export function extractSectionTags(lyrics: string): string[] {
+  const out: string[] = [];
+  for (const line of (lyrics || '').split('\n')) {
+    const m = line.match(/^[ \t]*\[([^\]]{1,60})\][ \t]*$/);
+    if (m) out.push(`[${m[1].trim()}]`);
+  }
+  return out;
+}
+
+/** "4" -> "4/4"; "4/4" -> "4/4"; anything unparseable -> "4/4". */
+export function normalizeTimeSignature(sig?: string | null): string {
+  const s = String(sig ?? '').trim();
+  if (/^\d{1,2}\s*\/\s*\d{1,2}$/.test(s)) return s.replace(/\s+/g, '');
+  if (/^\d{1,2}$/.test(s)) return `${s}/4`;
+  return '4/4';
+}
+
+/** "C# minor" -> ["C#", "minor"]; unparseable -> [null, null].
+ *  Deliberately NOT case-insensitive on the accidental: with /i, `[#b]` also
+ *  matches the note letter B, so "Bb minor" parses as note "B" + accidental "b"
+ *  only while the flag is off. Mode is matched case-insensitively by hand. */
+function parseKeyScale(key?: string | null): [string | null, string | null] {
+  const m = String(key ?? '').trim().match(/^([A-Ga-g])\s*([#b])?\s+([Mm]ajor|[Mm]inor)$/);
+  if (!m) return [null, null];
+  return [m[1].toUpperCase() + (m[2] ?? ''), m[3].toLowerCase()];
+}
+
+export function buildMm3CaptionPrompt(profile: PromptProfile, ctx: Mm3CaptionContext): string {
+  const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+  const sig = normalizeTimeSignature(ctx.signature || enrich?.signatures?.[0]);
+  const [note, scale] = parseKeyScale(ctx.key);
+  const tags = extractSectionTags(ctx.lyrics);
+
+  const lines: string[] = [];
+
+  lines.push(
+    'FIXED FACTS — reproduce these EXACTLY in the "Basic Attributes:" line. Do not round them, do not substitute your own, and do not repeat them anywhere else in the caption:',
+    `  bpm: ${ctx.bpm && ctx.bpm > 0 ? Math.round(ctx.bpm) : '(unknown — omit the bpm sentence)'}`,
+    `  key / scale: ${note && scale ? `${note} / ${scale}` : '(unknown — omit the key sentence)'}`,
+    `  time signature: ${sig}`,
+    '',
+  );
+
+  if (enrich?.genres?.length) {
+    lines.push(
+      `GENRE — detected on this album's actual recordings: ${enrich.genres.slice(0, 6).join(', ')}.`,
+      'Name the most SPECIFIC of these that fits this song. If one of them is an umbrella term and a narrower one is also true, use the narrower one.',
+      '',
+    );
+  }
+
+  if (ctx.aceCaption) {
+    lines.push(
+      "EVIDENCE — how this song is meant to sound. This describes the same track for a different music model, so it is source material, NOT a template: do not restructure it sentence by sentence. Read what it says about instruments, voice, production and energy, then write the Structured Caption from scratch.",
+      `  "${ctx.aceCaption}"`,
+      '',
+    );
+  } else if (enrich?.captionExamples?.length) {
+    lines.push(
+      "EVIDENCE — captions describing this album's actual recordings. Source material for the sound of this record, NOT a template to restructure:",
+      ...enrich.captionExamples.slice(0, 2).map((c, i) => `  ${i + 1}. "${c}"`),
+      '',
+    );
+  }
+
+  if (profile.tone_and_mood) lines.push(`Tone & mood of this artist: ${profile.tone_and_mood}`, '');
+  if (ctx.subject) lines.push(`What this song is about (context for the emotional arc only — never state it in the caption): ${ctx.subject}`, '');
+
+  if (ctx.instrumental) {
+    lines.push(
+      'THIS TRACK IS INSTRUMENTAL. There is no singing. Under "Vocal Gender & Timbre:" state that the piece is instrumental and name the instrument carrying the lead melodic line; keep the other three Vocal Details fields consistent with that. Never add a vocalist.',
+      '',
+    );
+  }
+
+  if (tags.length) {
+    lines.push(
+      `ARRANGEMENT TIMELINE — this song's own sections, in order (${tags.length}):`,
+      `  ${tags.join(' → ')}`,
+      `The track OPENS on ${tags[0]} and ENDS on ${tags[tags.length - 1]}. Name whatever plays under ${tags[0]} first under "Primary:", and make the Arrangement follow this exact sequence.`,
+      '',
+    );
+  }
+
+  lines.push(
+    'LYRICS — evidence of the arrangement and the emotional arc ONLY. Never quote, paraphrase or summarise a single line of them in the caption:',
+    ctx.lyrics,
+    '',
+    'Write the Structured Caption now. Output the caption only.',
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Deterministic cleanup of a model-written MM3 caption.
+ *
+ * Two jobs. First, strip the markdown a chat model reflexively adds — the
+ * upstream skill states its own three sections as `###` headings, so models
+ * that have seen it copy that, and the 1,000 real templates use plain labels.
+ *
+ * Second, REBUILD the "Basic Attributes:" line from the facts we hold exactly.
+ * This is the same correction `engine/tools/mm3-caption-hybrid.py` applies to
+ * MOSS's audio captions, for the same reason: models are unreliable on bpm and
+ * key even when told them (MOSS read 102 BPM / C# minor off a track Essentia
+ * measures at 90 / E major), and here the bpm and key are not observations at
+ * all — they are the values the song will actually be rendered at. The GENRE
+ * clause the model wrote is preserved, because genre is the one part of that
+ * line the model is the better judge of.
+ */
+export function normalizeMm3Caption(
+  raw: string,
+  facts: { bpm?: number; key?: string; signature?: string; fallbackGenre?: string } = {},
+): string {
+  let text = String(raw ?? '');
+
+  // Fenced block: keep only what is inside the first fence.
+  const fence = text.match(/```(?:[a-z]*)\n([\s\S]*?)```/i);
+  if (fence) text = fence[1];
+
+  const cleaned = text
+    .split('\n')
+    .map((l) =>
+      l
+        .replace(/^\s{0,8}#{1,6}\s*/, '')      // markdown headings
+        .replace(/^\s{0,8}[-*+]\s+/, '')       // bullet markers
+        .replace(/\*\*/g, '')                  // bold
+        .replace(/^\s+/, '')                   // leading indent
+        .replace(/\s+$/, ''),
+    )
+    .filter((l) => l.length > 0);               // templates carry no blank lines
+
+  const [note, scale] = parseKeyScale(facts.key);
+  const bpm = facts.bpm && facts.bpm > 0 ? Math.round(facts.bpm) : 0;
+  const sig = normalizeTimeSignature(facts.signature);
+
+  const idx = cleaned.findIndex((l) => /^Basic Attributes\s*:/i.test(l));
+  const genre = idx >= 0
+    ? (extractGenreClause(cleaned[idx].replace(/^Basic Attributes\s*:/i, '')) || facts.fallbackGenre || '')
+    : (facts.fallbackGenre || '');
+
+  // Only rebuild when we actually hold a fact worth asserting; otherwise the
+  // model's own line, whatever it says, is better than a stub.
+  if (bpm || (note && scale) || genre) {
+    const parts: string[] = [];
+    if (bpm) parts.push(`bpm is ${bpm}.`);
+    if (note && scale) parts.push(`key is ${note}, and scale is ${scale}.`);
+    if (genre) parts.push(`${genre}, in ${sig}.`);
+    else parts.push(`In ${sig}.`);
+    const line = `Basic Attributes: ${parts.join(' ')}`;
+    if (idx >= 0) cleaned[idx] = line;
+    else {
+      // Model omitted the line entirely — insert it under Global Metadata
+      // rather than dropping the facts on the floor.
+      const g = cleaned.findIndex((l) => /^Global Metadata\s*$/i.test(l));
+      cleaned.splice(g + 1, 0, line);
+    }
+  }
+
+  return cleaned.join('\n').trim();
+}
+
+/** Strip the bpm and key sentences out of a Basic Attributes body, leaving the
+ *  genre clause the model chose. */
+function extractGenreClause(body: string): string {
+  return body
+    .replace(/\bbpm\s+is\s+[^.]*\.?/i, '')
+    .replace(/\bkey\s+is\s+[^.]*\.?/i, '')
+    .replace(/\bscale\s+is\s+(major|minor)\s*\.?/i, '')
+    .replace(/,?\s*\bin\s+\d{1,2}\s*\/\s*\d{1,2}\b\s*\.?/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.,]+|[\s.,]+$/g, '')
+    .trim();
+}
+
+/**
+ * Format problems in a written MM3 caption. Empty array = structurally sound.
+ * Advisory only: it logs and drives ONE retry, and never rejects a caption —
+ * a partly-malformed Structured Caption still beats handing MM3 an ACE one.
+ *
+ * Checked against MiniMax's own 1,000 reference captions: 998 pass. The two
+ * that do not (big-band-jazz-swing_0003, musical-theatre-cinematic-folk_0001)
+ * run "* Primary:" inline on the Instrument Lifecycle line instead of starting
+ * its own. That is a genuine 0.2% corpus variation, not a bug here — we ask the
+ * model for the dominant form, so requiring it is correct.
+ */
+export function validateMm3Caption(caption: string): string[] {
+  const issues: string[] = [];
+  const text = String(caption ?? '');
+  for (const f of MM3_CAPTION_FIELDS) {
+    if ('heading' in f) {
+      if (!new RegExp(`^${f.heading}\\s*$`, 'm').test(text)) issues.push(`missing heading "${f.heading}"`);
+    } else {
+      const label = f.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (!new RegExp(`^${label}\\s*:`, 'im').test(text)) issues.push(`missing field "${f.label}:"`);
+    }
+  }
+  const words = text.split(/\s+/).filter(Boolean).length;
+  if (words < 300) issues.push(`too short (${words} words; reference captions run 436-714)`);
+  if (/^#{1,6}\s/m.test(text) || text.includes('**')) issues.push('contains markdown');
+  return issues;
+}
+
 // ── Lyric density rewrite ───────────────────────────────────────────────────
 //
 // Fixes songs whose lyrics are the wrong WORD DENSITY for their artist: written

@@ -17,6 +17,10 @@ export interface GenerationResponse {
   bpm: number;
   key: string;
   caption: string;
+  /** MiniMax-Music3 Structured Caption — a separate, differently-formatted
+   *  caption for the MM3 backend. '' when the MM3 caption call failed or the
+   *  stage does not run (refinement). Never a substitute for `caption`. */
+  caption_mm3: string;
   duration: number;
   system_prompt: string;
   user_prompt: string;

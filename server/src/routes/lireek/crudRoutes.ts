@@ -406,6 +406,7 @@ export function registerCrudRoutes(router: Router): void {
         bpm: gen.bpm,
         key: gen.key,
         caption: gen.caption,
+        captionMm3: gen.caption_mm3,
         duration: gen.duration,
         subject: gen.subject,
         extraInstructions: gen.extra_instructions,

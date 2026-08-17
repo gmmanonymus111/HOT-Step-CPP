@@ -16,6 +16,9 @@ export interface ExportData {
   bpm?: number;
   key?: string;
   caption?: string;
+  /** MiniMax-Music3 Structured Caption — the second, separately-formatted
+   *  caption. Absent on generations written before the field existed. */
+  captionMm3?: string;
   duration?: number;
   subject?: string;
   extraInstructions?: string;
@@ -59,6 +62,7 @@ export function exportGeneration(data: ExportData): { jsonPath: string; txtPath:
     bpm: data.bpm ?? null,
     key: data.key ?? null,
     caption: data.caption ?? null,
+    caption_mm3: data.captionMm3 ?? null,
     duration: data.duration ?? null,
     subject: data.subject ?? null,
     extra_instructions: data.extraInstructions ?? null,
@@ -77,6 +81,9 @@ export function exportGeneration(data: ExportData): { jsonPath: string; txtPath:
   if (data.key) txtLines.push(`Key: ${data.key}`);
   if (data.caption) txtLines.push(`Caption: ${data.caption}`);
   if (data.duration) txtLines.push(`Duration: ${data.duration}s`);
+  // Multi-line and structured, so it goes in its own block rather than inline
+  // with the single-line metadata above.
+  if (data.captionMm3) txtLines.push('', '--- MM3 Caption ---', '', data.captionMm3);
   txtLines.push('', '---', '', data.lyrics);
   fs.writeFileSync(txtPath, txtLines.join('\n'), 'utf-8');
 

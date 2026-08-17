@@ -398,13 +398,39 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
 
                       {/* Editable caption */}
                       <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
-                        <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Caption</label>
+                        <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Caption <span className="text-zinc-600 normal-case tracking-normal">— ACE-Step</span></label>
                         <textarea
                           className="w-full bg-transparent text-sm text-zinc-700 dark:text-zinc-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-pink-500/50 transition-colors resize-none"
                           rows={2}
                           defaultValue={gen.caption || ''}
                           onBlur={(e) => { if (e.target.value !== (gen.caption || '')) handleSaveField(gen.id, 'caption', e.target.value); }}
                         />
+                      </div>
+
+                      {/* Editable MM3 caption — a genuinely different caption, not a
+                          reformatting of the one above. MiniMax-Music3 was trained on
+                          a three-heading Structured Caption and lands off-genre when
+                          handed an ACE-Step caption instead. */}
+                      <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                        <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
+                          MM3 Caption <span className="text-zinc-600 normal-case tracking-normal">— MiniMax-Music3 Structured Caption</span>
+                        </label>
+                        {gen.caption_mm3 ? (
+                          <textarea
+                            className="w-full bg-transparent text-xs font-mono text-zinc-700 dark:text-zinc-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-cyan-500/50 transition-colors resize-y"
+                            rows={6}
+                            defaultValue={gen.caption_mm3}
+                            onBlur={(e) => { if (e.target.value !== (gen.caption_mm3 || '')) handleSaveField(gen.id, 'caption_mm3', e.target.value); }}
+                          />
+                        ) : (
+                          <textarea
+                            className="w-full bg-transparent text-xs font-mono text-zinc-700 dark:text-zinc-300 focus:outline-none border-b border-transparent hover:border-white/20 focus:border-cyan-500/50 transition-colors resize-y"
+                            rows={2}
+                            placeholder="None — written before this field existed, or the MM3 caption call failed. The MM3 backend will fall back to the caption above."
+                            defaultValue=""
+                            onBlur={(e) => { if (e.target.value.trim()) handleSaveField(gen.id, 'caption_mm3', e.target.value); }}
+                          />
+                        )}
                       </div>
 
                       {/* Action buttons */}

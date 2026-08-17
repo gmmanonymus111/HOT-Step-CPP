@@ -15,6 +15,8 @@ import { writePersistedState } from '../../hooks/usePersistedState';
 import type { Generation, Profile, AlbumPreset } from '../../services/lireekApi';
 import { resolveDuration } from '../../utils/estimateDuration';
 import { useGlobalParamsStore } from '../../stores/globalParamsStore';
+import { captionForBackend } from '../../utils/captionForBackend';
+import { useBackendStore } from '../../stores/backendStore';
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -39,8 +41,9 @@ export function useAudioGeneration({ profiles, showToast: _showToast }: UseAudio
     // usePersistedState hooks in the top bar update immediately.
     const write = (key: string, value: any) => writePersistedState(key, value);
 
-    // Content
-    write('hs-caption', gen.caption || '');
+    // Content. The caption box holds ONE caption, so which of the generation's
+    // two goes in it depends on the backend that is about to render it.
+    write('hs-caption', captionForBackend(gen, useBackendStore.getState().activeBackendId));
     write('hs-lyrics', gen.lyrics || '');
     write('hs-instrumental', false);
 

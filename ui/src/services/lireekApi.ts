@@ -91,6 +91,10 @@ export interface Generation {
   title?: string;
   subject?: string;
   caption?: string;
+  /** MiniMax-Music3 Structured Caption — a second, differently-formatted
+   *  caption used when the MM3 backend is active. Empty on generations written
+   *  before this field existed; consumers fall back to `caption`. */
+  caption_mm3?: string;
   bpm?: number;
   key?: string;
   duration?: number;
@@ -286,6 +290,7 @@ export const lireekApi = {
   updateMetadata: (generationId: number, updates: {
     title?: string;
     caption?: string;
+    caption_mm3?: string;
     bpm?: number;
     key?: string;
     duration?: number;

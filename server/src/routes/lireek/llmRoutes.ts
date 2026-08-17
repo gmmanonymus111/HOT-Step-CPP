@@ -206,6 +206,7 @@ export function registerLlmRoutes(router: Router): void {
           bpm: generated.bpm || undefined,
           key: generated.key,
           caption: generated.caption,
+          captionMm3: generated.caption_mm3,
           duration: generated.duration || undefined,
           systemPrompt: generated.system_prompt,
           userPrompt: generated.user_prompt
@@ -265,6 +266,7 @@ export function registerLlmRoutes(router: Router): void {
           bpm: generated.bpm || undefined,
           key: generated.key,
           caption: generated.caption,
+          captionMm3: generated.caption_mm3,
           duration: generated.duration || undefined,
           systemPrompt: generated.system_prompt,
           userPrompt: generated.user_prompt
@@ -308,6 +310,7 @@ export function registerLlmRoutes(router: Router): void {
           bpm: existing.bpm || undefined,
           key: existing.song_key,
           caption: existing.caption,
+          captionMm3: existing.caption_mm3,
           duration: existing.duration || undefined,
           systemPrompt: refined.system_prompt,
           userPrompt: refined.user_prompt,
@@ -352,6 +355,7 @@ export function registerLlmRoutes(router: Router): void {
           bpm: existing.bpm || undefined,
           key: existing.song_key,
           caption: existing.caption,
+          captionMm3: existing.caption_mm3,
           duration: existing.duration || undefined,
           systemPrompt: refined.system_prompt,
           userPrompt: refined.user_prompt,

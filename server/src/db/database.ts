@@ -336,6 +336,10 @@ export function initDb(): void {
     "ALTER TABLE generations ADD COLUMN bpm INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN key TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE generations ADD COLUMN caption TEXT NOT NULL DEFAULT ''",
+    // MiniMax-Music3 Structured Caption — a SECOND caption in MM3's own
+    // three-heading format, not a reformatting of `caption`. The two backends
+    // want genuinely different text and neither works in the other's slot.
+    "ALTER TABLE generations ADD COLUMN caption_mm3 TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE generations ADD COLUMN duration INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE generations ADD COLUMN parent_generation_id INTEGER REFERENCES generations(id) ON DELETE SET NULL",
     "ALTER TABLE artists ADD COLUMN image_url TEXT",

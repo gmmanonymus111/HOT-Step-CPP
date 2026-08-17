@@ -153,6 +153,9 @@ export interface SaveGenerationParams {
   bpm?: number;
   key?: string;
   caption?: string;
+  /** MiniMax-Music3 Structured Caption. Separate field, not a variant of
+   *  `caption` — the two backends want differently-formatted text. */
+  captionMm3?: string;
   duration?: number;
   systemPrompt?: string;
   userPrompt?: string;
@@ -163,17 +166,18 @@ export function saveGeneration(p: SaveGenerationParams): any {
   const now = new Date().toISOString();
   const result = getDb().prepare(
     `INSERT INTO generations
-     (profile_id, provider, model, extra_instructions, title, subject, bpm, key, caption, duration, lyrics, system_prompt, user_prompt, parent_generation_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (profile_id, provider, model, extra_instructions, title, subject, bpm, key, caption, caption_mm3, duration, lyrics, system_prompt, user_prompt, parent_generation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     p.profileId, p.provider, p.model, null,
-    p.title ?? '', p.subject ?? '', p.bpm ?? 0, p.key ?? '', p.caption ?? '', p.duration ?? 0,
+    p.title ?? '', p.subject ?? '', p.bpm ?? 0, p.key ?? '', p.caption ?? '', p.captionMm3 ?? '', p.duration ?? 0,
     p.lyrics, p.systemPrompt ?? '', p.userPrompt ?? '', p.parentGenerationId ?? null, now,
   );
   return {
     id: result.lastInsertRowid, profile_id: p.profileId, provider: p.provider,
     model: p.model, title: p.title ?? '', subject: p.subject ?? '',
-    bpm: p.bpm ?? 0, key: p.key ?? '', caption: p.caption ?? '', duration: p.duration ?? 0,
+    bpm: p.bpm ?? 0, key: p.key ?? '', caption: p.caption ?? '',
+    caption_mm3: p.captionMm3 ?? '', duration: p.duration ?? 0,
     lyrics: p.lyrics, parent_generation_id: p.parentGenerationId ?? null, created_at: now,
   };
 }

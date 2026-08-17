@@ -10,10 +10,14 @@ import {
   SONG_METADATA_SYSTEM_PROMPT,
   REFINEMENT_SYSTEM_PROMPT,
   TITLE_DERIVATION_PROMPT,
+  MM3_CAPTION_SYSTEM_PROMPT,
   buildMetadataPrompt,
   buildGenerationPrompt,
   buildRefinementPrompt,
   buildTitlePrompt,
+  buildMm3CaptionPrompt,
+  normalizeMm3Caption,
+  validateMm3Caption,
   reconcileDurationToLyrics,
   ensureInstrumentalIntro,
 } from '../prompts.js';
@@ -112,6 +116,72 @@ async function planSongMetadata(
     }
     console.error("Failed to parse metadata JSON:", cleanJson.slice(0, 300));
     return { subject: '', bpm: 0, key: '', caption: '', duration: 0 };
+  }
+}
+
+/**
+ * Write the MiniMax-Music3 Structured Caption for a finished song.
+ *
+ * Its own call, deliberately, and deliberately LAST: the Arrangement section is
+ * a section-by-section timeline of this specific song, so it needs the final
+ * lyrics — including the instrumental intro applied above, which is a real
+ * section of the arrangement. The metadata planner runs before any lyric exists
+ * and structurally cannot write it.
+ *
+ * Never fatal. MM3 is the second backend; a caption failure here must not cost
+ * the user a set of lyrics that is otherwise finished and saved.
+ */
+async function writeMm3Caption(
+  profile: LyricsProfile,
+  ctx: {
+    lyrics: string; aceCaption?: string; subject?: string;
+    bpm?: number; key?: string; signature?: string;
+  },
+  providerName: string,
+  modelName: string,
+  onChunk?: ChunkCallback,
+  callOptions?: CallOptions,
+): Promise<string> {
+  const provider = getProvider(providerName);
+  const facts = { bpm: ctx.bpm, key: ctx.key, signature: ctx.signature };
+  const userPrompt = buildMm3CaptionPrompt(profile, { ...ctx, instrumental: !ctx.lyrics.trim() });
+
+  const attempt = async (prompt: string): Promise<string> => {
+    const raw = await provider.call(
+      cacheBustPrompt(MM3_CAPTION_SYSTEM_PROMPT), prompt, modelName, onChunk, callOptions);
+    return normalizeMm3Caption(stripThinkingBlocks(raw), facts);
+  };
+
+  try {
+    let caption = await attempt(userPrompt);
+    let issues = validateMm3Caption(caption);
+
+    // One retry, with the specific defects named. Worth the extra call: the
+    // format IS the adherence lever for MM3, and the common failures (dropped
+    // labels, markdown headings, a 200-word sketch) are all things a model
+    // fixes readily once told which one it committed.
+    if (issues.length) {
+      console.warn(`[LLM] MM3 caption failed validation: ${issues.join('; ')}. Retrying once.`);
+      const retryPrompt = [
+        userPrompt,
+        '',
+        `Your previous attempt was REJECTED for: ${issues.join('; ')}.`,
+        'Write it again with every heading and every label present, plain text only, and the full length. Output the caption only.',
+      ].join('\n');
+      const retry = await attempt(retryPrompt);
+      const retryIssues = validateMm3Caption(retry);
+      if (retryIssues.length < issues.length) { caption = retry; issues = retryIssues; }
+    }
+
+    // A caption that still has defects is kept anyway — a partly-malformed
+    // Structured Caption is closer to what MM3 wants than the ACE caption it
+    // would otherwise fall back to, and the field is user-editable.
+    if (issues.length) console.warn(`[LLM] MM3 caption kept with issues: ${issues.join('; ')}`);
+    else console.log(`[LLM] MM3 caption written (${caption.split(/\s+/).length} words)`);
+    return caption;
+  } catch (err) {
+    console.warn('[LLM] MM3 caption generation failed:', err);
+    return '';
   }
 }
 
@@ -241,10 +311,24 @@ export async function generateLyricsStreaming(
     duration = reconciled;
   }
 
+  // MiniMax-Music3 wants a completely different caption from ACE-Step's, and
+  // the two are not interchangeable in either direction (see the A/B in
+  // prompts.ts). Written last so the Arrangement can follow the FINAL lyrics.
+  if (onPhase) onPhase("Writing MM3 caption…");
+  const caption_mm3 = await writeMm3Caption(
+    profile,
+    {
+      lyrics: raw, aceCaption: metadata.caption, subject: metadata.subject,
+      bpm: metadata.bpm, key: metadata.key,
+      signature: (profile as any).audio_enrichment?.signatures?.[0],
+    },
+    providerName, effectiveModel, onChunk, callOptions,
+  );
+
   return {
     lyrics: raw, provider: providerName, model: effectiveModel, title,
     subject: metadata.subject, bpm: metadata.bpm, key: metadata.key,
-    caption: metadata.caption, duration,
+    caption: metadata.caption, caption_mm3, duration,
     system_prompt: GENERATION_SYSTEM_PROMPT, user_prompt: userPrompt
   };
 }
@@ -297,7 +381,7 @@ export async function refineLyricsStreaming(
 
   return {
     lyrics: raw, provider: providerName, model: effectiveModel, title: refinedTitle,
-    subject: '', bpm: 0, key: '', caption: '', duration: 0,
+    subject: '', bpm: 0, key: '', caption: '', caption_mm3: '', duration: 0,
     system_prompt: REFINEMENT_SYSTEM_PROMPT, user_prompt: userPrompt
   };
 }
