@@ -1528,9 +1528,16 @@ router.get('/status/:id', (req, res) => {
 });
 
 // POST /api/generate/cancel/:id — cancel a running job
+// Ownership rule: only the job owner or an admin may cancel.
 router.post('/cancel/:id', (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) { res.status(404).json({ error: 'Job not found' }); return; }
+
+  const caller = req.user;
+  if (!caller || (caller.userId !== job.userId && caller.role !== 'admin')) {
+    res.status(403).json({ error: 'Not allowed to cancel this job' });
+    return;
+  }
 
   job.status = 'cancelled';
   if (job.aceJobId) {
@@ -1544,7 +1551,14 @@ router.post('/cancel/:id', (req, res) => {
 });
 
 // POST /api/generate/cancel-all — cancel all running jobs
+// Ownership rule: only an admin may cancel-all.
 router.post('/cancel-all', (req, res) => {
+  const caller = req.user;
+  if (!caller || caller.role !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return;
+  }
+
   let cancelled = 0;
   for (const [, job] of jobs) {
     if (job.status === 'pending' || job.status === 'lm_running' || job.status === 'synth_running') {
@@ -1588,7 +1602,14 @@ router.get('/queue', (_req, res) => {
 });
 
 // POST /api/generate/reset-queue — force-reset: cancel everything, drain queue
-router.post('/reset-queue', (_req, res) => {
+// Ownership rule: only an admin may reset the queue.
+router.post('/reset-queue', (req, res) => {
+  const caller = req.user;
+  if (!caller || caller.role !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return;
+  }
+
   let cancelled = 0;
 
   // Cancel all non-terminal jobs in the jobs Map
