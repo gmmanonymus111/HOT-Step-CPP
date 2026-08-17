@@ -44,7 +44,8 @@ caption+lyrics → Qwen2 BPE → Global LM 8.59B (Qwen3 arch, semantic codes @ i
 call with ~2.5 s timeout and keep last-known-good), `POST /mm3/warm` / `POST /mm3/unload`
 (idempotent; unload frees weights+KV), `POST /mm3/synth` (production, rides the same FIFO GPU
 worker as ACE `/synth`; standard `/job?id=` progress/cancel/result; request contract documented
-in `mm3-request.h`/`mm3-job.h`), `GET /mm3/job?id=` (MM3-vocabulary progress, never blocks),
+in `mm3-request.h`/`mm3-job.h`), `GET /mm3/job?id=` (MM3-vocabulary progress, never blocks;
+`&ar=1` returns the Plank code blob — see below),
 `POST /mm3/tokenize-check` (cold-capable; 5000-token limit), plus deprecated bring-up endpoints
 (`/mm3/voc-decode`, `/mm3/dit-forward`, `/mm3/flow-sample`, `/mm3/depth-frame`,
 `/mm3/cond-encode`, `/mm3/lm-plan`, `/mm3/synth-e2e`) kept for parity work — they run GPU work
@@ -200,6 +201,42 @@ the only claim here that can be checked without ears; (3) `linear` scheduler
 alone, which should be near-identical to native (MM3's schedule IS shift=1
 linear, differing only in float32 linspace rounding); (4) a solver, listening
 specifically at window seams on a >8 s clip.
+
+## MM3 Plank: the AR code cache (built 2026-08-17 — compiled, NOT YET RUN)
+
+Capture the AR stage's output codes on one render, replay them on later ones.
+Opt in per request: `get_ar_codes: true` captures; `forced_semantic` +
+`forced_acoustic` replay. The blob comes back from `GET /mm3/job?id=<id>&ar=1`
+as little-endian i32 — `[n_sem][sem…][n_ac][ac…]` — and is stored as
+`<uuid>.mm3plank` beside a `.mm3plank.json` sidecar in `<data>/mm3-planks/`.
+
+**Read this before building on it: replay is NOT a speedup.** The AR loop still
+executes every per-frame forward pass, so the planning progress bar still runs
+to 100 % on a replay job. Forcing fixes *which tokens come out*, not how much
+compute runs. Confirmed independently by MDMAchine on a live run, and the same
+root cause closes the other obvious AR lever: `MM3_LM_CFG_ROWS 2`
+(`mm3-lm-graph.h`) is compile-time, and AR decode is **weight-streaming-bound**
+(17.2 GB of f16 streams regardless of batch), so skipping the uncond row buys
+nothing either. Anything that tries to skip AR *compute* hits bandwidth, not
+arithmetic.
+
+What it IS for: a fixed semantic bed, so an A/B of two flow-stage
+solver/scheduler/guidance settings compares those settings instead of two
+different AR samplings. A genuine AR speedup would need `frame_hiddens`
+captured (the condition encoder's actual input, ~39 MB at 750 frames) and
+`mm3_ar_plan` skipped entirely — architecturally straightforward, unbuilt, and
+NOT what the codes-only path gives you.
+
+Frame arithmetic: entry 0 is the un-emitted iteration, so `I` codes render
+`I-1` frames. `mm3-request.h` derives `max_frames`/`duration` from the array and
+`mm3-ar-loop.h` clamps again — do not also set them client-side.
+
+Layers: `mm3-request.h` (parse) → `mm3-job.h` (capture + `?ar=1`) →
+`Job::result_ar_codes` (hot-step-server.cpp) → `minimax/plank.ts` (dir resolve,
+containment check, blob decode) → `minimax/generate.ts` (save/replay) →
+`mm3SaveArCodes` / `mm3PlankPath` capability extensions. The plank reference
+reaches the server from the browser, so it goes through
+`resolveMm3PlankPath()` — never join it onto a path directly.
 
 ## Performance budget (RTX 5090, f16, 12 s clip ≈ 12.4 s wall ≈ 1.0× realtime)
 

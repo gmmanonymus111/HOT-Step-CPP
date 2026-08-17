@@ -641,6 +641,18 @@ export const aceClient = {
       bandBlend?: boolean;
       bandFreq?: number;   // crossover center Hz (engine default 250)
       bandWidth?: number;  // transition width Hz (engine default 200)
+      /** Lua plugin routing for the SA3 sampler loop — the same registry the
+       *  ACE /synth dropdowns use. Orthogonal to the adapters/env/mix/band
+       *  fields above: those change load-time weights and post-hoc audio
+       *  blending, these change the run-time denoise. Absent = the original
+       *  pingpong/euler path, bit-identical.
+       *  NOTE: naming a solver REPLACES the pingpong renoise, and SA3 has no
+       *  CFG uncond, so APG-family guidance is a pass-through (sa3-refine.h). */
+      solver?: string;
+      scheduler?: string;
+      guidanceMode?: string;
+      guidanceScale?: number;                          // only sent when > 1
+      pluginParams?: Record<string, string | number>;  // "<plugin>:<key>" -> value
     },
   ): Promise<Buffer> {
     const params = new URLSearchParams();
@@ -663,6 +675,18 @@ export const aceClient = {
     if (opts.seed !== undefined) params.set('seed', String(opts.seed));
     if (opts.rmsMatch !== undefined) params.set('rms_match', opts.rmsMatch ? '1' : '0');
     if (opts.outSr !== undefined) params.set('out_sr', String(opts.outSr));
+    // Lua plugin routing. Empty strings are omitted rather than sent — the
+    // engine treats a missing key and an explicit '' identically, and omitting
+    // keeps the query string short.
+    if (opts.solver) params.set('solver', opts.solver);
+    if (opts.scheduler) params.set('scheduler', opts.scheduler);
+    if (opts.guidanceMode) params.set('guidance_mode', opts.guidanceMode);
+    if (opts.guidanceScale !== undefined && opts.guidanceScale > 1) {
+      params.set('guidance_scale', String(opts.guidanceScale));
+    }
+    if (opts.pluginParams && Object.keys(opts.pluginParams).length > 0) {
+      params.set('plugin_params', JSON.stringify(opts.pluginParams));
+    }
 
     const res = await fetch(`${BASE}/sa3-refine?${params.toString()}`, {
       method: 'POST',
@@ -870,6 +894,23 @@ export const aceClient = {
       return body.restored === true;
     } catch {
       return false;
+    }
+  },
+
+  /** GET /models/loaded — the VRAM-resident ModelStore entries. `in_use` marks
+   *  a module the worker is mid-call on, which unloadLabel() will refuse to
+   *  evict. Best-effort: returns [] rather than throwing, so a caller using
+   *  this to make room can always proceed. */
+  async listLoadedModels(): Promise<Array<{ label: string; mb: number; in_use: boolean }>> {
+    try {
+      const res = await fetch(`${BASE}/models/loaded`, { signal: AbortSignal.timeout(TIMEOUT_QUICK) });
+      if (!res.ok) return [];
+      const data = await res.json().catch(() => ({})) as {
+        loaded?: Array<{ label: string; mb: number; in_use: boolean }>;
+      };
+      return data.loaded ?? [];
+    } catch {
+      return [];
     }
   },
 

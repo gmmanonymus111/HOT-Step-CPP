@@ -311,6 +311,10 @@ struct Job {
     std::string       result_mime;
     std::string       result_lrc;   // LRC timestamp text (base64), empty if not generated
     std::vector<float> result_latent; // post-DiT latent [T*64] float32, empty if not captured
+    // MM3 Plank: the AR stage's output codes, serialised (see mm3-job.h for the
+    // layout). Only populated when the /mm3/synth request set get_ar_codes;
+    // retrieved via GET /mm3/job?id=<id>&ar=1. Empty otherwise.
+    std::string       result_ar_codes;
     std::atomic<bool> cancel{ false };
 
     // Phase tracking (advisory, independent of `status`). phase_step/phase_total
@@ -3866,6 +3870,15 @@ int main(int argc, char ** argv) {
     //             GGUFs from <models>/sa3-adapters/<name>.gguf, merged into
     //             the DiT at load. Forces the GGUF backend (ONNX graphs are
     //             frozen). 400 if a named adapter file is missing.
+    //   solver, scheduler, guidance_mode, guidance_scale, plugin_params
+    //             Lua plugin routing, same param names and semantics as /synth.
+    //             Absent/empty = the original pingpong/euler dispatch,
+    //             bit-identical to before this hookup existed. guidance_scale
+    //             is clamped to [1,20]. SA3 was trained at cfg=1 and has no
+    //             uncond branch, so guidance runs cond-as-both-preds, which
+    //             makes APG-family modes a pass-through — see sa3-refine.h.
+    //             Naming a solver REPLACES the pingpong renoise; they are
+    //             alternatives, not a stack.
     svr.Post("/sa3-refine", [models_dir](const httplib::Request & req, httplib::Response & res) {
         if (req.body.empty()) {
             json_error(res, 400, "Empty body (expected WAV audio)");
@@ -3973,6 +3986,75 @@ int main(int argc, char ** argv) {
         if (req.has_param("debug_zero_noise") && req.get_param_value("debug_zero_noise") == "1") zero_noise = true;
         if (req.has_param("rms_match") && req.get_param_value("rms_match") == "0") rms_match = false;
 
+        // ── Lua plugin routing (solver / scheduler / guidance) ──────────────
+        // Same param names and semantics as /synth. Absent or empty = the
+        // original pingpong/euler dispatch, bit-identical to before this
+        // hookup existed. See Sa3PluginParams in sa3-refine.h.
+        Sa3PluginParams sa3_sp;
+        if (req.has_param("solver"))        sa3_sp.solver        = req.get_param_value("solver");
+        if (req.has_param("scheduler"))     sa3_sp.scheduler     = req.get_param_value("scheduler");
+        if (req.has_param("guidance_mode")) sa3_sp.guidance_mode = req.get_param_value("guidance_mode");
+        if (req.has_param("guidance_scale")) {
+            sa3_sp.guidance_scale = std::strtof(req.get_param_value("guidance_scale").c_str(), nullptr);
+            if (sa3_sp.guidance_scale < 1.0f)  sa3_sp.guidance_scale = 1.0f;
+            if (sa3_sp.guidance_scale > 20.0f) sa3_sp.guidance_scale = 20.0f;
+        }
+        // plugin_params: a flat JSON object {"<plugin>:<key>": value, ...},
+        // the same shape /synth forwards to Lua plugins.
+        if (req.has_param("plugin_params")) {
+            const std::string & pp_json = req.get_param_value("plugin_params");
+            yyjson_doc * pp_doc = yyjson_read(pp_json.c_str(), pp_json.size(), 0);
+            if (pp_doc) {
+                yyjson_val * pp_obj = yyjson_doc_get_root(pp_doc);
+                if (yyjson_is_obj(pp_obj)) {
+                    yyjson_obj_iter iter;
+                    yyjson_obj_iter_init(pp_obj, &iter);
+                    yyjson_val * k;
+                    while ((k = yyjson_obj_iter_next(&iter))) {
+                        yyjson_val * v = yyjson_obj_iter_get_val(k);
+                        if (!yyjson_is_str(k)) continue;
+                        if (yyjson_is_str(v)) {
+                            sa3_sp.plugin_params[yyjson_get_str(k)] = yyjson_get_str(v);
+                        } else if (yyjson_is_num(v)) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "%g", yyjson_get_real(v));
+                            sa3_sp.plugin_params[yyjson_get_str(k)] = buf;
+                        } else if (yyjson_is_bool(v)) {
+                            sa3_sp.plugin_params[yyjson_get_str(k)] = yyjson_get_bool(v) ? "1" : "0";
+                        }
+                    }
+                }
+                yyjson_doc_free(pp_doc);
+            }
+        }
+        const Sa3PluginParams * sp_ptr = sa3_sp.any() ? &sa3_sp : nullptr;
+
+        // sampler_build_scheduler_override() and some solver plugins read the
+        // PROCESS-GLOBAL g_hotstep_params rather than taking their inputs as
+        // arguments. /sa3-refine runs on the same worker as /synth, so writing
+        // those fields and walking away would leak this refine's solver and
+        // scheduler into the next ACE generation. Save, set, restore.
+        struct Sa3GlobalsGuard {
+            bool        active;
+            std::string solver_name, scheduler;
+            std::unordered_map<std::string, std::string> plugin_params;
+            explicit Sa3GlobalsGuard(const Sa3PluginParams * p) : active(p != nullptr) {
+                if (!active) return;
+                solver_name   = g_hotstep_params.solver_name;
+                scheduler     = g_hotstep_params.scheduler;
+                plugin_params = g_hotstep_params.plugin_params;
+                if (!p->solver.empty())    g_hotstep_params.solver_name = p->solver;
+                if (!p->scheduler.empty()) g_hotstep_params.scheduler   = p->scheduler;
+                if (!p->plugin_params.empty()) g_hotstep_params.plugin_params = p->plugin_params;
+            }
+            ~Sa3GlobalsGuard() {
+                if (!active) return;
+                g_hotstep_params.solver_name   = solver_name;
+                g_hotstep_params.scheduler     = scheduler;
+                g_hotstep_params.plugin_params = plugin_params;
+            }
+        } sa3_globals_guard(sp_ptr);
+
         // Tokenized prompt (padded to SA3_TOK_LEN)
         std::vector<int64_t> ids(SA3_TOK_LEN, 0);
         int n_tokens = req.has_param("n_tokens") ? atoi(req.get_param_value("n_tokens").c_str()) : 0;
@@ -4034,7 +4116,7 @@ int main(int argc, char ** argv) {
             ModelHandle guard(g_store, sa3);
             refine_timer.reset();
             ok = sa3_refine_run_ggml(sa3, p44, T44, ids.data(), n_tokens,
-                                     strength, steps, pingpong, seed, zero_noise, out44);
+                                     strength, steps, pingpong, seed, zero_noise, out44, sp_ptr);
         } else {
             ModelKey k{};
             k.kind = MODEL_SA3_ORT;
@@ -4048,7 +4130,7 @@ int main(int argc, char ** argv) {
             ModelHandle guard(g_store, sa3);
             refine_timer.reset();
             ok = sa3_refine_run(sa3, p44, T44, ids.data(), n_tokens,
-                                strength, steps, pingpong, seed, zero_noise, out44);
+                                strength, steps, pingpong, seed, zero_noise, out44, sp_ptr);
         }
         fprintf(stderr, "[Server] SA3 refine compute (%s): %.0f ms\n",
                 use_gguf ? "gguf" : "onnx", refine_timer.ms());

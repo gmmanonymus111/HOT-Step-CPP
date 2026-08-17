@@ -168,6 +168,12 @@ export interface GlobalParams {
   stableStepMix: number; setStableStepMix: (v: number) => void;
   stableStepSeed: number; setStableStepSeed: (v: number) => void;
   stableStepSeedFollowsDit: boolean; setStableStepSeedFollowsDit: (v: boolean) => void;
+  // SA3 sampler routing — separate from the generation-side picks on purpose.
+  stableStepSteps: number; setStableStepSteps: (v: number) => void;
+  stableStepSolver: string; setStableStepSolver: (v: string) => void;
+  stableStepScheduler: string; setStableStepScheduler: (v: string) => void;
+  stableStepGuidanceMode: string; setStableStepGuidanceMode: (v: string) => void;
+  stableStepGuidanceScale: number; setStableStepGuidanceScale: (v: number) => void;
   // Cover Art
   coverArtEnabled: boolean; setCoverArtEnabled: (v: boolean) => void;
   coverArtSubject: string; setCoverArtSubject: (v: string) => void;

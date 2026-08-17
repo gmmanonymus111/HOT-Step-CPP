@@ -86,6 +86,8 @@ export const PARAM_GROUPS: { title: string; fields: string[] }[] = [
       'stableStepAdapters', 'stableStepPreserveDynamics', 'stableStepVocalPpVae',
       'stableStepBlendMode', 'stableStepCrossoverHz', 'stableStepCrossoverWidthHz', 'stableStepMix',
       'stableStepSeed', 'stableStepSeedFollowsDit',
+      'stableStepSteps', 'stableStepSolver', 'stableStepScheduler',
+      'stableStepGuidanceMode', 'stableStepGuidanceScale',
       'postprocessEnabled', 'postprocessPlugin',
       'lufsEnabled', 'lufsPreset', 'lufsTarget',
       'autoTrimEnabled', 'durationBuffer', 'autoTrimFadeMs',

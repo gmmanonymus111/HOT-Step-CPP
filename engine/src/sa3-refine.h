@@ -55,7 +55,18 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+// HOT-Step Lua plugin system — the SAME registry, plugins and dispatch entry
+// points the ACE-Step sampler and the MM3 flow DiT use. Nothing in
+// engine/plugins/ knows SA3 exists; the plugin layer never had a backend
+// dependency (every lua_call_* takes raw float* + counts + a param map).
+#include "guidance/apg-core.h"
+#include "guidance/guidance-interface.h"
+#include "lua-plugin-registry.h"
+#include "sampler-schedule.h"
+#include "solvers/solver-interface.h"
 
 // ── Constants (match the exported graphs / SA3 medium config) ───────────
 // Outside the SUPERSEP guard: the server endpoint references these even in
@@ -192,6 +203,83 @@ static inline bool sa3_decode_tiled(Sa3Backend * be, const float * latents, int 
     return true;
 }
 
+// ── SA3 ⇄ Lua plugin bridge ────────────────────────────────────────────
+//
+// Routes the HOT-Step solver/scheduler/guidance plugins through the SA3
+// refine loop. All-empty (the default, and `sp == nullptr`) runs the original
+// pingpong/euler dispatch expression for expression — the refine stays
+// bit-identical to before this hookup existed.
+//
+// ── CONVENTION 1: TIME ALREADY RUNS THE ACE WAY ────────────────────────
+//
+// Unlike MM3 (whose sigma ASCENDS and needed a sign flip — see
+// minimax/mm3-plugins.h), SA3's schedule already matches ACE's:
+//
+//   ACE  t descends 1 -> 0. Solver contract: `xt -= vt * (t_curr - t_prev)`.
+//   SA3  sigmas descend strength -> 0, and the Euler branch below is
+//        `dt = t_next - t_curr` (negative), `x += dt * v`
+//        == `x -= (t_curr - t_next) * v`.
+//
+// Character for character the same update. So no sign flip, and no schedule
+// re-parameterisation: SA3's `sigmas` array IS an ACE schedule that happens to
+// start at `strength` instead of 1.0. That one difference is what the
+// scheduler-override rescale below exists to reconcile.
+//
+// ── CONVENTION 2: THE LATENTS ARE TRANSPOSED ───────────────────────────
+//
+//   ACE  memory is TIME-MAJOR [T][Oc]  (index t*Oc + c) — see hot-step-sampler.h.
+//   SA3  latents are CHANNEL-MAJOR [SA3_LAT_CH][L] (index c*L + j) — that is
+//        what sa3_encode_tiled writes and what dit_forward consumes.
+//
+// This matters for GUIDANCE and only for guidance. apg_project() normalises and
+// projects PER CHANNEL OVER TIME and indexes `[t*Oc + c]` to do it
+// (guidance/apg-core.h). Hand it a channel-major buffer and it reinterprets the
+// block as [L][256]: the "channels" it normalises are scrambled mixtures, so
+// every cond-only enhancement plugin operates on nonsense. The bridge therefore
+// transposes into the ACE view before any guidance plugin sees a buffer, and
+// back afterwards.
+//
+// The SOLVER path needs no transpose: lua_call_solver_step takes only a flat
+// element count `n` (solver-interface.h), and lua_call_solver_loop uses T/Oc
+// solely to publish `n_per = T*Oc` — neither hands a plugin the shape it would
+// need to index across channels. Solvers are elementwise by contract.
+//
+// ── GUIDANCE ON A MODEL WITH NO UNCOND ─────────────────────────────────
+//
+// SA3 was trained at cfg=1: there is no unconditional branch, and a zero-cond
+// forward yields noise rather than a valid uncond signal. So the cond velocity
+// is passed as BOTH pred_cond and pred_uncond. APG then sees diff = 0 and is a
+// pass-through, while cond-only plugins still apply their enhancements. This is
+// deliberate and it means APG-family guidance is a NO-OP on SA3 — the dropdown
+// is only meaningful for plugins that do cond-side work.
+
+struct Sa3PluginParams {
+    std::string solver;         // "" = the original pingpong/euler dispatch
+    std::string scheduler;      // "" = sa3_build_schedule
+    std::string guidance_mode;  // "" = no guidance
+    float       guidance_scale = 1.0f;
+    float       apg_norm_threshold = 2.5f;
+    std::unordered_map<std::string, std::string> plugin_params;
+
+    bool any() const { return !solver.empty() || !scheduler.empty() || !guidance_mode.empty(); }
+};
+
+// cm: channel-major [Oc][T], index c*T + t   (SA3)
+// tm: time-major    [T][Oc], index t*Oc + c  (ACE)
+static inline void sa3_to_ace_view(const float * cm, float * tm, int Oc, int T) {
+    for (int c = 0; c < Oc; c++) {
+        const float * src = cm + (size_t) c * T;
+        for (int t = 0; t < T; t++) tm[(size_t) t * Oc + c] = src[t];
+    }
+}
+
+static inline void sa3_from_ace_view(const float * tm, float * cm, int Oc, int T) {
+    for (int c = 0; c < Oc; c++) {
+        float * dst = cm + (size_t) c * T;
+        for (int t = 0; t < T; t++) dst[t] = tm[(size_t) t * Oc + c];
+    }
+}
+
 // ── Main refine (backend-agnostic orchestration) ───────────────────────
 //
 // audio: planar stereo [2][T44] at 44.1kHz. token_ids: SA3_TOK_LEN padded ids.
@@ -199,6 +287,9 @@ static inline bool sa3_decode_tiled(Sa3Backend * be, const float * latents, int 
 // for production (per-step renoise), false = deterministic Euler (validation).
 // zero_noise: replaces all noise draws with zeros (numerical validation vs
 // the Python harness — C++ RNG can't reproduce torch's stream).
+// sp: optional Lua solver/scheduler/guidance selection (nullptr = legacy path).
+//     NOTE: naming a solver replaces the pingpong renoise with that solver's
+//     own update — pingpong and a Lua solver are alternatives, not a stack.
 // out: planar stereo [2][T44] at 44.1kHz, clamped to [-1,1].
 
 static inline bool sa3_refine_run_backend(Sa3Backend * be,
@@ -206,7 +297,8 @@ static inline bool sa3_refine_run_backend(Sa3Backend * be,
                                           const int64_t * token_ids, int n_tokens,
                                           float strength, int steps,
                                           bool pingpong, uint64_t seed, bool zero_noise,
-                                          std::vector<float> & out) {
+                                          std::vector<float> & out,
+                                          const Sa3PluginParams * sp = nullptr) {
     if (!be || !audio || T44 <= 0 || steps < 1) return false;
     float seconds_total = (float)T44 / SA3_SR;
 
@@ -247,9 +339,109 @@ static inline bool sa3_refine_run_backend(Sa3Backend * be,
         x[i] = x[i] * (1.0f - strength) + n * strength;
     }
 
-    // Schedule + padding mask
+    // ── Plugin resolution ──────────────────────────────────────────────
+    // Resolved once, before the loop. An unknown name is a warning plus a fall
+    // back to native for that slot — never a hard failure. A user who typo'd a
+    // solver should still get audio back.
+    const int   Oc    = SA3_LAT_CH;   // ACE-view channel count
+    const int   T     = L;            // ACE-view time frames
+    const int   n_lat = Oc * T;
+
+    LuaPlugin * solver_plugin    = nullptr;
+    LuaPlugin * guidance_plugin  = nullptr;
+    bool        use_lua_solver    = false;
+    bool        use_lua_guidance  = false;
+    bool        use_lua_scheduler = false;
+    bool        guidance_native_apg = false;
+
+    if (sp && sp->any()) {
+        auto & reg = PluginRegistry::instance();
+
+        if (!sp->solver.empty()) {
+            solver_plugin = reg.solver_lookup(sp->solver.c_str());
+            if (!solver_plugin) {
+                fprintf(stderr, "[SA3] WARNING: unknown solver '%s', using pingpong/euler\n", sp->solver.c_str());
+            } else {
+                use_lua_solver = true;
+            }
+        }
+
+        if (!sp->scheduler.empty()) {
+            use_lua_scheduler = (reg.scheduler_lookup(sp->scheduler.c_str()) != nullptr);
+            if (!use_lua_scheduler) {
+                fprintf(stderr, "[SA3] WARNING: unknown scheduler '%s', using sa3_build_schedule\n",
+                        sp->scheduler.c_str());
+            }
+        }
+
+        if (!sp->guidance_mode.empty() && sp->guidance_scale > 1.0f) {
+            // Guidance named exactly "apg" takes the native C++ path, mirroring
+            // hot-step-sampler.h's `use_apg_native` and mm3-plugins.h. Editing
+            // apg.lua's body has never done anything on ACE and must not start
+            // doing something here.
+            if (sp->guidance_mode == "apg") {
+                guidance_native_apg = true;
+                use_lua_guidance    = true;
+            } else {
+                guidance_plugin = reg.guidance_lookup(sp->guidance_mode.c_str());
+                if (!guidance_plugin) {
+                    fprintf(stderr, "[SA3] WARNING: unknown guidance '%s', skipping guidance\n",
+                            sp->guidance_mode.c_str());
+                } else {
+                    use_lua_guidance = true;
+                }
+            }
+        }
+
+        if (use_lua_solver || use_lua_scheduler || use_lua_guidance) {
+            fprintf(stderr, "[SA3] Plugins: solver=%s scheduler=%s guidance=%s\n",
+                    solver_plugin ? solver_plugin->name.c_str() : "(pingpong/euler)",
+                    use_lua_scheduler ? sp->scheduler.c_str() : "(sa3 logsnr)",
+                    guidance_native_apg ? "apg (native)"
+                                        : (guidance_plugin ? guidance_plugin->name.c_str() : "(none)"));
+            if (use_lua_solver && pingpong) {
+                fprintf(stderr, "[SA3] NOTE: solver '%s' replaces the pingpong renoise — they are "
+                                "alternatives, not a stack.\n", solver_plugin->name.c_str());
+            }
+            if (use_lua_guidance) {
+                fprintf(stderr, "[SA3] NOTE: SA3 has no CFG uncond (trained at cfg=1); the cond velocity is "
+                                "passed as both preds, so APG-family guidance is a pass-through.\n");
+            }
+            if (solver_plugin && solver_plugin->needs_model) {
+                fprintf(stderr, "[SA3] NOTE: '%s' is a multi-evaluation solver (%d NFE) — expect the refine "
+                                "to scale roughly with NFE.\n", solver_plugin->name.c_str(), solver_plugin->nfe);
+            }
+        }
+    }
+
+    // ── Schedule ───────────────────────────────────────────────────────
     std::vector<float> sigmas;
     sa3_build_schedule(steps, strength, sigmas);
+    if (use_lua_scheduler) {
+        // Lua schedulers are written for full denoising and emit sigma_max = 1.0.
+        // SA3 refine is SDEdit: it starts at `strength` (0.3 by default), not 1.0.
+        // Rescale the returned curve linearly onto [strength -> 0] so the
+        // scheduler's SPACING (the thing the user picked it for) is preserved
+        // while SA3's partial-noise starting point is respected.
+        //
+        // sampler_build_scheduler_override reads g_hotstep_params.scheduler —
+        // the caller sets and restores it around this call (hot-step-server.cpp).
+        std::vector<float> ov;
+        sampler_build_scheduler_override(ov, steps, sigmas.data());
+        if (!ov.empty()) {
+            const float sched_start = ov[0];
+            if (sched_start > 1e-6f) {
+                const float k = strength / sched_start;
+                for (auto & s : ov) s *= k;
+            }
+            ov[0] = strength;      // pin the start exactly, no float drift
+            ov.push_back(0.0f);    // the override drops the x0 endpoint; the loop indexes sigmas[i+1]
+            sigmas = ov;
+            fprintf(stderr, "[SA3] Scheduler '%s': rescaled sigma_max %.4f -> strength %.4f\n",
+                    sp->scheduler.c_str(), (double) sched_start, (double) strength);
+        }
+    }
+
     int eff = (int)ceil((double)(int64_t)(seconds_total * SA3_SR) / SA3_DS);
     int headroom_tokens = (int)(SA3_HEADROOM_SEC * SA3_SR / SA3_DS);
     int valid = eff + headroom_tokens; if (valid > L) valid = L;
@@ -258,23 +450,114 @@ static inline bool sa3_refine_run_backend(Sa3Backend * be,
     std::vector<float> local_add((size_t)(SA3_LAT_CH + 1) * L, 0.0f);  // no inpaint
 
     // Sampler loop (default pingpong, matching rf_denoiser production path)
-    std::vector<float> v((size_t)SA3_LAT_CH * L);
-    for (int i = 0; i < steps; i++) {
-        float t_curr = sigmas[i], t_next = sigmas[i + 1];
-        if (!be->dit_forward(x.data(), t_curr, cross.data(), sec_emb.data(),
-                             local_add.data(), pad_mask.data(), L, v.data())) return false;
-        if (pingpong) {
-            // denoised = x - t*v; x = (1-t_next)*denoised + t_next*randn
-            for (size_t k = 0; k < x.size(); k++) {
-                float denoised = x[k] - t_curr * v[k];
-                float n = zero_noise ? 0.0f : gauss(rng);
-                x[k] = (1.0f - t_next) * denoised + t_next * n;
-            }
+    std::vector<float> v((size_t)n_lat);   // velocity, SA3 channel-major [Oc][T]
+
+    // Guidance scratch, ACE time-major view. Only allocated when guidance runs.
+    std::vector<float> tm_c, tm_v;
+    APGMomentumBuffer  apg_mbuf(-0.75f);
+    APGWorkspace       apg_ws;
+    GuidanceCtx        g_ctx = { 0, steps, 0.0f, 0.0f };
+    if (use_lua_guidance) {
+        tm_c.assign((size_t)n_lat, 0.0f);
+        tm_v.assign((size_t)n_lat, 0.0f);
+        apg_ws.resize(n_lat);
+    }
+
+    // Apply guidance in-place on `v`. SA3 has no uncond, so the cond velocity is
+    // both preds — see the header block. Transposes into the ACE view first:
+    // apg_project indexes [t*Oc + c] and would otherwise scramble the channels.
+    auto sa3_apply_guidance = [&]() {
+        if (!use_lua_guidance) return;
+        sa3_to_ace_view(v.data(), tm_c.data(), Oc, T);
+        if (guidance_native_apg) {
+            apg_forward(tm_c.data(), tm_c.data(), sp->guidance_scale, apg_mbuf,
+                        tm_v.data(), Oc, T, sp->apg_norm_threshold, apg_ws);
         } else {
-            float dt = t_next - t_curr;
-            for (size_t k = 0; k < x.size(); k++) x[k] += dt * v[k];
+            lua_call_guidance(*guidance_plugin, tm_c.data(), tm_c.data(), sp->guidance_scale,
+                              apg_mbuf, tm_v.data(), Oc, T, g_ctx, sp->apg_norm_threshold,
+                              sp->plugin_params);
         }
-        fprintf(stderr, "[SA3] step %d/%d t=%.4f->%.4f\n", i + 1, steps, t_curr, t_next);
+        sa3_from_ace_view(tm_v.data(), v.data(), Oc, T);
+    };
+
+    // Evaluate the DiT at (xt_in, t_val) and leave the guided velocity in `v`.
+    // Matches SolverModelFn / LoopModelFn: multi-eval solvers call this and then
+    // read the result back out of the vt buffer they were handed.
+    SolverModelFn sa3_model_fn = [&](const float * xt_in, float t_val) {
+        if (!be->dit_forward(xt_in, t_val, cross.data(), sec_emb.data(),
+                             local_add.data(), pad_mask.data(), L, v.data())) {
+            fprintf(stderr, "[SA3] dit_forward failed at t=%.4f\n", t_val);
+            return;
+        }
+        sa3_apply_guidance();
+    };
+
+    if (use_lua_solver && solver_plugin->owns_loop) {
+        // Full-loop solver: it takes the whole schedule and drives its own
+        // iteration. Safe here in a way it is not on MM3 — SA3 refines the clip
+        // in one pass, so there is no per-step window-overlap blend to bypass.
+        LoopModelFn loop_model_fn = [&](const float * xt_in, float t_val) { sa3_model_fn(xt_in, t_val); };
+        LoopOnStepFn loop_on_step = [&](int step_idx, float t_curr, float t_next) -> bool {
+            g_ctx.step_idx = step_idx;
+            g_ctx.t_curr   = t_curr;
+            g_ctx.dt       = t_curr - t_next;
+            fprintf(stderr, "[SA3] step %d/%d t=%.4f->%.4f [lua-loop]\n",
+                    step_idx + 1, steps, t_curr, t_next);
+            return false;  // never cancelled
+        };
+
+        lua_call_solver_loop(*solver_plugin, x.data(), v.data(), sigmas.data(), steps,
+                             n_lat, /*N=*/1, T, Oc, loop_model_fn, loop_on_step,
+                             sp->plugin_params);
+    } else {
+        SolverState solver_state;
+        if (use_lua_solver) {
+            solver_state.seeds   = nullptr;   // single-sample refine, no Philox batch
+            solver_state.batch_n = 1;
+            solver_state.n_per   = n_lat;
+            solver_state.xt_scratch.assign((size_t)n_lat, 0.0f);  // multi-eval solvers expect this pre-sized
+        }
+        std::vector<float> v_snap;  // velocity snapshot for multi-eval solvers
+
+        for (int i = 0; i < steps; i++) {
+            float t_curr = sigmas[i], t_next = sigmas[i + 1];
+            g_ctx.step_idx = i;
+            g_ctx.t_curr   = t_curr;
+            g_ctx.dt       = t_curr - t_next;
+
+            if (!be->dit_forward(x.data(), t_curr, cross.data(), sec_emb.data(),
+                                 local_add.data(), pad_mask.data(), L, v.data())) return false;
+            sa3_apply_guidance();
+
+            if (use_lua_solver) {
+                // Buffer separation, as hot-step-sampler.h does: a multi-eval
+                // solver's model_fn overwrites `v`, so the "original velocity"
+                // argument must be a snapshot or solvers that read it after
+                // calling model_fn (Heun's corrector, UniPC's history) silently
+                // degrade to Euler.
+                const float * vt_readonly = v.data();
+                if (solver_plugin->needs_model) {
+                    v_snap.assign(v.begin(), v.end());
+                    vt_readonly = v_snap.data();
+                }
+                solver_state.step_index = i;
+                lua_call_solver_step(*solver_plugin, x.data(), vt_readonly, t_curr, t_next,
+                                     n_lat, solver_state, sa3_model_fn, v.data(),
+                                     sp->plugin_params);
+            } else if (pingpong) {
+                // denoised = x - t*v; x = (1-t_next)*denoised + t_next*randn
+                for (size_t k = 0; k < x.size(); k++) {
+                    float denoised = x[k] - t_curr * v[k];
+                    float n = zero_noise ? 0.0f : gauss(rng);
+                    x[k] = (1.0f - t_next) * denoised + t_next * n;
+                }
+            } else {
+                float dt = t_next - t_curr;
+                for (size_t k = 0; k < x.size(); k++) x[k] += dt * v[k];
+            }
+            fprintf(stderr, "[SA3] step %d/%d t=%.4f->%.4f%s%s\n", i + 1, steps, t_curr, t_next,
+                    use_lua_solver ? " [lua-solver]" : "", use_lua_guidance ? " [lua-guidance]" : "");
+        }
     }
 
     // Decode, zero padded region, trim to input length, clamp
@@ -383,10 +666,11 @@ static inline bool sa3_refine_run_ggml(Sa3GgmlRefine * m,
                                        const int64_t * token_ids, int n_tokens,
                                        float strength, int steps,
                                        bool pingpong, uint64_t seed, bool zero_noise,
-                                       std::vector<float> & out) {
+                                       std::vector<float> & out,
+                                       const Sa3PluginParams * sp = nullptr) {
     if (!m || !m->loaded) return false;
     return sa3_refine_run_backend(m, audio, T44, token_ids, n_tokens,
-                                  strength, steps, pingpong, seed, zero_noise, out);
+                                  strength, steps, pingpong, seed, zero_noise, out, sp);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -634,11 +918,12 @@ static inline bool sa3_refine_run(Sa3Refine * ctx,
                                   const int64_t * token_ids, int n_tokens,
                                   float strength, int steps,
                                   bool pingpong, uint64_t seed, bool zero_noise,
-                                  std::vector<float> & out) {
+                                  std::vector<float> & out,
+                                  const Sa3PluginParams * sp = nullptr) {
     if (!ctx || !ctx->dit) return false;
     Sa3OrtBackend be(ctx);
     return sa3_refine_run_backend(&be, audio, T44, token_ids, n_tokens,
-                                  strength, steps, pingpong, seed, zero_noise, out);
+                                  strength, steps, pingpong, seed, zero_noise, out, sp);
 }
 
 #else  // !HOT_STEP_ORT — ORT stubs (GGML backend above remains available)
@@ -648,7 +933,8 @@ static inline bool sa3_load(Sa3Refine *, const char *, int = 0) { return false; 
 static inline void sa3_free_sessions(Sa3Refine *) {}
 static inline bool sa3_refine_run(Sa3Refine *, const float *, int, const int64_t *, int,
                                   float, int, bool, uint64_t, bool,
-                                  std::vector<float> &) { return false; }
+                                  std::vector<float> &,
+                                  const Sa3PluginParams * = nullptr) { return false; }
 
 #endif // HOT_STEP_ORT
 #endif // SA3_REFINE_H

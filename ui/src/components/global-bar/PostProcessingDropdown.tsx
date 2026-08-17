@@ -25,6 +25,7 @@ import { useCapabilities } from '../../hooks/useCapabilities';
 import { CoverArtContent, CoverArtBadge } from './CoverArtDropdown';
 import { PluginControls } from './PluginControls';
 import { EditableSlider } from '../shared/EditableSlider';
+import { Sa3SamplerControls } from './Sa3SamplerControls';
 
 // LUFS normalization presets
 const LUFS_PRESETS = [
@@ -834,6 +835,16 @@ export const PostProcessingDropdown: React.FC = () => {
                   />
                 )}
               </div>
+
+              {/* Sampler routing — steps + Lua solver/scheduler/guidance.
+                  Collapsed behind its own summary: the defaults are the tested
+                  path and most users never need to open this. */}
+              <details className="pt-1 group">
+                <summary className="cursor-pointer text-xs font-medium text-zinc-500 uppercase tracking-wider hover:text-zinc-400 select-none">
+                  Sampler (advanced)
+                </summary>
+                <Sa3SamplerControls />
+              </details>
             </div>
           )}
         </div>

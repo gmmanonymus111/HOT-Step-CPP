@@ -302,6 +302,17 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
         release_if_transient();
     };
 
+    // MM3 Plank replay. Worth saying out loud what this does and does not buy:
+    // the AR loop still runs every per-frame forward pass, so the planning
+    // progress bar will still crawl to 100%. Forcing pins which TOKENS come out,
+    // not how much compute runs — the win is an identical semantic bed to A/B
+    // the flow stage against, not latency.
+    if (!req.forced_semantic.empty()) {
+        fprintf(stderr,
+                "[MM3-Job] %s: AR replay — %zu forced iterations (codes pinned; AR compute still runs)\n",
+                job->id.c_str(), req.forced_semantic.size());
+    }
+
     if (job->cancel.load()) {
         fail(3, "cancelled", "cancelled before it started");
         return;
@@ -432,6 +443,31 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     if (!r.ar.lrc.empty()) {
         job->result_lrc = mm3_b64_encode(r.ar.lrc);
         fprintf(stderr, "[MM3-Job] %s: LRC %zu bytes\n", job->id.c_str(), r.ar.lrc.size());
+    }
+
+    // ── MM3 Plank: serialise the AR stage's codes ──────────────────────────
+    // Flat little-endian i32 blob, retrieved via GET /mm3/job?id=<id>&ar=1:
+    //   [i32] n_semantic
+    //   [i32 * n_semantic] semantic_all
+    //   [i32] n_acoustic
+    //   [i32 * n_acoustic] acoustic_all
+    // Iteration-indexed, entry 0 un-emitted — the exact shape mm3-ar-loop.h
+    // wants back as forced_semantic/forced_acoustic, so a replay is a
+    // byte-for-byte round trip with no reindexing at either end.
+    if (req.get_ar_codes && !r.ar.semantic_all.empty()) {
+        const int32_t n_sem = (int32_t) r.ar.semantic_all.size();
+        const int32_t n_ac  = (int32_t) r.ar.acoustic_all.size();
+        job->result_ar_codes.resize(sizeof(int32_t) * (2 + (size_t) n_sem + (size_t) n_ac));
+        char * wp = &job->result_ar_codes[0];
+        memcpy(wp, &n_sem, sizeof(int32_t));
+        wp += sizeof(int32_t);
+        memcpy(wp, r.ar.semantic_all.data(), (size_t) n_sem * sizeof(int32_t));
+        wp += (size_t) n_sem * sizeof(int32_t);
+        memcpy(wp, &n_ac, sizeof(int32_t));
+        wp += sizeof(int32_t);
+        memcpy(wp, r.ar.acoustic_all.data(), (size_t) n_ac * sizeof(int32_t));
+        fprintf(stderr, "[MM3-Job] %s: AR codes captured — %d semantic + %d acoustic i32 (%.1f KB)\n",
+                job->id.c_str(), n_sem, n_ac, (double) job->result_ar_codes.size() / 1024.0);
     }
 
     {
@@ -592,6 +628,20 @@ static void mm3_handle_job(const httplib::Request & hreq, httplib::Response & re
     }
     auto job = job_find(id);
 
+    // ── MM3 Plank retrieval: ?ar=1 returns the raw code blob ───────────────
+    // Deliberately ahead of the state lock — this path touches only the job's
+    // completed result, never the progress record, and the blob can be several
+    // hundred kB. Layout is documented at the capture site in mm3_synth_worker.
+    if (hreq.has_param("ar") && hreq.get_param_value("ar") == "1") {
+        if (!job || job->status.load() != 1 || job->result_ar_codes.empty()) {
+            mm3_json_error(res, 404,
+                           "AR codes not available (job unfinished, get_ar_codes was not set, or none captured)");
+            return;
+        }
+        res.set_content(job->result_ar_codes, "application/octet-stream");
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(st->mtx);
 
     yyjson_mut_doc * o    = yyjson_mut_doc_new(NULL);
@@ -628,6 +678,8 @@ static void mm3_handle_job(const httplib::Request & hreq, httplib::Response & re
         yyjson_mut_obj_add_real(o, rr, "peak", st->peak);
         yyjson_mut_obj_add_bool(o, rr, "eos", st->eos);
         yyjson_mut_obj_add_bool(o, rr, "has_nan", st->has_nan);
+        // MM3 Plank: whether GET /mm3/job?id=<id>&ar=1 will return a blob.
+        yyjson_mut_obj_add_bool(o, rr, "ar_codes_available", job && !job->result_ar_codes.empty());
         yyjson_mut_val * ms = yyjson_mut_obj(o);
         yyjson_mut_obj_add_val(o, rr, "ms", ms);
         yyjson_mut_obj_add_real(o, ms, "ar", st->ar_ms);

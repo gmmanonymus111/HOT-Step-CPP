@@ -299,6 +299,14 @@ export interface GenerationParams {
   stableStepMix?: number;              // 0 = pure AS1.5 .. 1 = pure SA3 (mix mode)
   stableStepSeed?: number;             // fixed SA3 refine seed (override mode)
   stableStepSeedFollowsDit?: boolean;  // true (default) = follow generation seed
+  // SA3 sampler routing (engine: sa3-refine.h Sa3PluginParams). All optional —
+  // absent means the original ping-pong/euler refine path.
+  stableStepSteps?: number;            // sampler steps (engine default 8)
+  stableStepSolver?: string;
+  stableStepScheduler?: string;
+  stableStepGuidanceMode?: string;
+  stableStepGuidanceScale?: number;
+  stableStepPluginParams?: Record<string, string | number>;
 
   // DCW (Dynamic CFG Weighting)
   dcwEnabled?: boolean;

@@ -222,6 +222,46 @@ Param traps:
 | Every solver/scheduler/guidance dead after upstream sync | `pipeline-synth-ops.cpp` lost the `hot-step-sampler.h` include — now a link error via the `hotstep_sampler_linked_` sentinel. Run `engine/verify-hooks.ps1` |
 | Generation very slow with custom guidance | Each `eval_cond`/`eval_uncond` in `post_step` is a full forward pass — budget them |
 
+## Three samplers run these plugins, not one
+
+The plugin layer never had an ACE dependency — every `lua_call_*` takes raw
+`float*`, element counts and a param map. What was ACE-specific was the
+*sampler*. Three now dispatch into it, and a plugin change affects all three:
+
+| Sampler | Call sites | Notes |
+|---|---|---|
+| ACE-Step DiT | `hot-step-sampler.h` | the original; time-major `[T][Oc]`, `t` descends 1→0 |
+| MiniMax-Music3 flow DiT | `minimax/mm3-plugins.h` | sigma ascends, latents channel-major — the bridge flips both |
+| StableStep / SA3 refine | `sa3-refine.h` | `t` already descends like ACE; latents channel-major |
+
+**The layout trap, twice learned:** `apg_project()` (`guidance/apg-core.h`)
+normalises per channel over time and indexes `[t*Oc + c]` — it is hard-wired to
+ACE's **time-major** memory. MM3 and SA3 both store latents **channel-major**,
+so both bridges transpose into the ACE view before any guidance plugin sees a
+buffer, and back after. Skip that and APG silently normalises scrambled
+mixtures rather than channels — it compiles, it runs, it sounds subtly wrong.
+Solvers are exempt: `lua_call_solver_step` is handed only a flat `n`, and
+`lua_call_solver_loop` uses `T`/`Oc` solely to publish `n_per`, so no solver
+can index across channels.
+
+Per-backend caveats worth knowing before you assume a plugin "works everywhere":
+- **`owns_loop` solvers**: fine on ACE and SA3, **refused on MM3** — a full-loop
+  solver bypasses MM3's per-step window-overlap blend and breaks every seam.
+- **Guidance on SA3 is near-decorative.** SA3 was trained at cfg=1 and has no
+  unconditional branch, so the engine passes the cond velocity as *both*
+  predictions. APG-family modes see `diff = 0` and pass through unchanged; only
+  plugins doing cond-side work have any effect.
+- **Schedulers on SA3 get rescaled.** Schedulers emit `sigma_max = 1.0` for full
+  denoising; the SA3 refine is SDEdit and starts at `strength` (~0.3), so the
+  returned curve is linearly rescaled onto `[strength → 0]` — spacing preserved,
+  starting point not. Note the override array is `steps` long while the loop
+  indexes `sigmas[i+1]`, so the terminal `0.0` must be appended (getting this
+  wrong is an out-of-bounds read, not a compile error).
+- **`sampler_build_scheduler_override()` reads process-global
+  `g_hotstep_params`**, not its arguments. `/sa3-refine` therefore saves and
+  restores `solver_name`/`scheduler`/`plugin_params` around the call — without
+  that, a refine leaks its picks into the next ACE generation on the same worker.
+
 ## Institutional knowledge
 
 - **VALIDATED**: `hot-step-sampler.h` replaced `dit-sampler.h` as the sampling path; the include lives in upstream `pipeline-synth-ops.cpp` and its loss during a sync used to be silent (everything compiled, all plugins dead). The linker sentinel now makes it a link error. Always run `engine/verify-hooks.ps1` after touching upstream files.

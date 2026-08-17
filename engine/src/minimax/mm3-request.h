@@ -552,6 +552,23 @@ struct MM3SynthRequest {
     // Ignored for instrumentals — there is nothing to align.
     bool    want_lrc   = false;
 
+    // ── MM3 Plank ──────────────────────────────────────────────────────────
+    // Capture the AR stage's output codes so a later render can replay them.
+    // Zero cost when false (the default): the codes already exist in memory,
+    // this only decides whether they are serialised onto the job.
+    bool    get_ar_codes = false;
+
+    // Replay previously-captured codes instead of sampling them. Both must be
+    // present together, with acoustic == semantic * 7. Entry 0 is the
+    // un-emitted iteration, so I codes render I-1 frames (mm3-ar-loop.h).
+    //
+    // NOTE this does NOT make the render faster. The AR loop still executes
+    // every per-frame forward pass; forcing fixes which TOKENS come out, not
+    // how much compute runs. Its value is reproducibility — an identical
+    // semantic bed to A/B flow-stage solver/scheduler/guidance against.
+    std::vector<int32_t> forced_semantic;  // [I]
+    std::vector<int32_t> forced_acoustic;  // [I * 7], flat, iteration-major
+
     std::string prompt;  // the assembled template
     int64_t     n_tokens = 0;
 
@@ -746,6 +763,92 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
         }
     }
 
+    // ── MM3 Plank: AR code capture ──
+    {
+        yyjson_val * v = yyjson_obj_get(root, "get_ar_codes");
+        if (v && !yyjson_is_null(v)) {
+            if (!yyjson_is_bool(v)) {
+                if (err) {
+                    *err = "\"get_ar_codes\" must be a boolean";
+                }
+                return false;
+            }
+            out->get_ar_codes = yyjson_get_bool(v);
+        }
+    }
+
+    // ── MM3 Plank: AR replay ──
+    // Both arrays or neither. A half-specified replay is a caller bug worth a
+    // 400, not a silent fall back to sampling — the whole point of asking for
+    // replay is that the codes are pinned.
+    {
+        yyjson_val * sem_v  = yyjson_obj_get(root, "forced_semantic");
+        yyjson_val * ac_v   = yyjson_obj_get(root, "forced_acoustic");
+        const bool   has_sem = sem_v && !yyjson_is_null(sem_v);
+        const bool   has_ac  = ac_v  && !yyjson_is_null(ac_v);
+
+        if (has_sem != has_ac) {
+            if (err) {
+                *err = "\"forced_semantic\" and \"forced_acoustic\" must be provided together";
+            }
+            return false;
+        }
+        if (has_sem) {
+            if (!yyjson_is_arr(sem_v) || !yyjson_is_arr(ac_v)) {
+                if (err) {
+                    *err = "\"forced_semantic\" and \"forced_acoustic\" must be arrays of integers";
+                }
+                return false;
+            }
+            size_t       idx, imax;
+            yyjson_val * item;
+            yyjson_arr_foreach(sem_v, idx, imax, item) {
+                if (!yyjson_is_int(item)) {
+                    if (err) {
+                        *err = "\"forced_semantic\" must be an array of integers";
+                    }
+                    return false;
+                }
+                out->forced_semantic.push_back((int32_t) yyjson_get_int(item));
+            }
+            yyjson_arr_foreach(ac_v, idx, imax, item) {
+                if (!yyjson_is_int(item)) {
+                    if (err) {
+                        *err = "\"forced_acoustic\" must be an array of integers";
+                    }
+                    return false;
+                }
+                out->forced_acoustic.push_back((int32_t) yyjson_get_int(item));
+            }
+
+            const int64_t NCB      = 7;  // acoustic codebooks per frame
+            const int64_t expected = (int64_t) out->forced_semantic.size() * NCB;
+            if ((int64_t) out->forced_acoustic.size() != expected) {
+                if (err) {
+                    char buf[160];
+                    snprintf(buf, sizeof(buf),
+                             "\"forced_acoustic\" has %zu entries, expected %lld (= %zu frames * %lld codebooks)",
+                             out->forced_acoustic.size(), (long long) expected,
+                             out->forced_semantic.size(), (long long) NCB);
+                    *err = buf;
+                }
+                return false;
+            }
+            // Entry 0 is the un-emitted iteration, so I codes render I-1 frames.
+            // mm3-ar-loop.h clamps max_frames to this itself, but doing it here
+            // too keeps `duration` (which the flow stage and the job report both
+            // read) honest about what will actually come out.
+            if (out->forced_semantic.size() < 2) {
+                if (err) {
+                    *err = "forced replay needs at least 2 iterations (one un-emitted, one emitted)";
+                }
+                return false;
+            }
+            out->max_frames = (int64_t) out->forced_semantic.size() - 1;
+            out->duration   = (double) out->max_frames / (double) frame_rate;
+        }
+    }
+
     // ── Sampler plugins (mm3-plugins.h) ──
     // Field names are ACE's on purpose: one UI control set, one wire vocabulary,
     // and a request that can be moved between backends without translation.
@@ -829,6 +932,13 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
     out->gen.steps      = (int) nsteps;
     out->gen.cfg_flow   = (float) cfg;
     out->gen.plugins    = plug;
+    // MM3 Plank replay. MM3GenRequest holds these by value, and the job worker
+    // takes the whole MM3SynthRequest by value too, so the copy chain is safe —
+    // no pointer into this parse's storage survives the handoff.
+    if (!out->forced_semantic.empty()) {
+        out->gen.forced_semantic = out->forced_semantic;
+        out->gen.forced_acoustic = out->forced_acoustic;
+    }
     return true;
 }
 

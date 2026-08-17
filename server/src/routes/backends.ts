@@ -22,6 +22,7 @@ import {
   getActiveBackendId,
   setActiveBackendId,
 } from '../services/backends/registry.js';
+import { listMm3Planks, readMm3PlankMeta } from '../services/backends/minimax/plank.js';
 import type { BackendCapabilities } from '../services/backends/types.js';
 
 const router = Router();
@@ -173,6 +174,35 @@ router.get('/capabilities', async (req, res) => {
       extensions: [],
     } satisfies BackendCapabilities);
   }
+});
+
+// ── MM3 Plank ────────────────────────────────────────────────────────────────
+//
+// The planks themselves are read engine-side via the generation request; these
+// two routes exist only so the picker can list them and preview one before the
+// user commits to a replay.
+
+/** GET /api/mm3/planks — the saved planks, newest first. */
+router.get('/mm3/planks', (_req, res) => {
+  res.json({ planks: listMm3Planks() });
+});
+
+/** GET /api/mm3/plank-meta?file=<name> — one plank's sidecar metadata.
+ *  `file` arrives from the browser, so it is resolved through the same
+ *  containment check the replay path uses; anything outside the plank
+ *  directory reads nothing. */
+router.get('/mm3/plank-meta', (req, res) => {
+  const ref = String(req.query.file ?? '').trim();
+  if (!ref) {
+    res.status(400).json({ error: 'missing ?file= parameter' });
+    return;
+  }
+  const meta = readMm3PlankMeta(ref);
+  if (!meta) {
+    res.status(404).json({ error: 'plank sidecar not found or unreadable' });
+    return;
+  }
+  res.json(meta);
 });
 
 export default router;

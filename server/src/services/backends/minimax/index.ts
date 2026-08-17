@@ -13,6 +13,7 @@
 import { engineReady } from '../../../engineState.js';
 import { isEngineSuspended } from '../../aceEngineProcess.js';
 import { getSetting, setSetting } from '../../../db/lireekDb.js';
+import { listMm3Planks } from './plank.js';
 import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
 import type { Mm3Props, Mm3RoleVariants } from './client.js';
 import type {
@@ -139,6 +140,20 @@ function status(): BackendLifecycleStatus {
   // behind an in-flight MM3 generation (GET /mm3/props holds the MM3 mutex).
   const props = mm3PropsCached();
   return props?.synth_ready ? 'ready' : 'down';
+}
+
+/** The saved planks as select options, newest first. Built here rather than
+ *  held as a static schema so a plank saved on the last render shows up on the
+ *  next capabilities poll without a restart. Never throws — a missing or
+ *  unreadable plank directory just means "None" is the only choice. */
+function mm3PlankOptions(): { value: string; label: string }[] {
+  const none = { value: '', label: 'None — generate a fresh AR plan' };
+  return [none, ...listMm3Planks().map(p => {
+    const when = typeof p.created === 'string' ? p.created.slice(0, 16).replace('T', ' ') : '';
+    const cap = p.caption ? p.caption.slice(0, 40) : p.file.replace('.mm3plank', '').slice(0, 8);
+    const frames = Number.isFinite(p.frames) ? `${p.frames}f` : '';
+    return { value: p.file, label: [when, cap, frames].filter(Boolean).join(' · ') };
+  })];
 }
 
 async function capabilities(): Promise<BackendCapabilities> {
@@ -291,6 +306,31 @@ async function capabilities(): Promise<BackendCapabilities> {
         min: 0.5,
         max: 6.0,
         step: 0.05,
+      },
+      {
+        // ── MM3 Plank ──
+        // Read the hint carefully before believing this is a speed feature: it
+        // is not. The AR loop still runs every per-frame forward pass on a
+        // replay. What it buys is an IDENTICAL semantic bed, so that comparing
+        // two solver/scheduler/guidance settings compares those settings rather
+        // than two different AR samplings.
+        key: 'mm3SaveArCodes',
+        type: 'toggle',
+        label: 'Save AR Plan (Plank)',
+        hint: 'Save this render\'s AR planner output so it can be replayed later. '
+            + 'Costs nothing to enable — the codes already exist in memory.',
+        default: false,
+      },
+      {
+        key: 'mm3PlankPath',
+        type: 'select',
+        label: 'Replay AR Plan',
+        hint: 'Reuse a saved AR plan instead of generating a new one, fixing the '
+            + 'semantic content so flow-stage settings can be compared fairly. '
+            + 'NOT a speedup: the AR stage still runs its full compute, it just '
+            + 'emits the saved codes. Duration and lyrics come from the plank.',
+        default: '',
+        options: mm3PlankOptions(),
       },
     ],
   };

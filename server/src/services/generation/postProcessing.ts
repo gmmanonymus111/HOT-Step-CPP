@@ -71,9 +71,19 @@ export interface PostProcessParams {
   stableStepOn?: boolean;
   stableStep?: boolean;          // preset/settings-file alias for stableStepOn
   stableStepStrength?: number;   // 0..1 init noise level (default 0.3)
+  stableStepSteps?: number;      // sampler steps (engine default 8, clamped 1..64)
   /** Engine backend for the SA3 refine: 'onnx' (ONNX Runtime/TensorRT),
    *  'gguf' (GGML — CUDA/Vulkan/CPU) or 'auto' (engine picks, default). */
   stableStepBackend?: 'auto' | 'onnx' | 'gguf';
+  /** Lua plugin routing for the SA3 sampler loop — same registry as the ACE
+   *  Generation dropdowns. Absent = the original pingpong/euler path.
+   *  Naming a solver replaces the pingpong renoise; SA3 has no CFG uncond, so
+   *  APG-family guidance is a pass-through (engine/src/sa3-refine.h). */
+  stableStepSolver?: string;
+  stableStepScheduler?: string;
+  stableStepGuidanceMode?: string;
+  stableStepGuidanceScale?: number;
+  stableStepPluginParams?: Record<string, string | number>;
   /** StableStep DoRA adapters (models/sa3-adapters/<name>.gguf) merged into
    *  the SA3 DiT at load with per-adapter strength. Forces the GGUF backend. */
   stableStepAdapters?: Array<{ name: string; scale: number }>;
@@ -297,6 +307,27 @@ export async function runPostProcessingChain(
           + 'BS-RoFormer pass (instrumental derived as mix − vocals)');
       }
       setStage(`Separating vocals${totalTracks > 1 ? ` (${i+1}/${totalTracks})` : ''}...`);
+
+      // A previous track's refine can leave the SA3 DiT resident (~2.8 GB),
+      // while BS-RoFormer wants ~2.6 GB CONTIGUOUS for its attention matrix.
+      // Fragmentation, not total free VRAM, is what fails there — so evict SA3
+      // before the split rather than after an allocation failure. It reloads
+      // on demand when the refine runs a few lines below. Best-effort by
+      // design: in_use modules are skipped and any error here is non-fatal,
+      // because the separation may well succeed without the eviction.
+      if (stableStepWantsStems) {
+        try {
+          const loaded = await aceClient.listLoadedModels();
+          for (const m of loaded.filter(x => x.label.toLowerCase().includes('sa3') && !x.in_use)) {
+            if (await aceClient.unloadLabel(m.label)) {
+              log('INFO', `[StableStep] Evicted ${m.label} (${m.mb.toFixed(0)} MB) before vocal separation`);
+            }
+          }
+        } catch (evErr: any) {
+          log('DEBUG', `[StableStep] SA3 eviction before separation failed (non-fatal): ${evErr?.message ?? evErr}`);
+        }
+      }
+
       try {
         log('INFO', `[SuperSep] Vocal split via level ${sepLevel}`
           + `${useLeap ? ' (dual BS-Roformer-Leap Xe)' : ' (BS-RoFormer 6-stem)'}`);
@@ -355,6 +386,25 @@ export async function runPostProcessingChain(
             log('INFO', `[StableStep] Adapters: ${adapters.map(a => `${a.name}@${a.scale}`).join(', ')}`);
           }
           const strength = params.stableStepStrength ?? 0.3;
+          // Lua plugin routing + step count. Spread into every submitSa3Refine
+          // call below so the three refine branches (whole-mix, no-split,
+          // stem-split) cannot drift apart. Each field is omitted unless set,
+          // which is what keeps the engine on its bit-identical default path.
+          const sa3PluginOpts = {
+            ...(params.stableStepSteps !== undefined ? { steps: params.stableStepSteps } : {}),
+            ...(params.stableStepSolver ? { solver: params.stableStepSolver } : {}),
+            ...(params.stableStepScheduler ? { scheduler: params.stableStepScheduler } : {}),
+            ...(params.stableStepGuidanceMode ? { guidanceMode: params.stableStepGuidanceMode } : {}),
+            ...(params.stableStepGuidanceScale && params.stableStepGuidanceScale > 1
+              ? { guidanceScale: params.stableStepGuidanceScale } : {}),
+            ...(params.stableStepPluginParams && Object.keys(params.stableStepPluginParams).length > 0
+              ? { pluginParams: params.stableStepPluginParams } : {}),
+          };
+          if (sa3PluginOpts.solver || sa3PluginOpts.scheduler || sa3PluginOpts.guidanceMode) {
+            log('INFO', `[StableStep] Plugins: solver=${sa3PluginOpts.solver ?? '(pingpong)'} `
+              + `scheduler=${sa3PluginOpts.scheduler ?? '(sa3 logsnr)'} `
+              + `guidance=${sa3PluginOpts.guidanceMode ?? '(none)'}`);
+          }
           const ssSeed = params.stableStepSeed;
           if (ssSeed !== undefined) log('INFO', `[StableStep] Seed: ${ssSeed}`);
           const caption = params.stableStepCaptions?.[i] || '';
@@ -369,7 +419,8 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const wavBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(wavBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed,
+              ...blendOpts, ...sa3PluginOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else if (!vocalSep) {
@@ -379,7 +430,8 @@ export async function runPostProcessingChain(
             setStage(`StableStep: refining instrumental${suffix}...`);
             const srcBuf = fs.readFileSync(processedPath);
             const refined = await aceClient.submitSa3Refine(srcBuf, {
-              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed, ...blendOpts,
+              tokens: ids, nTokens, strength, backend, adapters, envMatch, seed: ssSeed,
+              ...blendOpts, ...sa3PluginOpts,
             });
             fs.writeFileSync(processedPath, refined);
           } else {
@@ -406,7 +458,7 @@ export async function runPostProcessingChain(
               // Omitted on the native path: the engine defaults out_sr to the
               // input rate, so asking for anything would force a resample.
               ...(nativeRate ? {} : { outSr: 48000 }),
-              ...blendOpts,
+              ...blendOpts, ...sa3PluginOpts,
             });
 
             setStage(`StableStep: processing vocals${suffix}...`);

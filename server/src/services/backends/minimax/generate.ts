@@ -45,6 +45,7 @@ import { config } from '../../../config.js';
 import { getDb } from '../../../db/database.js';
 import { aceClient } from '../../aceClient.js';
 import { wavDurationSec } from '../../audioCrop.js';
+import { MM3_PLANK_EXT, mm3PlankDir, readMm3Plank } from './plank.js';
 import { runPostProcessingChain } from '../../generation/postProcessing.js';
 import type { PostProcessParams } from '../../generation/postProcessing.js';
 import {
@@ -155,6 +156,28 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
       // LRC timestamps ride the same toggle ACE uses (skipLrc inverted).
       // Instrumentals are filtered engine-side, so no check is needed here.
       get_lrc: params.skipLrc !== true,
+      // MM3 Plank capture — opt-in, zero cost when off.
+      ...(params.mm3SaveArCodes === true ? { get_ar_codes: true } : {}),
+      // MM3 Plank replay. A plank that will not load is a note, not a failure:
+      // the render proceeds with a normal AR pass.
+      ...(params.mm3PlankPath ? (() => {
+        const codes = readMm3Plank(String(params.mm3PlankPath));
+        if (!codes) {
+          notes.push(`AR plank not found or unreadable (${params.mm3PlankPath}) — running a normal AR pass`);
+          return {};
+        }
+        // Entry 0 is the un-emitted iteration, so I codes render I-1 frames.
+        // The engine derives max_frames/duration from the array itself
+        // (mm3-request.h), so nothing needs overriding here.
+        notes.push(
+          `AR replay from ${path.basename(String(params.mm3PlankPath))} `
+          + `(${codes.forced_semantic.length - 1} frames — codes pinned, AR compute still runs)`,
+        );
+        return {
+          forced_semantic: codes.forced_semantic,
+          forced_acoustic: codes.forced_acoustic,
+        };
+      })() : {}),
       ...samplerPlugins,
     },
     notes,
@@ -415,6 +438,44 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       }
       if (finalDetail.evicted_modules) {
         log('INFO', `[MM3] VRAM arbitration evicted ${finalDetail.evicted_modules} ACE module(s) (${(finalDetail.evicted_mb ?? 0).toFixed(0)} MB)`);
+      }
+
+      // MM3 Plank capture. Entirely non-fatal: the audio is already rendered
+      // and saved by this point, so a failure here costs the plank, not the
+      // song. /mm3/job?ar=1 is an ENGINE endpoint — it must go to
+      // config.aceServer.url, not back into this Node server.
+      if (req.get_ar_codes && r.ar_codes_available) {
+        try {
+          const arRes = await fetch(
+            `${config.aceServer.url}/mm3/job?id=${encodeURIComponent(sub.job_id)}&ar=1`,
+            { signal: AbortSignal.timeout(60_000) },
+          );
+          if (!arRes.ok) {
+            log('WARNING', `[MM3 Plank] AR code fetch failed (HTTP ${arRes.status}) — nothing saved`);
+          } else {
+            const blob = Buffer.from(await arRes.arrayBuffer());
+            const dir = mm3PlankDir();
+            fs.mkdirSync(dir, { recursive: true });
+            const plankId = uuidv4();
+            fs.writeFileSync(path.join(dir, `${plankId}${MM3_PLANK_EXT}`), blob);
+            fs.writeFileSync(path.join(dir, `${plankId}${MM3_PLANK_EXT}.json`), JSON.stringify({
+              id: plankId,
+              jobId: sub.job_id,
+              created: new Date().toISOString(),
+              caption: req.caption,
+              lyrics: req.lyrics || '',
+              duration: sub.duration,
+              seed: sub.seed,
+              frames: r.frames,
+              sizeBytes: blob.length,
+            }, null, 2));
+            job.params.mm3LastPlankPath = `${plankId}${MM3_PLANK_EXT}`;
+            log('INFO', `[MM3 Plank] Saved ${plankId}${MM3_PLANK_EXT} `
+              + `(${(blob.length / 1024).toFixed(0)} KB, ${r.frames} frames)`);
+          }
+        } catch (plankErr: any) {
+          log('WARNING', `[MM3 Plank] AR code save failed (non-fatal): ${plankErr?.message ?? plankErr}`);
+        }
       }
     }
 

@@ -150,6 +150,19 @@ export interface Mm3SynthRequest {
    *  for instrumentals. */
   get_lrc?: boolean;
 
+  // ── MM3 Plank (engine: minimax/mm3-job.h) ─────────────────────────────────
+  /** Capture the AR stage's output codes so a later render can replay them.
+   *  When set, GET /mm3/job?id=<id>&ar=1 serves the blob once the job is done.
+   *  Zero cost when false (the default) — the codes already exist in memory. */
+  get_ar_codes?: boolean;
+  /** Replay previously-captured codes instead of sampling them. Both must be
+   *  sent together, with forced_acoustic.length === forced_semantic.length * 7.
+   *  This does NOT make the render faster: the AR loop still runs every
+   *  per-frame forward pass. It pins WHICH codes come out, which is what makes
+   *  a flow-stage A/B comparison valid. */
+  forced_semantic?: number[];  // [I], entry 0 is the un-emitted iteration
+  forced_acoustic?: number[];  // [I * 7], flat, iteration-major
+
   // ── Sampler plugins (engine: minimax/mm3-plugins.h) ───────────────────────
   // The SAME Lua solver/scheduler/guidance plugins the ACE DiT uses, driving
   // MM3's flow DiT through a convention adapter. Field names are ACE's, so one
@@ -231,6 +244,9 @@ export interface Mm3JobDetail {
     peak: number;
     eos: boolean;
     has_nan: boolean;
+    /** MM3 Plank: true when get_ar_codes was set and the blob is ready for
+     *  GET /mm3/job?id=<id>&ar=1. */
+    ar_codes_available?: boolean;
     ms?: { ar: number; cond: number; flow: number; voc: number; total: number };
   };
 }
