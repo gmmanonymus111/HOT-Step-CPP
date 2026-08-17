@@ -271,6 +271,51 @@ marginal, and the trigger word is what binds style to invocation. Do not spend
 unbounded effort perfecting base-model genre before a training run has ever been
 judged.
 
+## Lyric Studio writes MM3 captions natively (2026-08-17)
+
+Lyric Studio's Generate Lyrics now produces **two** captions per song. They are
+separate DB fields and neither is a reformatting of the other:
+
+| field | backend | shape |
+|---|---|---|
+| `generations.caption` | ACE-Step 1.5 | 2-4 sentences of flowing description |
+| `generations.caption_mm3` | MiniMax-Music3 | the three-heading Structured Caption above |
+
+Where it lives — all prompt text is single-sourced in
+`server/src/services/lireek/prompts.ts` (`MM3_CAPTION_SYSTEM_PROMPT`,
+`buildMm3CaptionPrompt`, `normalizeMm3Caption`, `validateMm3Caption`,
+`MM3_CAPTION_FIELDS`), consumed by both the in-app pipeline
+(`llm/orchestration.ts::writeMm3Caption`) and the MCP server
+(`prepare_mm3_caption` tool → `save_generation`'s `caption_mm3` param).
+
+Four design points, each load-bearing:
+
+1. **Its own LLM call, made AFTER the lyrics.** The Arrangement is a
+   section-by-section timeline of that song, so it needs the real section tags.
+   The metadata planner runs before any lyric exists and cannot write it. Do
+   not "optimise" this back into the metadata JSON.
+2. **`Basic Attributes:` is rebuilt deterministically** from the stored
+   bpm/key/signature after the model answers — the same correction
+   `mm3-caption-hybrid.py` applies to MOSS. The **genre clause the model wrote
+   is preserved**, because genre is the one part of that line a model judges
+   better than we do.
+3. **Prompt field lengths are measured, not guessed** — median words per field
+   over all 1,000 upstream templates, encoded in `MM3_CAPTION_FIELDS`.
+   `validateMm3Caption` passes 998 of those 1,000 (the two misses run
+   `* Primary:` inline). It is advisory: it drives ONE retry and never rejects,
+   because a partly-malformed Structured Caption still beats an ACE caption.
+4. **Consumers pick by ACTIVE backend**, via `ui/src/utils/captionForBackend.ts`.
+   Read it live from `backendStore`, never from a queued param snapshot:
+   `routes/generate.ts` routes on `getActiveBackendId()` and ignores the
+   request's `backend` field entirely.
+
+**Open — no backfill.** The ~1,485 generations written before this all have
+`caption_mm3 = ''` and fall back to their ACE caption on MM3. A bulk backfill
+would look like the existing `CAPTION_REPLAN` machinery, but note the ceiling
+established above: mechanically restructuring an ACE caption never reached the
+target genre in five ear-judged rounds. A backfill should re-run the real MM3
+caption call per song, not restructure.
+
 ## Directory contents
 
 ```
