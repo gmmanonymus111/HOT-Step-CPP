@@ -591,10 +591,10 @@ export function buildCaptionReplanPrompt(
 // ── MiniMax-Music3 Structured Caption ───────────────────────────────────────
 //
 // MM3 is the second generation backend and it does NOT want an ACE-Step
-// caption. It was trained on a three-heading "Structured Caption" whose twelve
+// caption. It was trained on a three-heading "Structured Caption" whose thirteen
 // labelled sub-fields are 100% consistent across all 1,000 reference captions
 // MiniMax ship (.claude/skills/mm3-captioning/upstream/templates/ — every one of
-// the 1,000 carries all twelve labels, verbatim). Adherence to that format is
+// the 1,000 carries all thirteen labels, verbatim). Adherence to that format is
 // the dominant lever on MM3 output, not a stylistic preference:
 //
 //   Controlled A/B, 2026-08-14 — one track, identical lyrics, 5 seeds per arm,
@@ -626,7 +626,7 @@ export function buildCaptionReplanPrompt(
 // a model that hits them produces something the same size and density as what
 // MM3 was actually trained on.
 
-/** The twelve labelled sub-fields of an MM3 Structured Caption, in order,
+/** The thirteen labelled sub-fields of an MM3 Structured Caption, in order,
  *  with the measured median word count of each across MiniMax's 1,000
  *  reference captions. `heading` marks the three top-level lines. */
 export const MM3_CAPTION_FIELDS: ReadonlyArray<
@@ -665,7 +665,7 @@ function mm3Skeleton(): string {
 
 export const MM3_CAPTION_SYSTEM_PROMPT = `You write Structured Captions for MiniMax-Music3, an AI music generator. This caption is the ONLY description the model receives: it alone decides the genre, the voice and the arrangement of the track that gets rendered. A caption that drifts off format produces off-genre music — that is measured, not theoretical.
 
-Return ONE caption in EXACTLY this shape. All three heading lines and all twelve labels are mandatory, in this order, spelled character-for-character as shown:
+Return ONE caption in EXACTLY this shape. All three heading lines and all thirteen labels are mandatory, in this order, spelled character-for-character as shown:
 
 ${mm3Skeleton()}
 
@@ -684,7 +684,7 @@ CONTENT RULES (musical — each one is a measured failure mode):
 - Do NOT fabricate precision. If something is not supported by what you were given, describe it in broader terms instead of inventing an exact technique.
 - An instrumental track stays instrumental. Never add vocals that were not asked for.
 - Write concrete audio detail, not review copy. "The snare moves from rimclick to a full backbeat at the first chorus" is useful; "an emotionally resonant journey" is not.
-- English, roughly 450-650 words in total.`;
+- English, roughly 450-650 words in total. The per-field figures above are medians from those same reference captions and sum to about 525 words of prose; with the heading and label text that lands near 570, comfortably inside the range. They agree — treat the per-field numbers as the shape and the range as the bound, and do not pad to reach 650.`;
 
 /** Everything the MM3 caption call knows about the song being described. */
 export interface Mm3CaptionContext {

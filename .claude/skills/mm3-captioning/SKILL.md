@@ -279,7 +279,7 @@ separate DB fields and neither is a reformatting of the other:
 | field | backend | shape |
 |---|---|---|
 | `generations.caption` | ACE-Step 1.5 | 2-4 sentences of flowing description |
-| `generations.caption_mm3` | MiniMax-Music3 | the three-heading Structured Caption above |
+| `generations.caption_mm3` | MiniMax-Music3 | the three-heading Structured Caption above (3 headings + 13 labels) |
 
 Where it lives — all prompt text is single-sourced in
 `server/src/services/lireek/prompts.ts` (`MM3_CAPTION_SYSTEM_PROMPT`,

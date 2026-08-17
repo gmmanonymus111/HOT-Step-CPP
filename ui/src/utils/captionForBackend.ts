@@ -5,7 +5,7 @@
  * of the same text:
  *
  *   caption      ACE-Step 1.5 — 2-4 sentences of flowing description.
- *   caption_mm3  MiniMax-Music3 — a three-heading Structured Caption with twelve
+ *   caption_mm3  MiniMax-Music3 — a three-heading Structured Caption with thirteen
  *                fixed labels (Global Metadata / Vocal Details / Arrangement).
  *
  * Handing one model the other's caption is a measured quality loss, not a
