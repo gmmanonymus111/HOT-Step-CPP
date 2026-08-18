@@ -69,6 +69,13 @@ export const CAPTION_INSTRUCTIONS: string =
   "key: <note plus lowercase mode, e.g. 'C minor' or 'F# major'>\n" +
   "signature: <numerator only — one of 2, 3, 4, 6>\n\n" +
   'Caption rules:\n' +
+  // This rule is FIRST and stated as a requirement because a smaller local model
+  // will otherwise drop the caption line entirely and answer with the metadata
+  // fields alone — measured on MOSS-Music-8B, which returned exactly
+  // "Genre: ...\nBPM: ...\nKey: ...\nSignature: ..." for 12 of 13 tracks. Leading
+  // with the length limit reads as permission to be brief; leading with "the
+  // caption is required" does not.
+  '- Line 1 is REQUIRED and must begin with `caption:` followed by the description. Never omit it, never leave it blank, and never answer with the metadata fields alone. If you are unsure of everything else, still write the caption.\n' +
   '- The caption is 2 to 4 sentences, roughly 25 to 60 words, on a single line. Reference captions average about 30 words; a longer caption is not a better one, and padding it with invented detail is worse than stopping.\n' +
   '- Cover these, woven into flowing description rather than listed:\n' +
   CAPTION_DIMENSIONS.map(s => `    - ${s}\n`).join('') +

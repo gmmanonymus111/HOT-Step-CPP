@@ -1047,7 +1047,20 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       }
       useGenius = false;
     }
-    if (useCaption) {
+    if (useCaption && (body.caption?.provider === 'moss')) {
+      // MOSS is a local binary, not a chat API — getProvider() throws on it, and
+      // its availability is "built + weights present", not "API key set". Handled
+      // before the LLM branch so labeling can run with no cloud credentials at
+      // all, which is the entire point of the local captioner.
+      const probe = resolveMossPaths();
+      if ('missing' in probe) {
+        if (captionAsked) {
+          res.status(503).json({ error: `MOSS captioning is not available: ${probe.missing}` });
+          return;
+        }
+        useCaption = false;
+      }
+    } else if (useCaption) {
       const providerName = body.caption?.provider || config.lireek.defaultProvider;
       let provider;
       try {

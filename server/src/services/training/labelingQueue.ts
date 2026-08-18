@@ -938,6 +938,10 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
               const promptSample = incoming.lyrics ? { ...enriched, lyrics: incoming.lyrics } : enriched;
               const fields = await captionLimiter.run(() => enhanceCaption(promptSample, ds, {
                 provider: opts.caption?.provider || config.lireek.defaultProvider,
+                // MOSS only: emit the MM3 Structured Caption alongside the AS1.5
+                // block. One extra decode off an encode already paid for, and it
+                // is what `ace-train mm3-condition` reads.
+                wantMm3: true,
                 model: opts.caption?.model,
                 includeLyricsExcerpt: true,
                 temperature: 0.45,
@@ -978,6 +982,18 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
        }
       };
 
+      // MOSS: caption the whole dataset in ONE process before Pass B consumes
+      // the results, so the ~10 GB model is loaded once instead of per track.
+      // Placed here, after passALane has already started, so Essentia (CPU) runs
+      // concurrently with captioning (GPU) rather than queueing behind it.
+      if (opts.useCaption !== false && opts.caption?.provider === 'moss') {
+        await prepareMossBatch(targets.map(t => t.audioPath), {
+          wantMm3: true,
+          signal: job.controller.signal,
+          log: (level, message) => emitLog(job, level, message),
+        });
+      }
+
       await Promise.all(Array.from({ length: passBPool }, () => passBWorker()));
     })();
 
@@ -994,6 +1010,9 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
     if (isCancelled(job)) return;
     console.error(`[Training] Label job ${job.id} FAILED — ${err?.message || err}`);
     finishJob(job, 'failed', err?.message || 'Label job failed');
+  } finally {
+    // Prefetched MOSS captions are scoped to this job — see runCaptionJob.
+    clearMossBatch();
   }
 }
 

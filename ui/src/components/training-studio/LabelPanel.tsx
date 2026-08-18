@@ -33,12 +33,19 @@ export const LabelPanel: React.FC = () => {
 
   const essentiaOk = caps?.essentia.available !== false;
   const geniusOk = !!caps?.genius.configured;
-  const captionOk = !!caps?.llm.configured;
+  // MOSS needs no API key, so an unconfigured cloud provider must not disable
+  // captioning outright — that hid the only offline option exactly when it was
+  // the only one available.
+  const mossOk = !!caps?.moss.available;
+  const captionOk = !!caps?.llm.configured || mossOk;
 
   const [scope, setScope] = useState<'unlabeled' | 'all' | 'selected'>('unlabeled');
   const [useEssentia, setUseEssentia] = useState(true);
   const [useGenius, setUseGenius] = useState(true);
   const [useCaption, setUseCaption] = useState(true);
+  // Default to MOSS when present: it is local, free, and describes what it hears
+  // rather than rewriting the local analysis. Cloud stays available via Enhance.
+  const [captionProvider, setCaptionProvider] = useState('');
   const [mergePolicy, setMergePolicy] = useState<MergePolicy>('fill_missing');
   const [starting, setStarting] = useState(false);
 
@@ -57,6 +64,9 @@ export const LabelPanel: React.FC = () => {
         useEssentia: effectiveEssentia,
         useGenius: effectiveGenius,
         useCaption: effectiveCaption,
+        // Without this the server falls back to config.lireek.defaultProvider,
+        // which is why labeling always went to Gemini even with MOSS installed.
+        caption: { provider: captionProvider || (mossOk ? 'moss' : undefined) },
         mergePolicy,
       });
     } finally {
@@ -139,6 +149,19 @@ export const LabelPanel: React.FC = () => {
             />
             {t('trainingStudio.label.useCaption')}
           </label>
+          {effectiveCaption && (mossOk && caps?.llm.configured) && (
+            <div className="ml-6 flex items-center gap-2">
+              <span className="text-[11px] text-zinc-500">Captioner</span>
+              <select
+                value={captionProvider || 'moss'}
+                onChange={(e) => setCaptionProvider(e.target.value)}
+                className="text-[11px] rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5"
+              >
+                <option value="moss">MOSS — local, hears the audio</option>
+                <option value={caps!.llm.defaultProvider}>{caps!.llm.defaultProvider} (cloud)</option>
+              </select>
+            </div>
+          )}
           {captionOk ? (
             <div className="ml-6 text-[11px] text-zinc-500">{t('trainingStudio.label.useCaptionHint')}</div>
           ) : (
