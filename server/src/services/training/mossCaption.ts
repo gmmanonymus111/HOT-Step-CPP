@@ -98,7 +98,13 @@ export interface MossRunOptions {
  * choruses. Do not raise rep to fix a loop; raise freq.
  */
 export const MOSS_TEMPERATURE = 0;      // greedy — captions are facts, not prose style
-export const MOSS_REP_PENALTY = 1.05;
+// 1.0 = off, and that is parity, not a guess: the "rep 1.05 + freq 0.3" sweep
+// ran through SGLang, which parses repetition_penalty and NEVER applies it (no
+// repetition_penalty.py in its penaltylib, nothing in the sampling path reads
+// it). So the sweep's optimum was frequency_penalty alone, and applying rep
+// here is a divergence from the runtime the settings were tuned on. Verified
+// 2026-08-18: rep 1.0 vs 1.05 changes none of the 9 americanfootball captions.
+export const MOSS_REP_PENALTY = 1.0;
 export const MOSS_FREQ_PENALTY = 0.3;
 
 /**

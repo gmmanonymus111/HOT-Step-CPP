@@ -62,9 +62,19 @@ export const CAPTION_INSTRUCTIONS: string =
   'only as weak secondary context.\n\n' +
   'Return EXACTLY 5 lines in plain text and nothing else. Each field must start at ' +
   'the beginning of its own new line. Never place two fields on the same line.\n\n' +
+  // `genre:` comes FIRST, before the caption prose — this is load-bearing, not
+  // cosmetic. Measured on MOSS-Music-8B over the 9-track americanfootball set
+  // (2026-08-18): with caption first, the model opens with its stock phrase
+  // "A brooding, atmospheric…" and that phrase drags the genre token toward
+  // electronic/trap (teacher-forced, the reference's own top-3 after that
+  // prefix is `electronic`/`instrumental`/`trap` within 0.25 logits — a coin
+  // flip). Genre named before any prose exists to bias it: badly-wrong genres
+  // went 6/9 -> 2/9 and the dark-trap/808/cloud-rap hallucinations vanished.
+  // The HF reference fails identically with caption first, so this is a
+  // property of the model, not of our GGML port.
   'Use this exact output template:\n' +
-  'caption: <2 to 4 sentences on one line>\n' +
   "genre: <comma-separated genre/style tags, e.g. 'bass house, electro house'>\n" +
+  'caption: <2 to 4 sentences on one line>\n' +
   'bpm: <estimated BPM as integer, e.g. 120>\n' +
   "key: <note plus lowercase mode, e.g. 'C minor' or 'F# major'>\n" +
   "signature: <numerator only — one of 2, 3, 4, 6>\n\n" +
@@ -75,7 +85,7 @@ export const CAPTION_INSTRUCTIONS: string =
   // "Genre: ...\nBPM: ...\nKey: ...\nSignature: ..." for 12 of 13 tracks. Leading
   // with the length limit reads as permission to be brief; leading with "the
   // caption is required" does not.
-  '- Line 1 is REQUIRED and must begin with `caption:` followed by the description. Never omit it, never leave it blank, and never answer with the metadata fields alone. If you are unsure of everything else, still write the caption.\n' +
+  '- Line 1 is REQUIRED and must begin with `genre:`. Line 2 is REQUIRED and must begin with `caption:` followed by the description. Never omit it, never leave it blank, and never answer with the metadata fields alone. If you are unsure of everything else, still write the caption.\n' +
   '- The caption is 2 to 4 sentences, roughly 25 to 60 words, on a single line. Reference captions average about 30 words; a longer caption is not a better one, and padding it with invented detail is worse than stopping.\n' +
   '- Cover these, woven into flowing description rather than listed:\n' +
   CAPTION_DIMENSIONS.map(s => `    - ${s}\n`).join('') +
@@ -85,7 +95,7 @@ export const CAPTION_INSTRUCTIONS: string =
   "- No vague imagery or stacked adjectives ('neon skies, electric hearts'), no marketing copy, and no listener-reaction language ('keeps you moving', 'emotionally resonant').\n" +
   "- Avoid generic openings like 'This track is' when more specific wording can be used immediately.\n" +
   '- If the track is instrumental, say so and name the instrument carrying the lead line.\n' +
-  '- Start `caption:` on line 1, `genre:` on line 2, `bpm:` on line 3, `key:` on line 4, and `signature:` on line 5.\n' +
+  '- Start `genre:` on line 1, `caption:` on line 2, `bpm:` on line 3, `key:` on line 4, and `signature:` on line 5.\n' +
   '- Do not merge fields together. For example, do not output `genre: ... bpm: ... key: ...` on one line.\n' +
   '- Do not use markdown, bullets, numbering, code fences, labels before the template, or commentary after the template.\n' +
   '- Do not mention the artist name or song title in the caption.\n' +
