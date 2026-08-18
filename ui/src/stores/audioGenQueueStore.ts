@@ -24,6 +24,7 @@ import type { GenerationParams } from '../types';
 import { resolveDuration } from '../utils/estimateDuration';
 import { createGenerationTimer, getGenerationTimeoutMinutes } from '../utils/generationTimer';
 import { captionForBackend } from '../utils/captionForBackend';
+import { normalizeKeyScale } from '../utils/keyScale';
 import { useBackendStore } from './backendStore';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -941,7 +942,9 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
   params.instrumental = false;
   params.duration = resolveDuration(gen.duration, gen.lyrics || '', gen.bpm || 120);
   if (gen.bpm) params.bpm = gen.bpm;
-  if (gen.key) params.keyScale = gen.key;
+  // Canonical spelling — the engine's metadata FSM only accepts a lower-case
+  // mode, and 99.6% of stored generations carry a capitalised one.
+  if (gen.key) params.keyScale = normalizeKeyScale(gen.key);
   if (item.artistName) params.artist = item.artistName;
   if (gen.subject) params.subject = gen.subject;
 

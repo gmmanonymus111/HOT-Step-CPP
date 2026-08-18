@@ -4,6 +4,7 @@
 // All functions use getDb() from database.ts — there is no separate connection.
 
 import { getDb } from './database.js';
+import { normalizeKeyScale } from '../services/lireek/prompts.js';
 
 // ── Legacy exports (no-ops, kept for compatibility during transition) ────────
 // initLireekDb/closeLireekDb are no longer needed — the tables are created
@@ -256,6 +257,12 @@ export interface SaveGenerationParams {
 }
 
 export function saveGeneration(p: SaveGenerationParams): Record<string, any> {
+  // Canonicalise the key on write. The engine's metadata FSM only accepts a
+  // lower-case mode (engine/src/metadata-fsm.h), so "D Major" is out of
+  // vocabulary; the dataset sidecars spell it capitalised and the planner
+  // copies what it sees. This is the one choke point every save passes
+  // through, including refinements that carry a parent's key forward.
+  const key = normalizeKeyScale(p.key);
   const now = new Date().toISOString();
   const result = getDb().prepare(
     `INSERT INTO generations
@@ -263,14 +270,14 @@ export function saveGeneration(p: SaveGenerationParams): Record<string, any> {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     p.profileId, p.provider, p.model, p.extraInstructions ?? null,
-    p.title ?? '', p.subject ?? '', p.bpm ?? 0, p.key ?? '', p.caption ?? '', p.captionMm3 ?? '', p.duration ?? 0,
+    p.title ?? '', p.subject ?? '', p.bpm ?? 0, key, p.caption ?? '', p.captionMm3 ?? '', p.duration ?? 0,
     p.lyrics, p.systemPrompt ?? '', p.userPrompt ?? '', p.parentGenerationId ?? null, now,
   );
   return {
     id: result.lastInsertRowid, profile_id: p.profileId, provider: p.provider,
     model: p.model, extra_instructions: p.extraInstructions ?? null,
     title: p.title ?? '', subject: p.subject ?? '', bpm: p.bpm ?? 0,
-    key: p.key ?? '', caption: p.caption ?? '', caption_mm3: p.captionMm3 ?? '', duration: p.duration ?? 0,
+    key, caption: p.caption ?? '', caption_mm3: p.captionMm3 ?? '', duration: p.duration ?? 0,
     lyrics: p.lyrics, system_prompt: p.systemPrompt ?? '', user_prompt: p.userPrompt ?? '',
     parent_generation_id: p.parentGenerationId ?? null, created_at: now,
   };

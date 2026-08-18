@@ -5,6 +5,9 @@
 
 import Database from 'better-sqlite3';
 import path from 'path';
+// Canonical key spelling, shared with the in-app path via the re-exported
+// prompts module (server/src/services/lireek/prompts.ts).
+import { normalizeKeyScale } from './prompts.js';
 
 let db: Database.Database;
 
@@ -163,6 +166,10 @@ export interface SaveGenerationParams {
 }
 
 export function saveGeneration(p: SaveGenerationParams): any {
+  // Canonicalise the key on write — the engine's metadata FSM only accepts a
+  // lower-case mode, so "D Major" is out of vocabulary. Mirrors the in-app
+  // path in server/src/db/lireekDb.ts.
+  const key = normalizeKeyScale(p.key);
   const now = new Date().toISOString();
   const result = getDb().prepare(
     `INSERT INTO generations
@@ -170,13 +177,13 @@ export function saveGeneration(p: SaveGenerationParams): any {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     p.profileId, p.provider, p.model, null,
-    p.title ?? '', p.subject ?? '', p.bpm ?? 0, p.key ?? '', p.caption ?? '', p.captionMm3 ?? '', p.duration ?? 0,
+    p.title ?? '', p.subject ?? '', p.bpm ?? 0, key, p.caption ?? '', p.captionMm3 ?? '', p.duration ?? 0,
     p.lyrics, p.systemPrompt ?? '', p.userPrompt ?? '', p.parentGenerationId ?? null, now,
   );
   return {
     id: result.lastInsertRowid, profile_id: p.profileId, provider: p.provider,
     model: p.model, title: p.title ?? '', subject: p.subject ?? '',
-    bpm: p.bpm ?? 0, key: p.key ?? '', caption: p.caption ?? '',
+    bpm: p.bpm ?? 0, key, caption: p.caption ?? '',
     caption_mm3: p.captionMm3 ?? '', duration: p.duration ?? 0,
     lyrics: p.lyrics, parent_generation_id: p.parentGenerationId ?? null, created_at: now,
   };

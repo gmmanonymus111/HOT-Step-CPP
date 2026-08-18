@@ -410,6 +410,26 @@ export interface AlbumEnrichment {
   pacedSongs: number;
 }
 
+/**
+ * Canonical key spelling: note letter upper-case, mode lower-case — "Bb minor".
+ *
+ * The engine's metadata FSM builds its keyscale vocabulary from
+ * `modes[] = { "major", "minor" }` (engine/src/metadata-fsm.h), 70 values, all
+ * lower-case. "D Major" is therefore OUT OF VOCABULARY, not merely untidy.
+ *
+ * The dataset sidecars store the mode capitalised ("E Minor", "C# Major"), so
+ * an album's measured key list reached the metadata planner in a form the
+ * engine cannot accept — while the system prompt two lines away demanded
+ * lower-case. The planner reasonably copied the examples it could see, which is
+ * how 1,487 of 1,493 stored generations ended up with a capitalised mode.
+ * Normalising here fixes every consumer of AlbumEnrichment at once.
+ */
+export function normalizeKeyScale(key?: string | null): string {
+  const m = String(key ?? '').trim().match(/^([A-Ga-g])\s*([#b]|♯|♭)?\s+([Mm]ajor|[Mm]inor)$/);
+  if (!m) return String(key ?? '').trim();
+  return `${m[1].toUpperCase()}${m[2] ?? ''} ${m[3].toLowerCase()}`;
+}
+
 /** Unique non-empty values ordered by frequency (ties keep first-seen order). */
 function freqRank(values: string[]): string[] {
   const counts = new Map<string, { display: string; n: number; at: number }>();
@@ -462,7 +482,7 @@ export function computeAlbumEnrichment(
     if (!has) continue;
     enriched++;
     if (Number.isFinite(bpm) && bpm > 0) bpms.push(Math.round(bpm));
-    if (key) keys.push(key);
+    if (key) keys.push(normalizeKeyScale(key));
     // Genre fields are usually comma-separated tag lists — count each tag.
     if (genre) genres.push(...genre.split(',').map(g => g.trim()).filter(Boolean));
     if (signature) signatures.push(signature);
@@ -729,9 +749,8 @@ export function normalizeTimeSignature(sig?: string | null): string {
  *  matches the note letter B, so "Bb minor" parses as note "B" + accidental "b"
  *  only while the flag is off. Mode is matched case-insensitively by hand. */
 function parseKeyScale(key?: string | null): [string | null, string | null] {
-  const m = String(key ?? '').trim().match(/^([A-Ga-g])\s*([#b])?\s+([Mm]ajor|[Mm]inor)$/);
-  if (!m) return [null, null];
-  return [m[1].toUpperCase() + (m[2] ?? ''), m[3].toLowerCase()];
+  const m = normalizeKeyScale(key).match(/^([A-G][#b♯♭]?) (major|minor)$/);
+  return m ? [m[1], m[2]] : [null, null];
 }
 
 export function buildMm3CaptionPrompt(profile: PromptProfile, ctx: Mm3CaptionContext): string {
@@ -1627,10 +1646,44 @@ export function buildMetadataPrompt(
       // "Same format as these examples" is not enough on its own: the planner
       // reads the examples as a style hint and still obeys the system prompt's
       // "1-3 sentences" rule, so it emits a third of a caption and drops the
-      // arrangement sentences entirely. Spell the nine slots out instead.
+      // arrangement detail entirely. It needs an explicit length override.
+      //
+      // That override used to hardcode "EXACTLY 9 complete prose sentences",
+      // inherited from Side-Step's nine-dimension caption plan. When
+      // CAPTION_DIMENSIONS was cut from nine topics to five on 2026-08-16
+      // (measured against ACE-Step's own reference captions: median 2
+      // sentences, 0 of 32 with 9+), the count was left behind — so the prompt
+      // demanded nine sentences while listing five topics. Two independent
+      // readers flagged the contradiction; one resolved it by inferring a
+      // sentence-per-topic split from the examples, which is the right instinct
+      // and is now the instruction.
+      //
+      // Hardcoding either number is wrong, because the caption corpus is
+      // mid-migration: captions written before 2026-08-16 run long in the
+      // nine-sentence style, newer ones are short in ACE's reference style, and
+      // an album can hold either. So MEASURE THE EXAMPLES BEING SHOWN and
+      // target those. They are already the stated authority on format; this
+      // makes the length instruction agree with them instead of contradicting
+      // it, and it self-corrects as albums get recaptioned.
+      const exampleSentences = enrich.captionExamples
+        .map(c => (c.match(/[.!?](?:\s|$)/g) || []).length)
+        .filter(n => n > 0);
+      const loSent = exampleSentences.length ? Math.min(...exampleSentences) : 0;
+      const hiSent = exampleSentences.length ? Math.max(...exampleSentences) : 0;
+      const exampleWords = enrich.captionExamples.map(c => c.split(/\s+/).filter(Boolean).length);
+      const medWords = exampleWords.length
+        ? [...exampleWords].sort((a, b) => a - b)[Math.floor(exampleWords.length / 2)]
+        : 0;
+
+      const sentRange = loSent === hiSent ? `${loSent} sentences` : `${loSent}-${hiSent} sentences`;
+
       lines.push(
-        'Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.',
-        'This OVERRIDES the caption length and comma-separated-list rules in the system prompt. Specifically, the caption must be ONE line of EXACTLY 9 complete prose sentences, each covering one topic in this order:',
+        `Write the new song's "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.`,
+        'This OVERRIDES the caption length and comma-separated-list rules in the system prompt: the examples above are the authority on length, not those rules.',
+        loSent > 0
+          ? `Match them. They run ${sentRange} and around ${medWords} words — write ONE line in that range. Do not stop at two or three sentences, and do not pad beyond what the examples do either.`
+          : 'Write ONE line of continuous prose at the same length as the examples above.',
+        'Cover these topics, woven into flowing description rather than listed as a checklist. A topic may take more than one sentence where the examples give it more than one:',
         ...CAPTION_DIMENSIONS.map((s: string) => `  - ${s}`),
         'Do not name the artist or the song. Keep BPM, key and time signature out of the caption prose — they are separate fields.',
       );

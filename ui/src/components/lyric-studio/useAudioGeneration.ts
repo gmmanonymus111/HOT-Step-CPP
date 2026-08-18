@@ -16,6 +16,7 @@ import type { Generation, Profile, AlbumPreset } from '../../services/lireekApi'
 import { resolveDuration } from '../../utils/estimateDuration';
 import { useGlobalParamsStore } from '../../stores/globalParamsStore';
 import { captionForBackend } from '../../utils/captionForBackend';
+import { normalizeKeyScale } from '../../utils/keyScale';
 import { useBackendStore } from '../../stores/backendStore';
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -54,14 +55,7 @@ export function useAudioGeneration({ profiles, showToast: _showToast }: UseAudio
 
     // Metadata
     if (gen.bpm) write('hs-bpm', gen.bpm);
-    if (gen.key) {
-      // Normalize casing: LLM may produce "B Major" but dropdown expects "B major"
-      const parts = gen.key.trim().split(/\s+/);
-      const normalized = parts.length === 2
-        ? `${parts[0]} ${parts[1].toLowerCase()}`
-        : gen.key;
-      write('hs-keyScale', normalized);
-    }
+    if (gen.key) write('hs-keyScale', normalizeKeyScale(gen.key));
     if (gen.duration || gen.bpm) {
       write('hs-duration', resolveDuration(gen.duration, gen.lyrics || '', gen.bpm || 120));
     }
