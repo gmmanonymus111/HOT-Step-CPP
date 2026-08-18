@@ -35,6 +35,50 @@ import { CAPTION_INSTRUCTIONS } from './captionPrompt.js';
 /** Modes `ace-caption` can decode off a single encode. */
 export type MossMode = 'prose' | 'mm3' | 'lyrics';
 
+/**
+ * The MM3 Structured Caption prompt.
+ *
+ * Starts as a copy of `PROMPT_MM3` in engine/tools/ace-caption.cpp and is
+ * passed via `--prompt-file mm3=` so prompt iteration never needs a C++
+ * rebuild — the app's captions are driven from HERE; the CLI built-in is the
+ * fallback for bare `ace-caption` runs. Two rules were added over the C++
+ * copy after auditing real output against the 1000 official templates:
+ * MOSS wrote the Instrument Lifecycle Description as one flowing line
+ * instead of Primary:/Secondary: sub-lines on 5/9 americanfootball tracks
+ * (999/1000 templates split them), and once appended a 12-line run of bare
+ * "Chorus:"/"Verse N:" labels after the final field.
+ */
+export const MM3_INSTRUCTIONS: string =
+  'Listen to this track and write a Structured Caption in exactly the format below.\n\n'
+  + "Use these three section labels on their own lines, with no markdown, no '#', and no "
+  + 'extra sections:\n\n'
+  + 'Global Metadata\n'
+  + 'Basic Attributes: bpm is <N>. key is <X>, and scale is <major|minor>. <Genre / Subgenre>.\n'
+  + 'Global Emotional Progression: <how the emotional arc moves across the song>\n'
+  + 'Application Scenarios & Imagery: <where this music would be used; concrete visual imagery>\n'
+  + 'Sonics & Production Profile: <soundstage, density, frequency balance, dynamics, mix character>\n'
+  + 'Vocal Details\n'
+  + 'Vocal Gender & Timbre: <Singer A (Male/Female). timbre, register, texture>\n'
+  + 'Vocal Style: <delivery and how it evolves across sections>\n'
+  + 'Harmony/Backing Vocals: <layering, doubling, gang vocals, call-and-response, or state none>\n'
+  + 'Vocal FX: <reverb, delay, distortion, pitch correction, or state minimal>\n'
+  + 'Arrangement\n'
+  + 'Instrument Lifecycle Description (Primary/Secondary Layering):\n'
+  + 'Primary: <the instruments carrying the track and how they change>\n'
+  + 'Secondary: <supporting instruments and when they enter or drop>\n'
+  + 'Groove & Foundation Progression: <rhythm section, feel changes, section by section>\n'
+  + 'Embellishments, Textures & Spatial FX: <risers, sweeps, reverse reverb, glitches, ambience>\n\n'
+  + 'Rules:\n'
+  + '- Describe only what you actually hear. Do not invent an exact BPM or key if unsure.\n'
+  + '- If the track is instrumental, say so under Vocal Details and name the lead instrument.\n'
+  + '- Do NOT quote or summarise the lyrics anywhere.\n'
+  + '- Write flowing prose inside each field.\n'
+  + "- Under 'Instrument Lifecycle Description (Primary/Secondary Layering):', write "
+  + "'Primary:' and 'Secondary:' each at the start of its own line, exactly as the "
+  + 'template shows. Never merge them into one paragraph.\n'
+  + "- The caption ENDS after 'Embellishments, Textures & Spatial FX'. Do not append "
+  + 'section names, chorus or verse labels, timestamps, or anything else after it.';
+
 export interface MossPaths {
   exe: string;
   modelsDir: string;
@@ -420,6 +464,13 @@ export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
   // and has been seen indenting field labels. The conditioner was trained on
   // the dense shape, so the dense shape is what lands on disk.
   const lines = mm3.split('\n').map(l => l.trim()).filter(l => l !== '');
+  // Decode-loop junk: MOSS has appended runs of bare section labels after the
+  // final field ("Chorus:\nVerse 1:\nVerse 1:\n…" — 12 lines on stay_home).
+  // Upstream files END at the Embellishments field, so trailing bare labels
+  // (a colon with nothing after it) are never content. Strip from the end.
+  while (lines.length > 0 && /^[^:]{1,40}:$/.test(lines[lines.length - 1])) {
+    lines.pop();
+  }
   const bi = lines.findIndex(l => l.startsWith('Basic Attributes:'));
   const built = buildBasicAttributes(facts, mm3);
   if (bi >= 0) {
@@ -529,7 +580,7 @@ export async function prepareMossBatch(
   if (opts.wantLyrics) modes.push('lyrics');
 
   runMossBatch(audioPaths, {
-    modes, prompts: { prose: CAPTION_INSTRUCTIONS },
+    modes, prompts: { prose: CAPTION_INSTRUCTIONS, mm3: MM3_INSTRUCTIONS },
     maxSeconds: opts.maxSeconds, signal: opts.signal, log: opts.log,
   });
 }
@@ -701,7 +752,7 @@ export async function captionWithMoss(
     modes,
     // The AS1.5 prompt is passed by file rather than restated in C++ so the two
     // can't drift; it is the same string the cloud providers get.
-    prompts: { prose: CAPTION_INSTRUCTIONS },
+    prompts: { prose: CAPTION_INSTRUCTIONS, mm3: MM3_INSTRUCTIONS },
     maxSeconds: opts.maxSeconds,
     signal: opts.signal,
     log: opts.log,
