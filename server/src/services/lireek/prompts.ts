@@ -650,24 +650,24 @@ export function buildCaptionReplanPrompt(
  *  with the measured median word count of each across MiniMax's 1,000
  *  reference captions. `heading` marks the three top-level lines. */
 export const MM3_CAPTION_FIELDS: ReadonlyArray<
-  { heading: string } | { label: string; words: number; what: string }
+  { heading: string } | { label: string; words: number; what: string; opener?: string }
 > = [
   { heading: 'Global Metadata' },
   { label: 'Basic Attributes', words: 15, what: 'the fixed facts, in the exact shape shown below' },
-  { label: 'Global Emotional Progression', words: 62, what: 'how the emotional intensity moves from the opening through to the ending' },
-  { label: 'Application Scenarios & Imagery', words: 27, what: 'where this music would be heard, or the scene it paints' },
-  { label: 'Sonics & Production Profile', words: 59, what: 'soundstage width, frequency balance, dynamic aesthetic, production era and character' },
+  { label: 'Global Emotional Progression', words: 62, what: 'how the emotional intensity moves from the opening through to the ending', opener: 'The piece opens... / The track opens...' },
+  { label: 'Application Scenarios & Imagery', words: 27, what: 'where this music would be heard, or the scene it paints', opener: 'Ideal for...' },
+  { label: 'Sonics & Production Profile', words: 59, what: 'soundstage width, frequency balance, dynamic aesthetic, production era and character', opener: 'The production features... / The soundstage is... / The mix features...' },
   { heading: 'Vocal Details' },
-  { label: 'Vocal Gender & Timbre', words: 28, what: 'open with "Singer A (Male)." or "Singer A (Female).", then the texture, weight and register of the voice' },
-  { label: 'Vocal Style', words: 49, what: 'phrasing, delivery, dynamics, and how the performance changes across the song' },
-  { label: 'Harmony/Backing Vocals', words: 40, what: 'what harmony or backing exists and where it enters — state plainly when there is none' },
-  { label: 'Vocal FX', words: 47, what: 'processing on the voice: reverb, delay, doubling, saturation. Restraint is the norm' },
+  { label: 'Vocal Gender & Timbre', words: 28, what: 'the texture, weight and register of the voice', opener: 'Singer A (Male). / Singer A (Female).' },
+  { label: 'Vocal Style', words: 49, what: 'phrasing, delivery, dynamics, and how the performance changes across the song', opener: 'The performance begins... / The delivery is...' },
+  { label: 'Harmony/Backing Vocals', words: 40, what: 'what harmony or backing exists and where it enters - state plainly when there is none', opener: 'Layered backing vocals... / No distinct backing vocals...' },
+  { label: 'Vocal FX', words: 47, what: 'processing on the voice: reverb, delay, doubling, saturation. Restraint is the norm', opener: 'The lead vocal... / The vocal track...' },
   { heading: 'Arrangement' },
-  { label: 'Instrument Lifecycle Description (Primary/Secondary Layering)', words: 0, what: 'a bare label on its own line — Primary and Secondary follow it' },
-  { label: 'Primary', words: 35, what: 'the instruments carrying the harmonic and melodic weight, and when they are present. NAME WHATEVER OPENS THE TRACK FIRST' },
-  { label: 'Secondary', words: 45, what: 'the supporting layers, and which sections introduce or drop them' },
-  { label: 'Groove & Foundation Progression', words: 65, what: 'drums, bass and rhythmic feel, and how they develop section by section' },
-  { label: 'Embellishments, Textures & Spatial FX', words: 53, what: 'fills, risers, pads, transitions, ambience — or state plainly that there are none' },
+  { label: 'Instrument Lifecycle Description (Primary/Secondary Layering)', words: 0, what: 'a bare label on its own line - Primary and Secondary follow it' },
+  { label: 'Primary', words: 35, what: 'the instruments carrying the harmonic and melodic weight, and when they are present', opener: 'the instrument itself, as a noun phrase - NAME WHATEVER OPENS THE TRACK' },
+  { label: 'Secondary', words: 45, what: 'the supporting layers, and which sections introduce or drop them', opener: 'the instrument itself, as a noun phrase' },
+  { label: 'Groove & Foundation Progression', words: 65, what: 'drums, bass and rhythmic feel, and how they develop section by section', opener: 'The rhythm section... / The track begins...' },
+  { label: 'Embellishments, Textures & Spatial FX', words: 53, what: 'fills, risers, pads, transitions, ambience - or state plainly that there are none' },
 ];
 
 /** The literal skeleton, rendered from MM3_CAPTION_FIELDS so the prompt and the
@@ -676,11 +676,28 @@ function mm3Skeleton(): string {
   return MM3_CAPTION_FIELDS.map((f) => {
     if ('heading' in f) return f.heading;
     if (f.label === 'Basic Attributes') {
-      return 'Basic Attributes: bpm is <N>. key is <note>, and scale is <major|minor>. <Specific Genre>, in <time signature>.';
+      return 'Basic Attributes: bpm is <N>. key is <note>, and scale is <major|minor>. <Specific Genre>.';
     }
     if (!f.words) return `${f.label}:`;
     return `${f.label}: <${f.what}> (~${f.words} words)`;
   }).join('\n');
+}
+
+/** How the 1,000 reference captions actually OPEN each field.
+ *
+ *  Measured, not stylistic preference. The reference corpus is far more
+ *  formulaic than it first looks: 69% of Global Emotional Progression fields
+ *  begin "The piece opens", 64% of Groove fields begin "The rhythm section",
+ *  82% of Vocal FX fields begin with some form of "The lead vocal / The vocal
+ *  track / The vocals are". Captions written to the field DESCRIPTIONS alone
+ *  matched those openers 0-4 times out of 8, i.e. they were in-format but out
+ *  of dialect, and that is the layer nothing in the earlier prompt addressed. */
+function mm3Phrasing(): string {
+  return MM3_CAPTION_FIELDS
+    .filter((f): f is { label: string; words: number; what: string; opener?: string } =>
+      !('heading' in f) && !!f.opener)
+    .map(f => `  ${f.label}: ${f.opener}`)
+    .join('\n');
 }
 
 export const MM3_CAPTION_SYSTEM_PROMPT = `You write Structured Captions for MiniMax-Music3, an AI music generator. This caption is the ONLY description the model receives: it alone decides the genre, the voice and the arrangement of the track that gets rendered. A caption that drifts off format produces off-genre music — that is measured, not theoretical.
@@ -688,6 +705,12 @@ export const MM3_CAPTION_SYSTEM_PROMPT = `You write Structured Captions for Mini
 Return ONE caption in EXACTLY this shape. All three heading lines and all thirteen labels are mandatory, in this order, spelled character-for-character as shown:
 
 ${mm3Skeleton()}
+
+HOUSE PHRASING (measured over MiniMax's own 1,000 reference captions — these are
+the openings the model was trained on, and matching them matters as much as the
+labels do). Open each field the way the reference does:
+
+${mm3Phrasing()}
 
 FORMAT RULES (mechanical — a violation breaks the model's expectations):
 - PLAIN TEXT ONLY. No markdown, no '#' headings, no '**bold**', no bullets or dashes at the start of lines, no code fences, no numbering.
@@ -697,8 +720,9 @@ FORMAT RULES (mechanical — a violation breaks the model's expectations):
 - Output the caption and NOTHING else — no preamble, no explanation, no closing remark.
 
 CONTENT RULES (musical — each one is a measured failure mode):
+- THE BASIC ATTRIBUTES LINE ENDS ON THE GENRE. No time signature, no trailing clause, nothing after it — all 1,000 reference captions close that line on the genre itself, and it is the only line that states the genre at all.
 - THE GENRE MUST BE SPECIFIC. Write "Pop-Punk", "Post-Hardcore", "Contemporary R&B", "Melodic Dubstep" — never the umbrella term "Rock", "Pop" or "Electronic" when a narrower one is true. Collapsing a genre to its umbrella is the single most reliable way to get a generic, wrong-sounding track. Two or three slash-joined genres are normal: "Synth-Pop / Mandopop".
-- NAME WHATEVER OPENS THE TRACK FIRST under "Primary:". An instrument mentioned late in a long caption does not survive into the audio; the one named first does. If the song opens on a solo piano, that piano is the first thing "Primary:" says.
+- NAME WHATEVER OPENS THE TRACK FIRST under "Primary:", as a noun phrase, exactly the way the reference does it: "A grand piano serves as the harmonic core...", "Heavily distorted electric guitars carry...". An instrument mentioned late in a long caption does not survive into the audio; the one named first does. Do NOT invert it into "X opens the track" — that construction does not appear in the reference corpus at all.
 - Describe the song SECTION BY SECTION. The lyrics you are given carry section tags — [Intro], [Verse], [Chorus], [Bridge - Heavy Breakdown], [Outro] and so on. They are directives: they tell you what actually happens and when. Follow the real tags; do not invent a drop for a ballad or a quiet bridge for a thrash number.
 - NEVER quote, paraphrase or summarise the lyrics, and never state the song title, the artist or the band name. Use the lyrics only as evidence of the arrangement and the emotional arc.
 - Do NOT fabricate precision. If something is not supported by what you were given, describe it in broader terms instead of inventing an exact technique.
@@ -765,7 +789,8 @@ export function buildMm3CaptionPrompt(profile: PromptProfile, ctx: Mm3CaptionCon
     'FIXED FACTS — reproduce these EXACTLY in the "Basic Attributes:" line. Do not round them, do not substitute your own, and do not repeat them anywhere else in the caption:',
     `  bpm: ${ctx.bpm && ctx.bpm > 0 ? Math.round(ctx.bpm) : '(unknown — omit the bpm sentence)'}`,
     `  key / scale: ${note && scale ? `${note} / ${scale}` : '(unknown — omit the key sentence)'}`,
-    `  time signature: ${sig}`,
+    '',
+    'The Basic Attributes line ENDS on the genre. Do not state a time signature there or anywhere else in the caption — the reference captions never do.',
     '',
   );
 
@@ -860,7 +885,6 @@ export function normalizeMm3Caption(
 
   const [note, scale] = parseKeyScale(facts.key);
   const bpm = facts.bpm && facts.bpm > 0 ? Math.round(facts.bpm) : 0;
-  const sig = normalizeTimeSignature(facts.signature);
 
   const idx = cleaned.findIndex((l) => /^Basic Attributes\s*:/i.test(l));
   const genre = idx >= 0
@@ -870,11 +894,15 @@ export function normalizeMm3Caption(
   // Only rebuild when we actually hold a fact worth asserting; otherwise the
   // model's own line, whatever it says, is better than a stub.
   if (bpm || (note && scale) || genre) {
+    // The line ENDS on the genre. Every one of MiniMax's 1,000 reference
+    // captions does; none of them states a time signature here. An earlier
+    // version appended ", in 4/4." — lifted from mm3-caption-hybrid.py without
+    // checking that convention against the corpus, which it does not match —
+    // so the genre was never the terminal token of the only line that names it.
     const parts: string[] = [];
     if (bpm) parts.push(`bpm is ${bpm}.`);
     if (note && scale) parts.push(`key is ${note}, and scale is ${scale}.`);
-    if (genre) parts.push(`${genre}, in ${sig}.`);
-    else parts.push(`In ${sig}.`);
+    if (genre) parts.push(`${genre}.`);
     const line = `Basic Attributes: ${parts.join(' ')}`;
     if (idx >= 0) cleaned[idx] = line;
     else {
