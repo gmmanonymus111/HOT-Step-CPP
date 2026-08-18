@@ -39,7 +39,7 @@ import { buildDataset } from './datasetBuilder.js';
 import * as audioMeta from './audioMeta.js';
 import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
 import type { AceRequest } from '../aceClient.js';
-import { prepareMossBatch, clearMossBatch } from './mossCaption.js';
+import { arbitrateSidecarGenre, prepareMossBatch, clearMossBatch } from './mossCaption.js';
 import type {
   BuildOptions, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, MergePolicy,
   TrainingDatasetRow, TrainingJobKind, TrainingJobStatus, TrainingJobSummary,
@@ -554,8 +554,10 @@ async function mergeIntoSidecar(
       }
     }
   }
-  // `forced` bypasses the merge policy — used for fields the user DECLARED
-  // (dataset language), which must also repair earlier wrong guesses.
+  // `forced` bypasses the merge policy — for values whose precedence was
+  // already decided elsewhere: fields the user DECLARED (dataset language)
+  // and the arbitrated genre (arbitrateSidecarGenre consumed the existing
+  // value as input, so the occupancy check has nothing left to protect).
   if (forced) merged = { ...merged, ...forced };
   await writeSidecar(sample.sidecarPath, merged);
 }
@@ -966,6 +968,12 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
           }
 
           // ── Step 3: LLM caption + genre (hears the audio on gemini) ──
+          // Genre is arbitrated, not merged: Pass A seeds the file's rip tag
+          // into the sidecar before this step runs, so under every policy but
+          // overwrite_all the field is "occupied" and a policy-mediated write
+          // from the provider silently loses. The arbitrated winner goes in
+          // via `forced` — arbitration already weighed the existing value.
+          let arbitratedGenre: string | undefined;
           if (opts.useCaption === true) {
             job.phase = 'llm';
             emitProgress(job);
@@ -986,7 +994,14 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
               }));
               if (fields.caption) { incoming.caption = fields.caption; sources.caption = 'llm'; }
               else failures.push('LLM returned no caption');
-              if (fields.genre) { incoming.genre = fields.genre; sources.genre = 'llm'; }
+              // Never fight an explicit user edit — provenance says who wrote it.
+              if (readLabel(ds.slug, sample.sampleId)?.sources?.genre !== 'user') {
+                const existingGenre = (loadSidecarMetadata(sample.audioPath).genre ?? '').trim();
+                const genre = arbitrateSidecarGenre({
+                  providerGenre: fields.genre, providerCaption: fields.caption, existing: existingGenre,
+                });
+                if (genre && genre !== existingGenre) { arbitratedGenre = genre; sources.genre = 'llm'; }
+              }
               if (!incoming.bpm && fields.bpm) { incoming.bpm = fields.bpm; sources.bpm = 'llm'; }
               if (!incoming.key && fields.key) { incoming.key = fields.key; sources.key = 'llm'; }
               if (!incoming.signature && fields.signature) { incoming.signature = fields.signature; sources.signature = 'llm'; }
@@ -999,8 +1014,11 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
 
           job.phase = 'writing';
           // is_instrumental follows the WINNING lyrics (§4.8).
+          const forced: Record<string, string> = {};
+          if (ds.defaultLanguage) forced.language = ds.defaultLanguage;
+          if (arbitratedGenre) forced.genre = arbitratedGenre;
           await mergeIntoSidecar(sample, incoming, policy, true,
-            ds.defaultLanguage ? { language: ds.defaultLanguage } : undefined);
+            Object.keys(forced).length > 0 ? forced : undefined);
 
           // Error only when every cloud step came back empty-handed; partial
           // success is labeled with its warnings already in the job log.
@@ -1174,9 +1192,23 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
         if (Object.keys(fields).length === 0) {
           markError(job, ds, sample, 'LLM returned nothing usable');
         } else {
-          await mergeIntoSidecar(sample, fields, policy);
+          // Genre is arbitrated against the sidecar's current value (usually
+          // the file's rip tag) and lands via `forced` — same reasoning as the
+          // label job's Step 3: an occupied field beats a policy-mediated
+          // write under every policy but overwrite_all. Both caption paths
+          // must do this; wiring one does not wire the other.
+          const { genre: providerGenre, ...rest } = fields;
           const sources: Record<string, FieldSource> = {};
-          for (const key of Object.keys(fields)) sources[key] = 'llm';
+          for (const key of Object.keys(rest)) sources[key] = 'llm';
+          let forced: Record<string, string> | undefined;
+          if (readLabel(ds.slug, sample.sampleId)?.sources?.genre !== 'user') {
+            const existingGenre = (loadSidecarMetadata(sample.audioPath).genre ?? '').trim();
+            const genre = arbitrateSidecarGenre({
+              providerGenre, providerCaption: fields.caption, existing: existingGenre,
+            });
+            if (genre && genre !== existingGenre) { forced = { genre }; sources.genre = 'llm'; }
+          }
+          await mergeIntoSidecar(sample, rest, policy, false, forced);
           markLabeled(job, ds, sample, sources);
           job.done++;
         }

@@ -249,6 +249,18 @@ async function runMossCaptionInner(
  */
 export const GENRE_HINTS: ReadonlyArray<readonly [RegExp, string]> = [
   // — rock family (validated ordering, do not reorder) —
+  // The 2026-08-18 block below is PREPENDED, not reordered: each term contains
+  // an umbrella lower in the family (post-rock ⊃ rock, midwest emo ⊃ emo …),
+  // so before they were listed, MOSS's genre-first output collapsed to the
+  // umbrella — "post-rock, ambient rock" scanned as `Rock`, Barry's bug in
+  // new clothes. Every addition must stay above the umbrella it contains.
+  [/midwest emo/i, 'Midwest Emo'],
+  [/math rock/i, 'Math Rock'],
+  [/post[-\s]?rock/i, 'Post-Rock'],
+  [/post[-\s]?punk/i, 'Post-Punk'],
+  [/garage rock/i, 'Garage Rock'],
+  [/surf[-\s]?rock/i, 'Surf Rock'],
+  [/shoegaze/i, 'Shoegaze'],
   [/pop[-\s]?punk/i, 'Pop-Punk'],
   [/post[-\s]?hardcore/i, 'Post-Hardcore'],
   [/punk rock/i, 'Punk Rock'],
@@ -281,9 +293,13 @@ export const GENRE_HINTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btrap\b/i, 'Trap'],
   [/\bhip[-\s]?hop\b|\brap\b/i, 'Hip-Hop'],
   [/\br\s*&\s*b\b|\brnb\b/i, 'R&B'],
+  // The hyphen is a word boundary, so \bsoul\b matches inside "neo-soul".
+  [/neo[-\s]?soul/i, 'Neo-Soul'],
   [/\bsoul\b/i, 'Soul'],
   [/\bfunk\b/i, 'Funk'],
   // — acoustic / traditional —
+  [/\bindie folk\b/i, 'Indie Folk'],
+  [/singer[-\s]?songwriter/i, 'Singer-Songwriter'],
   [/\bbluegrass\b/i, 'Bluegrass'],
   [/\bcountry\b/i, 'Country'],
   [/\bfolk\b/i, 'Folk'],
@@ -294,8 +310,21 @@ export const GENRE_HINTS: ReadonlyArray<readonly [RegExp, string]> = [
   // descriptions of tracks that are not remotely those genres.
   [/\bblues\b(?!\s+(?:scale|note|progression|lick|inflection)s?\b)/i, 'Blues'],
   [/\bclassical\b(?!\s+(?:guitar|piano|influence|training)s?\b)|\borchestral\b(?!\s+(?:pad|swell|hit|stab|sample|texture)s?\b)/i, 'Classical'],
+  // indie pop above dream pop: providers list the primary genre first, and
+  // "indie pop, dream pop" should resolve to the primary.
+  [/\bindie pop\b/i, 'Indie Pop'],
+  [/\bdream pop\b/i, 'Dream Pop'],
   [/\bpop\b/i, 'Pop'],
 ];
+
+/** First hint the text matches, or undefined. The hint ORDER is the ranking. */
+export function scanGenreHints(text: string | undefined): string | undefined {
+  const hay = text ?? '';
+  for (const [re, label] of GENRE_HINTS) {
+    if (re.test(hay)) return label;
+  }
+  return undefined;
+}
 
 /**
  * The most specific genre named by any source that actually OBSERVED the track.
@@ -309,11 +338,36 @@ export function pickGenre(
   observedCaption: string | undefined,
   fallback: string | undefined,
 ): string {
-  const hay = `${mossText ?? ''}\n${observedCaption ?? ''}`;
-  for (const [re, label] of GENRE_HINTS) {
-    if (re.test(hay)) return label;
-  }
-  return (fallback ?? '').trim() || 'Alternative Rock';
+  return scanGenreHints(`${mossText ?? ''}\n${observedCaption ?? ''}`)
+    ?? ((fallback ?? '').trim() || 'Alternative Rock');
+}
+
+/**
+ * The genre that should land in the AS1.5 sidecar, weighing the caption
+ * provider's claim against what the sidecar already holds — which is usually
+ * the audio file's embedded rip tag, seeded by labeling Pass A before any
+ * captioning runs (labelingQueue), and therefore "occupied" by the time the
+ * provider answers.
+ *
+ * Cross-source specificity, not source priority: every claim goes into ONE
+ * scan, so hint order arbitrates. A hand-typed "Midwest Emo" tag beats MOSS's
+ * "indie rock"; MOSS's "indie pop" beats a rip tag's bare "Indie". When no
+ * hint recognises anything, the provider's explicit genre line wins over the
+ * tag — it listened to the track; the tag is a 2014 rip habit. Unlike
+ * `pickGenre` this NEVER invents a default: `undefined` means "write
+ * nothing", and the existing value survives untouched.
+ */
+export function arbitrateSidecarGenre(opts: {
+  providerGenre?: string | null;
+  providerCaption?: string | null;
+  existing?: string | null;
+}): string | undefined {
+  const providerGenre = (opts.providerGenre ?? '').trim();
+  const providerCaption = (opts.providerCaption ?? '').trim();
+  if (!providerGenre && !providerCaption) return undefined;
+  const existing = (opts.existing ?? '').trim();
+  const hinted = scanGenreHints([providerGenre, providerCaption, existing].filter(Boolean).join('\n'));
+  return hinted ?? (providerGenre || undefined);
 }
 
 /** `C# minor` / `F major` -> parts. Anything else -> nulls, and the caller omits the clause. */
