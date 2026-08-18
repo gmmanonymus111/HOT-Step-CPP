@@ -209,6 +209,20 @@ static void mm3_align_dtw(const std::vector<float> & cost, int n_tok, int n_fr, 
     (*path)[0] = t;
 }
 
+// Is this a PROMPT-MACHINERY tag rather than a song section?
+//
+// _normalize_lyrics prepends "[start]" to every lyric body, and substitutes the
+// literal "[instrumental]" when the caller sends no lyrics (mm3-request.h). Those
+// are prompt scaffolding, not structure a listener can hear, so they are the only
+// bracket lines dropped from the LRC. Real song tags ("[verse 1]", "[chorus]",
+// "[drop]") are kept: they sit in the aligned span like any other token, and the
+// UI draws them as the marker row above the waveform exactly as it does for ACE.
+//
+// Tags arrive lowercased (mm3_lower_tags), so no case folding is needed.
+static bool mm3_align_is_sentinel_tag(const std::string & body) {
+    return body == "[start]" || body == "[end]" || body == "[instrumental]";
+}
+
 static std::string mm3_align_stamp(float sec) {
     if (sec < 0.0f) {
         sec = 0.0f;
@@ -283,12 +297,14 @@ static std::string mm3_align_build_lrc(const std::vector<float> & scores, const 
     std::string line;
     int         line_first = 0;
     auto        flush      = [&](void) {
-        // Trim; skip blank lines and bare structure tags like "[verse]".
+        // Trim; skip blank lines and the prompt-machinery tags. Section tags
+        // ("[verse 1]", "[chorus]") ARE emitted -- they align like any other
+        // token and become the marker row above the waveform.
         size_t a = line.find_first_not_of(" \t\r\n");
         size_t b = line.find_last_not_of(" \t\r\n");
         if (a != std::string::npos && b != std::string::npos) {
             const std::string body = line.substr(a, b - a + 1);
-            if (!body.empty() && body[0] != '[') {
+            if (!body.empty() && !mm3_align_is_sentinel_tag(body)) {
                 int fr = onset[(size_t) line_first];
                 if (fr < 0) {
                     fr = 0;
