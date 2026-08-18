@@ -978,8 +978,21 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
             job.phase = 'llm';
             emitProgress(job);
             try {
-              // Feed the freshest lyrics into the prompt excerpt.
-              const promptSample = incoming.lyrics ? { ...enriched, lyrics: incoming.lyrics } : enriched;
+              // Feed the freshest local results into the caption step, not just
+              // the job-start snapshot. On a FIRST labeling run the snapshot has
+              // no bpm/key — Pass A computes them DURING this job — so building
+              // facts from `enriched` alone emitted MM3 Basic Attributes lines
+              // with no `bpm is N. key is K` clause on every fresh dataset
+              // (measured: 0/24 across americanfootball + chasestatus, while
+              // the identical pipeline emits them once the sidecar is warm).
+              // `incoming` already holds Pass A's essentia-first precedence.
+              const promptSample: TrainingSample = {
+                ...enriched,
+                ...(incoming.lyrics ? { lyrics: incoming.lyrics } : {}),
+                ...(incoming.bpm ? { bpm: Number(incoming.bpm) } : {}),
+                ...(incoming.key ? { key: incoming.key } : {}),
+                ...(incoming.signature ? { signature: incoming.signature } : {}),
+              };
               const fields = await captionLimiter.run(() => enhanceCaption(promptSample, ds, {
                 provider: opts.caption?.provider || config.lireek.defaultProvider,
                 // MOSS only: emit the MM3 Structured Caption alongside the AS1.5

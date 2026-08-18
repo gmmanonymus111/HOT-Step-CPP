@@ -390,13 +390,17 @@ export interface LocalFacts {
 export function buildBasicAttributes(facts: LocalFacts, mossText?: string): string {
   const bpm = Math.round(Number(facts.bpm ?? 0));
   const { key, scale } = parseKeyScale(facts.keyscale);
-  const sig = String(facts.signature ?? '').trim() || '4/4';
   const genre = pickGenre(mossText, facts.observedCaption ?? undefined, facts.genre ?? undefined);
 
+  // Upstream shape, measured over all 1000 official templates: 998 are
+  // `bpm is N. key is K, and scale is S. GENRE.` and NONE carry a time
+  // signature — the previous `, in 4/4` clause appeared in 0/1000 and was
+  // therefore off-distribution for the conditioner. Signature stays in the
+  // AS1.5 sidecar only.
   const parts: string[] = [];
   if (bpm > 0) parts.push(`bpm is ${bpm}.`);
   if (key) parts.push(`key is ${key}, and scale is ${scale}.`);
-  parts.push(`${genre}, in ${sig}.`);
+  parts.push(`${genre}.`);
   return `Basic Attributes: ${parts.join(' ')}`;
 }
 
@@ -410,13 +414,18 @@ export function buildBasicAttributes(facts: LocalFacts, mossText?: string): stri
  * `Global Metadata` rather than dropping known-good facts on the floor.
  */
 export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
-  const lines = mm3.split('\n');
+  // Normalise to the official template shape first: all 1000 upstream files
+  // have zero blank lines and zero leading/trailing whitespace, while MOSS's
+  // raw output separates paragraphs with blank lines (measured 18/24 files)
+  // and has been seen indenting field labels. The conditioner was trained on
+  // the dense shape, so the dense shape is what lands on disk.
+  const lines = mm3.split('\n').map(l => l.trim()).filter(l => l !== '');
   const bi = lines.findIndex(l => l.startsWith('Basic Attributes:'));
   const built = buildBasicAttributes(facts, mm3);
   if (bi >= 0) {
     lines[bi] = built;
   } else {
-    const gi = lines.findIndex(l => l.trim() === 'Global Metadata');
+    const gi = lines.findIndex(l => l === 'Global Metadata');
     lines.splice(gi + 1, 0, built);
   }
   return lines.join('\n');
