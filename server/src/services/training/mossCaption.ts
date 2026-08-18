@@ -428,18 +428,28 @@ export function correctFactsInProse(caption: string, facts: LocalFacts): string 
  * progress and cancellation. Prefetching instead keeps every one of those
  * per-sample behaviours exactly as they are: the queue still walks samples one
  * at a time, but the expensive part is already done.
+ *
+ * Entries are PROMISES, not values: the batch resolves each track's entry the
+ * moment `ace-caption` reports its files written, so a consumer awaiting track
+ * 1 gets its caption while track 7 is still decoding. Before 5c75591 each
+ * caption landed as its track completed; the first batch implementation
+ * regressed that to all-at-the-end (the review grid sat empty for minutes on a
+ * big dataset), and this restores it without giving up the single model load.
  */
-const batchCache = new Map<string, Partial<Record<MossMode, string>>>();
+const batchPending = new Map<string, Promise<Partial<Record<MossMode, string>> | undefined>>();
 
 /** Drop anything left over. Call when a job ends, however it ends. */
 export function clearMossBatch(): void {
-  batchCache.clear();
+  batchPending.clear();
 }
 
 /**
  * Caption every track in one `ace-caption` process, holding the model across
- * them. Failure is non-fatal: an empty cache just means each sample falls back
- * to its own run, which is slower but produces identical output.
+ * them. Resolves once the batch is UNDERWAY — consumers pick up per-track
+ * results through `captionWithMoss` as each track completes. Failure is
+ * non-fatal: a track whose entry resolves `undefined` just falls back to its
+ * own run (queued behind the batch by `serialised`, so VRAM is never doubled),
+ * which is slower but produces identical output.
  */
 export async function prepareMossBatch(
   audioPaths: string[],
@@ -455,38 +465,42 @@ export async function prepareMossBatch(
   if (opts.wantMm3) modes.push('mm3');
   if (opts.wantLyrics) modes.push('lyrics');
 
-  try {
-    const results = await runMossBatch(audioPaths, {
-      modes, prompts: { prose: CAPTION_INSTRUCTIONS },
-      maxSeconds: opts.maxSeconds, signal: opts.signal, log: opts.log,
-    });
-    for (const [audioPath, modeText] of results) batchCache.set(audioPath, modeText);
-    opts.log?.('info', `MOSS: captioned ${results.size}/${audioPaths.length} tracks in one load`);
-  } catch (err: any) {
-    if ((err as NodeJS.ErrnoException)?.name === 'AbortError') throw err;
-    opts.log?.('warn', `MOSS batch failed (${String(err?.message || err).slice(0, 160)}) — falling back to per-track runs`);
-  }
+  runMossBatch(audioPaths, {
+    modes, prompts: { prose: CAPTION_INSTRUCTIONS },
+    maxSeconds: opts.maxSeconds, signal: opts.signal, log: opts.log,
+  });
 }
 
 /**
- * One process, N tracks. Returns a map of audio path -> per-mode text.
+ * One process, N tracks, each track's `batchPending` entry resolved as its
+ * files land. Registers every entry SYNCHRONOUSLY (before the first await) so
+ * a consumer that runs immediately after `prepareMossBatch` returns finds a
+ * promise, never a gap.
+ *
+ * Per-track completion is read from the CLI's stderr: it prints
+ * `[MOSS] <mode>   -> <base> (N.Ns)` AFTER fclose()ing each output file
+ * (ace-caption.cpp), so a track is done when every requested mode has
+ * reported. Tracks the process skipped (unreadable audio) or that were still
+ * unreported at exit resolve from whatever files exist, then `undefined`.
  *
  * Output bases are numbered (`t0`, `t1`, …) rather than derived from filenames:
  * dataset filenames collide across albums, and two tracks resolving to the same
  * base would silently overwrite one caption with another's.
  */
-async function runMossBatch(
-  audioPaths: string[],
-  opts: MossRunOptions,
-): Promise<Map<string, Partial<Record<MossMode, string>>>> {
-  return serialised(async () => {
+function runMossBatch(audioPaths: string[], opts: MossRunOptions): void {
+  const settlers = new Map<string, (v: Partial<Record<MossMode, string>> | undefined) => void>();
+  for (const audioPath of audioPaths) {
+    batchPending.set(audioPath, new Promise(resolve => { settlers.set(audioPath, resolve); }));
+  }
+
+  const done = serialised(async () => {
     const resolved = resolveMossPaths();
     if ('missing' in resolved) throw new Error(`MOSS captioning unavailable: ${resolved.missing}`);
     const { exe, modelsDir } = resolved.paths;
 
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'hs_mossb_'));
+    const bases = audioPaths.map((_, i) => path.join(work, `t${i}`));
     try {
-      const bases = audioPaths.map((_, i) => path.join(work, `t${i}`));
       fs.writeFileSync(
         path.join(work, 'list.txt'),
         audioPaths.map((p, i) => `${p}\t${bases[i]}`).join('\n'),
@@ -512,34 +526,71 @@ async function runMossBatch(
         args.push('--prompt-file', `${mode}=${pf}`);
       }
 
-      await new Promise<void>((resolve, reject) => {
-        // A non-zero exit means SOME file failed, not that all did — the CLI
-        // captions every readable track first. So resolve either way and let the
-        // per-file read below decide what actually landed.
-        execFile(exe, args,
-          { timeout: 6 * 60 * 60_000, maxBuffer: 64 * 1024 * 1024, signal: opts.signal },
-          (error) => {
-            if (error && (error as NodeJS.ErrnoException).name === 'AbortError') { reject(error); return; }
-            resolve();
-          });
-      });
-
-      const out = new Map<string, Partial<Record<MossMode, string>>>();
-      audioPaths.forEach((audioPath, i) => {
+      // Reads whatever landed for track i and settles its entry.
+      const settle = (i: number) => {
+        const audioPath = audioPaths[i];
+        const resolve = settlers.get(audioPath);
+        if (!resolve) return;
+        settlers.delete(audioPath);
         const modeText: Partial<Record<MossMode, string>> = {};
         for (const mode of opts.modes) {
-          const text = [`${bases[i]}.${mode}.txt`, `${bases[i]}.txt`]
+          // Multi-mode writes <base>.<mode>.txt; single-mode writes -o as
+          // given, which for our extensionless bases is the bare base path.
+          const text = [`${bases[i]}.${mode}.txt`, `${bases[i]}.txt`, bases[i]]
             .filter(p => fs.existsSync(p))
             .map(p => fs.readFileSync(p, 'utf8').trim())
             .find(t => t.length > 0);
           if (text) modeText[mode] = text;
         }
-        if (Object.keys(modeText).length > 0) out.set(audioPath, modeText);
+        resolve(Object.keys(modeText).length > 0 ? modeText : undefined);
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        // A non-zero exit means SOME file failed, not that all did — the CLI
+        // captions every readable track first. So resolve either way; per-file
+        // settle() decides what actually landed.
+        const child = execFile(exe, args,
+          { timeout: 6 * 60 * 60_000, maxBuffer: 64 * 1024 * 1024, signal: opts.signal },
+          (error) => {
+            if (error && (error as NodeJS.ErrnoException).name === 'AbortError') { reject(error); return; }
+            resolve();
+          });
+
+        // `[MOSS] <mode>   -> <base> (N.Ns)`, one line per written file. A
+        // track is complete when all its requested modes have reported.
+        const reported = new Map<number, number>();
+        let buffer = '';
+        child.stderr?.setEncoding('utf8');
+        child.stderr?.on('data', (chunk: string) => {
+          buffer += chunk;
+          let nl: number;
+          while ((nl = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+            const m = /^\[MOSS\] \S+\s+-> (.+?) \(\d+(?:\.\d+)?s\)\s*$/.exec(line);
+            if (!m) continue;
+            const base = m[1].replace(/\.(?:prose|mm3|lyrics)\.txt$/, '').replace(/\.txt$/, '');
+            const i = bases.indexOf(base);
+            if (i < 0) continue;
+            const n = (reported.get(i) ?? 0) + 1;
+            reported.set(i, n);
+            if (n >= opts.modes.length) settle(i);
+          }
+        });
       });
-      return out;
+
+      audioPaths.forEach((_, i) => settle(i));   // stragglers: read what exists
+      opts.log?.('info', `MOSS: batch of ${audioPaths.length} tracks complete`);
     } finally {
+      // Everything unsettled — spawn failure, abort, missing weights — falls
+      // back to a per-track run rather than hanging its consumer.
+      for (const resolve of settlers.values()) resolve(undefined);
+      settlers.clear();
       try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* tmp */ }
     }
+  });
+  done.catch((err: any) => {
+    if ((err as NodeJS.ErrnoException)?.name === 'AbortError') return;
+    opts.log?.('warn', `MOSS batch failed (${String(err?.message || err).slice(0, 160)}) — falling back to per-track runs`);
   });
 }
 
@@ -573,11 +624,15 @@ export async function captionWithMoss(
   if (opts.wantMm3) modes.push('mm3');
   if (opts.wantLyrics) modes.push('lyrics');
 
-  // Prefetched by prepareMossBatch, if the caller ran one. Deleted on read so a
-  // retry of the same sample re-runs the model rather than replaying a stale
-  // result — and so the map cannot grow across a long job.
-  const prefetched = batchCache.get(audioPath);
-  if (prefetched) batchCache.delete(audioPath);
+  // Prefetched by prepareMossBatch, if the caller ran one. The entry is a
+  // promise that resolves the moment the batch finishes THIS track — awaiting
+  // it here is what lets each caption land in the UI as its track completes
+  // instead of when the whole batch exits. Deleted on read so a retry of the
+  // same sample re-runs the model rather than replaying a stale result — and
+  // so the map cannot grow across a long job.
+  const pending = batchPending.get(audioPath);
+  if (pending) batchPending.delete(audioPath);
+  const prefetched = pending ? await pending : undefined;
 
   const raw = prefetched ?? await runMossCaption(audioPath, {
     modes,
