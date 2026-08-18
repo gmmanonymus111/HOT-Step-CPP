@@ -911,6 +911,18 @@ export function sampleAudioUrl(id: string, sampleId: string): string {
   return `${API_BASE}/datasets/${encodeURIComponent(id)}/samples/${encodeURIComponent(sampleId)}/audio`;
 }
 
+/** MM3 Structured Caption (`<stem>.mm3.txt`) — served on demand, not in the samples list. */
+export async function getSampleMm3(id: string, sampleId: string): Promise<{ text: string }> {
+  return request(`/datasets/${encodeURIComponent(id)}/samples/${encodeURIComponent(sampleId)}/mm3`);
+}
+
+export async function saveSampleMm3(id: string, sampleId: string, text: string): Promise<{ text: string }> {
+  return request(
+    `/datasets/${encodeURIComponent(id)}/samples/${encodeURIComponent(sampleId)}/mm3`,
+    { method: 'PUT', ...jsonBody({ text }) },
+  );
+}
+
 // ── Jobs ─────────────────────────────────────────────────────────────────
 
 export async function startLabel(id: string, opts: LabelOptions): Promise<{ jobId: string }> {

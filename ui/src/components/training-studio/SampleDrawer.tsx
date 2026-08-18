@@ -4,10 +4,10 @@
 // element is local to the drawer: preview never touches the global playback
 // store because these files are not library songs.
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Headphones, Loader2, X, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { sampleAudioUrl } from '../../services/trainingApi';
+import { getSampleMm3, sampleAudioUrl, saveSampleMm3 } from '../../services/trainingApi';
 import { mergedSample, useTrainingStore } from '../../stores/trainingStore';
 import { AuditionPlayer } from './AuditionPlayer';
 
@@ -35,14 +35,39 @@ export const SampleDrawer: React.FC<SampleDrawerProps> = ({ sampleId }) => {
   const sample = useMemo(() => mergedSample(sampleRaw, pending), [sampleRaw, pending]);
   const idx = sampleOrder.indexOf(sampleId);
 
+  // MM3 Structured Caption — a separate file (<stem>.mm3.txt), not a sidecar
+  // field, so it does not ride the store's optimistic edit path. Fetched when
+  // the drawer opens on a sample; saved on blur; Escape reverts to last saved.
+  const [mm3, setMm3] = useState<string | null>(null);
+  const [mm3Error, setMm3Error] = useState<string | null>(null);
+  const mm3SavedRef = useRef('');
+  useEffect(() => {
+    let stale = false;
+    setMm3(null);
+    setMm3Error(null);
+    if (!datasetId || !sampleId) return;
+    getSampleMm3(datasetId, sampleId)
+      .then(({ text }) => { if (!stale) { mm3SavedRef.current = text; setMm3(text); } })
+      .catch((err: Error) => { if (!stale) { setMm3(''); setMm3Error(err.message); } });
+    return () => { stale = true; };
+  }, [datasetId, sampleId]);
+  const flushMm3 = () => {
+    if (!datasetId || mm3 === null || mm3 === mm3SavedRef.current) return;
+    const text = mm3;
+    saveSampleMm3(datasetId, sampleId, text)
+      .then(() => { mm3SavedRef.current = text; setMm3Error(null); })
+      .catch((err: Error) => setMm3Error(err.message));
+  };
+
   if (!sample || !datasetId) return null;
 
   const readOnly = sample.labelStatus === 'processing' || sample.fileMissing;
-  const close = () => { void flushSample(sampleId); setOpenSampleId(null); };
+  const close = () => { void flushSample(sampleId); flushMm3(); setOpenSampleId(null); };
   const goto = (delta: number) => {
     const next = sampleOrder[idx + delta];
     if (!next) return;
     void flushSample(sampleId);
+    flushMm3();
     setOpenSampleId(next);
   };
 
@@ -138,6 +163,37 @@ export const SampleDrawer: React.FC<SampleDrawerProps> = ({ sampleId }) => {
             onKeyDown={(e) => { if (e.key === 'Escape') revertSampleField(sampleId, 'caption'); }}
             className={area}
           />
+        </label>
+
+        {/* MM3 Structured Caption — the second of the two caption formats a
+            MOSS labeling run writes. Shown beside the AS1.5 caption so the two
+            can be compared and edited without leaving the app. */}
+        <label className="flex flex-col gap-1.5">
+          <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.drawer.mm3Caption')}</span>
+          {mm3 === null ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-zinc-500">
+              <Loader2 size={12} className="animate-spin" />
+            </div>
+          ) : (
+            <>
+              {mm3 === '' && mm3SavedRef.current === '' && !mm3Error && (
+                <span className="text-[11px] text-zinc-500">{t('trainingStudio.drawer.mm3Missing')}</span>
+              )}
+              <textarea
+                rows={10}
+                value={mm3}
+                disabled={readOnly}
+                placeholder={t('trainingStudio.drawer.mm3Placeholder')}
+                onChange={(e) => setMm3(e.target.value)}
+                onBlur={flushMm3}
+                onKeyDown={(e) => { if (e.key === 'Escape') setMm3(mm3SavedRef.current); }}
+                className={`${area} font-mono text-xs leading-relaxed`}
+              />
+              {mm3Error && (
+                <span className="text-[11px] text-red-500 dark:text-red-400 break-words">{mm3Error}</span>
+              )}
+            </>
+          )}
         </label>
 
         {/* Instrumental */}

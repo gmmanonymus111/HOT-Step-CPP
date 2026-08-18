@@ -36,6 +36,8 @@
 //   POST   /datasets/:id/samples/bulk                   — bulk field set
 //   PATCH  /datasets/:id/samples/:sampleId              — edit one sample
 //   GET    /datasets/:id/samples/:sampleId/audio        — stream audio (Range aware)
+//   GET    /datasets/:id/samples/:sampleId/mm3          — read <stem>.mm3.txt
+//   PUT    /datasets/:id/samples/:sampleId/mm3          — write <stem>.mm3.txt
 //   POST   /datasets/:id/label                          — start a labeling job
 //   POST   /datasets/:id/enhance/genius                 — start a Genius job
 //   POST   /datasets/:id/enhance/caption                — start an LLM caption job
@@ -928,6 +930,75 @@ router.patch('/datasets/:id/samples/:sampleId', async (req: Request, res: Respon
     res.json({ sample: updated });
   } catch (err: any) {
     console.error(`[Training] Sample patch failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── MM3 Structured Caption (§2.4a) ───────────────────────────────────────
+//
+// Lives in `<stem>.mm3.txt` beside the audio (what `ace-train mm3-condition`
+// reads), NOT in the sidecar — so it cannot ride the PATCH whitelist above.
+// Served on demand rather than embedded in the samples list: at ~3 KB a
+// caption it would double the list payload for a field only the drawer shows.
+
+/** `<stem>.mm3.txt` for a sample, mirroring enhanceService's write path. */
+function mm3PathOf(sample: TrainingSample): string {
+  return `${sample.audioPath.replace(/\.[^.\\/]+$/, '')}.mm3.txt`;
+}
+
+router.get('/datasets/:id/samples/:sampleId/mm3', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const samples = await buildSamples(ds);
+    const sample = samples.find(s => s.sampleId === req.params.sampleId);
+    if (!sample) {
+      res.status(404).json({ error: 'Sample not found' });
+      return;
+    }
+    const mm3Path = mm3PathOf(sample);
+    // Absent file is `text: ''`, not a 404 — "no MM3 caption yet" is a normal
+    // state for a dataset labeled before MOSS existed.
+    const text = fs.existsSync(mm3Path) ? fs.readFileSync(mm3Path, 'utf8') : '';
+    res.json({ text });
+  } catch (err: any) {
+    console.error(`[Training] MM3 read failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/datasets/:id/samples/:sampleId/mm3', async (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const text = String((req.body || {}).text ?? '');
+    const samples = await buildSamples(ds);
+    const sample = samples.find(s => s.sampleId === req.params.sampleId);
+    if (!sample) {
+      res.status(404).json({ error: 'Sample not found' });
+      return;
+    }
+    if (sample.fileMissing) {
+      res.status(409).json({ error: 'Audio file is missing from disk' });
+      return;
+    }
+    const mm3Path = mm3PathOf(sample);
+    if (text.trim()) {
+      fs.writeFileSync(mm3Path, text, 'utf8');
+    } else if (fs.existsSync(mm3Path)) {
+      // Clearing the editor deletes the file — an empty .mm3.txt would still
+      // be picked up by `ace-train mm3-condition` and condition on nothing.
+      fs.unlinkSync(mm3Path);
+    }
+    res.json({ text });
+  } catch (err: any) {
+    console.error(`[Training] MM3 write failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
