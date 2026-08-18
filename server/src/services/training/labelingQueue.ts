@@ -492,6 +492,28 @@ function refreshSample(ds: TrainingDatasetRow, sample: TrainingSample): Training
 }
 
 /**
+ * Lyrics that SAY the track is instrumental, rather than being lyrics.
+ *
+ * Two shapes, both seen in the wild (americanfootball, 2026-08-18):
+ *  - Genius's stock sentence — "This song is an instrumental" — sometimes
+ *    embedded in scraped page junk ("[Original song bio:]… Read More This
+ *    song is an instrumental").
+ *  - Nothing but section tags, at least one of them [Instrumental].
+ * Neither contains sung words, so treating them as lyrics both misses the
+ * `is_instrumental` flag AND trains the model to sing the Genius boilerplate.
+ */
+function lyricsSayInstrumental(lyrics: string): boolean {
+  const text = lyrics.trim();
+  if (!text) return false;
+  if (/\bthis (?:song|track) is an instrumental\b/i.test(text)) return true;
+  const untagged = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !/^\[[^\]]*\]$/.test(line));
+  return untagged.length === 0 && /\[[^\]]*instrumental[^\]]*\]/i.test(text);
+}
+
+/**
  * Merge `incoming` into the sample's sidecar under `policy` and rewrite it.
  *
  * With `deriveInstrumental`, §4.8's rule is applied to the **winning** lyrics —
@@ -511,12 +533,26 @@ async function mergeIntoSidecar(
   const existing = loadSidecarMetadata(sample.audioPath);
   let merged = mergeFields(existing, incoming, policy);
   if (deriveInstrumental) {
-    // Lyrics PRESENT is evidence the track is not instrumental. Lyrics ABSENT
-    // is not evidence of anything — a failed Genius lookup must not brand a
-    // vocal track instrumental. Truly instrumental tracks are marked by the
-    // user (or already carry is_instrumental in their sidecar).
+    // Lyrics PRESENT is evidence the track is not instrumental — unless what
+    // they say is "this IS an instrumental" (Genius stock sentence, or a lone
+    // [Instrumental] tag), which is evidence of exactly the opposite. Lyrics
+    // ABSENT is not evidence of anything — a failed Genius lookup must not
+    // brand a vocal track instrumental. Truly instrumental tracks are marked
+    // by this rule, the user, or an is_instrumental already in their sidecar.
+    // Direct set, NOT policy-mediated: the flag is derived from the winning
+    // lyrics, and it must track them whatever the merge policy decided —
+    // under `overwrite_caption` an is_instrumental left behind by an earlier
+    // run is "occupied" and a policy-mediated write silently loses.
     const winning = (merged.lyrics ?? '').trim();
-    if (winning) merged = mergeFields(merged, { is_instrumental: 'false' }, policy);
+    if (winning) {
+      if (lyricsSayInstrumental(winning)) {
+        // The boilerplate is not lyrics — normalise to the canonical tag so
+        // the model is never trained to sing "This song is an instrumental".
+        merged = { ...merged, is_instrumental: 'true', lyrics: '[Instrumental]' };
+      } else {
+        merged = { ...merged, is_instrumental: 'false' };
+      }
+    }
   }
   // `forced` bypasses the merge policy — used for fields the user DECLARED
   // (dataset language), which must also repair earlier wrong guesses.
@@ -982,8 +1018,11 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
        }
       };
 
-      // MOSS: caption the whole dataset in ONE process before Pass B consumes
-      // the results, so the ~10 GB model is loaded once instead of per track.
+      // MOSS: caption the whole dataset in ONE process so the ~10 GB model is
+      // loaded once instead of per track. Resolves as soon as the batch is
+      // underway — Pass B consumes each track's caption the moment it lands
+      // (per-track promises in mossCaption.ts), so the review grid fills
+      // progressively rather than all at once when the process exits.
       // Placed here, after passALane has already started, so Essentia (CPU) runs
       // concurrently with captioning (GPU) rather than queueing behind it.
       if (opts.useCaption !== false && opts.caption?.provider === 'moss') {
@@ -1055,7 +1094,10 @@ async function runGeniusJob(job: TrainingJob): Promise<void> {
           markError(job, ds, sample,
             artist && title ? `No Genius match (searched "${artist} — ${title}")` : 'No Genius match (no artist/title found)');
         } else {
-          await mergeIntoSidecar(sample, { lyrics: hit.lyrics, is_instrumental: 'false' }, policy);
+          // deriveInstrumental, not a hardcoded 'false': Genius answers with
+          // "This song is an instrumental" for instrumentals, and that hit
+          // must set the flag rather than clear it.
+          await mergeIntoSidecar(sample, { lyrics: hit.lyrics }, policy, true);
           markLabeled(job, ds, sample, { lyrics: 'genius' });
           job.done++;
         }
