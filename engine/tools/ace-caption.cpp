@@ -212,6 +212,7 @@ int main(int argc, char ** argv) {
     std::vector<std::string> prompt_files;   // repeatable; see the per-mode note below
     int max_tokens = 1024;
     int top_k_debug = 0;
+    std::string dump_ids, dump_encoder;   // parity instrumentation, see --dump-* below
     double max_seconds = 420.0;   // hard cap, see below
     moss::SamplerParams sp;
 
@@ -233,6 +234,8 @@ int main(int argc, char ** argv) {
         else if (a == "-o") { out_path = next("-o"); }
         else if (a == "--ffmpeg") { ffmpeg = next("--ffmpeg"); }
         else if (a == "--top-k-debug") { top_k_debug = atoi(next("--top-k-debug").c_str()); }
+        else if (a == "--dump-ids") { dump_ids = next("--dump-ids"); }
+        else if (a == "--dump-encoder") { dump_encoder = next("--dump-encoder"); }
         else if (a == "--max-tokens") { max_tokens = atoi(next("--max-tokens").c_str()); }
         else if (a == "--max-seconds") { max_seconds = atof(next("--max-seconds").c_str()); }
         else if (a == "--temperature") { sp.temperature = (float) atof(next("--temperature").c_str()); }
@@ -244,7 +247,8 @@ int main(int argc, char ** argv) {
                     "       [--mode prose|mm3|lyrics[,...]] [--prompt \"...\"]\n"
                     "       [--prompt-file [prose=|mm3=|lyrics=]<path>]   (repeatable)\n"
                     "       [-o <out.txt>] [--max-tokens N] [--max-seconds S]\n"
-                    "       [--temperature T] [--rep-penalty R] [--freq-penalty F]\n");
+                    "       [--temperature T] [--rep-penalty R] [--freq-penalty F]\n"
+                    "       [--dump-ids <path>] [--dump-encoder <path>]   (parity debug)\n");
             return 2;
         }
     }
@@ -482,6 +486,29 @@ int main(int argc, char ** argv) {
             (double) pcm.size() / 16000.0, frames, eo.n_tokens,
             (double) eo.n_tokens / ((double) pcm.size() / 16000.0));
 
+    // ---- parity instrumentation (--dump-encoder) --------------------------
+    // Raw little-endian f32 of encoder_out [n_tokens, d_model] in row-major
+    // (token-major) order, plus a one-line manifest. Written for the FIRST job
+    // only -- this exists to diff a single track against the reference at FULL
+    // length, which is the parity bar the 30 s fixtures never tested.
+    if (!dump_encoder.empty()) {
+        const int D = eo.n_tokens > 0 ? (int) (eo.encoder_out.size() / (size_t) eo.n_tokens) : 0;
+        FILE * df = fopen(dump_encoder.c_str(), "wb");
+        if (df) {
+            fwrite(eo.encoder_out.data(), sizeof(float), eo.encoder_out.size(), df);
+            fclose(df);
+            double s1 = 0.0, s2 = 0.0;
+            for (float v : eo.encoder_out) { s1 += v; s2 += (double) v * v; }
+            const double n = (double) eo.encoder_out.size();
+            fprintf(stderr, "[MOSS] dumped encoder_out [%d,%d] mean=%.6f rms=%.6f -> %s\n",
+                    eo.n_tokens, D, s1 / n, sqrt(s2 / n), dump_encoder.c_str());
+        } else {
+            fprintf(stderr, "[MOSS] could not open %s for writing\n", dump_encoder.c_str());
+        }
+        dump_encoder.clear();   // first job only
+    }
+
+
     // ---- prompt assembly (per mode) ---------------------------------------
     // Everything from here down runs once PER OUTPUT MODE, but `eo` above is
     // computed once and shared: the encoder is prompt-independent, so N formats
@@ -550,6 +577,24 @@ int main(int argc, char ** argv) {
     std::vector<int32_t> ids;
     if (!build_ids(user_prompt, ids)) {
         return false;
+    }
+
+    // ---- parity instrumentation (--dump-ids) ------------------------------
+    // One decimal token id per line, in prompt order. Diffed against the
+    // reference processor's input_ids to prove the time-marker interleave and
+    // chat wrapper agree token-for-token at full track length.
+    if (!dump_ids.empty()) {
+        FILE * df = fopen(dump_ids.c_str(), "w");
+        if (df) {
+            for (int32_t id : ids) {
+                fprintf(df, "%d\n", (int) id);
+            }
+            fclose(df);
+            fprintf(stderr, "[MOSS] dumped %zu input ids -> %s\n", ids.size(), dump_ids.c_str());
+        } else {
+            fprintf(stderr, "[MOSS] could not open %s for writing\n", dump_ids.c_str());
+        }
+        dump_ids.clear();   // first mode only
     }
 
     // ---- join tensors -----------------------------------------------------
