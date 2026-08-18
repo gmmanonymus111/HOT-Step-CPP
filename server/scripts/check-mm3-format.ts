@@ -82,6 +82,29 @@ for (const dir of dirs) {
       else cursor = at;
     }
 
+    // One line per field: every line must be a section header or start with a
+    // known label. A bare label with its prose on the NEXT line, an unknown
+    // section ("Chorus: …"), or a decode-loop label run all fail this.
+    // Exception, measured upstream: inside the Instrument Lifecycle block the
+    // templates use free-form instrument-group labels — Tertiary: (10/1000),
+    // Bass:, Synthesizers:, Percussive Accents:, … — so short label-led lines
+    // are legal there and only there.
+    const ildIdx = lines.findIndex(l => l.trim().startsWith('Instrument Lifecycle Description'));
+    const GROUP_LABEL_RE = /^[A-Z][A-Za-z /()&'-]{0,34}: \S/;
+    lines.forEach((l, idx) => {
+      const t = l.trim();
+      if (!t) return;
+      if (SECTIONS.includes(t)) return;
+      if (FIELD_ORDER.some(lb => t.startsWith(lb))) return;
+      if (ildIdx >= 0 && idx > ildIdx && GROUP_LABEL_RE.test(t)) return;
+      errors.push(`stray line (not a section or known field): "${t.slice(0, 60)}"`);
+    });
+    // Upstream files end at the Embellishments field (1000/1000).
+    const embIdx = lines.findIndex(l => l.trim().startsWith('Embellishments, Textures & Spatial FX:'));
+    if (embIdx >= 0 && lines.slice(embIdx + 1).some(l => l.trim() !== '')) {
+      errors.push('content after the Embellishments field');
+    }
+
     const ba = lines.find(l => l.startsWith('Basic Attributes:'));
     if (ba) {
       if (/\d\/\d/.test(ba)) errors.push('time signature in Basic Attributes (0/1000 upstream)');

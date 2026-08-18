@@ -457,20 +457,99 @@ export function buildBasicAttributes(facts: LocalFacts, mossText?: string): stri
  * If MOSS omitted the line entirely, it is inserted directly under
  * `Global Metadata` rather than dropping known-good facts on the floor.
  */
-export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
-  // Normalise to the official template shape first: all 1000 upstream files
-  // have zero blank lines and zero leading/trailing whitespace, while MOSS's
-  // raw output separates paragraphs with blank lines (measured 18/24 files)
-  // and has been seen indenting field labels. The conditioner was trained on
-  // the dense shape, so the dense shape is what lands on disk.
-  const lines = mm3.split('\n').map(l => l.trim()).filter(l => l !== '');
-  // Decode-loop junk: MOSS has appended runs of bare section labels after the
-  // final field ("Chorus:\nVerse 1:\nVerse 1:\n…" — 12 lines on stay_home).
-  // Upstream files END at the Embellishments field, so trailing bare labels
-  // (a colon with nothing after it) are never content. Strip from the end.
-  while (lines.length > 0 && /^[^:]{1,40}:$/.test(lines[lines.length - 1])) {
-    lines.pop();
+/** The three bare section headers, in template order. */
+const MM3_SECTIONS: ReadonlySet<string> = new Set(['Global Metadata', 'Vocal Details', 'Arrangement']);
+
+/** Every field label an official template line may start with. */
+const MM3_LABELS: readonly string[] = [
+  'Basic Attributes:',
+  'Global Emotional Progression:',
+  'Application Scenarios & Imagery:',
+  'Sonics & Production Profile:',
+  'Vocal Gender & Timbre:',
+  'Vocal Style:',
+  'Harmony/Backing Vocals:',
+  'Vocal FX:',
+  'Instrument Lifecycle Description (Primary/Secondary Layering):',
+  'Primary:',
+  'Secondary:',
+  'Groove & Foundation Progression:',
+  'Embellishments, Textures & Spatial FX:',
+];
+
+/**
+ * Reshape MOSS's raw MM3 output into the official template shape — measured
+ * over all 1000 upstream files, not assumed: zero blank lines, zero
+ * leading/trailing whitespace, label + content on ONE line per field, the
+ * Instrument Lifecycle Description header bare with Primary:/Secondary: on
+ * their own lines, and the file ENDING at the Embellishments field.
+ *
+ * MOSS deviates in each of these ways (measured on americanfootball +
+ * chasestatus): blank lines between paragraphs (18/24 files), `Primary:`
+ * welded inline onto the ILD header, bare labels with their prose on the NEXT
+ * line, off-template trailing sections ("Chorus: <prose>"), and decode-loop
+ * runs of bare labels ("Verse 1:\nVerse 1:\n…"). Everything here reshapes or
+ * drops off-template trailing matter — nothing is ever invented.
+ */
+export function normalizeMm3Shape(mm3: string): string {
+  let lines = mm3.split('\n').map(l => l.trim()).filter(l => l !== '');
+
+  // Split anything welded onto the ILD header — upstream keeps it bare.
+  const ild = 'Instrument Lifecycle Description (Primary/Secondary Layering):';
+  lines = lines.flatMap(l => {
+    if (!l.startsWith(ild) || l === ild) return [l];
+    const rest = l.slice(ild.length).trim();
+    return [ild, rest];
+  });
+  // Give inline Primary/Secondary their own lines wherever they appear.
+  lines = lines.flatMap(l => {
+    const out: string[] = [];
+    let cur = l;
+    for (const marker of [' Secondary:', ' Primary:']) {
+      const at = cur.indexOf(marker);
+      if (at > 0) {
+        out.unshift(cur.slice(at + 1));
+        cur = cur.slice(0, at).trim();
+      }
+    }
+    out.unshift(cur);
+    return out.filter(x => x !== '');
+  });
+
+  // Merge continuation lines: upstream is one line per field, so a line that
+  // is neither a section header nor label-led belongs to the previous line.
+  // Inside the Instrument Lifecycle block, upstream also uses free-form
+  // instrument-group labels (Tertiary:, Bass:, Synthesizers:, …) — those are
+  // structural too, but only there; elsewhere "Chorus: …" is off-template.
+  const GROUP_LABEL_RE = /^[A-Z][A-Za-z /()&'-]{0,34}: \S/;
+  const merged: string[] = [];
+  let inIld = false;
+  for (const line of lines) {
+    if (line.startsWith('Instrument Lifecycle Description')) inIld = true;
+    else if (line.startsWith('Embellishments, Textures & Spatial FX:')) inIld = false;
+    const isStructural = MM3_SECTIONS.has(line)
+      || MM3_LABELS.some(lb => line.startsWith(lb))
+      || (inIld && GROUP_LABEL_RE.test(line));
+    if (!isStructural && merged.length > 0 && !MM3_SECTIONS.has(merged[merged.length - 1])) {
+      merged[merged.length - 1] += ` ${line}`;
+    } else {
+      merged.push(line);
+    }
   }
+
+  // Upstream files end at the Embellishments field (1000/1000). Anything after
+  // it — "Chorus: <prose>" sections, decode-loop label runs — is off-template.
+  const ei = merged.findIndex(l => l.startsWith('Embellishments, Textures & Spatial FX:'));
+  const bounded = ei >= 0 ? merged.slice(0, ei + 1) : merged;
+  // Defensive tail strip for the no-Embellishments case.
+  while (bounded.length > 0 && /^[^:]{1,40}:$/.test(bounded[bounded.length - 1])) {
+    bounded.pop();
+  }
+  return bounded.join('\n');
+}
+
+export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
+  const lines = normalizeMm3Shape(mm3).split('\n');
   const bi = lines.findIndex(l => l.startsWith('Basic Attributes:'));
   const built = buildBasicAttributes(facts, mm3);
   if (bi >= 0) {
