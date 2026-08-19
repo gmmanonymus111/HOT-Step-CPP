@@ -780,10 +780,23 @@ export interface PipelineFolderSpec {
   customTag?: string;
 }
 
+/** Per-run label-stage overrides applied to every dataset in the pipeline, on
+ *  top of the stored label defaults. Lets a bulk re-caption skip Genius and
+ *  Essentia and force the merge policy it needs. Absent field = default. */
+export interface PipelineLabelOptions {
+  /** 'all' re-labels every sample; default 'unlabeled' only fills gaps. */
+  scope?: 'all' | 'unlabeled';
+  useEssentia?: boolean;
+  useGenius?: boolean;
+  useCaption?: boolean;
+  mergePolicy?: MergePolicy;
+}
+
 export interface StartPipelineInput {
   folders: PipelineFolderSpec[];
   /** Which stages to run, in canonical order. Omit = all five. */
   stages?: PipelineStage[];
+  labelOptions?: PipelineLabelOptions;
 }
 
 export interface PipelineStageResult {

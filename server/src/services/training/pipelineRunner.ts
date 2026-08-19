@@ -28,6 +28,7 @@ import * as queue from './labelingQueue.js';
 import { trainingBaseDir } from './paths.js';
 import { getTrainingDefaults } from './trainingDefaults.js';
 import type {
+  PipelineLabelOptions,
   PipelineFolderSpec, PipelineItem, PipelineItemStatus, PipelineStage, PipelineStageResult,
   PipelineSummary, TrainingDefaults,
 } from './types.js';
@@ -217,11 +218,14 @@ export function listPipelines(): PipelineSummary[] {
   return [...running, ...rest].slice(0, MAX_LISTED);
 }
 
-export function startPipeline(folders: PipelineFolderSpec[], stages: PipelineStage[]): PipelineSummary {
+export function startPipeline(
+  folders: PipelineFolderSpec[], stages: PipelineStage[], labelOptions?: PipelineLabelOptions,
+): PipelineSummary {
   const state: PipelineState = {
     id: randomUUID(),
     status: 'running',
     stages: [...stages],
+    ...(labelOptions && Object.keys(labelOptions).length > 0 ? { labelOptions } : {}),
     items: folders.map(spec => ({
       sourceDir: spec.sourceDir,
       name: (spec.name || '').trim() || path.basename(path.resolve(spec.sourceDir)) || spec.sourceDir,
@@ -578,7 +582,20 @@ async function runStage(
   // A dataset that arrives already labelled is a DONE label stage, not a failed
   // one. Without this the route answers 400 "Nothing to label" and the item is
   // abandoned before preprocess/train ever run (2026-07-31).
-  if (result.stage === 'label') body.allowEmpty = true;
+  if (result.stage === 'label') {
+    body.allowEmpty = true;
+    // Per-run overrides ride ON TOP of the stored defaults — a bulk re-caption
+    // skips Genius/Essentia and forces overwrite_caption without touching the
+    // defaults every other run reads. Absent field = default decides.
+    const lo = state.labelOptions;
+    if (lo) {
+      if (lo.scope) body.scope = lo.scope;
+      if (typeof lo.useEssentia === 'boolean') body.useEssentia = lo.useEssentia;
+      if (typeof lo.useGenius === 'boolean') body.useGenius = lo.useGenius;
+      if (typeof lo.useCaption === 'boolean') body.useCaption = lo.useCaption;
+      if (lo.mergePolicy) body.mergePolicy = lo.mergePolicy;
+    }
+  }
   const url = `http://127.0.0.1:${config.server.port}`
     + `/api/training/datasets/${encodeURIComponent(item.datasetId)}/${STAGE_PATH[result.stage]}`;
 

@@ -116,7 +116,7 @@ import type {
   AuditionListResponse, AuditionOptions, AuditionSideSpec,
   BulkSetInput, CaptionOptions, CreateDatasetInput, FieldSource, GeniusOptions, LabelOptions, LmSize,
   LyricStudioExportInput,
-  PatchSampleInput, PipelineFolderSpec, PipelineStage,
+  PatchSampleInput, PipelineFolderSpec, PipelineLabelOptions, PipelineStage,
   PreprocessCompat, PreprocessDtype, PreprocessNormalize, PreprocessOptions,
   TrainingCapabilities, TrainingDatasetRow, TrainingDefaults, TrainingSample,
   DitAdapterType, TrainDitOptions, TrainDitStage, TrainLmOptions, TrainLmStage,
@@ -513,7 +513,24 @@ router.post('/pipeline', (req: Request, res: Response) => {
       return;
     }
 
-    res.status(202).json({ pipeline: startPipeline(folders, stages) });
+    // Per-run label-stage overrides (bulk re-caption etc.) — validated field
+    // by field; anything absent falls through to the stored label defaults.
+    let labelOptions: PipelineLabelOptions | undefined;
+    if (body.labelOptions && typeof body.labelOptions === 'object') {
+      const lo = body.labelOptions as Record<string, unknown>;
+      labelOptions = {};
+      for (const k of ['useEssentia', 'useGenius', 'useCaption'] as const) {
+        if (typeof lo[k] === 'boolean') labelOptions[k] = lo[k] as boolean;
+      }
+      if (lo.scope === 'all' || lo.scope === 'unlabeled') labelOptions.scope = lo.scope;
+      const policies = ['fill_missing', 'overwrite_caption', 'overwrite_lyrics', 'overwrite_all'];
+      if (typeof lo.mergePolicy === 'string' && policies.includes(lo.mergePolicy)) {
+        labelOptions.mergePolicy = lo.mergePolicy as PipelineLabelOptions['mergePolicy'];
+      }
+      if (Object.keys(labelOptions).length === 0) labelOptions = undefined;
+    }
+
+    res.status(202).json({ pipeline: startPipeline(folders, stages, labelOptions) });
   } catch (err: any) {
     console.error(`[Training] Pipeline start failed: ${err.message}`);
     res.status(500).json({ error: err.message });

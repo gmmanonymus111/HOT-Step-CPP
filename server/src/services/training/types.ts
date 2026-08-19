@@ -955,6 +955,22 @@ export interface PipelineItem {
   error: string | null;
 }
 
+/** Per-pipeline overrides for the label stage, applied to EVERY dataset in the
+ *  run on top of the stored label defaults. Lets a bulk re-caption skip the
+ *  Genius and Essentia passes it does not need, and force the merge policy a
+ *  re-caption requires (fill_missing keeps the very captions it should
+ *  replace). Absent field = the stored default decides. */
+export interface PipelineLabelOptions {
+  /** 'all' re-labels every sample; default 'unlabeled' only fills gaps. A
+   *  re-caption run MUST use 'all' — the corpus is already labeled, so the
+   *  default scope finds zero targets and the stage silently no-ops. */
+  scope?: 'all' | 'unlabeled';
+  useEssentia?: boolean;
+  useGenius?: boolean;
+  useCaption?: boolean;
+  mergePolicy?: MergePolicy;
+}
+
 export interface PipelineSummary {
   id: string;
   status: PipelineStatus;
@@ -966,6 +982,9 @@ export interface PipelineSummary {
    *  status flips to 'paused' once the runner parks at the next stage
    *  boundary. Absent on snapshots written before pause existed. */
   pauseRequested?: boolean;
+  /** Label-stage overrides for this run — persisted with the state so a
+   *  resumed pipeline keeps them. Absent on older snapshots. */
+  labelOptions?: PipelineLabelOptions;
 }
 
 export interface TrainingDefaults {

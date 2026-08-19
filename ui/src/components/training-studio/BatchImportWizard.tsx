@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { adapterApi } from '../../services/api';
 import {
   PIPELINE_STAGES, scanPreview,
-  type PipelineStage, type TrainingDatasetSummary,
+  type MergePolicy, type PipelineStage, type TrainingDatasetSummary,
 } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { DatasetAssetChips } from './DatasetAssetChips';
@@ -64,6 +64,16 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
   const [loadingRoot, setLoadingRoot] = useState(false);
   const [rootError, setRootError] = useState<string | null>(null);
   const [stages, setStages] = useState<Record<PipelineStage, boolean>>(defaultStages);
+  // Label-stage step toggles, applied to EVERY dataset in the run (a bulk
+  // re-caption skips Genius/Essentia and needs overwrite_caption). All steps
+  // default on, mirroring the single-dataset LabelPanel.
+  const [labelEssentia, setLabelEssentia] = useState(true);
+  const [labelGenius, setLabelGenius] = useState(true);
+  const [labelCaption, setLabelCaption] = useState(true);
+  const [labelMergePolicy, setLabelMergePolicy] = useState<MergePolicy>('fill_missing');
+  // 'unlabeled' (default) only fills gaps; a re-caption run needs 'all' or an
+  // already-labeled corpus yields zero targets and the stage silently no-ops.
+  const [labelScope, setLabelScope] = useState<'unlabeled' | 'all'>('unlabeled');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -78,6 +88,7 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
     if (!open) return;
     genRef.current++;
     setRootDir(''); setRows([]); setRootError(null); setSubmitError(null); setStages(defaultStages());
+    setLabelEssentia(true); setLabelGenius(true); setLabelCaption(true); setLabelMergePolicy('fill_missing'); setLabelScope('unlabeled');
   }, [open]);
 
   /**
@@ -219,6 +230,15 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
       await startPipeline({
         folders: selectedRows.map(r => ({ sourceDir: r.path })),
         stages: selectedStages,
+        ...(stages.label ? {
+          labelOptions: {
+            scope: labelScope,
+            useEssentia: labelEssentia,
+            useGenius: labelGenius,
+            useCaption: labelCaption,
+            mergePolicy: labelMergePolicy,
+          },
+        } : {}),
       });
       setPhase('monitor');
       onClose();
@@ -396,6 +416,53 @@ export const BatchImportWizard: React.FC<BatchImportWizardProps> = ({ open, onCl
                 {t('trainingStudio.batch.defaultsHint')}
               </div>
             </div>
+
+            {/* Label-stage steps — applied to every dataset in the run */}
+            {stages.label && (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.label.title')}</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {([
+                    [labelEssentia, setLabelEssentia, 'trainingStudio.label.useEssentia'],
+                    [labelGenius, setLabelGenius, 'trainingStudio.label.useGenius'],
+                    [labelCaption, setLabelCaption, 'trainingStudio.label.useCaption'],
+                  ] as Array<[boolean, (v: boolean) => void, string]>).map(([value, setValue, key]) => (
+                    <label
+                      key={key}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-xs text-zinc-700 dark:text-zinc-300 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={value}
+                        onChange={(e) => setValue(e.target.checked)}
+                        className="accent-amber-500"
+                      />
+                      {t(key)}
+                    </label>
+                  ))}
+                  <select
+                    value={labelScope}
+                    onChange={(e) => setLabelScope(e.target.value as 'unlabeled' | 'all')}
+                    className="px-2.5 py-1.5 rounded-lg text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-amber-500"
+                    title={t('trainingStudio.label.scope')}
+                  >
+                    <option value="unlabeled">{t('trainingStudio.label.scopeUnlabeled')}</option>
+                    <option value="all">{t('trainingStudio.label.scopeAll')}</option>
+                  </select>
+                  <select
+                    value={labelMergePolicy}
+                    onChange={(e) => setLabelMergePolicy(e.target.value as MergePolicy)}
+                    className="px-2.5 py-1.5 rounded-lg text-xs bg-zinc-100 dark:bg-black/20 border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-amber-500"
+                    title={t('trainingStudio.label.mergePolicy')}
+                  >
+                    <option value="fill_missing">{t('trainingStudio.label.mergeFill')}</option>
+                    <option value="overwrite_caption">{t('trainingStudio.label.mergeCaption')}</option>
+                    <option value="overwrite_lyrics">{t('trainingStudio.label.mergeLyrics')}</option>
+                    <option value="overwrite_all">{t('trainingStudio.label.mergeAll')}</option>
+                  </select>
+                </div>
+              </div>
+            )}
 
             {submitError && (
               <div className="px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-xs text-red-500 dark:text-red-400">{submitError}</div>
