@@ -558,7 +558,14 @@ export function applyFactSubstitution(mm3: string, facts: LocalFacts): string {
     const gi = lines.findIndex(l => l === 'Global Metadata');
     lines.splice(gi + 1, 0, built);
   }
-  return lines.join('\n');
+  // MOSS welds tempo/key claims into the BODY prose too — ABR's Groove line
+  // said "at 120 BPM" two lines under a Basic Attributes we had just set to
+  // "bpm is 105", a self-contradiction inside one caption. The same rewrite
+  // that keeps the AS1.5 caption honest keeps every MM3 line honest; the
+  // rebuilt Basic Attributes line is already true and is left alone.
+  return lines
+    .map(l => (l.startsWith('Basic Attributes:') ? l : correctFactsInProse(l, facts)))
+    .join('\n');
 }
 
 /**
@@ -838,6 +845,17 @@ export async function captionWithMoss(
   });
 
   const out: MossCaptionResult = { prose: raw.prose, lyrics: raw.lyrics };
-  if (raw.mm3) out.mm3 = applyFactSubstitution(raw.mm3, facts);
+  if (raw.mm3) {
+    // The freshest audio-observed evidence for the Basic Attributes genre is
+    // the prose MOSS wrote seconds ago FROM THIS SAME ENCODE — its line-1
+    // genre and caption both. facts.observedCaption alone is the sidecar's
+    // PREVIOUS caption, so the pick was scanning stale text while the right
+    // answer sat in raw.prose: on ABR's The Blinding Light the new prose said
+    // "thrash and groove metal" (sidecar genre: Metal) while the MM3 line
+    // scanned only its own body ("rock beat") and landed Rock (2026-08-19).
+    const observed = [raw.prose, facts.observedCaption]
+      .filter(v => (v ?? '').trim()).join('\n');
+    out.mm3 = applyFactSubstitution(raw.mm3, { ...facts, observedCaption: observed });
+  }
   return out;
 }
