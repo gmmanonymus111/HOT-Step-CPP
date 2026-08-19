@@ -214,6 +214,7 @@ int main(int argc, char ** argv) {
     int top_k_debug = 0;
     std::string dump_ids, dump_encoder;   // parity instrumentation, see --dump-* below
     double max_seconds = 420.0;   // hard cap, see below
+    int enc_window = 400;         // mel frames per encoder chunk; 0 = whole-track (see below)
     moss::SamplerParams sp;
 
     for (int i = 1; i < argc; ++i) {
@@ -238,6 +239,7 @@ int main(int argc, char ** argv) {
         else if (a == "--dump-encoder") { dump_encoder = next("--dump-encoder"); }
         else if (a == "--max-tokens") { max_tokens = atoi(next("--max-tokens").c_str()); }
         else if (a == "--max-seconds") { max_seconds = atof(next("--max-seconds").c_str()); }
+        else if (a == "--encoder-window") { enc_window = atoi(next("--encoder-window").c_str()); }
         else if (a == "--temperature") { sp.temperature = (float) atof(next("--temperature").c_str()); }
         else if (a == "--rep-penalty") { sp.repetition_penalty = (float) atof(next("--rep-penalty").c_str()); }
         else if (a == "--freq-penalty") { sp.frequency_penalty = (float) atof(next("--freq-penalty").c_str()); }
@@ -248,7 +250,8 @@ int main(int argc, char ** argv) {
                     "       [--prompt-file [prose=|mm3=|lyrics=]<path>]   (repeatable)\n"
                     "       [-o <out.txt>] [--max-tokens N] [--max-seconds S]\n"
                     "       [--temperature T] [--rep-penalty R] [--freq-penalty F]\n"
-                    "       [--dump-ids <path>] [--dump-encoder <path>]   (parity debug)\n");
+                    "       [--dump-ids <path>] [--dump-encoder <path>]   (parity debug)\n"
+                    "       [--encoder-window FRAMES]   (0 = whole-track legacy encode)\n");
             return 2;
         }
     }
@@ -476,8 +479,54 @@ int main(int argc, char ** argv) {
 
     int frames = 0;
     std::vector<float> mel = moss::log_mel(pcm.data(), pcm.size(), mp, &frames);
+
+    // CHUNKED ENCODE -- this matches how the model was TRAINED, and it is the
+    // single biggest quality lever in this tool. SGLang's serving path (the
+    // runtime MOSS's authors recommend) splits the mel into n_window*2 = 400
+    // frame (4 s) chunks and runs the encoder on each independently: positions
+    // restart per chunk and attention is local to the chunk
+    // (sglang/srt/models/moss_audio.py). One whole-track pass -- what vanilla
+    // transformers' modeling code does, and what this tool did before -- feeds
+    // the encoder positions far past max_source_positions (1500) and global
+    // attention spans it never saw in training. Measured on
+    // 08-the_clash-lost_in_the_supermarket (230 s): whole-track collapses to
+    // the prompt's example genre ("bass house, electro house", q8_0 AND f16),
+    // chunked matches SGLang ("indie rock, post-punk revival"). At 30 s clips
+    // both paths agree, which is why the original fixtures never caught it.
+    // 400 is a multiple of 8, so per-chunk token counts sum to the whole-track
+    // count and the time-marker interleave downstream is unchanged.
+    // The adapter and deepstack mergers are per-token GatedMLPs, so running
+    // them per chunk and concatenating equals running them on the full track.
+    const int chunk = (enc_window > 0) ? enc_window : frames;
     moss::EncoderOutput eo;
-    if (!moss::moss_encode_audio(tower, mel.data(), mp.n_mels, frames, bp.backend, &eo)) {
+    bool enc_ok = true;
+    for (int off = 0; off < frames && enc_ok; off += chunk) {
+        const int len = std::min(chunk, frames - off);
+        // mel is row-major [n_mels, frames]; slice columns [off, off+len).
+        std::vector<float> piece((size_t) mp.n_mels * len);
+        for (int m = 0; m < mp.n_mels; ++m) {
+            memcpy(piece.data() + (size_t) m * len,
+                   mel.data() + (size_t) m * frames + off,
+                   sizeof(float) * (size_t) len);
+        }
+        moss::EncoderOutput part;
+        if (!moss::moss_encode_audio(tower, piece.data(), mp.n_mels, len, bp.backend, &part)) {
+            enc_ok = false;
+            break;
+        }
+        eo.n_tokens += part.n_tokens;
+        eo.encoder_out.insert(eo.encoder_out.end(), part.encoder_out.begin(), part.encoder_out.end());
+        eo.adapter_out.insert(eo.adapter_out.end(), part.adapter_out.begin(), part.adapter_out.end());
+        if (eo.deepstack_taps.size() < part.deepstack_taps.size()) eo.deepstack_taps.resize(part.deepstack_taps.size());
+        for (size_t k = 0; k < part.deepstack_taps.size(); ++k) {
+            eo.deepstack_taps[k].insert(eo.deepstack_taps[k].end(), part.deepstack_taps[k].begin(), part.deepstack_taps[k].end());
+        }
+        if (eo.merger_out.size() < part.merger_out.size()) eo.merger_out.resize(part.merger_out.size());
+        for (size_t k = 0; k < part.merger_out.size(); ++k) {
+            eo.merger_out[k].insert(eo.merger_out[k].end(), part.merger_out[k].begin(), part.merger_out[k].end());
+        }
+    }
+    if (!enc_ok) {
         fprintf(stderr, "ace-caption: encode failed for %s\n", src_file.c_str());
         batch_rc = 1;
         continue;

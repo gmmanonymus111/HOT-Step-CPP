@@ -73,7 +73,13 @@ export const CAPTION_INSTRUCTIONS: string =
   // The HF reference fails identically with caption first, so this is a
   // property of the model, not of our GGML port.
   'Use this exact output template:\n' +
-  "genre: <comma-separated genre/style tags, e.g. 'bass house, electro house'>\n" +
+  // No example genre: a concrete example gets copied verbatim as the answer
+  // when the model is unsure — 333 sidecars carried the literal phrase
+  // 'bass house, electro house' after the 2026-08-18/19 bulk run. The trigger
+  // was the broken whole-track encode (fixed in ace-caption --encoder-window),
+  // but the fallback target was this line; a placeholder gives an unsure model
+  // nothing to copy.
+  'genre: <comma-separated genre/style tags, most specific first>\n' +
   'caption: <2 to 4 sentences on one line>\n' +
   'bpm: <estimated BPM as integer, e.g. 120>\n' +
   "key: <note plus lowercase mode, e.g. 'C minor' or 'F# major'>\n" +
