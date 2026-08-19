@@ -7,8 +7,9 @@
 // Uses the SAME hs-* localStorage keys -- zero migration needed.
 
 import { create } from 'zustand';
-import type { GenerationParams } from '../types';
+import type { GenerationParams, LmRepMode } from '../types';
 import { DEFAULT_SETTINGS, type AppSettings } from '../components/settings/SettingsPanel';
+import { useBackendStore } from './backendStore';
 
 // -- Types --
 
@@ -37,6 +38,27 @@ function writeKey<T>(key: string, value: T): void {
 // -- Store --
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Mirror the Models-tab selection to the server.
+ *
+ * This state lives in localStorage, which the server cannot see — and the
+ * Training Studio needs it: a BULK run has no UI in the loop, and the engine
+ * that knows its own loaded DiT is deliberately stopped while training runs. A
+ * stale mirror is what made an overnight run train 18 datasets against the
+ * stock base instead of the selected fine-tune (2026-07-31).
+ *
+ * Fire-and-forget on purpose: this must never block or fail a model change.
+ */
+function mirrorActiveModels(patch: Record<string, string>): void {
+  try {
+    void fetch('/api/training/active-models', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).catch(() => { /* offline / server down — retried on the next change and at boot */ });
+  } catch { /* never let a model change throw */ }
+}
+
 export const useGlobalParamsStore = create<any>()((set, get) => ({
   // -- State (initialised from localStorage) --
   ditModel: readKey("hs-ditModel", ''),
@@ -84,6 +106,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   // pick planner adapters from there, like the DiT adapter folder.
   lmAdapterFolder: readKey("hs-lmAdapterFolder", ''),
   advancedAdapters: readKey("hs-advancedAdapters", false),
+  // Optional 3rd output: low-step render on the bare DiT (adapter bypassed,
+  // LM adapter kept, no post-processing) for A/B-ing the DiT adapter by ear.
+  noAdapterRender: readKey("hs-noAdapterRender", false),
   adaptersOpen: readKey("hs-adaptersOpen", false),
   inferenceSteps: readKey("hs-inferenceSteps", 12),
   guidanceScale: readKey("hs-guidanceScale", 9.0),
@@ -91,11 +116,22 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmCfgCutoffRatio: readKey("hs-lmCfgCutoffRatio", 1.0),
   cacheRatio: readKey("hs-cacheRatio", 0),
   shift: readKey("hs-shift", 3.0),
+  // DiT self-attention reach override. PARKED — the UI control is removed and
+  // this is pinned to -1 (= the model's own 128). Deliberately NOT read from
+  // localStorage: anyone who moved the slider while it was exposed still has a
+  // value stored, and reading it back would keep silently applying an override
+  // with no UI left to show or undo it. See docs/plans/attention-drift/.
+  ditSlidingWindow: -1,
   inferMethod: readKey("hs-inferMethod", 'euler'),
   scheduler: readKey("hs-scheduler", 'linear'),
   guidanceMode: readKey("hs-guidanceMode", 'apg'),
   seed: readKey("hs-seed", 42),
   randomSeed: readKey("hs-randomSeed", true),
+  // Backend-declared knobs (capabilities().extensions), keyed by the schema's
+  // `key`. One persisted bag rather than a named field per knob: the whole
+  // point of the extension mechanism is that a backend can add a control
+  // WITHOUT a matching edit here. Spread into the request payload below.
+  backendParams: readKey("hs-backendParams", {} as Record<string, unknown>),
   // LM Seed — independent of the DiT/generation seed above, unless tied
   // via lmSeedFollowsDit (default true = original tied behavior).
   lmSeed: readKey("hs-lmSeed", 42),
@@ -132,8 +168,16 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lmTopP: readKey("hs-lmTopP", 0.92),
   lmRepPenalty: readKey("hs-lmRepPenalty", 1.1),
   lmRepWindow: readKey("hs-lmRepWindow", 64),
+  lmRepMode: readKey<LmRepMode>("hs-lmRepMode", 'presence'),
+  lmDryBase: readKey("hs-lmDryBase", 1.75),
+  lmDryMinLen: readKey("hs-lmDryMinLen", 3),
   lmNegativePrompt: readKey("hs-lmNegativePrompt", 'NO USER INPUT'),
   lmCodesStrength: readKey("hs-lmCodesStrength", 1.0),
+  // LM codes window mode: 'ratio' scales by fraction of the step budget
+  // (lmCodesStrength), 'steps' pins an absolute step count (lmCodesSteps).
+  // Both collapse to audio_cover_strength at request build — no engine field.
+  lmCodesMode: readKey("hs-lmCodesMode", 'ratio' as 'ratio' | 'steps'),
+  lmCodesSteps: readKey("hs-lmCodesSteps", 6),
   postProcessingEnabled: readKey("hs-postProcessingEnabled", true),
   spectralLifterEnabled: readKey("hs-spectralLifterEnabled", false),
   slDenoiseStrength: readKey("hs-slDenoiseStrength", 0.3),
@@ -166,6 +210,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   stableStepAdapters: readKey("hs-stableStepAdapters", [] as Array<{ name: string; scale: number; enabled: boolean }>),
   // Preserve source dynamics: envelope-match refined audio to the source
   stableStepPreserveDynamics: readKey("hs-stableStepPreserveDynamics", true),
+  // PP-VAE re-encode of the vocal stem — OFF by default: the round trip is
+  // lossy above ~4 kHz (see stableStepVocalPpVae in postProcessing.ts)
+  stableStepVocalPpVae: readKey("hs-stableStepVocalPpVae", false),
   // Source blending: 'off' | 'crossover' (source lows + refined highs) | 'mix'
   stableStepBlendMode: readKey("hs-stableStepBlendMode", 'off'),
   stableStepCrossoverHz: readKey("hs-stableStepCrossoverHz", 250),
@@ -202,8 +249,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   lufsTarget: readKey('hs-lufsTarget', -14),
 
   // -- Actions --
-  setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); },
-  setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); },
+  setDitModel: (v: any) => { set({ ditModel: v }); writeKey("hs-ditModel", v); mirrorActiveModels({ ditModel: v }); },
+  setLmModel: (v: any) => { set({ lmModel: v }); writeKey("hs-lmModel", v); mirrorActiveModels({ lmModel: v }); },
   setLmAdapter: (v: any) => { set({ lmAdapter: v }); writeKey("hs-lmAdapter", v); },
   setLmAdapterScale: (v: any) => { set({ lmAdapterScale: v }); writeKey("hs-lmAdapterScale", v); },
   setVaeModel: (v: any) => {
@@ -259,6 +306,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setAdapterFolder: (v: any) => { set({ adapterFolder: v }); writeKey("hs-adapterFolder", v); },
   setLmAdapterFolder: (v: any) => { set({ lmAdapterFolder: v }); writeKey("hs-lmAdapterFolder", v); },
   setAdvancedAdapters: (v: any) => { set({ advancedAdapters: v }); writeKey("hs-advancedAdapters", v); },
+  setNoAdapterRender: (v: any) => { set({ noAdapterRender: v }); writeKey("hs-noAdapterRender", v); },
   setAdaptersOpen: (v: any) => { set({ adaptersOpen: v }); writeKey("hs-adaptersOpen", v); },
   setInferenceSteps: (v: any) => { set({ inferenceSteps: v }); writeKey("hs-inferenceSteps", v); },
   setGuidanceScale: (v: any) => { set({ guidanceScale: v }); writeKey("hs-guidanceScale", v); },
@@ -266,10 +314,16 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setLmCfgCutoffRatio: (v: any) => { set({ lmCfgCutoffRatio: v }); writeKey("hs-lmCfgCutoffRatio", v); },
   setCacheRatio: (v: any) => { set({ cacheRatio: v }); writeKey("hs-cacheRatio", v); },
   setShift: (v: any) => { set({ shift: v }); writeKey("hs-shift", v); },
+  setDitSlidingWindow: (v: any) => { set({ ditSlidingWindow: v }); writeKey("hs-ditSlidingWindow", v); },
   setInferMethod: (v: any) => { set({ inferMethod: v }); writeKey("hs-inferMethod", v); },
   setScheduler: (v: any) => { set({ scheduler: v }); writeKey("hs-scheduler", v); },
   setGuidanceMode: (v: any) => { set({ guidanceMode: v }); writeKey("hs-guidanceMode", v); },
   setSeed: (v: any) => { set({ seed: v }); writeKey("hs-seed", v); },
+  setBackendParam: (key: string, v: any) => {
+    const next = { ...(get().backendParams || {}), [key]: v };
+    set({ backendParams: next });
+    writeKey("hs-backendParams", next);
+  },
   setRandomSeed: (v: any) => {
     set({ randomSeed: v }); writeKey("hs-randomSeed", v);
     // When disabling random, snap seed away from -1 (the random sentinel)
@@ -310,9 +364,14 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setLmTopK: (v: any) => { set({ lmTopK: v }); writeKey("hs-lmTopK", v); },
   setLmTopP: (v: any) => { set({ lmTopP: v }); writeKey("hs-lmTopP", v); },
   setLmRepPenalty: (v: any) => { set({ lmRepPenalty: v }); writeKey("hs-lmRepPenalty", v); },
+  setLmRepMode: (v: any) => { set({ lmRepMode: v }); writeKey("hs-lmRepMode", v); },
+  setLmDryBase: (v: any) => { set({ lmDryBase: v }); writeKey("hs-lmDryBase", v); },
+  setLmDryMinLen: (v: any) => { set({ lmDryMinLen: v }); writeKey("hs-lmDryMinLen", v); },
   setLmRepWindow: (v: any) => { set({ lmRepWindow: v }); writeKey("hs-lmRepWindow", v); },
   setLmNegativePrompt: (v: any) => { set({ lmNegativePrompt: v }); writeKey("hs-lmNegativePrompt", v); },
   setLmCodesStrength: (v: any) => { set({ lmCodesStrength: v }); writeKey("hs-lmCodesStrength", v); },
+  setLmCodesMode: (v: any) => { set({ lmCodesMode: v }); writeKey("hs-lmCodesMode", v); },
+  setLmCodesSteps: (v: any) => { set({ lmCodesSteps: v }); writeKey("hs-lmCodesSteps", v); },
   setPostProcessingEnabled: (v: any) => { set({ postProcessingEnabled: v }); writeKey("hs-postProcessingEnabled", v); },
   setSpectralLifterEnabled: (v: any) => { set({ spectralLifterEnabled: v }); writeKey("hs-spectralLifterEnabled", v); },
   setSlDenoiseStrength: (v: any) => { set({ slDenoiseStrength: v }); writeKey("hs-slDenoiseStrength", v); },
@@ -341,6 +400,7 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
   setStableStepBackend: (v: any) => { set({ stableStepBackend: v }); writeKey("hs-stableStepBackend", v); },
   setStableStepAdapters: (v: any) => { set({ stableStepAdapters: v }); writeKey("hs-stableStepAdapters", v); },
   setStableStepPreserveDynamics: (v: any) => { set({ stableStepPreserveDynamics: v }); writeKey("hs-stableStepPreserveDynamics", v); },
+  setStableStepVocalPpVae: (v: any) => { set({ stableStepVocalPpVae: v }); writeKey("hs-stableStepVocalPpVae", v); },
   setStableStepBlendMode: (v: any) => { set({ stableStepBlendMode: v }); writeKey("hs-stableStepBlendMode", v); },
   setStableStepCrossoverHz: (v: any) => { set({ stableStepCrossoverHz: v }); writeKey("hs-stableStepCrossoverHz", v); },
   setStableStepCrossoverWidthHz: (v: any) => { set({ stableStepCrossoverWidthHz: v }); writeKey("hs-stableStepCrossoverWidthHz", v); },
@@ -451,7 +511,25 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     const triggerWords: string[] = triggerSpecs.map(s => s.word);
     const triggerWord = triggerWords.join(', ');
 
+    // LM codes window → audio_cover_strength fraction. Steps mode converts the
+    // absolute count against the current step budget; +0.5 lands mid-bin so the
+    // engine's floor(num_steps * strength) yields exactly that many steps
+    // despite f32 rounding. At or above the budget → 1.0 (no silence switch).
+    const lmCodesEff = s.lmCodesMode === 'steps'
+      ? (s.lmCodesSteps >= s.inferenceSteps ? 1.0 : Math.max(0, s.lmCodesSteps + 0.5) / s.inferenceSteps)
+      : s.lmCodesStrength;
+
     return {
+      // Backend-declared knobs (capabilities().extensions), flattened alongside
+      // the core params. Spread FIRST on purpose: later properties win in an
+      // object literal, so a backend can never shadow a core field by picking a
+      // colliding key.
+      ...(s.backendParams || {}),
+      // Multi-backend: which engine backend this request targets. Read directly
+      // from backendStore (not a globalParamsStore field) so it's always the
+      // live active id; defaults to 'ace' for installs with no second backend
+      // registered (docs/plans/multi-backend-architecture.md §4.5).
+      backend: useBackendStore.getState().activeBackendId || 'ace',
       ditModel: s.ditModel, lmModel: s.lmModel, vaeModel: s.vaeModel, embeddingModel: s.embeddingModel,
       // Planner-LM adapter (runtime LoRA on the 5Hz LM) — aceReq fields, so
       // they survive the LM-echo synth rebuild by construction.
@@ -481,6 +559,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
         ? s.adapterRuntimeQuant : undefined,
       // Merge low-VRAM storage (native-quant re-encode) — only relevant in merge mode.
       adapterMergeLowVram: (primary && s.adapterMode !== 'runtime' && s.adapterMergeLowVram) ? true : undefined,
+      // No-adapter reference render — only meaningful with a DiT adapter loaded.
+      noAdapterRender: (primary && s.noAdapterRender) ? true : undefined,
       // Basin re-base: only sent with an adapter and a chosen source. Works in
       // both merge and runtime modes (runtime folds the nudge into the delta sum);
       // the engine skips it on the per-section masking path.
@@ -495,6 +575,8 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       // placement — which silently dropped trigger words on Create/custom-gen.
       triggerPlacement: triggerWords.length ? triggerPlacement : undefined,
       inferenceSteps: s.inferenceSteps, guidanceScale: s.guidanceScale, shift: s.shift,
+      // ditSlidingWindow deliberately not sent while the feature is parked, so
+      // requests are byte-identical to pre-feature generations.
       cfgCutoffRatio: s.cfgCutoffRatio < 1.0 ? s.cfgCutoffRatio : undefined,
       lmCfgCutoffRatio: s.lmCfgCutoffRatio < 1.0 ? s.lmCfgCutoffRatio : undefined,
       cacheRatio: s.cacheRatio > 0 ? s.cacheRatio : undefined,
@@ -514,7 +596,10 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
       lmTopK: s.lmTopK, lmTopP: s.lmTopP, lmNegativePrompt: s.lmNegativePrompt,
       lmRepPenalty: s.lmRepPenalty > 1.0 ? s.lmRepPenalty : undefined,
       lmRepWindow: s.lmRepPenalty > 1.0 ? s.lmRepWindow : undefined,
-      audioCoverStrength: (!s.skipLm && s.lmCodesStrength < 1.0) ? s.lmCodesStrength : undefined,
+      lmRepMode: s.lmRepPenalty > 1.0 ? s.lmRepMode : undefined,
+      lmDryBase: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryBase : undefined,
+      lmDryMinLen: (s.lmRepPenalty > 1.0 && s.lmRepMode === 'dry') ? s.lmDryMinLen : undefined,
+      audioCoverStrength: (!s.skipLm && lmCodesEff < 1.0) ? lmCodesEff : undefined,
       postProcessingEnabled: s.postProcessingEnabled,
       spectralLifterEnabled: s.postProcessingEnabled ? s.spectralLifterEnabled : false,
       slDenoiseStrength: (s.postProcessingEnabled && s.spectralLifterEnabled) ? s.slDenoiseStrength : undefined,
@@ -571,6 +656,9 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
         : undefined,
       stableStepPreserveDynamics: (s.postProcessingEnabled && s.stableStepOn)
         ? s.stableStepPreserveDynamics !== false : undefined,
+      // Opt-in only — omitted means "leave the AS1.5 vocals alone"
+      stableStepVocalPpVae: (s.postProcessingEnabled && s.stableStepOn && s.stableStepVocalPpVae)
+        || undefined,
       stableStepBlendMode: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode !== 'off')
         ? s.stableStepBlendMode : undefined,
       stableStepCrossoverHz: (s.postProcessingEnabled && s.stableStepOn && s.stableStepBlendMode === 'crossover')
@@ -599,3 +687,13 @@ export const useGlobalParamsStore = create<any>()((set, get) => ({
     };
   },
 }));
+
+// One-shot boot sync. An existing install already has a DiT chosen in
+// localStorage that the server has never been told about, and a user who never
+// touches the dropdown again would otherwise never mirror it — leaving the
+// Training Studio on its old "first BF16 in the catalogue" fallback.
+mirrorActiveModels({
+  ditModel: useGlobalParamsStore.getState().ditModel || '',
+  lmModel: useGlobalParamsStore.getState().lmModel || '',
+  vaeModel: useGlobalParamsStore.getState().vaeModel || '',
+});

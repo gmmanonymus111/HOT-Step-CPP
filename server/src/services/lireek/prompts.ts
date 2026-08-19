@@ -14,11 +14,51 @@
 
 import { BLACKLISTED_WORDS, BLACKLISTED_PHRASES, OVERUSED_WORDS } from './slopDetector.js';
 import { stripLyricQuotes } from './llm/postprocess.js';
+// The nine-sentence plan the dataset captions were written to. Imported rather
+// than restated so a planned caption and a training caption stay one format.
+import { CAPTION_SENTENCE_PLAN } from '../training/captionPrompt.js';
 
 /** Loose profile shape — accepts both the app's LyricsProfile and the MCP's raw profile_data JSON. */
 export type PromptProfile = Record<string, any>;
 
 // ── Blueprint helpers ───────────────────────────────────────────────────────
+
+// ── Section-tag vocabulary ──────────────────────────────────────────────────
+//
+// Taken from the BASE MODEL's own documentation — ACE-Step-1.5 docs/en
+// Tutorial.md and ace_step_musicians_guide.md — not invented here. Those docs
+// list the tags below and state that "structure tags can be combined with `-`
+// for finer control" ([Chorus - anthemic], [Bridge - whispered]), with one
+// caution: "Don't stack too many tags."
+//
+// Two corrections this encodes (2026-08-08), both measured over the 1487
+// existing generations:
+//
+//   * [Build], [Drop] and [Breakdown] are DOCUMENTED base tags, but the prompts
+//     used to ban them as "invented labels". Result: zero uses of Build, Drop,
+//     Breakdown, Instrumental, Guitar Solo, Piano Interlude, Fade Out and
+//     Silence across all 1487 songs — the entire dynamic and instrumental half
+//     of the vocabulary was suppressed. Those are exactly the markers an
+//     electronic/metal arrangement needs.
+//   * [Instrumental Break: Guitar Solo] was given as an EXAMPLE, so it was
+//     copied 54 times. Neither the head nor the colon is documented; the docs
+//     specify a dash and the head [Instrumental] or [Guitar Solo].
+//
+// [Post-Chorus] and [Interlude] are not in the docs but appear 408 and 251
+// times in the real-song training lyrics, so they are demonstrably understood
+// and stay permitted.
+export const SECTION_LABEL_RULE: string =
+  '- SECTION HEADERS use square brackets. Recognised labels: [Intro], [Verse 1], [Verse 2], [Verse 3], ' +
+  '[Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Outro], ' +
+  '[Build], [Drop], [Breakdown], [Instrumental], [Guitar Solo], [Piano Interlude], [Fade Out], [Silence].\n' +
+  '  [Build], [Drop] and [Breakdown] are first-class labels — use them where the arrangement calls for them, ' +
+  'especially in electronic, dance and metal styles.\n' +
+  '  You may append ONE short performance annotation after a DASH: [Chorus - High Energy], ' +
+  '[Bridge - Sparse and Quiet], [Instrumental - Saxophone Solo]. Never use a colon ([Instrumental Break: Guitar Solo] is wrong), ' +
+  'and do not stack several annotations on one tag.\n' +
+  '  Do NOT invent labels like [X], [Hook] or [Solo] — for a solo use [Guitar Solo] or [Instrumental - <instrument> Solo].\n' +
+  '  INTROS: most records play a few bars before the first vocal, so DEFAULT to opening the song with an empty [Intro - Instrumental] — header, no lyric lines. Roughly one song in five should instead open straight on [Verse 1]; make that a deliberate choice for songs that want to slam in. If the song opens on SUNG material, tag it [Intro] and write the words.\n' +
+  '  NEVER write a BARE [Intro] or [Outro] with no lyric lines and no descriptor. The descriptor is what tells the music model to PLAY there rather than sing; without it an empty boundary tag is an open invitation the model fills with an arbitrarily long instrumental of its own choosing (a bare [Intro] once rendered 105 seconds of riffing). [Intro - Instrumental] and [Outro - Instrumental] are correct; a naked [Intro] above a blank line is not.';
 
 export const BLUEPRINT_LABEL_NAMES: Record<string, string> = {
   V: 'Verse', C: 'Chorus', B: 'Bridge', PC: 'Pre-Chorus',
@@ -94,6 +134,264 @@ export function blueprintToSections(bp: string): string[] {
 // sound adapter trained on the same album accurate. Sets without enrichment
 // (plain Genius fetches) get null here and every consumer skips silently.
 
+/** Per-example ceiling for the verbatim training captions shown to the planner. */
+const CAPTION_EXAMPLE_MAX_CHARS = 2000;
+
+// ── Vocal pacing ────────────────────────────────────────────────────────────
+//
+// The LM renders a song at EXACTLY its stated duration (98.4% of 1248 logged
+// runs stop within ±1s), so duration and lyric word count must agree or the
+// song either cuts off mid-phrase or pads with improvised filler. The
+// conversion rate is words-per-second of TOTAL duration — measured over 2361
+// real vocal songs it already prices in intros, solos and outros.
+//
+// CRITICAL: pacing is an ARTIST property, not a universal constant. Per-artist
+// medians run 0.51 w/s (Muse) to 3.29 (Eminem) — 6.5x — so always prefer the
+// artist's own measured rate (AlbumEnrichment.wordsPerSec) and use this global
+// median only when no measured rate exists.
+export const GLOBAL_WORDS_PER_SECOND = 1.20;
+
+// The vocal-idle floor. An artist's measured words/TOTAL-duration bakes their
+// INSTRUMENTAL share into the rate — and the model cannot render instrumental
+// time it is not told about. Deriving duration = words / 0.71 for Funeral For
+// A Friend stretched 235 words over 331s and the extra ~2 minutes rendered as
+// aimless looping riffs (Rob, 2026-08-08 — the first real listen after the
+// per-artist retime). Real FFAF fills that time with COMPOSED instrumental
+// passages; a generation's only channel for those is declared section tags.
+// So for DURATION DERIVATION the effective rate is floored here: undeclared
+// time is filler risk, not artistry. Declared instrumental sections still add
+// real time on top via the allowance.
+//
+// 1.25 is EAR-MEASURED, not assumed (2026-08-08 evening, n=2 but tight): with
+// the empty [Intro] stripped, the model sang 235 words in ~187s (1.26 w/s) and
+// 252 in ~205s (1.23 w/s), parking ALL remaining duration in the declared
+// instrumental outro — a 60s and a 30s tail respectively. The first floor of
+// 0.95 was still 25% below the model's real singing rate, and that 25% is
+// exactly the aimless tail Rob heard. The model sings at ~1.25 regardless of
+// the artist's TOTAL-duration rate; artists measured faster than 1.25
+// (rap: Eminem 3.29) carry their density in the lyrics themselves, which is
+// why the floor is max(), not a constant.
+export const VOCAL_FLOOR_WORDS_PER_SECOND = 1.25;
+
+// How much of a song may be INSTRUMENTAL, as a multiple of its sung time.
+//
+// The 1.25 floor above is the rate the model SINGS at, and treating it as the
+// rate the song RUNS at was an error: it priced every artist's instrumental
+// time at zero. Measured against 2009 real recordings (real lyrics, real
+// durations), `words / max(rate, 1.25)` reproduces the length of artists at or
+// above 1.25 w/s (median 1.00x) but shortens everyone below it (median 0.77x,
+// worst 0.26x) — and 90 of 160 albums measure below it. That is where the 1:38
+// Muse songs and 1:47 Pink Floyd songs came from.
+//
+// An artist's measured words/TOTAL-duration rate already IS their real total
+// length for a given word count, so `words / rate` is the unbiased answer
+// (median 1.00x across the corpus). It is capped here rather than used raw
+// because the extreme low rates are the ones that produce aimless filler:
+// Muse at 0.51 w/s would demand a song that is 59% empty. At 1.5 no song is
+// more than a third instrumental, which recovers essentially all of the bias
+// (median 0.99x, median error 2s vs 25s today — 1.6 buys 1s more and nothing
+// past that changes) while keeping a hard ceiling on undeclared empty time.
+export const INSTRUMENTAL_FACTOR_CAP = 1.5;
+
+// The effective floor on an artist's TOTAL-duration rate — the two constants
+// above expressed as the single number both the word budget and the duration
+// derivation are built from. Keeping them derived from one another is the
+// point: when the word target and the duration used different floors, a
+// compliant writer still produced a song whose length disagreed with its own
+// word count by the ratio between them.
+export const DURATION_RATE_FLOOR = VOCAL_FLOOR_WORDS_PER_SECOND / INSTRUMENTAL_FACTOR_CAP;
+
+const SECTION_TAG_LINE = /^[ \t]*\[[^\]]{1,60}\][ \t]*$/;
+
+/** Words of singable lyric in a lyrics text — section-tag lines excluded. */
+export function countLyricWords(lyrics: string): number {
+  let words = 0;
+  for (const line of String(lyrics ?? '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || SECTION_TAG_LINE.test(t)) continue;
+    words += t.split(/\s+/).filter(Boolean).length;
+  }
+  return words;
+}
+
+/** Section heads that occupy time without carrying lyrics. Bare [Intro]/[Outro]
+ *  are deliberately absent — an EMPTY bare boundary tag is an open invitation
+ *  the model fills from its adapter prior (a bare [Intro] on a Funeral For A
+ *  Friend song rendered 105s of riffing). But a boundary tag with an
+ *  explicitly instrumental descriptor ([Outro - Instrumental], [Intro - Guitar
+ *  Feedback]) is a DECLARED section and earns allowance time like any other. */
+const INSTRUMENTAL_HEADS = /^(instrumental|guitar solo|piano interlude|build|drop|breakdown|interlude|fade out)$/i;
+const INSTRUMENTAL_BOUNDARY = /^(intro|outro)$/i;
+const INSTRUMENTAL_DESC = /instrumental|solo|breakdown|build|riff|feedback|jam|ambient|drum/i;
+
+/** Bars a declared empty instrumental section is worth, by head. A flat 8 bars
+ *  for everything was too small for the passages that carry real weight — a
+ *  guitar solo or a breakdown is a 16-bar event, a bookend or a turnaround is
+ *  8, a fade is 4. At 120 BPM that is 32s / 16s / 8s. */
+function instrumentalSectionBars(head: string): number {
+  if (/^(guitar solo|instrumental|breakdown)$/i.test(head)) return 16;
+  if (/^fade out$/i.test(head)) return 4;
+  return 8;   // build, drop, interlude, piano interlude, declared intro/outro
+}
+
+/** Seconds of DECLARED empty instrumental time in a lyric — the passages the
+ *  writer explicitly asked for, which the model renders at its learned size
+ *  rather than filling with improvisation. */
+export function declaredInstrumentalSeconds(lyrics: string, bpm: number): number {
+  const barSeconds = bpm > 0 ? 240 / bpm : 2.0;
+  const lines = String(lyrics ?? '').split(/\r?\n/);
+  let bars = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!SECTION_TAG_LINE.test(t)) continue;
+    const [head, ...descParts] = t.slice(1, -1).split(/\s+[-–—]\s+/).map(s => s.trim());
+    const declared = INSTRUMENTAL_HEADS.test(head) ||
+      (INSTRUMENTAL_BOUNDARY.test(head) && descParts.length > 0 && INSTRUMENTAL_DESC.test(descParts.join(' ')));
+    if (!declared) continue;
+    let hasLyric = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      const u = lines[j].trim();
+      if (SECTION_TAG_LINE.test(u)) break;
+      if (u) { hasLyric = true; break; }
+    }
+    if (!hasLyric) bars += instrumentalSectionBars(head);
+  }
+  return bars * barSeconds;
+}
+
+/**
+ * The duration the written lyrics actually need, at this artist's pacing.
+ *
+ * Called AFTER the lyrics are final, because the writer LLM cannot reliably
+ * count its own words while writing — the word target gets it near, this makes
+ * the duration==content invariant hold by construction.
+ *
+ * Returns the planned duration unchanged when the two already agree within
+ * 15s (don't churn the planner's musical intent over noise), else the
+ * lyric-derived duration clamped to [60, 480]. The upper bound is 480 rather
+ * than 400 because the instrumental factor legitimately pushes long songs by
+ * slow artists past 400s — the corpus has real 7-minute Pink Floyd and
+ * Pendulum tracks, and clipping them at 400 would reintroduce the same
+ * truncation this change exists to remove.
+ */
+export function reconcileDurationToLyrics(
+  lyrics: string, bpm: number, plannedDuration: number, wordsPerSec?: number,
+): number {
+  const derived = lyricsDurationSeconds(lyrics, bpm, wordsPerSec);
+  if (!derived) return plannedDuration;
+  if (plannedDuration > 0 && Math.abs(derived - plannedDuration) <= 15) return plannedDuration;
+  return Math.max(60, Math.min(480, derived));
+}
+
+/** The UNCLAMPED seconds the written lyrics need at the given pacing —
+ *  reconcileDurationToLyrics without the stability window or bounds. 0 when
+ *  there are no lyric words. Exposed so batch tooling can see the true need
+ *  (a derived 430s that the clamp would hide is a "regenerate the lyrics"
+ *  signal, not a retiming). */
+export function lyricsDurationSeconds(lyrics: string, bpm: number, wordsPerSec?: number): number {
+  const rate = wordsPerSec && wordsPerSec > 0 ? wordsPerSec : GLOBAL_WORDS_PER_SECOND;
+  const words = countLyricWords(lyrics);
+  if (!words) return 0;
+
+  // A song is SUNG time plus INSTRUMENTAL time, and the two are measured
+  // differently. Sung time comes from the model's own ear-measured sing rate
+  // (1.25 w/s) — that part of the old formula was right and is unchanged.
+  const sung = words / Math.max(rate, VOCAL_FLOOR_WORDS_PER_SECOND);
+
+  // Instrumental time comes from either of two sources, whichever is larger —
+  // never their sum, which would double-count. The artist's own rate is words
+  // over TOTAL duration, so it ALREADY prices in their typical intro, solo and
+  // outro; adding declared sections on top of it charges for the same bars
+  // twice. Taking the max instead means the artist's measured shape is the
+  // baseline, and a writer who explicitly asks for MORE than that (three
+  // breakdowns, a long declared outro) gets the extra time.
+  const artistTotal = words / Math.max(rate, DURATION_RATE_FLOOR);
+  const declaredTotal = sung + declaredInstrumentalSeconds(lyrics, bpm);
+
+  return Math.round(Math.max(artistTotal, declaredTotal));
+}
+
+// ── Instrumental intro policy ───────────────────────────────────────────────
+//
+// Most records let the music establish itself before the first vocal. The
+// 2026-08-09 boundary-tag sweep removed every empty [Intro] because a BARE one
+// is an open invitation the model fills at whatever size its adapter prefers
+// (105s of riffing on one FFAF song). That was right about the bare tag and
+// wrong about the conclusion: with no tag at all the vocal now starts at 0s on
+// essentially every song. The fix is the DESCRIPTORED form — [Intro -
+// Instrumental] declares both that there is an intro and that nothing is sung
+// in it, which is the one shape the ear tests showed the model renders at a
+// sane, learned size.
+//
+// Not every song, though: some records genuinely slam straight into the first
+// verse. The share below is applied deterministically per song (hashed from a
+// stable seed, not random) so the same song always makes the same choice and
+// a re-run is reproducible.
+export const INSTRUMENTAL_INTRO_SHARE = 0.8;
+
+export const INSTRUMENTAL_INTRO_TAG = '[Intro - Instrumental]';
+
+/** Stable 0..1 from a seed string (FNV-1a). Deterministic across processes —
+ *  Math.random() here would make re-runs of the migration disagree. */
+function seedFraction(seed: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h / 0x100000000;
+}
+
+/**
+ * Give a lyric an explicit instrumental intro, unless it already opens with an
+ * intro of its own or the seed puts it in the ~20% that start on the vocal.
+ *
+ * Three cases, in order:
+ *  - opens with an [Intro...] carrying sung lines  → untouched (a sung intro
+ *    is a deliberate arrangement, not a missing one)
+ *  - opens with an EMPTY [Intro] (bare or descriptored non-instrumentally) →
+ *    upgraded to [Intro - Instrumental], the form the model handles sanely
+ *  - opens with anything else → the tag is inserted, subject to the share
+ *
+ * Returns null when nothing changed.
+ */
+export function ensureInstrumentalIntro(lyrics: string, seed: string): string | null {
+  const text = String(lyrics ?? '');
+  if (!text.trim()) return null;
+  const lines = text.split(/\r?\n/);
+
+  // First section tag in the lyric, and whether anything is sung under it.
+  let firstTag = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (SECTION_TAG_LINE.test(lines[i].trim())) { firstTag = i; break; }
+    if (lines[i].trim()) break;   // sung line before any tag — no header to read
+  }
+
+  if (firstTag >= 0) {
+    const label = lines[firstTag].trim().slice(1, -1);
+    const [head, ...descParts] = label.split(/\s+[-–—]\s+/).map(s => s.trim());
+    if (INSTRUMENTAL_BOUNDARY.test(head) && /^intro$/i.test(head)) {
+      let hasLyric = false;
+      for (let j = firstTag + 1; j < lines.length; j++) {
+        const u = lines[j].trim();
+        if (SECTION_TAG_LINE.test(u)) break;
+        if (u) { hasLyric = true; break; }
+      }
+      if (hasLyric) return null;                                    // sung intro, leave it
+      const desc = descParts.join(' ');
+      if (desc && INSTRUMENTAL_DESC.test(desc)) return null;        // already declared
+      lines[firstTag] = INSTRUMENTAL_INTRO_TAG;                     // upgrade bare/vague
+      return lines.join('\n');
+    }
+  }
+
+  if (seedFraction(seed) >= INSTRUMENTAL_INTRO_SHARE) return null;  // the ~20% with no intro
+
+  const at = firstTag >= 0 ? firstTag : 0;
+  lines.splice(at, 0, INSTRUMENTAL_INTRO_TAG, '');
+  return lines.join('\n');
+}
+
 export interface AlbumEnrichment {
   bpmMin: number;               // 0 when no track had a BPM
   bpmMax: number;
@@ -103,6 +401,13 @@ export interface AlbumEnrichment {
   captionExamples: string[];    // up to 3 verbatim training captions
   enrichedSongs: number;        // songs carrying at least one enriched field
   totalSongs: number;
+  /** This artist's measured vocal pacing: median words-per-second over songs
+   *  carrying both lyrics and a real duration. 0 = unknown (fall back to
+   *  GLOBAL_WORDS_PER_SECOND). Per-artist medians span 0.51 (Muse) to 3.29
+   *  (Eminem) — a 6.5x spread — so a global constant misprices most artists. */
+  wordsPerSec: number;
+  /** How many songs the pacing median was computed over. */
+  pacedSongs: number;
 }
 
 /** Unique non-empty values ordered by frequency (ties keep first-seen order). */
@@ -134,6 +439,7 @@ export function computeAlbumEnrichment(
   const genres: string[] = [];
   const signatures: string[] = [];
   const captions: string[] = [];
+  const paceRates: number[] = [];
   let enriched = 0;
 
   for (const s of songs) {
@@ -143,6 +449,15 @@ export function computeAlbumEnrichment(
     const genre = typeof s.genre === 'string' ? s.genre.trim() : '';
     const signature = typeof s.signature === 'string' ? s.signature.trim() : '';
     const caption = typeof s.caption === 'string' ? s.caption.trim() : '';
+    // Vocal pacing needs BOTH real lyrics and a real duration on the same song.
+    const dur = Number(s.duration);
+    if (Number.isFinite(dur) && dur > 30 && typeof s.lyrics === 'string') {
+      const words = countLyricWords(s.lyrics);
+      const rate = words / dur;
+      // Per-song clamp guards against corrupt metadata (one dataset measures a
+      // physically impossible 8 w/s — bad sidecar durations, not fast rapping).
+      if (words >= 40 && rate >= 0.3 && rate <= 3.6) paceRates.push(rate);
+    }
     const has = (Number.isFinite(bpm) && bpm > 0) || !!key || !!genre || !!caption || !!signature;
     if (!has) continue;
     enriched++;
@@ -154,7 +469,14 @@ export function computeAlbumEnrichment(
     if (caption) captions.push(caption);
   }
 
-  if (!enriched) return null;
+  if (!enriched && !paceRates.length) return null;
+
+  // Median over at least 4 songs; fewer is too noisy to trust over the global.
+  let wordsPerSec = 0;
+  if (paceRates.length >= 4) {
+    const sorted = [...paceRates].sort((a, b) => a - b);
+    wordsPerSec = Math.round(sorted[Math.floor(sorted.length / 2)] * 100) / 100;
+  }
 
   return {
     bpmMin: bpms.length ? Math.min(...bpms) : 0,
@@ -162,10 +484,184 @@ export function computeAlbumEnrichment(
     keys: freqRank(keys),
     genres: freqRank(genres),
     signatures: freqRank(signatures),
-    captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, 500)),
+    // Cap generously, not tightly: a Side-Step caption is nine sentences and
+    // runs ~1100-1600 chars, and the LAST three sentences are the only
+    // description of arrangement over time (opening/buildup, drop/break,
+    // climax/outro) anywhere in the conditioning. Truncating to 500 amputated
+    // every example mid-caption, and the planner faithfully copied the
+    // amputation — captions came back at ~520 chars with no structure at all.
+    captionExamples: [...new Set(captions)].slice(0, 3).map(c => c.slice(0, CAPTION_EXAMPLE_MAX_CHARS)),
     enrichedSongs: enriched,
     totalSongs: songs.length,
+    wordsPerSec,
+    pacedSongs: paceRates.length,
   };
+}
+
+// ── Caption re-planning ─────────────────────────────────────────────────────
+//
+// Rewrites the caption of an EXISTING generation into the nine-sentence format
+// the sound adapters were actually trained on, leaving its lyrics, title,
+// subject, bpm, key and duration untouched. Used by the bulk migration of
+// captions written before the 2026-08-08 format fix, which came out at
+// 258-986 chars against training captions of 1149-1537.
+//
+// The caption describes music that does NOT exist yet, so the only evidence is
+// the lyrics — above all their section tags, which are what sentences 7-9 have
+// to be derived from. A weak model's failure mode here is reaching for "the
+// drop" and "the breakdown" on a ballad; the rules below name that explicitly.
+
+export const CAPTION_REPLAN_SYSTEM_PROMPT = `You write music-dataset captions that condition an AI music generator.
+
+You will be given an artist's real training captions, then a batch of planned songs. For each song write ONE new caption in exactly the same format as those training captions.
+
+Return ONLY a JSON object mapping each song id to its caption string:
+{"123": "<caption>", "124": "<caption>"}
+
+No markdown, no code fences, no commentary.`;
+
+/** One song whose caption is being re-planned. Lyrics carry the section tags. */
+export interface CaptionReplanSong {
+  id: number;
+  title: string;
+  subject?: string | null;
+  bpm?: number | null;
+  key?: string | null;
+  duration?: number | null;
+  lyrics: string;
+}
+
+/**
+ * Build the user prompt for a batch of songs from ONE lyrics set.
+ *
+ * Batching per set is deliberate: the caption examples are the bulk of the
+ * prompt and are identical for every song in the set, so sending them once per
+ * set instead of once per song is a large token saving across ~190 sets.
+ */
+export function buildCaptionReplanPrompt(
+  profile: PromptProfile, songs: CaptionReplanSong[], captionExamples?: string[],
+): string {
+  const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+  const examples = captionExamples?.length ? captionExamples : (enrich?.captionExamples ?? []);
+  const lines: string[] = [];
+
+  if (examples.length) {
+    lines.push("REAL TRAINING CAPTIONS — these describe the actual recordings this artist's sound adapter was trained on. Match their format, register, vocabulary and level of detail exactly:", '');
+    examples.forEach((c, i) => lines.push(`  ${i + 1}. "${c}"`, ''));
+  }
+  if (enrich) lines.push(...formatAlbumEnrichment(enrich), '');
+
+  lines.push(
+    'CAPTION RULES (all mandatory):',
+    '- ONE line of EXACTLY 9 complete prose sentences. Not a comma-separated tag list.',
+    '- Each sentence covers one topic, in this order:',
+    ...CAPTION_SENTENCE_PLAN.map(s => `    - ${s}`),
+    '- Never name the artist, the band or the song title.',
+    '- Never state the BPM number, the key name or the time signature in the prose — they are separate fields.',
+    "- Avoid review or marketing language ('captivating', 'emotionally resonant', 'a journey'). Use concrete audio detail.",
+    '',
+    'DERIVE SENTENCES 7, 8 AND 9 FROM THE SONG\'S OWN SECTION TAGS — not from a template:',
+    '- The lyrics below carry tags such as [Intro], [Verse], [Pre-Chorus], [Chorus], [Bridge - Heavy Breakdown], [Bridge - Sparse and Quiet], [Outro - Whispered]. They tell you what actually happens and when.',
+    '- If a song has no breakdown, do NOT invent one. A ballad or a quiet track must describe the lift into its chorus and its sparse bridge, not "the drop".',
+    '- Match the stated tempo and key quality: a slow minor song and a fast major one must not get the same energy language.',
+    '- Sentence 9 must describe how THIS song ends, which its final tag tells you.',
+    '',
+    `SONGS (${songs.length}):`,
+  );
+
+  for (const s of songs) {
+    lines.push(
+      '',
+      `--- id ${s.id} ---`,
+      `Title: ${s.title}`,
+      ...(s.subject ? [`Subject: ${s.subject}`] : []),
+      `Tempo: ${s.bpm ?? 'unknown'} BPM | Key: ${s.key ?? 'unknown'} | Duration: ${s.duration ?? 'unknown'}s`,
+      'Lyrics:',
+      s.lyrics,
+    );
+  }
+
+  lines.push('', `Return the JSON object now, with exactly ${songs.length} entries.`);
+  return lines.join('\n');
+}
+
+// ── Lyric density rewrite ───────────────────────────────────────────────────
+//
+// Fixes songs whose lyrics are the wrong WORD DENSITY for their artist: written
+// before per-artist pacing existed, a sparse lyric on a fast artist (needs
+// EXPANSION) or a wordy lyric on a slow artist (needs CONDENSING) cannot be
+// fixed by retiming — the derived duration lands outside anything the artist
+// actually records. The song's identity (title, subject, hooks, section
+// sequence) is kept; only the quantity of lyric per section changes. The
+// section SEQUENCE must survive because each song's caption describes that
+// arc (sentences 7-9) and was written against it.
+
+export const LYRIC_DENSITY_REWRITE_SYSTEM_PROMPT = `You are a professional songwriter performing a surgical rewrite. Each song below already has its identity — title, subject, hook, section structure — but the WRONG AMOUNT of lyric for how this artist actually sings. Your job is to expand or condense each lyric to a target word count while keeping the song recognisably the same song, in the artist's voice.
+
+Rules, all mandatory and machine-validated:
+- Hit each song's TARGET WORD COUNT within ±10%. Count words in lyric lines only (section tags don't count).
+- KEEP the song's title concept, subject, narrative and main hook lines. Keep the SAME SECTION SEQUENCE in the same order — you may change how many lines each section holds, but not reorder, add or remove sections (exception: when EXPANDING you may add [Pre-Chorus] before an existing [Chorus], or repeat the final [Chorus], if the target is otherwise unreachable).
+- EXPANDING means adding CONTENT — concrete images, narrative detail, call-and-response, ad-libs, hook repetitions — never filler words stretched thin. Study the reference lyric for how densely this artist packs a line.
+- CONDENSING means cutting to the strongest material — keep the hook and the sharpest images, drop whole lines rather than thinning every line.
+- Match the reference lyric's line lengths and phrasing density. It is a real song by this artist.
+- Every lyric line must end with punctuation (period, comma, exclamation, question mark, dash, or ellipsis).
+- No "Title:" line, no commentary. Lyrics start at the first section tag.
+- Avoid AI-cliché words: neon, ethereal, embers, silhouette, static, void, shimmering, tapestry, gasoline, halogen.
+
+Return ONLY a JSON object mapping each song id to its complete rewritten lyrics string (with \\n newlines):
+{"123": "[Intro]\\n\\n[Verse 1]\\n...", ...}
+No markdown fences, no commentary.`;
+
+export interface DensityRewriteSong {
+  id: number;
+  title: string;
+  subject?: string | null;
+  bpm?: number | null;
+  key?: string | null;
+  targetDuration: number;
+  targetWords: number;
+  currentWords: number;
+  lyrics: string;
+}
+
+export interface DensityRewriteRef {
+  title: string;
+  duration: number;
+  words: number;
+  lyrics: string;
+}
+
+/** Per-set batch prompt: artist pacing context + one real reference lyric sent
+ *  once, then every song needing a rewrite in that set. */
+export function buildDensityRewritePrompt(
+  artist: string, rate: number, albumMedianSec: number,
+  ref: DensityRewriteRef | null, songs: DensityRewriteSong[],
+): string {
+  const lines: string[] = [
+    `Artist: ${artist}`,
+    `Measured vocal pacing: ${rate.toFixed(2)} words per second of song time (from their real recordings). A typical song by this artist runs ~${albumMedianSec}s.`,
+    '',
+    ...SECTION_LABEL_RULE.split('\n'),
+  ];
+  if (ref) {
+    lines.push('', `=== REFERENCE — a real lyric by this artist ("${ref.title}", ${ref.duration}s, ${ref.words} words). Match its density and voice, do NOT copy its content: ===`, '', ref.lyrics);
+  }
+  lines.push('', `=== SONGS TO REWRITE (${songs.length}) ===`);
+  for (const s of songs) {
+    const dir = s.targetWords > s.currentWords ? 'EXPAND' : 'CONDENSE';
+    lines.push(
+      '',
+      `--- id ${s.id} ---`,
+      `Title: ${s.title}`,
+      ...(s.subject ? [`Subject: ${s.subject}`] : []),
+      `Tempo: ${s.bpm ?? 'unknown'} BPM | Key: ${s.key ?? 'unknown'} | Target duration: ${s.targetDuration}s`,
+      `${dir}: currently ${s.currentWords} words -> TARGET ${s.targetWords} words (±10%).`,
+      'Current lyrics:',
+      s.lyrics,
+    );
+  }
+  lines.push('', `Return the JSON object now, with exactly ${songs.length} entries.`);
+  return lines.join('\n');
 }
 
 /** The shared "=== AUDIO ANALYSIS ===" prompt block (facts only, no guidance). */
@@ -179,6 +675,9 @@ export function formatAlbumEnrichment(e: AlbumEnrichment): string[] {
   if (e.keys.length) lines.push(`Keys used: ${e.keys.join(', ')}`);
   if (e.genres.length) lines.push(`Detected genre: ${e.genres.join(', ')}`);
   if (e.signatures.length) lines.push(`Time signatures: ${e.signatures.join(', ')}`);
+  if (e.wordsPerSec > 0) {
+    lines.push(`Vocal pacing: ~${e.wordsPerSec.toFixed(2)} words/second of song time (median of ${e.pacedSongs} tracks) — plan duration and lyric quantity around this rate.`);
+  }
   lines.push(`(from ${e.enrichedSongs} of ${e.totalSongs} tracks)`);
   return lines;
 }
@@ -201,13 +700,11 @@ The rules below come in two tiers. TIER 1 rules are mechanical requirements of t
 === TIER 1: PIPELINE REQUIREMENTS (HARD — the music model breaks if violated) ===
 
 - NO TITLE: Write ONLY the lyrics — no "Title:" line, no heading. Start directly with the first section header.
-- SECTION HEADERS use square brackets. Recognised labels: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro].
-  You may append a short performance annotation where it helps the music: [Chorus - High Energy], [Bridge - Sparse and Quiet], [Instrumental Break: Guitar Solo].
-  Do NOT use bare invented labels like [X], [Drop], [Breakdown], [Solo], [Hook] — the pipeline does not understand them.
+${SECTION_LABEL_RULE}
 - PUNCTUATION: Every lyric line MUST end with punctuation (period, comma, exclamation mark, question mark, dash, or ellipsis). The vocal model uses it for phrasing.
 - CHORUS: Every song needs at least one [Chorus]. If a section repeats throughout the song, it is a chorus — label it [Chorus], not [Bridge]. A bridge is a one-time contrasting section, typically appearing once before the final chorus.
 - LINE BUDGET: If the user prompt gives a duration budget with a maximum total line count, treat it as a hard ceiling — the music model skips lines beyond it and the song comes out truncated.
-- INSTRUMENTAL INTRO: Default to opening with an instrumental [Intro] — just the header, no lyric lines under it — so the music establishes itself before vocals enter. If this particular song genuinely wants to slam straight into the first verse, you may skip it; make that a deliberate, occasional choice. NEVER write count-ins like "One, two, three, four!".
+- INSTRUMENTAL INTRO: Let the music establish itself before the vocals enter. Open the song with an empty [Intro - Instrumental] header — no lyric lines under it — on MOST songs; roughly one in five should instead slam straight into [Verse 1], as a deliberate choice for songs that want it. The descriptor is not optional: a bare [Intro] with nothing under it invites an arbitrarily long instrumental of the model's own choosing, while [Intro - Instrumental] renders at a sane, learned size. If this song opens on SUNG material, tag it [Intro] and write those words instead. NEVER write count-ins like "One, two, three, four!".
 
 === TIER 2: STYLE TARGETS (calibrate to THIS artist — deviate only with intent) ===
 
@@ -308,6 +805,7 @@ CAPTION:
 - Match the artist's known sound and production aesthetic
 - Keep it to 1-3 sentences of comma-separated descriptors
 - Example: "indie rock, driving electric guitars, male vocal, raw and energetic, garage production, anthemic chorus, 2010s alternative"
+- OVERRIDE: if the user prompt supplies "Captions describing this album's actual recordings", ignore the two rules above (comma-separated list, 1-3 sentences) and follow the caption format given there instead — matching the training captions matters more than brevity
 
 DURATION:
 - Estimate the total track duration in seconds (any integer value is fine — do NOT round to multiples of 5)
@@ -484,8 +982,7 @@ REFINEMENT RULES
 
 FORMATTING RULES
 - The FIRST LINE must be: Title: <song title> (keep the original title unless it's clearly weak or uses banned title words)
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID SECTION LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro]. A short performance annotation after the label is fine ([Chorus - High Energy], [Instrumental Break: Guitar Solo]). Do NOT use bare invented labels like [X], [Breakdown], [Drop], [Solo], [Hook].
+${SECTION_LABEL_RULE}
 - Every lyric line must end with proper punctuation
 - Do NOT include any commentary, notes, explanations, or annotations
 - Output ONLY the title and refined lyrics
@@ -631,10 +1128,9 @@ export const INSTAGEN_LYRIC_SYSTEM_PROMPT = `You are a talented songwriter. You 
 
 FORMATTING RULES (MANDATORY):
 - Start with the first section header (e.g. [Intro] or [Verse 1]). No title line.
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Instrumental Break], [Outro]. No other bare labels.
+${SECTION_LABEL_RULE}
 - Every lyric line must end with punctuation (period, comma, exclamation, question mark, dash, or ellipsis).
-- Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse.
+- Open MOST songs with an empty [Intro - Instrumental] header (no lyric lines under it) so the music establishes itself before the vocal; about one song in five should start straight on [Verse 1] instead. Never write a BARE [Intro] with nothing under it — without the "- Instrumental" descriptor the music model fills it with an arbitrarily long instrumental of its own choosing.
 
 STRUCTURE RULES:
 - VERSES: keep line counts even — typically 4 or 8 lines each.
@@ -710,11 +1206,10 @@ CRITICAL TAG RULES:
 === LYRICS (the "lyrics" field) ===
 
 FORMATTING:
-- Section headers use square brackets: [Verse 1], [Chorus], [Bridge], etc.
-- VALID LABELS: [Intro], [Verse 1], [Verse 2], [Verse 3], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude], [Outro], [Instrumental Break]
-- Section annotations with context are encouraged: [Verse 1: Female Vocal], [Chorus - High Energy with Layered Vocals], [Bridge - Atmospheric and Sparse], [Instrumental Break: Saxophone Solo]
+${SECTION_LABEL_RULE}
+- Section annotations are encouraged where they help the arrangement: [Verse 1 - Female Vocal], [Chorus - High Energy], [Bridge - Atmospheric and Sparse], [Instrumental - Saxophone Solo]
 - Every lyric line must end with punctuation
-- Begin with an [Intro] section (instrumental, no lyrics — just the header) before the first verse
+- Open MOST songs with an empty [Intro - Instrumental] header (no lyric lines under it) so the music establishes itself before the vocal; about one song in five should start straight on [Verse 1] instead. Never write a BARE [Intro] with nothing under it — without the "- Instrumental" descriptor the music model fills it with an arbitrarily long instrumental of its own choosing.
 
 STRUCTURE:
 - VERSES: keep line counts even — typically 4 or 8 lines each
@@ -778,12 +1273,22 @@ export function buildMetadataPrompt(
   if (profile.perspective) lines.push(`Perspective / voice: ${profile.perspective}`);
 
   // Audio truth from the source recordings (Training Studio export). Guidance,
-  // not a cage: the planner may leave the ranges when the subject demands it.
+  // not a cage — but the tempo bound IS firm now. Measured over the existing
+  // 1487 generations, 94.8% already sat inside their album's range; the 73 that
+  // did not skewed to both extremes (42 slower than anything on the record, 31
+  // faster) because bulk runs were being told to write "a ballad and a fast
+  // one" per album. That produces a 68 BPM Bowie against a 113-137 album and a
+  // 96 BPM Electric Callboy against 118-178 — tempos those artists never play
+  // on that record. Variety has to come from inside the artist's own range.
   const enrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
   if (enrich) {
     lines.push('', ...formatAlbumEnrichment(enrich));
     if (enrich.bpmMax > 0) {
-      lines.push(`Choose a BPM inside the album's measured range (${enrich.bpmMin}–${enrich.bpmMax}) unless the subject truly demands otherwise.`);
+      lines.push(
+        `TEMPO: choose a BPM inside this album's measured range (${enrich.bpmMin}–${enrich.bpmMax}). That range IS this artist's range on this record — it is measured from the actual recordings, not a guess.`,
+        'Do NOT reach outside it for contrast. If the album has no slow songs, this artist does not write a ballad here; if it has no fast songs, do not write a thrash number. Ignore any generic genre tempo table in favour of these measured values.',
+        'Get variety from WITHIN the range — pick a different point in it than recent songs, and vary the feel, subject, key and arrangement rather than the extremes.',
+      );
     }
     if (enrich.keys.length) {
       lines.push('Prefer a key from this album\'s list (or a closely related key) so the song sits in the same tonal world.');
@@ -794,7 +1299,16 @@ export function buildMetadataPrompt(
     if (enrich.captionExamples.length) {
       lines.push('', 'Captions describing this album\'s actual recordings:');
       enrich.captionExamples.forEach((c, i) => lines.push(`  ${i + 1}. "${c}"`));
-      lines.push('Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.');
+      // "Same format as these examples" is not enough on its own: the planner
+      // reads the examples as a style hint and still obeys the system prompt's
+      // "1-3 sentences" rule, so it emits a third of a caption and drops the
+      // arrangement sentences entirely. Spell the nine slots out instead.
+      lines.push(
+        'Write the new song\'s "caption" in the SAME format, register and level of detail as these examples — consistent caption phrasing keeps a sound adapter trained on this album accurate.',
+        'This OVERRIDES the caption length and comma-separated-list rules in the system prompt. Specifically, the caption must be ONE line of EXACTLY 9 complete prose sentences, each covering one topic in this order:',
+        ...CAPTION_SENTENCE_PLAN.map(s => `  - ${s}`),
+        'Do not name the artist or the song. Keep BPM, key and time signature out of the caption prose — they are separate fields.',
+      );
     }
   }
 
@@ -933,34 +1447,97 @@ export function buildGenerationPrompt(
     const sectionCount = bpParts.length;
     const transitionBars = (sectionCount - 1) * 2;
 
-    // BPM-aware bars-per-line: fast tempos need more bars per line because
-    // each bar is shorter in real time and the music model needs breathing room.
-    // Scale from 2.5 bars/line at ≤80 BPM to 4.0 bars/line at ≥180 BPM.
-    const barsPerLine = Math.min(4.0, Math.max(2.5, 2.5 + 1.5 * ((bpm - 80) / 100)));
+    // Budget in WORDS, not lines, and do not scale with tempo.
+    //
+    // Measured over 2361 real vocal songs in the training datasets (duration +
+    // lyrics from their sidecars): vocal pacing is ~1.20 words/second and is
+    // essentially FLAT across tempo — 1.28 w/s at 90-110 BPM, 1.12 at 110-150,
+    // 1.36 at 170+. Seconds-per-line is likewise flat at ~5.3s.
+    //
+    // The old formula charged every line the same time and scaled that time
+    // with BPM (7.5s/line at 80 BPM down to 5.3s at 180). Both halves were
+    // wrong, but the damage is VARIANCE, not bias: generated songs already
+    // averaged 1.16 words/sec against the corpus 1.20, i.e. the median song
+    // was fine. The spread is the problem — p5 0.74 to p95 1.63 w/s, a 2.19x
+    // range — because average line length varies 1.89x between songs (6.1 to
+    // 11.4 words) and a line count cannot express a time budget. Short-lined
+    // songs got far too much time, wordy ones far too little.
+    //
+    // Why it matters: the LM stops at EXACTLY the requested duration (98.4% of
+    // 1248 logged runs, within +/-1s) — it is not truncated, it is obeying the
+    // duration it was given. Under-budget the words and the vocal ends early,
+    // so the model improvises an instrumental tail and the duration wall cuts
+    // whatever it invented mid-phrase. That is the "enters a guitar solo then
+    // cuts off" failure, and the "all sections crammed into the first half"
+    // failure — one cause, two appearances.
+    // THIS ARTIST'S measured pacing first, global median only as fallback —
+    // per-artist medians span 0.51 to 3.29 w/s, so the global constant
+    // misprices most artists (a third of the words Eminem needs, nearly double
+    // what Pink Floyd sings). The rate is words over TOTAL duration, so it
+    // already prices in intros, instrumental breaks and outros — never apply
+    // it to a transitions-deducted figure, that discounts the same time twice.
+    const paceEnrich: AlbumEnrichment | null = profile.audio_enrichment ?? null;
+    const artistRate = paceEnrich && paceEnrich.wordsPerSec > 0 ? paceEnrich.wordsPerSec : 0;
+    // FLOORED for the word target — but at the same floor the DURATION uses
+    // (DURATION_RATE_FLOOR), not at the sing rate. These two numbers must be
+    // the same number. When the word target was floored at 1.25 and the
+    // duration derived at the artist's rate, a writer who hit the target
+    // exactly still produced a song whose derived length disagreed with the
+    // plan by the ratio between the floors — asking Muse for 2.5x the words
+    // real Muse songs carry, then timing the result as if they had written
+    // their normal amount. One floor, used by both, is what makes a compliant
+    // writer land on the planned duration by construction.
+    const wordsPerSecond = Math.max(artistRate || GLOBAL_WORDS_PER_SECOND, DURATION_RATE_FLOOR);
+    // Time this artist spends NOT singing, in seconds of this song. The word
+    // budget is the sung part; this is the remainder, and it only becomes real
+    // music if the writer DECLARES it as sections — undeclared, the model
+    // improvises into it and the duration wall cuts whatever it invented.
+    // Only artists BELOW the sing rate have instrumental time to declare —
+    // a denser artist (Rancid 1.69, Eminem 3.29) carries their density in the
+    // lyrics and sings faster than the floor, so their song is sung end to end.
+    const sungSeconds = Math.min(targetDuration,
+      Math.round(targetDuration * (wordsPerSecond / VOCAL_FLOOR_WORDS_PER_SECOND)));
+    const instrumentalSeconds = Math.max(0, targetDuration - sungSeconds);
+    const instrumentalBars = Math.round(instrumentalSeconds / barSeconds);
+    const instrumentalShare = targetDuration > 0
+      ? Math.round(100 * instrumentalSeconds / targetDuration) : 0;
+    const WORDS_PER_LINE_LO = 5.5;   // sparse phrasing -> more lines needed
+    const WORDS_PER_LINE_HI = 8.0;   // wordy phrasing  -> fewer lines needed
     const singableBars = totalBars - transitionBars;
-    const maxLyricLines = Math.max(8, Math.floor(singableBars / barsPerLine));
+    const targetWords = Math.round(targetDuration * wordsPerSecond);
+    const minLyricLines = Math.max(8, Math.floor(targetWords / WORDS_PER_LINE_HI));
+    const maxLyricLines = Math.max(minLyricLines + 4, Math.ceil(targetWords / WORDS_PER_LINE_LO));
     const minutes = Math.floor(targetDuration / 60);
     const seconds = Math.round(targetDuration % 60);
 
-    lines.push('', '=== DURATION BUDGET (HARD LIMIT — DO NOT EXCEED) ===');
-    lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')})`);
-    lines.push(`BPM: ${bpm} — one bar of 4/4 = ${barSeconds.toFixed(1)} seconds`);
-    lines.push(`Total bars available: ~${totalBars} bars for the entire song`);
-    lines.push(`At this tempo, each lyric line needs ~${barsPerLine.toFixed(1)} bars (vocal delivery + melodic phrasing).`);
-    lines.push(`After accounting for ~${transitionBars} bars of transitions, you have ~${singableBars} singable bars.`);
-    lines.push(`*** MAXIMUM LYRIC LINES: ${maxLyricLines} total lines across ALL sections. ***`);
-    lines.push(`This is a HARD LIMIT. The music model WILL skip lines if you write more than ${maxLyricLines}.`);
-    lines.push('');
-    lines.push('USE THIS TO DECIDE LINE COUNTS:');
-    if (maxLyricLines <= 16) {
-      lines.push('- This is a SHORT/FAST song. Use 4-line verses and 4-line choruses ONLY. Minimal sections.');
-      lines.push('- Consider dropping one verse or chorus from the suggested structure if needed to stay under the line limit.');
-    } else if (maxLyricLines <= 28) {
-      lines.push('- This is a STANDARD-length song. Use 4-line verses and 4-line choruses. One verse can be 6 or 8 lines if budget allows.');
-    } else {
-      lines.push('- This is a LONGER song. You can use 6-8 line verses and choruses if the structure calls for it.');
+    lines.push('', '=== DURATION BUDGET ===');
+    lines.push(`Target duration: ${targetDuration} seconds (${minutes}:${String(seconds).padStart(2, '0')}) at ${bpm} BPM.`);
+    lines.push(`That is ~${totalBars} bars, of which ~${singableBars} carry vocals once transitions are allowed for.`);
+    lines.push(artistRate
+      ? `This artist sings a measured ~${artistRate.toFixed(2)} words per second (median of ${paceEnrich!.pacedSongs} of their real recordings).`
+      : `Assuming a typical ~${GLOBAL_WORDS_PER_SECOND.toFixed(2)} words per second of vocal pacing (no measured rate for this artist).`);
+    if (instrumentalSeconds >= 12) {
+      lines.push(
+        `The model sings at ~${VOCAL_FLOOR_WORDS_PER_SECOND} words per second, so the ${targetWords} words below occupy about ${sungSeconds}s of the ${targetDuration}s.`,
+        `*** THE REMAINING ~${instrumentalSeconds}s (~${instrumentalBars} bars, ${instrumentalShare}% of the song) IS INSTRUMENTAL — YOU MUST DECLARE IT AS SECTIONS. ***`,
+        'That time exists on this artist\'s real records: it is the intro, the turnaround between sections, the solo and the outro. It is NOT slack in the word count — do not write more words to fill it, and do not ignore it.',
+        'Declare it with EMPTY sections (a header with no lyric lines under it). Budget roughly:',
+        '  - [Intro - Instrumental] — 8 bars. Start the song with this unless it deliberately opens on the vocal.',
+        '  - [Guitar Solo] / [Instrumental] / [Breakdown] — 16 bars each, placed where this artist would put one.',
+        '  - [Build] / [Drop] / [Interlude] — 8 bars each.',
+        '  - [Outro - Instrumental] — 8 bars, if the song plays out rather than ending on a sung line.',
+        `Pick the combination that adds up to roughly ${instrumentalBars} bars and fits this artist. Undeclared empty time renders as aimless looping filler — declared time renders as an arrangement.`,
+      );
     }
-    lines.push(`- Count your total lyric lines before finalising. If you exceed ${maxLyricLines} lines, the music model WILL skip content.`);
+    lines.push(`*** WRITE APPROXIMATELY ${targetWords} WORDS of lyrics in total, across ALL sections. ***`);
+    lines.push(`That is roughly ${minLyricLines}-${maxLyricLines} lines depending on how long your lines are — count WORDS, not lines, because a wordy line takes far longer to sing than a short one.`);
+    lines.push('');
+    lines.push('THIS IS A TARGET TO HIT, NOT A CEILING TO STAY UNDER — missing it in either direction damages the song:');
+    lines.push(`- Well UNDER ${targetWords} words: the vocal finishes long before the track does, and the music model fills the remainder with aimless repetition or an instrumental passage that gets cut off mid-phrase.`);
+    lines.push(`- Well OVER ${targetWords} words: the song runs out of time and stops mid-section.`);
+    lines.push(`- Count your words before finalising. Within about 10% of ${targetWords} is right.`);
+    lines.push('- Repeated chorus lines DO count — a repeat takes just as long to sing as a new line.');
+    lines.push(`- If this song genuinely wants fewer words than ${targetWords} — a sparse, atmospheric or riff-led track — then DECLARE the extra instrumental time instead of leaving it implicit: add another [Instrumental], [Guitar Solo], [Build] or [Breakdown] section where that space belongs. Real records fill their gaps deliberately; an undeclared gap gets filled with aimless repetition.`);
   }
 
   lines.push(

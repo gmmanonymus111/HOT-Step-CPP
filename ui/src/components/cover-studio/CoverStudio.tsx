@@ -18,6 +18,7 @@ import {
 import { SourcePanel } from './SourcePanel';
 import { ArtistSettingsPanel } from './ArtistSettingsPanel';
 import { ActivitySidebar } from '../shared/ActivitySidebar';
+import { BackendCapabilityGate } from '../shared/BackendCapabilityGate';
 import { StemMixer, type StemControl, type MixerStemInfo } from '../shared/StemMixer';
 import {
   addManualQueueItem, updateManualQueueItem,
@@ -612,6 +613,7 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
             audioUrl: s.result?.audioUrls?.[0] || '',
             songId: s.result?.songIds?.[0],
             masteredAudioUrl: s.result?.masteredAudioUrl,
+            noAdapterAudioUrl: s.result?.noAdapterAudioUrl,
             audioDuration: s.result?.duration,
           });
           resolve();
@@ -698,6 +700,7 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
 
   // ── Render ──
   return (
+    <BackendCapabilityGate feature="cover">
     <div className="flex flex-col w-full h-full bg-zinc-50 dark:bg-suno overflow-hidden">
       {/* Toast */}
       {toast && (
@@ -821,5 +824,6 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
         </div>
       </div>
     </div>
+    </BackendCapabilityGate>
   );
 };

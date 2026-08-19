@@ -452,10 +452,32 @@ export async function runTrainDitJob(job: TrainingJob): Promise<void> {
       }
     }
 
-    // Album presets follow the newest run automatically (Rob, 2026-07-29).
-    const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'dit');
-    if (presetsTouched) {
-      pushLog(`[Training] train-dit job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
+    // Album presets follow the newest run automatically (Rob, 2026-07-29) —
+    // UNLESS calibration is queued: it has the final say on which adapter
+    // serves (calibrateRunner PRESET RULE), so a fresh-but-worse run must not
+    // capture the preset first.
+    if (!(opts.calibrate && opts.stages.includes('export'))) {
+      const presetsTouched = refreshPresetsForNewRun(opts.adapterDir, 'dit');
+      if (presetsTouched) {
+        pushLog(`[Training] train-dit job ${job.id}: ${presetsTouched} album preset(s) updated to the new run`);
+      }
+    }
+
+    // Post-training DiT calibration — OPT-IN since 2026-08-13 (it was default
+    // ON from 2026-08-11). Note the consequence in the branch above: with
+    // calibration off the new run takes this artist's album presets outright,
+    // under the older newest-run-wins rule, with no beat-the-previous guard.
+    // Same GPU lane, runs after this job's finally has restarted the engine it
+    // needs.
+    if (opts.calibrate && opts.stages.includes('export')) {
+      const { startDitCalibrateJob } = await import('./labelingQueue.js');
+      const cal = startDitCalibrateJob(job.datasetId, {
+        newRunDir: opts.adapterDir,
+        oldRunDir: opts.initAdapter || '',
+        variantKey: opts.variantKey,
+        repoint: opts.calibrateRepoint,
+      });
+      pushLog(`[Training] train-dit job ${job.id}: calibration queued as job ${cal.id}`);
     }
 
     pushLog(`[Training] train-dit job ${job.id} finished — adapter at ${opts.adapterDir}`);

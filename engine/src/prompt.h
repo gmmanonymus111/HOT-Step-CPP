@@ -7,8 +7,10 @@
 #include "bpe.h"
 #include "task-types.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,134 @@ struct AcePrompt {
     std::string timesignature;
     std::string vocal_language;
 };
+
+// ─── Degenerate-caption detection (2026-08-11) ──────────────────────────────
+//
+// Phase 1 writes the CoT caption as free-form text and, unlike the audio-code
+// stream, gets NO repetition penalty — apply_code_rep_penalty is codes-only.
+// The training captions average ~1286 characters (~320 tokens), so this is a
+// long unguarded generation and it does occasionally collapse into a loop
+// and/or emit invalid UTF-8 mid-token. Observed live: a caption that repeated
+// a ~40-word chunk with word substitutions and ended
+// "...a brief passes<bad byte> section with final musical statement berniate
+// and chorus", whose invalid bytes then made request_to_json fail so the whole
+// LM result serialized as "[]".
+//
+// DETECTION, NOT SUPPRESSION. The obvious fix — a repetition penalty on Phase-1
+// text — would change the sampling distribution, and every adapter calibration
+// score was measured under the current one. These helpers only let the caller
+// REJECT an already-broken generation, so a healthy caption is untouched and
+// bit-identical to before.
+
+/** True when `in` contains a byte sequence that is not valid UTF-8. Checked on
+ *  the RAW Phase-1 text: request.cpp's sanitizer runs later, at serialization,
+ *  so nothing has replaced the bad bytes yet at this point. */
+static bool text_has_invalid_utf8(const std::string & in) {
+    size_t       i = 0;
+    const size_t n = in.size();
+    auto         cont = [&](size_t k) { return i + k < n && ((unsigned char) in[i + k] & 0xC0) == 0x80; };
+    while (i < n) {
+        const unsigned char c    = (unsigned char) in[i];
+        size_t              take = 0;
+        if (c < 0x80) {
+            take = 1;
+        } else if ((c & 0xE0) == 0xC0 && c >= 0xC2 && cont(1)) {
+            take = 2;
+        } else if ((c & 0xF0) == 0xE0 && cont(1) && cont(2)) {
+            take = 3;
+        } else if ((c & 0xF8) == 0xF0 && c <= 0xF4 && cont(1) && cont(2) && cont(3)) {
+            take = 4;
+        }
+        if (take == 0) {
+            return true;
+        }
+        i += take;
+    }
+    return false;
+}
+
+/**
+ * Fraction of 10-word windows that already appeared earlier in the text — a
+ * loop metric. `first_repeat_off`, when given, receives the byte offset of the
+ * first repeated window so the caller can salvage the clean prefix.
+ *
+ * Measured on real generations: 12 healthy captions (adapter and base LM, 6
+ * seeds each) all scored 0.000, while the degenerate one above scores ~0.14.
+ * The 0.05 threshold in caption_is_degenerate() therefore has a wide margin
+ * and cannot trip on a caption that merely reuses a phrase.
+ */
+static float text_repeat_ratio(const std::string & in, size_t * first_repeat_off = nullptr) {
+    const int                kGram = 10;
+    std::vector<std::string> words;
+    std::vector<size_t>      offs;
+    for (size_t i = 0; i < in.size();) {
+        while (i < in.size() && isspace((unsigned char) in[i])) {
+            i++;
+        }
+        if (i >= in.size()) {
+            break;
+        }
+        const size_t start = i;
+        std::string  w;
+        while (i < in.size() && !isspace((unsigned char) in[i])) {
+            w += (char) tolower((unsigned char) in[i]);
+            i++;
+        }
+        words.push_back(w);
+        offs.push_back(start);
+    }
+    if ((int) words.size() < kGram * 4) {
+        return 0.0f;  // too short for a loop verdict to mean anything
+    }
+    std::set<std::string> seen;
+    int                   repeats = 0, total = 0;
+    for (size_t i = 0; i + kGram <= words.size(); i++) {
+        std::string gram;
+        for (int k = 0; k < kGram; k++) {
+            gram += words[i + k];
+            gram += ' ';
+        }
+        total++;
+        if (!seen.insert(gram).second) {
+            repeats++;
+            if (first_repeat_off && *first_repeat_off == std::string::npos) {
+                *first_repeat_off = offs[i];
+            }
+        }
+    }
+    return total > 0 ? (float) repeats / (float) total : 0.0f;
+}
+
+/**
+ * True when an LM-written caption is degenerate. `why` gets a short reason for
+ * the log; `salvage_len`, when given, receives the length of the clean prefix
+ * (the caller can truncate there when it has no original caption to restore).
+ */
+static bool caption_is_degenerate(const std::string & caption, std::string * why, size_t * salvage_len = nullptr) {
+    if (salvage_len) {
+        *salvage_len = caption.size();
+    }
+    if (text_has_invalid_utf8(caption)) {
+        if (why) {
+            *why = "invalid UTF-8";
+        }
+        return true;
+    }
+    size_t      first_repeat = std::string::npos;
+    const float ratio        = text_repeat_ratio(caption, &first_repeat);
+    if (ratio > 0.05f) {
+        if (why) {
+            char b[96];
+            snprintf(b, sizeof(b), "%.0f%% of 10-word windows repeat", (double) ratio * 100.0);
+            *why = b;
+        }
+        if (salvage_len && first_repeat != std::string::npos) {
+            *salvage_len = first_repeat;
+        }
+        return true;
+    }
+    return false;
+}
 
 // CoT parsing (extract metadata + lyrics from LLM Phase1 output)
 static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {

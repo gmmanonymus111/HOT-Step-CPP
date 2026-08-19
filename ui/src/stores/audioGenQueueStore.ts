@@ -15,7 +15,8 @@
 
 import { useSyncExternalStore, useEffect, useRef, useCallback } from 'react';
 import { lireekApi } from '../services/lireekApi';
-import { generateApi, songApi } from '../services/api';
+import { generateApi, songApi, healthApi } from '../services/api';
+import { useGlobalParamsStore } from './globalParamsStore';
 import { writePersistedState } from '../hooks/usePersistedState';
 import type { Generation, AlbumPreset } from '../services/lireekApi';
 import { addToPlaylist } from '../components/lyric-studio/playlistStore';
@@ -50,6 +51,7 @@ export interface AudioQueueItem {
   audioUrl?: string;
   songId?: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   audioDuration?: number;
 }
 
@@ -108,17 +110,20 @@ async function _idbSet(key: string, value: unknown): Promise<void> {
   });
 }
 
-/** Prepare queue data for persistence. Strips globalParams (only needed at
- *  submit time) to reduce storage churn — not for quota reasons anymore. */
+/** Prepare queue data for persistence.
+ *
+ *  globalParams MUST be persisted with the item. It carries the engine settings
+ *  the song was queued with — including which LM and DiT model to load. Stripping
+ *  it meant a restored item submitted with server defaults while still carrying
+ *  its album preset's adapter, so e.g. an lm-4b adapter arrived against the
+ *  default 0.6B LM and the engine refused it outright ("LM adapter has 36 layers
+ *  but model has 28"). Every item failed that way after a reload or restart.
+ *
+ *  Stripping was originally to stay under the 5MB localStorage cap, which no
+ *  longer applies now the queue lives in IndexedDB. */
 function _dataForStorage(): { items: AudioQueueItem[]; completionCounter: number } {
   return {
-    items: _state.items.map(item => {
-      if (item.globalParams && Object.keys(item.globalParams).length > 0) {
-        const { globalParams, ...rest } = item;
-        return rest as AudioQueueItem;
-      }
-      return item;
-    }),
+    items: _state.items,
     completionCounter: _state.completionCounter,
   };
 }
@@ -222,6 +227,10 @@ function _genId(): string { return `aq-${Date.now()}-${_nextId++}`; }
 
 let _resumeCalled = false;
 
+/** Last auth token the queue was handed. Lets actions that aren't wired to the
+ *  auth context — the Retry button — restart the runner. */
+let _lastToken: string | null = null;
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export async function enqueueAudioGen(
@@ -251,6 +260,7 @@ export async function enqueueAudioGen(
 
   _state.items.push(item);
   _emit(true);
+  _lastToken = token;
   _processQueue(token);
 }
 
@@ -279,6 +289,29 @@ export function forceFailQueueItem(id: string): void {
 export function clearFinishedFromAudioQueue(): void {
   _state.items = _state.items.filter(i => i.status !== 'succeeded' && i.status !== 'failed');
   _emit(true);
+}
+
+/** Put every failed item back in the queue and restart the runner. The jobId is
+ *  cleared so each one is submitted fresh — the old server job either failed or
+ *  no longer exists, so there is nothing worth reconnecting to. */
+export function retryFailedInAudioQueue(): number {
+  let retried = 0;
+  for (const item of _state.items) {
+    if (item.status !== 'failed') continue;
+    item.status = 'pending';
+    item.error = undefined;
+    item.jobId = undefined;
+    item.progress = undefined;
+    item.stage = 'Queued…';
+    _engineWaits.delete(item.id);
+    retried++;
+  }
+  if (retried > 0) {
+    _emit(true);
+    if (_lastToken) _processQueue(_lastToken);
+    else console.warn('[AudioQueue] Retry requested before any token was seen — items are pending but idle');
+  }
+  return retried;
 }
 
 // ── Manual queue API (for Cover Studio and other non-Lyric-Studio modules) ───
@@ -336,6 +369,7 @@ export function completeManualQueueItem(id: string, result: {
   audioUrl: string;
   songId?: string;
   masteredAudioUrl?: string;
+  noAdapterAudioUrl?: string;
   audioDuration?: number;
 }): void {
   const item = _state.items.find(i => i.id === id);
@@ -344,6 +378,7 @@ export function completeManualQueueItem(id: string, result: {
   item.audioUrl = result.audioUrl;
   if (result.songId) item.songId = result.songId;
   if (result.masteredAudioUrl) item.masteredAudioUrl = result.masteredAudioUrl;
+  if (result.noAdapterAudioUrl) item.noAdapterAudioUrl = result.noAdapterAudioUrl;
   if (result.audioDuration) item.audioDuration = result.audioDuration;
   item.progress = 100;
   item.stage = 'Complete!';
@@ -412,6 +447,7 @@ function _maybeAutoAddToPlaylist(item: AudioQueueItem): void {
     title: item.generation.title || 'Untitled',
     audioUrl: item.audioUrl || '',
     masteredAudioUrl: item.masteredAudioUrl || '',
+    noAdapterAudioUrl: item.noAdapterAudioUrl || '',
     artistName: item.artistName || '',
     coverUrl: item.coverUrl || item.artistImageUrl || '',
     duration: item.audioDuration || 0,
@@ -560,6 +596,7 @@ export async function enqueueSimpleGen(
           item.audioUrl = audioUrl;
           item.songId = songIds[0];
           item.masteredAudioUrl = masteredUrl;
+          item.noAdapterAudioUrl = status.result?.noAdapterAudioUrl;
           item.audioDuration = status.result?.duration;
           item.progress = 100;
           item.stage = 'Complete!';
@@ -610,6 +647,7 @@ export async function enqueueSimpleGen(
 export async function resumeQueue(token: string): Promise<void> {
   if (_resumeCalled) return;
   _resumeCalled = true;
+  _lastToken = token;
 
   // Wait for IndexedDB restore to complete before processing
   await _idbReady;
@@ -617,9 +655,14 @@ export async function resumeQueue(token: string): Promise<void> {
   _pruneDeletedSongs(token);
 
   const hasPending = _state.items.some(i => i.status === 'pending');
-  if (hasPending) {
-    _processQueue(token);
-  }
+  if (!hasPending) return;
+
+  // Start the runner unconditionally. If the engine is still booting it answers
+  // 503 and the runner parks the item and waits for it — deliberately NOT gated
+  // on a health check here, because a slow or hanging /api/health would then be
+  // able to stop the queue from ever starting.
+  console.log(`[AudioQueue] Resuming — ${_state.items.filter(i => i.status === 'pending').length} pending`);
+  _processQueue(token);
 }
 
 /**
@@ -649,6 +692,63 @@ async function _pruneDeletedSongs(token: string): Promise<void> {
   } catch {
     // Non-fatal — server unreachable, keep entries as-is
   }
+}
+
+// ── Engine availability ──────────────────────────────────────────────────────
+// The server's job queue is in-memory, so a Node restart drops it and ace-server
+// then cold-boots for a minute or more reloading models. Throughout that window
+// /api/generate answers 503 "Engine not ready". A 503 is not the song's fault,
+// so the runner parks the item and waits instead of failing it — otherwise the
+// while-loop marks every remaining item failed at network speed and the whole
+// queue is gone seconds after a restart.
+
+const ENGINE_POLL_MS = 3000;
+/** Cap on a single health probe — see _probeEngine. */
+const ENGINE_PROBE_TIMEOUT_MS = 5000;
+/** Longest a single park may last before the item is failed for real. */
+const ENGINE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+/** Parks allowed per item before we treat the engine as genuinely dead. */
+const MAX_ENGINE_WAITS = 3;
+
+/** Per-item park count. Module-level rather than persisted — a page reload is
+ *  a fresh start, and these should not survive one. */
+const _engineWaits = new Map<string, number>();
+
+/** True when the failure means "the engine can't take work right now" rather
+ *  than "this song is bad": engine booting, engine suspended for training, or
+ *  the server process unreachable mid-restart. */
+function _isEngineUnavailable(msg: string): boolean {
+  return /Engine not ready|Engine is paused|Failed to fetch|NetworkError|Load failed|API error: 50[023]/i.test(msg);
+}
+
+/** One health probe, bounded. /api/health reaches through to ace-server, which
+ *  can be slow to answer while it is busy, and fetch has no default timeout —
+ *  an unbounded probe here would wedge the wait loop. */
+async function _probeEngine(): Promise<{ ready: boolean; status: string }> {
+  try {
+    const health = await Promise.race([
+      healthApi.check(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('health probe timed out')), ENGINE_PROBE_TIMEOUT_MS)),
+    ]);
+    return { ready: health.engine?.ready === true, status: health.engine?.bootStatus || 'Starting engine…' };
+  } catch {
+    // Server still down mid-restart, or too busy to answer in time.
+    return { ready: false, status: 'Waiting for server…' };
+  }
+}
+
+/** Poll /api/health until the engine reports ready. Resolves true once it is,
+ *  false if it never came back inside ENGINE_WAIT_TIMEOUT_MS. */
+async function _waitForEngine(onTick?: (status: string) => void): Promise<boolean> {
+  const deadline = Date.now() + ENGINE_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, ENGINE_POLL_MS));
+    const { ready, status } = await _probeEngine();
+    if (ready) return true;
+    onTick?.(status);
+  }
+  return false;
 }
 
 // ── Queue runner ─────────────────────────────────────────────────────────────
@@ -693,14 +793,39 @@ async function _processQueue(token: string): Promise<void> {
 
         await _executeItem(next, token);
         next.status = 'succeeded';
+        _engineWaits.delete(next.id);
         _state.completionCounter++;
         // Notify App.tsx so Library updates in real-time
         if (next.songId) _notifySongCreated(next.songId);
         _maybeAutoAddToPlaylist(next);
       } catch (err) {
-        next.status = 'failed';
-        next.error = (err as Error).message;
-        console.error(`[AudioQueue] Item ${next.id} failed:`, (err as Error).message);
+        const msg = (err as Error).message || '';
+        const waits = _engineWaits.get(next.id) ?? 0;
+
+        if (_isEngineUnavailable(msg) && waits < MAX_ENGINE_WAITS) {
+          // Park this item and hold the whole queue until the engine is back.
+          // Keep any jobId: on retry _tryReconnect re-attaches if the server
+          // still knows the job, and re-submits if it doesn't.
+          _engineWaits.set(next.id, waits + 1);
+          next.status = 'pending';
+          next.progress = undefined;
+          next.stage = 'Waiting for engine…';
+          _emit(true);
+          console.warn(`[AudioQueue] Engine unavailable (${msg}) — holding queue`);
+
+          if (await _waitForEngine(s => { next.stage = s; _emit(); })) {
+            next.stage = 'Retrying…';
+            _emit(true);
+            continue;
+          }
+          next.status = 'failed';
+          next.error = `Engine did not come back: ${msg}`;
+        } else {
+          next.status = 'failed';
+          next.error = msg;
+        }
+        _engineWaits.delete(next.id);
+        console.error(`[AudioQueue] Item ${next.id} failed:`, next.error);
       }
       _emit(true);
     }
@@ -731,6 +856,7 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
         item.audioUrl = audioUrl;
         if (songId) item.songId = songId;
         if (masteredUrl) item.masteredAudioUrl = masteredUrl;
+        if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
         if (status.result?.duration) item.audioDuration = status.result.duration;
       }
       item.status = 'succeeded';
@@ -789,7 +915,14 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
   // 1) Start with globalParams snapshot — identical to Create page's getGlobalParams().
   //    This includes ALL engine params: inference, guidance, solver, DCW, latent,
   //    LM, adapter (global), mastering, trigger word, etc.
-  const params: Record<string, any> = { ...item.globalParams };
+  //    Items persisted before globalParams was included in storage come back
+  //    without one; fall back to the live settings rather than submitting an
+  //    empty param set, which would pick server defaults and mismatch the
+  //    preset's adapter.
+  const snapshot = item.globalParams && Object.keys(item.globalParams).length > 0
+    ? item.globalParams
+    : useGlobalParamsStore.getState().getGlobalParams();
+  const params: Record<string, any> = { ...snapshot };
 
   // 2) Overlay content fields from the written song
   params.lyrics = gen.lyrics || '';
@@ -943,6 +1076,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
   const timer = createGenerationTimer({ resumeElapsedSec: item.elapsed });
   _emit(true);
 
+  let notFound = 0;
   while (true) {
     await new Promise(r => setTimeout(r, 2500));
     try {
@@ -963,6 +1097,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
           item.audioUrl = audioUrl;
           if (songId) item.songId = songId;
           if (masteredUrl) item.masteredAudioUrl = masteredUrl;
+          if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
           if (status.result?.duration) item.audioDuration = status.result.duration;
           _emit(true);
           // If server didn't provide duration, probe the audio file
@@ -987,6 +1122,15 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
       const msg = (e as Error).message;
       if ((msg.includes('failed') || msg.includes('Cancelled') || msg.includes('timed out')) && !msg.includes('fetch')) {
         throw e;
+      }
+      // A job the server has never heard of died with the process that owned it.
+      // Allow a few ticks in case the server is mid-restart, then surface it as
+      // an engine outage so the runner parks and re-submits, rather than polling
+      // a dead id forever behind a spinner that never resolves.
+      if (msg.includes('Job not found')) {
+        if (++notFound >= 4) throw new Error('Engine not ready: job was lost when the server restarted');
+      } else {
+        notFound = 0;
       }
       // Transient network error — keep polling
     }

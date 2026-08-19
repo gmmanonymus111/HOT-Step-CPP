@@ -59,6 +59,46 @@ if ($content -match '#include\s+"hot-step-params\.h"') {
     $errors++
 }
 
+# ── Hook 4b: hot-step-server.cpp must include minimax/mm3-server.h ────
+#            Single hook for the whole MiniMax-Music3 backend subsystem
+#            (engine/src/minimax/). Lose it and /mm3/* silently disappears.
+$content = Get-Content "$tools\hot-step-server.cpp" -Raw
+if ($content -match '#include\s+"minimax/mm3-server\.h"') {
+    Write-Host "  [OK] hot-step-server.cpp -> minimax/mm3-server.h" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] hot-step-server.cpp missing minimax/mm3-server.h include" -ForegroundColor Red
+    Write-Host "         Without it the /mm3/props, /mm3/warm and /mm3/unload routes vanish." -ForegroundColor Yellow
+    $errors++
+}
+if ($content -match 'mm3_register_routes\s*\(') {
+    Write-Host "  [OK] hot-step-server.cpp calls mm3_register_routes()" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] hot-step-server.cpp never calls mm3_register_routes()" -ForegroundColor Red
+    Write-Host "         The include alone registers nothing - the call site is the other half." -ForegroundColor Yellow
+    $errors++
+}
+
+# -- Hook 4c: hot-step-server.cpp must include minimax/mm3-job.h ------------
+#             MID-FILE include (after the job system: Job/job_create/work_push),
+#             not next to mm3-server.h at the top. Lose it and POST /mm3/synth
+#             vanishes, leaving only the deprecated /mm3/synth-e2e bring-up path
+#             that does GPU work on an httplib thread.
+if ($content -match '#include\s+"minimax/mm3-job\.h"') {
+    Write-Host "  [OK] hot-step-server.cpp -> minimax/mm3-job.h" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] hot-step-server.cpp missing minimax/mm3-job.h include" -ForegroundColor Red
+    Write-Host "         Re-add it AFTER job_status_str() - it needs Job, job_create," -ForegroundColor Yellow
+    Write-Host "         job_set_phase, work_push and g_store, which are defined there." -ForegroundColor Yellow
+    $errors++
+}
+if ($content -match 'mm3_register_job_routes\s*\(') {
+    Write-Host "  [OK] hot-step-server.cpp calls mm3_register_job_routes()" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] hot-step-server.cpp never calls mm3_register_job_routes()" -ForegroundColor Red
+    Write-Host "         Without the call POST /mm3/synth and GET /mm3/job are not routed." -ForegroundColor Yellow
+    $errors++
+}
+
 # ── Hook 5: fsq-detok.h must include fsq-quant.h, and neither fsq-detok.h
 #            nor fsq-tok.h may carry upstream's own FSQ quantizer copies ──
 $content = Get-Content "$src\fsq-detok.h" -Raw

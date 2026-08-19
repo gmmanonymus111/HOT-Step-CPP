@@ -22,6 +22,7 @@
 
 #include "train/dit-data.h"
 #include "train/dit-export.h"
+#include "train/dit-resume.h"
 #include "train/dit-selftest.h"
 #include "train/dit-train-ckpt.h"
 
@@ -134,6 +135,13 @@ struct DitTrainArgs {
 
     float milestone_step = 0.1f;
     int   milestone_keep = 6;
+
+    // Resume (--init-adapter, 2026-08-10): dir of an exported run whose factors
+    // seed this one. Identity hyperparams adopted from its dit_train_log.json
+    // by dit_resume_prepare (cmd_train_dit); explicit contradictions exit 2.
+    // init_from_ma5 carries the source's saved_ma5 for provenance/logging.
+    std::string init_adapter;
+    double      init_from_ma5 = -1.0;
 
     bool overwrite = false;
     int  limit     = 0;
@@ -327,6 +335,14 @@ struct DitTrainOutcome {
     double    final_loss        = -1.0;
     double    best_loss         = -1.0;
     int       best_epoch        = 0;
+    // What is ACTUALLY sitting in out_dir when the run ends (2026-07-30).
+    // The adapter is no longer whatever the last epoch produced: it is the
+    // best-scoring one, or the epoch that tripped the target if one did.
+    // saved_ma5 is the ma5 at that epoch, so it is directly comparable to
+    // target_loss; saved_reason is "target" or "best".
+    double      saved_ma5    = -1.0;
+    int         saved_epoch  = 0;
+    std::string saved_reason;
     bool      stopped_on_target = false;
     int       samples           = 0;
     int       crop              = 0;
@@ -400,6 +416,21 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
         if (!samples[i].enc_genre.empty()) {
             genre_samples++;
         }
+    }
+    // enc_S is the WHOLE DATASET's padded length, so ONE long-lyrics song sets it
+    // for every sample. That matters because attention K/V scale with (S + enc_S)
+    // and the VRAM auto-fit reduces CROP before depth — a long encoder sequence
+    // is therefore paid for in audio window, silently, unless it is said out loud.
+    // Threshold is the reference pipeline's own buffer (512 lyric + 1 + 256 text).
+    if (enc_S > 769) {
+        char eb[224];
+        snprintf(eb, sizeof(eb),
+                 "encoder sequence enc_S=%d exceeds the reference 769 (one song's lyrics/caption set this for the "
+                 "WHOLE dataset). Cross-attention and the crop the auto-fit can afford both pay for it — lower "
+                 "--max-lyric-tokens if the fitted crop came out shorter than you wanted",
+                 enc_S);
+        lm_log("warn", eb);
+        fprintf(stderr, "[train-dit] %s\n", eb);
     }
     for (size_t i = 0; i < samples.size(); i++) {
         DitSample & s = samples[i];
@@ -782,6 +813,38 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             dit_train_free(&M);
             return 1;
         }
+    }
+    // Resume: overwrite the fresh init with the source run's factors. After
+    // adapter->init so the tensors exist; coverage-tolerant (see dit-resume.h —
+    // the trained layer window may differ between runs).
+    if (!a.init_adapter.empty()) {
+        DitResumeStats rs;
+        std::string    err;
+        const bool     rok = is_lokr ? dit_resume_load_lokr(&lokr, a.init_adapter, &rs, &err)
+                                     : dit_resume_load_lora(&lora, a.init_adapter, &rs, &err);
+        if (!rok) {
+            lm_fatal("resume", err);
+            ggml_backend_buffer_free(buf_static);
+            ggml_free(ctx_static);
+            dit_train_free(&M);
+            return 1;
+        }
+        if (rs.loaded == 0) {
+            lm_fatal("resume", "no tensors from " + a.init_adapter +
+                                   " overlap this run's trained layer window — nothing was resumed");
+            ggml_backend_buffer_free(buf_static);
+            ggml_free(ctx_static);
+            dit_train_free(&M);
+            return 1;
+        }
+        char b[320];
+        snprintf(b, sizeof(b),
+                 "resumed %d tensors from %s (source ma5 %.4f); %d site(s) start fresh, %d file layer(s) outside "
+                 "this window",
+                 rs.loaded, a.init_adapter.c_str(), a.init_from_ma5, rs.fresh_sites, rs.skipped_file);
+        lm_log("info", b);
+        jl("{\"type\":\"resume\",\"initAdapter\":\"%s\",\"tensors\":%d,\"freshSites\":%d,\"sourceMa5\":%.6f}",
+           lm_json_escape(a.init_adapter).c_str(), rs.loaded, rs.fresh_sites, a.init_from_ma5);
     }
     const DitAdapter * ad = adapter;
 
@@ -1494,10 +1557,30 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
             log->best_loss  = out->best_loss;
             log->best_epoch = out->best_epoch;
 
-            // Export EVERY epoch, BEFORE the stop test (D16): the checkpoint that
-            // triggered the stop is already on disk, and a cancel or crash always
-            // leaves a usable adapter.
-            {
+            // Export the BEST epoch, not the last one (2026-07-30).
+            //
+            // This used to export unconditionally every epoch, which met D16
+            // ("a cancel or crash always leaves a usable adapter") but meant a
+            // run that missed its target shipped whatever the FINAL epoch
+            // happened to produce — frequently worse than something it passed
+            // through 50 epochs earlier. Exporting only on improvement keeps
+            // D16 fully (there is still an adapter on disk from epoch 1 onward,
+            // and now it is the best one) and does strictly LESS I/O.
+            //
+            // Selection is on MA5, not the single-epoch mean, for the same
+            // reason the target test is: one epoch over 11 songs is a handful
+            // of random crop/timestep draws, so the single-epoch minimum tends
+            // to be the luckiest draw rather than the best adapter. MA5 cuts
+            // that variance ~2.2x. best_loss/best_epoch below stay single-epoch
+            // — they are what the UI reports, and changing them would silently
+            // redefine a number people have been reading.
+            //
+            // hit_target forces an export even if it is not an improvement:
+            // when the run stops on target, the adapter must be the epoch that
+            // tripped it.
+            const bool hit_target = (a.target_loss > 0.0f && ma5 <= (double) a.target_loss);
+            const bool best_ma5   = (out->saved_ma5 < 0.0) || (ma5 < out->saved_ma5);
+            if (best_ma5 || hit_target) {
                 DitExportResult xr;
                 std::string     xerr;
                 if (!dit_export_peft(*ad, xmeta, a.out_dir.c_str(), &xr, &xerr)) {
@@ -1507,6 +1590,12 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
                 }
                 out->exported       = true;
                 out->export_tensors = xr.tensors;
+                out->saved_ma5      = best_ma5 ? ma5 : out->saved_ma5;
+                out->saved_epoch    = epoch + 1;
+                out->saved_reason   = hit_target ? "target" : "best";
+                log->saved_ma5      = out->saved_ma5;
+                log->saved_epoch    = out->saved_epoch;
+                log->saved_reason   = out->saved_reason;
             }
 
             if (a.milestone_step > 0.0f) {
@@ -1593,9 +1682,15 @@ static int dit_train_stage(const DitTrainArgs & a, DitTrainLog * log, DitTrainOu
            (long long) tracker.base_mb, (long long) tracker.peak_mb, tracker.max_delta, global_step);
 
         if (rc == 0) {
+            // savedEpoch/savedMa5/savedReason say which epoch's adapter is in
+            // the run dir. finalLoss is the LAST epoch and is usually NOT it.
+            fprintf(stderr, "[train-dit] adapter saved from epoch %d (ma5 %.4f, %s) of %d run\n",
+                    out->saved_epoch, out->saved_ma5, out->saved_reason.c_str(), out->epochs_run);
             jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"end\",\"epochsRun\":%d,\"finalLoss\":%.6f,"
-               "\"bestLoss\":%.6f,\"stoppedOnTarget\":%s,\"ms\":%lld}",
-               out->epochs_run, out->final_loss, out->best_loss, out->stopped_on_target ? "true" : "false", out->ms);
+               "\"bestLoss\":%.6f,\"savedEpoch\":%d,\"savedMa5\":%.6f,\"savedReason\":\"%s\","
+               "\"stoppedOnTarget\":%s,\"ms\":%lld}",
+               out->epochs_run, out->final_loss, out->best_loss, out->saved_epoch, out->saved_ma5,
+               out->saved_reason.c_str(), out->stopped_on_target ? "true" : "false", out->ms);
         }
 
         teardown();
@@ -1686,6 +1781,8 @@ static int dit_train_main(const DitTrainArgs & a) {
     log.crop_max        = a.crop_max;
     log.mirror          = a.mirror;
     log.bwd             = a.bwd;
+    log.init_adapter    = a.init_adapter;
+    log.init_from_ma5   = a.init_from_ma5;
     log.lr              = a.lr;
     log.epochs          = a.epochs;
     log.grad_accum      = a.grad_accum;

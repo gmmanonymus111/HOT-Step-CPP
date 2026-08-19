@@ -69,6 +69,7 @@ export function initDb(): void {
       dit_model TEXT DEFAULT '',
       generation_params TEXT DEFAULT '{}',
       mastered_audio_url TEXT DEFAULT '',
+      backend TEXT DEFAULT 'ace',
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -233,6 +234,7 @@ export function initDb(): void {
       status            TEXT NOT NULL DEFAULT 'draft',
       built_at          TEXT NOT NULL DEFAULT '',
       dataset_json_path TEXT NOT NULL DEFAULT '',
+      album_name        TEXT NOT NULL DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now')),
       updated_at        TEXT DEFAULT (datetime('now'))
     );
@@ -245,6 +247,21 @@ export function initDb(): void {
     {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='default_language'`,
       alter: `ALTER TABLE training_datasets ADD COLUMN default_language TEXT NOT NULL DEFAULT 'english'`,
+    },
+    // Friendly album name detected from the tracks' embedded tags. Cached here
+    // because the dataset LIST must not parse audio files on every request —
+    // datasetAssets.ts fills it once, then refreshes it whenever a scan has the
+    // samples in hand.
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='album_name'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN album_name TEXT NOT NULL DEFAULT ''`,
+    },
+    // Persistent dataset → Lyric Studio link, written by the export commit and
+    // lazily backfilled when the audition's Lyric Studio prompt source resolves
+    // the album by detection. 0 = never linked.
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='lyrics_set_id'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN lyrics_set_id INTEGER NOT NULL DEFAULT 0`,
     },
   ];
   for (const m of trainingMigrations) {
@@ -315,6 +332,18 @@ export function initDb(): void {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='metadata_overrides'`,
       alter: `ALTER TABLE songs ADD COLUMN metadata_overrides TEXT DEFAULT ''`,
     },
+    {
+      // No-adapter reference render: low-step bare-DiT output (adapter bypassed,
+      // no post-processing) for A/B-ing what the DiT adapter contributes.
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='noadapter_audio_url'`,
+      alter: `ALTER TABLE songs ADD COLUMN noadapter_audio_url TEXT DEFAULT ''`,
+    },
+    {
+      // Which generation backend produced this song ('ace', future: 'minimax-m3', ...).
+      // See docs/plans/multi-backend-architecture.md §3.5.
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='backend'`,
+      alter: `ALTER TABLE songs ADD COLUMN backend TEXT DEFAULT 'ace'`,
+    },
   ];
   for (const m of songsMigrations) {
     const row = db.prepare(m.check).get() as any;
@@ -344,6 +373,46 @@ export function initDb(): void {
   ];
   for (const sql of lireekMigrations) {
     try { db.exec(sql); } catch { /* column already exists */ }
+  }
+
+  // ── "These lyrics have been generated" marker ─────────────────────────────
+  // Stored on the generations row rather than derived from audio_generations,
+  // because the whole point is that it survives the audio being deleted — from
+  // disk or from the DB. Backfilled once from the audio_generations rows that
+  // already exist so the "never generated" filter is accurate on day one.
+  const genCols = db.prepare("SELECT name FROM pragma_table_info('generations')").all() as { name: string }[];
+  const hasGenCol = (n: string) => genCols.some(c => c.name === n);
+  const needsGeneratedBackfill = !hasGenCol('audio_generated_count');
+
+  if (!hasGenCol('audio_generated_count')) {
+    db.exec('ALTER TABLE generations ADD COLUMN audio_generated_count INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasGenCol('first_generated_at')) {
+    db.exec('ALTER TABLE generations ADD COLUMN first_generated_at TEXT');
+  }
+
+  // Downloads: "I liked this one enough to keep it". Same reasoning as above —
+  // stored on the generations row so deleting the audio afterwards, which is
+  // exactly what happens once a track has been downloaded, doesn't lose it.
+  // downloaded_at on audio_generations makes the count per-track rather than
+  // per-click, so grabbing both the original and the master, or downloading the
+  // same file twice, still counts as one kept version.
+  // No backfill is possible: nothing recorded downloads before now.
+  if (!hasGenCol('download_count')) {
+    db.exec('ALTER TABLE generations ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasGenCol('first_downloaded_at')) {
+    db.exec('ALTER TABLE generations ADD COLUMN first_downloaded_at TEXT');
+  }
+  try { db.exec('ALTER TABLE audio_generations ADD COLUMN downloaded_at TEXT'); } catch { /* exists */ }
+  if (needsGeneratedBackfill) {
+    const filled = db.prepare(`
+      UPDATE generations SET
+        audio_generated_count = (SELECT COUNT(*) FROM audio_generations ag WHERE ag.generation_id = generations.id),
+        first_generated_at    = (SELECT MIN(ag.created_at) FROM audio_generations ag WHERE ag.generation_id = generations.id)
+      WHERE EXISTS (SELECT 1 FROM audio_generations ag WHERE ag.generation_id = generations.id)
+    `).run();
+    console.log(`[DB] Backfilled generated-marker for ${filled.changes} lyric generations`);
   }
 
   // ── One-time migration: import data from lireek.db if it exists ───────────

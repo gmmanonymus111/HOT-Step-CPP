@@ -15,6 +15,7 @@
 #include "vae-enc.h"
 #include "version.h"
 
+#include "train/lm-common.h"     // lm_normalize_language — parity with inference
 #include "train/preprocess-io.h"
 #include "train/st-write.h"
 
@@ -199,8 +200,20 @@ static std::string pp_caption_text(const PSample & s, const PManifest & mf, bool
             text = text.empty() ? tag : tag + ", " + text;
         } else if (pos == "append") {
             text = text.empty() ? tag : text + ", " + tag;
+        } else if (pos == "replace") {
+            // The caption IS the trigger (2026-08-12). Every descriptive word
+            // from the sidecar is dropped, so the trigger token alone has to
+            // carry genre/timbre/feel and the adapter is forced to learn them
+            // rather than lean on the prose. The Build panel has always
+            // labelled this "Instead of the caption"; until now preprocess
+            // silently did nothing (verbatim Side-Step), which trained an
+            // adapter whose captions carried no trigger at all.
+            //
+            // The `# Metas` block (bpm/timesignature/keyscale/duration) and
+            // the lyric prompt are built separately in pp_prompt_strings and
+            // are NOT affected — only the caption text collapses.
+            text = tag;
         }
-        // "replace": tag is NOT applied here — verbatim Side-Step behaviour.
     }
     return text;
 }
@@ -212,8 +225,14 @@ static void pp_prompt_strings(const PSample & s, const std::string & caption_tex
         snprintf(bpm_b, sizeof(bpm_b), "%d", s.bpm);
     }
     const char * ks   = s.keyscale.empty() ? "N/A" : s.keyscale.c_str();
-    const char * ts   = s.timesignature.empty() ? "N/A" : s.timesignature.c_str();
-    const char * lang = s.language.empty() ? "unknown" : s.language.c_str();
+    // Both normalized to what INFERENCE conditions on (2026-08-12 parity):
+    // timesig numerator ('4/4' → '4') and ISO language ('english' → 'en').
+    // Raw values here baked "timesignature: 4/4" / "Languages\nenglish" into
+    // the training tensors while every generation sends '4' / 'en'.
+    const std::string ts_n   = pm_timesig_numerator(s.timesignature);
+    const std::string lang_n = lm_normalize_language(s.language);
+    const char * ts   = ts_n.empty() ? "N/A" : ts_n.c_str();
+    const char * lang = lang_n.empty() ? "unknown" : lang_n.c_str();
 
     char metas[512];
     snprintf(metas, sizeof(metas), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm_b,
@@ -250,6 +269,43 @@ static bool pp_truncate_ids(std::vector<int> & ids, int cap, int eos_id) {
 // ─── ffmpeg transcode ───────────────────────────────────────────────────────
 
 // Transcode any container ffmpeg understands into a 48 kHz stereo f32 WAV.
+// Decode an audio file to 48 kHz planar stereo, UTF-8 path and all.
+//
+// NOT audio_read_48k(): that opens the path with the CRT's narrow fopen, which
+// on Windows decodes it in the ANSI codepage and cannot see a non-ASCII
+// filename (hot-step-fsutf8.h). Load the bytes ourselves through hs_fopen and
+// hand the buffer to the buffer-based decoder, which sniffs RIFF-vs-MP3 from
+// the content rather than the extension. Keeping the fix here — rather than in
+// the upstream audio-io.h — also keeps it out of the way of an upstream sync.
+static float * pp_audio_read_48k(const std::string & path, int * T_out) {
+    *T_out = 0;
+    FILE * f = hs_fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    const long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    uint8_t * buf = (uint8_t *) malloc((size_t) fsize);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    const size_t nr = fread(buf, 1, (size_t) fsize, f);
+    fclose(f);
+    if (nr != (size_t) fsize) {
+        free(buf);
+        return NULL;
+    }
+    float * planar = audio_read_48k_buf(buf, (size_t) fsize, T_out);
+    free(buf);
+    return planar;
+}
+
 static bool pp_ffmpeg_transcode(const PreprocessOpts & o, const std::string & src, const std::string & tmp_wav,
                                 std::string & err) {
     char cmd[4096];
@@ -262,9 +318,9 @@ static bool pp_ffmpeg_transcode(const PreprocessOpts & o, const std::string & sr
     }
 #ifdef _WIN32
     std::string wrapped = "\"" + std::string(cmd) + "\"";  // cmd.exe strips the outer pair
-    int         rc      = system(wrapped.c_str());
+    int         rc      = hs_system(wrapped);              // UTF-16 — src may be non-ASCII
 #else
-    int rc = system(cmd);
+    int rc = hs_system(cmd);
 #endif
     if (rc != 0) {
         char b[64];
@@ -308,7 +364,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
         r.ok    = false;
         r.error = msg;
         if (!tmp_wav.empty()) {
-            remove(tmp_wav.c_str());
+            hs_remove(tmp_wav);
         }
         return r;
     };
@@ -344,7 +400,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
     //    therefore addresses channel 1 through T_orig and only bounds the loops
     //    by T_audio. Plan §3.4.3 steps 2/4 carry the original defect.
     int     T_orig = 0;
-    float * planar = audio_read_48k(src.c_str(), &T_orig);
+    float * planar = pp_audio_read_48k(src, &T_orig);
     if (!planar || T_orig <= 0) {
         if (planar) {
             free(planar);
@@ -618,7 +674,7 @@ static SongResult preprocess_song(PreprocessCtx & c, const PreprocessOpts & o, c
 
     // 12. Cleanup + result.
     if (!tmp_wav.empty()) {
-        remove(tmp_wav.c_str());
+        hs_remove(tmp_wav);
     }
     long long bytes = 0;
     pm_stat_file(out_path, &bytes, NULL);

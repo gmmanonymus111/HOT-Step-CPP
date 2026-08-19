@@ -7,6 +7,15 @@
 //
 // docs/plans/2026-07-27-preprocess-implementation.md §3.1
 
+// MM3 training path. mm3-dav-encode.h is training-only (audio -> target
+// latents); the rest are the same headers ace-server uses, included here for the
+// conditioning rollout (mm3-condition). All header-only static APIs.
+#include "minimax/mm3-dav-encode.h"
+#include "minimax/mm3-tokenizer.h"
+#include "minimax/mm3-request.h"
+#include "minimax/mm3-ar-loop.h"
+#include "minimax/mm3-cond-graph.h"
+#include "train/mm3-dit-train-run.h"   // MM3 flow-DiT LoRA trainer
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
 #include "train/lm-train-run.h"    // pulls in every lm-*.h (LM LoRA trainer)
@@ -104,6 +113,56 @@ static void print_usage(void) {
             "  preprocess    Build per-song tensor caches from a dataset.\n"
             "  train-lm      Train a planner-LM LoRA from a preprocessed tensor cache.\n"
             "  train-dit     Train a DiT LoRA from a preprocessed tensor cache.\n"
+            "  mm3-encode    MiniMax-Music3 DAV encode: raw f32 audio -> flow latents.\n"
+            "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
+            "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
+            "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-preprocess  MiniMax-Music3 dataset -> flow-DiT target latents.\n"
+            "                --dataset <dataset.json> --enc <mm3-enc-*.gguf> --out <dir>\n"
+            "                [--ffmpeg <path>] [--max-duration <sec>] [--tf32 on|off]\n"
+            "                Audio is transcoded at 44100 Hz (NOT the ACE path's 48000).\n"
+            "  mm3-condition MiniMax-Music3 AR rollout -> flow-DiT conditioning cache.\n"
+            "                --manifest <mm3_preprocess.json> --models <dir> --captions <dataset dir>\n"
+            "                [--seed N] [--lm-quant Q] [--dit-quant Q; default Q2_K, never executed]\n"
+            "                [--segment-sec S] default 60; 0 = one rollout per song, which\n"
+            "                UNDER-COVERS long songs (the LM hits EOS early: 65%% on a 280 s track)\n"
+            "  mm3-train-dit MiniMax-Music3 flow-DiT LoRA training.\n"
+            "                --cache <dir from mm3-condition> --models <dir> --out <dir>\n"
+            "                [--rank 32] [--alpha 32] [--lr 1e-4] [--steps 200] [--crop 689]\n"
+            "                [--grad-accum 1] [--seed 42] [--song <id> : overfit one song]\n"
+            "                [--logit-mean M] default 0; POSITIVE biases sigma toward 0, i.e.\n"
+            "                toward mostly-clean crops. Raise it (~+1.0..+1.5) or the run\n"
+            "                spends most steps near pure noise learning only the genre mean.\n"
+            "                [--logit-std S] default 1\n"
+            "                [--eval-every N] fixed holdout, sigma on a stratified grid, forward\n"
+            "                only. Comparable ACROSS runs; training loss is not, because\n"
+            "                --logit-mean changes which sigmas it is measured at. Reports\n"
+            "                three sigma bands — a fix that only moves the high band has\n"
+            "                learned the genre marginal again.  [--eval-n K] default 24\n"
+            "                [--eval-crop F] default 689; PINNED independently of --crop so a\n"
+            "                run at a different crop is still comparable. 0 = follow --crop.\n"
+            "                [--crop-mode random|beginning] default random, which covers the\n"
+            "                whole song. `beginning` always starts at 0 — what SimpleTuner's\n"
+            "                truncation_mode does, so it only ever sees each track's head.\n"
+            "                [--ckpt-segments N] gradient checkpointing over the block stack.\n"
+            "                Peak attention is n_blk*n_heads*S^2*4 B, so crop 2584 (30 s) needs\n"
+            "                ~30.8 GB monolithic and is impossible without this; 6 segments\n"
+            "                make it ~5.1 GB for ~1 extra forward. ggml's flash-attn has no\n"
+            "                backward, so this is the ONLY lever.\n"
+            "                [--ckpt-verify] run both paths on one micro-batch and compare.\n"
+            "                Gate before trusting any checkpointed run; exits non-zero on\n"
+            "                disagreement. With no --ckpt-segments it verifies and exits.\n"
+            "                [--export-every N] snapshot mm3_lora_step<N>.safetensors along the\n"
+            "                way. For the delta ladder: measure each with relnorm, ear-test the\n"
+            "                1-5%% band (0.074%% proven inaudible, 17%% proven destroyed).\n"
+            "                [--target all|mlpv] mlpv trains ONLY the timbre groups: MLPs +\n"
+            "                attention V + to_out. No q,k (ablation-proven structure poison),\n"
+            "                no proj heads (seed-dependent fuzz). Concentrates the whole delta\n"
+            "                budget in what survives, instead of filtering at export.\n"
+            "                [--sign-check] measure the velocity target's sign, train nothing\n"
+            "                [--bwd outprod] restore the slow CPU mul_mat backward (510x slower)\n"
+            "                [--tf32 on|off] default off\n"
+            "                Writes <out>/mm3_lora.safetensors; load with MM3_ADAPTER=<path>.\n"
             "\n"
             "ace-train preprocess  (all paths absolute; long options only; \"--flag value\" form)\n"
             "\n"
@@ -160,6 +219,15 @@ static void print_usage(void) {
             "  LoRA:\n"
             "    --rank <n>                  16\n"
             "    --alpha <n>                 32\n"
+            "\n"
+            "  Resume:\n"
+            "    --init-adapter <dir>        continue training from an exported run (PEFT LoRA or\n"
+            "                                LoKr dir). Identity hyperparams (adapter type, rank/\n"
+            "                                alpha, lokr dim/alpha/factor, --weights, base size)\n"
+            "                                are ADOPTED from its lm_train_log.json; an explicit\n"
+            "                                contradicting flag is refused. Fresh warmup+cosine;\n"
+            "                                optimizer momentum starts cold. Epoch 1 should land\n"
+            "                                near the source's saved_loss (logged as a check).\n"
             "\n"
             "  Optimizer / schedule:\n"
             "    --lr <f>                    1e-4\n"
@@ -315,6 +383,15 @@ static void print_usage(void) {
             "    --target-loss <f>           0.4         0 = disabled (run to the epoch cap)\n"
             "    --order <shuffle|fixed>     shuffle\n"
             "\n"
+            "  Resume:\n"
+            "    --init-adapter <dir>        continue training from an exported run (PEFT LoRA or\n"
+            "                                LoKr dir). Identity hyperparams (adapter type, rank/\n"
+            "                                alpha, lokr dims, target-mlp, layers, base model) are\n"
+            "                                ADOPTED from its dit_train_log.json; an explicit\n"
+            "                                contradicting flag is refused. Layer-window coverage is\n"
+            "                                tolerant: uncovered sites start at zero delta. mirror\n"
+            "                                and --bwd may differ (measured ~7e-5 loss drift).\n"
+            "\n"
             "  Crop / memory:\n"
             "    --crop <n>                  0           latent frames; 0 = auto-fit\n"
             "    --crop-min <n>              375\n"
@@ -431,7 +508,7 @@ static void purge_suffix(const std::string & dir, const char * suffix) {
     const size_t slen = strlen(suffix);
     for (size_t i = 0; i < names.size(); i++) {
         if (names[i].size() >= slen && names[i].compare(names[i].size() - slen, slen, suffix) == 0) {
-            remove((dir + "/" + names[i]).c_str());
+            hs_remove(dir + "/" + names[i]);
         }
     }
 }
@@ -440,7 +517,7 @@ static void purge_all(const std::string & dir) {
     std::vector<std::string> names;
     registry_list_dir(dir.c_str(), &names);
     for (size_t i = 0; i < names.size(); i++) {
-        remove((dir + "/" + names[i]).c_str());
+        hs_remove(dir + "/" + names[i]);
     }
 }
 
@@ -741,6 +818,31 @@ static int cmd_preprocess(int argc, char ** argv) {
                 cmp_i("max_lyric_tokens", cs.max_lyric_tokens, o.max_lyric_tokens);
                 cmp_i("vae_chunk", cs.vae_chunk, o.vae_chunk);
                 cmp_i("vae_overlap", cs.vae_overlap, o.vae_overlap);
+
+                // Trigger pair — resolved exactly the way pp_caption_text does,
+                // because it decides the CAPTION that got text-encoded into
+                // this file. NOT cmp_s: that skips an empty `had`, and the
+                // costliest change here (a cache written before the dataset had
+                // a tag, or with the key absent) has precisely that shape. An
+                // empty position means "prepend", and position is meaningless
+                // without a tag, so both sides normalise before comparing.
+                const std::string want_tag = s.custom_tag.empty() ? mf.custom_tag : s.custom_tag;
+                const std::string want_pos_raw = s.tag_position.empty() ? mf.tag_position : s.tag_position;
+                auto norm_pos = [](const std::string & tag, const std::string & pos) {
+                    return tag.empty() ? std::string() : (pos.empty() ? std::string("prepend") : pos);
+                };
+                const std::string had_pos  = norm_pos(cs.custom_tag, cs.tag_position);
+                const std::string want_pos = norm_pos(want_tag, want_pos_raw);
+                if (cs.custom_tag != want_tag) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "custom_tag " + (cs.custom_tag.empty() ? std::string("(none)") : cs.custom_tag)
+                                 + "\xE2\x86\x92" + (want_tag.empty() ? std::string("(none)") : want_tag);
+                }
+                if (had_pos != want_pos) {
+                    if (!resume_diff.empty()) resume_diff += ", ";
+                    resume_diff += "tag_position " + (had_pos.empty() ? std::string("(none)") : had_pos)
+                                 + "\xE2\x86\x92" + (want_pos.empty() ? std::string("(none)") : want_pos);
+                }
             }
             if (!resume_diff.empty()) {
                 char wb[640];
@@ -929,8 +1031,897 @@ static void bwd_apply(const std::string & v) {
 //
 // docs/plans/2026-07-27-lm-trainer-implementation.md §2.1, §3.1
 
+// ─── mm3-encode ─────────────────────────────────────────────────────────────
+//
+// Bring-up + parity driver for the MM3 DAV encoder (training path step 2).
+// Reads raw f32 planar audio (as dumped by mm3-weights/encode_ref.py) and
+// writes raw f32 latents [128][L], so the two can be compared directly.
+//
+//   ace-train mm3-encode --enc <mm3-enc-*.gguf> --audio <in.f32> --out <out.f32>
+//                        [--channels 2] [--ref <latents.f32>]
+//
+// With --ref it does the comparison itself and exits non-zero if the parity
+// floor is missed, so it can be used as a gate and not just a dumper.
+static int cmd_mm3_encode(int argc, char ** argv) {
+    std::string enc_path, audio_path, out_path, ref_path;
+    int         channels = 2;
+    bool        tf32     = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--enc"))      enc_path   = next("--enc");
+        else if (!strcmp(argv[i], "--audio"))    audio_path = next("--audio");
+        else if (!strcmp(argv[i], "--out"))      out_path   = next("--out");
+        else if (!strcmp(argv[i], "--ref"))      ref_path   = next("--ref");
+        else if (!strcmp(argv[i], "--channels")) channels   = atoi(next("--channels"));
+        else if (!strcmp(argv[i], "--tf32"))     tf32       = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+
+    // TF32 is OFF by default here, which is the opposite of the engine's usual
+    // preference, and the reason is measured rather than assumed:
+    //
+    //   TF32 on : corr 0.999988843  rel-RMSE 4.725e-03  max-abs-diff 1.70e-01
+    //   TF32 off: corr 1.000000000  rel-RMSE 7.493e-07  max-abs-diff 4.49e-05
+    //
+    // cuBLAS uses TF32 tensor cores for F32 GEMMs on Ampere+, and TF32 carries
+    // 10 explicit mantissa bits (~1e-3 relative), which compounds over ~30
+    // convolutions into ~5e-3 on the latents. These latents are the flow DiT's
+    // TRAINING TARGETS: they are computed once and then re-read for hundreds of
+    // epochs, so a systematic 0.5% error would be baked into every gradient for
+    // the life of the dataset. Preprocessing is not the place to trade accuracy
+    // for speed — and the speed it buys is a few seconds per dataset.
+    //
+    // Must be set BEFORE the CUDA backend initialises (mm3_enc_load ->
+    // backend_init), since cuBLAS reads it at context creation. Same lever
+    // dit-selftest.h uses for its finite-difference child process.
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+    if (enc_path.empty() || audio_path.empty()) {
+        fprintf(stderr, "ace-train mm3-encode: --enc and --audio are required\n");
+        return 2;
+    }
+    if (channels != 1 && channels != 2) {
+        fprintf(stderr, "ace-train mm3-encode: --channels must be 1 or 2\n");
+        return 2;
+    }
+
+    // Planar f32: channel 0 in full, then channel 1.
+    FILE * f = fopen(audio_path.c_str(), "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", audio_path.c_str()); return 1; }
+    fseek(f, 0, SEEK_END);
+    const long   bytes = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    const int64_t total = (int64_t) (bytes / (long) sizeof(float));
+    const int64_t n     = total / channels;
+    std::vector<float> raw((size_t) total);
+    if (fread(raw.data(), sizeof(float), (size_t) total, f) != (size_t) total) {
+        fclose(f); fprintf(stderr, "short read on %s\n", audio_path.c_str()); return 1;
+    }
+    fclose(f);
+    fprintf(stderr, "[mm3-encode] %s: %lld samples x %d ch\n", audio_path.c_str(), (long long) n, channels);
+
+    // Mono is duplicated, matching the reference's _prepare_waveform.
+    const float * chans[2] = { raw.data(), channels == 2 ? raw.data() + n : raw.data() };
+
+    MM3Enc      enc = {};
+    std::string err;
+    if (!mm3_enc_load(&enc, enc_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-encode] load failed: %s\n", err.c_str());
+        return 1;
+    }
+
+    std::vector<float> lat;
+    int64_t            L = 0;
+    const int64_t      t0 = ggml_time_ms();
+    if (!mm3_enc_encode(&enc, chans, n, &lat, &L, &err)) {
+        fprintf(stderr, "[mm3-encode] encode failed: %s\n", err.c_str());
+        mm3_enc_free(&enc);
+        return 1;
+    }
+    const int64_t ms = ggml_time_ms() - t0;
+    fprintf(stderr, "[mm3-encode] -> [%u, %lld] in %lld ms\n", enc.cfg.latent_channels, (long long) L,
+            (long long) ms);
+
+    int rc = 0;
+
+    if (!out_path.empty()) {
+        FILE * o = fopen(out_path.c_str(), "wb");
+        if (!o) { fprintf(stderr, "cannot write %s\n", out_path.c_str()); rc = 1; }
+        else {
+            fwrite(lat.data(), sizeof(float), lat.size(), o);
+            fclose(o);
+            fprintf(stderr, "[mm3-encode] wrote %s (%zu floats)\n", out_path.c_str(), lat.size());
+        }
+    }
+
+    if (!ref_path.empty()) {
+        FILE * r = fopen(ref_path.c_str(), "rb");
+        if (!r) { fprintf(stderr, "cannot open ref %s\n", ref_path.c_str()); mm3_enc_free(&enc); return 1; }
+        fseek(r, 0, SEEK_END);
+        const size_t rn = (size_t) (ftell(r) / (long) sizeof(float));
+        fseek(r, 0, SEEK_SET);
+        std::vector<float> ref(rn);
+        if (fread(ref.data(), sizeof(float), rn, r) != rn) {
+            fclose(r); fprintf(stderr, "short read on ref\n"); mm3_enc_free(&enc); return 1;
+        }
+        fclose(r);
+        if (rn != lat.size()) {
+            fprintf(stderr, "[mm3-encode] PARITY FAIL: ref has %zu floats, ours %zu\n", rn, lat.size());
+            mm3_enc_free(&enc);
+            return 1;
+        }
+        // Correlation + relative RMSE, the standing MM3 per-module bar.
+        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, sd = 0, sr = 0, amax = 0;
+        for (size_t i = 0; i < rn; i++) {
+            const double a = ref[i], b = lat[i], d = b - a;
+            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+            sd += d * d; sr += a * a;
+            amax = std::max(amax, std::abs(d));
+        }
+        const double nn   = (double) rn;
+        const double cov  = sab / nn - (sa / nn) * (sb / nn);
+        const double va   = saa / nn - (sa / nn) * (sa / nn);
+        const double vb   = sbb / nn - (sb / nn) * (sb / nn);
+        const double corr = cov / std::sqrt(va * vb);
+        const double rel  = std::sqrt(sd / sr);
+        fprintf(stderr, "[mm3-encode] PARITY corr=%.9f rel-RMSE=%.3e max-abs-diff=%.4e\n", corr, rel, amax);
+        // The bar for an fp32-vs-fp32 module port: this is not a bf16 dump
+        // comparison, both sides are f32, so it should be tight.
+        if (!(corr >= 0.9999 && rel <= 1e-3)) {
+            fprintf(stderr, "[mm3-encode] PARITY FAIL (want corr >= 0.9999 and rel-RMSE <= 1e-3)\n");
+            rc = 1;
+        } else {
+            fprintf(stderr, "[mm3-encode] PARITY OK\n");
+        }
+    }
+
+    mm3_enc_free(&enc);
+    return rc;
+}
+
+// ─── mm3-preprocess ─────────────────────────────────────────────────────────
+//
+// Training path step 3a: dataset -> flow-DiT TARGET latents, one file per song.
+//
+//   ace-train mm3-preprocess --dataset <dataset.json> --enc <mm3-enc-*.gguf>
+//                            --out <dir> [--ffmpeg <path>] [--max-duration <s>]
+//
+// Consumes the EXISTING Training Studio dataset format unchanged — the same
+// dataset.json + `<stem>.txt` sidecars the ACE path uses. MM3 needs only three
+// fields per sample (audio, caption, lyrics); duration comes from the audio.
+// Caption and lyrics are copied into the manifest for step 3b (the AR
+// conditioning rollout), which is the other half of a preprocessed sample.
+//
+// Audio goes through ffmpeg at **44100 Hz**, not the ACE path's 48000: the DAV
+// hop is 512 samples and 44100/512 = 86.1328125 Hz is the latent rate the flow
+// DiT and the condition resampler are both built around. Resampling in ffmpeg
+// rather than in-engine keeps the one high-quality resampler we already depend
+// on, and means read_wav_buf can take the result verbatim.
+static int cmd_mm3_preprocess(int argc, char ** argv) {
+    std::string ds_path, enc_path, out_dir, ffmpeg = "ffmpeg";
+    int         max_duration = 0;
+    bool        tf32         = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--dataset"))      ds_path      = next("--dataset");
+        else if (!strcmp(argv[i], "--enc"))          enc_path     = next("--enc");
+        else if (!strcmp(argv[i], "--out"))          out_dir      = next("--out");
+        else if (!strcmp(argv[i], "--ffmpeg"))       ffmpeg       = next("--ffmpeg");
+        else if (!strcmp(argv[i], "--max-duration")) max_duration = atoi(next("--max-duration"));
+        else if (!strcmp(argv[i], "--tf32"))         tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (ds_path.empty() || enc_path.empty() || out_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-preprocess: --dataset, --enc and --out are required\n");
+        return 2;
+    }
+    // Same reasoning as mm3-encode: these are training targets, computed once
+    // and re-read for hundreds of epochs. See cmd_mm3_encode for the numbers.
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+
+    // ── read dataset.json ──
+    FILE * df = hs_fopen(ds_path, "rb");
+    if (!df) { fprintf(stderr, "cannot open %s\n", ds_path.c_str()); return 1; }
+    fseek(df, 0, SEEK_END);
+    const long dsz = ftell(df);
+    fseek(df, 0, SEEK_SET);
+    std::string dbuf((size_t) dsz, '\0');
+    if (fread(&dbuf[0], 1, (size_t) dsz, df) != (size_t) dsz) {
+        fclose(df); fprintf(stderr, "short read on %s\n", ds_path.c_str()); return 1;
+    }
+    fclose(df);
+
+    yyjson_doc * doc = yyjson_read(dbuf.c_str(), dbuf.size(), 0);
+    if (!doc) { fprintf(stderr, "%s is not valid JSON\n", ds_path.c_str()); return 1; }
+    yyjson_val * root    = yyjson_doc_get_root(doc);
+    yyjson_val * samples = yyjson_obj_get(root, "samples");
+    if (!samples || !yyjson_is_arr(samples)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "%s has no `samples` array\n", ds_path.c_str());
+        return 1;
+    }
+    auto jstr = [](yyjson_val * o, const char * k) -> std::string {
+        yyjson_val * v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+    };
+    auto jnum = [](yyjson_val * o, const char * k) -> double {
+        yyjson_val * v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_num(v)) ? yyjson_get_num(v) : 0.0;
+    };
+
+    if (!pm_mkdir_p(out_dir) || !pm_mkdir_p(out_dir + "/latents")) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "cannot create %s\n", out_dir.c_str());
+        return 1;
+    }
+
+    MM3Enc      enc = {};
+    std::string err;
+    if (!mm3_enc_load(&enc, enc_path.c_str(), &err)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "[mm3-preprocess] encoder load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const int64_t hop = (int64_t) enc.cfg.total_downsample;
+    const int64_t SR  = (int64_t) enc.cfg.sampling_rate;
+
+    yyjson_mut_doc * mdoc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * mroot = yyjson_mut_obj(mdoc);
+    yyjson_mut_doc_set_root(mdoc, mroot);
+    yyjson_mut_obj_add_str(mdoc, mroot, "kind", "mm3_preprocess");
+    yyjson_mut_obj_add_int(mdoc, mroot, "version", 1);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "sample_rate", (uint64_t) SR);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "hop", (uint64_t) hop);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "latent_channels", enc.cfg.latent_channels);
+    yyjson_mut_obj_add_real(mdoc, mroot, "latent_rate_hz", (double) SR / (double) hop);
+    yyjson_mut_obj_add_strcpy(mdoc, mroot, "dataset", ds_path.c_str());
+    yyjson_mut_val * marr = yyjson_mut_arr(mdoc);
+    yyjson_mut_obj_add_val(mdoc, mroot, "samples", marr);
+
+    const std::string tmp_wav = out_dir + "/_mm3_tmp.wav";
+    size_t            idx = 0, ok_n = 0, fail_n = 0;
+    double            total_sec = 0.0;
+    const size_t      n_samples = yyjson_arr_size(samples);
+
+    yyjson_val * s;
+    yyjson_arr_iter it = yyjson_arr_iter_with(samples);
+    while ((s = yyjson_arr_iter_next(&it))) {
+        idx++;
+        const std::string id       = jstr(s, "id");
+        const std::string filename = jstr(s, "filename");
+        const std::string audio    = jstr(s, "audio_path");
+        if (audio.empty()) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu SKIP %s: no audio_path\n", idx, n_samples, filename.c_str());
+            fail_n++;
+            continue;
+        }
+
+        char cmd[4096];
+        if (max_duration > 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -t %d -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, max_duration, tmp_wav.c_str());
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, tmp_wav.c_str());
+        }
+#ifdef _WIN32
+        const std::string wrapped = "\"" + std::string(cmd) + "\"";  // cmd.exe strips the outer pair
+        const int         rc      = hs_system(wrapped);
+#else
+        const int rc = hs_system(cmd);
+#endif
+        if (rc != 0 || !pm_file_exists(tmp_wav)) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: ffmpeg exit %d\n", idx, n_samples,
+                    filename.c_str(), rc);
+            fail_n++;
+            continue;
+        }
+
+        // Read the transcode back. It is already 44.1 kHz stereo f32, so there
+        // is no in-engine resample.
+        //
+        // USE audio_io_read_wav_buf, NOT read_wav_buf. The raw reader returns
+        // INTERLEAVED [T,2] (see the header comment in wav.h); the encoder
+        // wants PLANAR [L:T][R:T]. This call site used to take the raw reader's
+        // output and slice it as { p, p + T }, which silently made "left" the
+        // FIRST HALF of the song with L and R alternating, and "right" the
+        // second half. Because L ~= R in most music, alternating them
+        // duplicates every sample -- an exact 2x time stretch, exactly one
+        // octave down. Every cached training target was the song in slow
+        // motion, and five LoRA runs learned to produce slow motion.
+        //
+        // Nothing caught it for a day because T is PER-CHANNEL frames, so
+        // latent_frames / duration still came out at exactly 86.1328 Hz and
+        // every arithmetic check passed. The DAV encoder's own parity gate
+        // passed too -- it is fed encode_ref.py's dump, which really is planar.
+        // The encoder was never wrong; only this wiring into it was.
+        //
+        // Judge preprocessing by DECODING A TARGET AND LISTENING TO IT. That
+        // found this in one listen after metadata checks found nothing.
+        FILE * wf = hs_fopen(tmp_wav, "rb");
+        if (!wf) { fprintf(stderr, "[mm3-preprocess] cannot reopen temp wav\n"); fail_n++; continue; }
+        fseek(wf, 0, SEEK_END);
+        const long wsz = ftell(wf);
+        fseek(wf, 0, SEEK_SET);
+        std::vector<uint8_t> wbuf((size_t) wsz);
+        const bool           wread = fread(wbuf.data(), 1, (size_t) wsz, wf) == (size_t) wsz;
+        fclose(wf);
+        int      T = 0, got_sr = 0;
+        float *  planar = wread ? audio_io_read_wav_buf(wbuf.data(), wbuf.size(), &T, &got_sr) : nullptr;
+        if (!planar || T <= 0) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: cannot decode transcode\n", idx, n_samples,
+                    filename.c_str());
+            free(planar);
+            fail_n++;
+            continue;
+        }
+        if (got_sr != (int) SR) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: ffmpeg produced %d Hz, wanted %lld\n", idx,
+                    n_samples, filename.c_str(), got_sr, (long long) SR);
+            free(planar);
+            fail_n++;
+            continue;
+        }
+
+        const float * chans[2] = { planar, planar + T };
+        std::vector<float> lat;
+        int64_t            L = 0;
+        if (!mm3_enc_encode(&enc, chans, (int64_t) T, &lat, &L, &err)) {
+            fprintf(stderr, "[mm3-preprocess] %zu/%zu FAIL %s: %s\n", idx, n_samples, filename.c_str(),
+                    err.c_str());
+            free(planar);
+            fail_n++;
+            continue;
+        }
+        free(planar);
+
+        const std::string stem = id.empty() ? std::to_string(idx) : id;
+        const std::string lp   = out_dir + "/latents/" + stem + ".f32";
+        FILE *            lf   = hs_fopen(lp, "wb");
+        if (!lf) { fprintf(stderr, "[mm3-preprocess] cannot write %s\n", lp.c_str()); fail_n++; continue; }
+        fwrite(lat.data(), sizeof(float), lat.size(), lf);
+        fclose(lf);
+
+        const double secs = (double) T / (double) SR;
+        total_sec += secs;
+        ok_n++;
+
+        yyjson_mut_val * m = yyjson_mut_obj(mdoc);
+        yyjson_mut_obj_add_strcpy(mdoc, m, "id", stem.c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "filename", filename.c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "latents", ("latents/" + stem + ".f32").c_str());
+        yyjson_mut_obj_add_int(mdoc, m, "latent_frames", (int64_t) L);
+        yyjson_mut_obj_add_int(mdoc, m, "n_samples", (int64_t) T);
+        yyjson_mut_obj_add_real(mdoc, m, "duration_sec", secs);
+        // Carried for step 3b (the AR conditioning rollout), so that stage does
+        // not have to re-open the dataset or re-resolve sidecars.
+        yyjson_mut_obj_add_strcpy(mdoc, m, "caption", jstr(s, "caption").c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "lyrics", jstr(s, "lyrics").c_str());
+        yyjson_mut_obj_add_real(mdoc, m, "bpm", jnum(s, "bpm"));
+        yyjson_mut_obj_add_strcpy(mdoc, m, "keyscale", jstr(s, "keyscale").c_str());
+        yyjson_mut_obj_add_strcpy(mdoc, m, "timesignature", jstr(s, "timesignature").c_str());
+        yyjson_mut_arr_append(marr, m);
+
+        fprintf(stderr, "[mm3-preprocess] %zu/%zu ok %-44s %6.1fs -> [%u, %lld]\n", idx, n_samples,
+                filename.c_str(), secs, enc.cfg.latent_channels, (long long) L);
+    }
+
+    hs_remove(tmp_wav);
+    yyjson_doc_free(doc);
+    mm3_enc_free(&enc);
+
+    yyjson_mut_obj_add_uint(mdoc, mroot, "n_ok", (uint64_t) ok_n);
+    yyjson_mut_obj_add_uint(mdoc, mroot, "n_failed", (uint64_t) fail_n);
+    yyjson_mut_obj_add_real(mdoc, mroot, "total_audio_sec", total_sec);
+
+    const std::string mpath = out_dir + "/mm3_preprocess.json";
+    size_t            mlen  = 0;
+    char *            mjson = yyjson_mut_write(mdoc, YYJSON_WRITE_PRETTY, &mlen);
+    int               rc    = 0;
+    if (mjson) {
+        FILE * mf = hs_fopen(mpath, "wb");
+        if (mf) { fwrite(mjson, 1, mlen, mf); fclose(mf); }
+        else    { fprintf(stderr, "cannot write %s\n", mpath.c_str()); rc = 1; }
+        free(mjson);
+    } else {
+        rc = 1;
+    }
+    yyjson_mut_doc_free(mdoc);
+
+    fprintf(stderr, "[mm3-preprocess] done: %zu ok, %zu failed, %.1f min of audio -> %s\n", ok_n, fail_n,
+            total_sec / 60.0, mpath.c_str());
+    return (fail_n && !ok_n) ? 1 : rc;
+}
+
+// ─── mm3-condition ──────────────────────────────────────────────────────────
+//
+// Training path step 3b: the flow DiT's CONDITIONING, cached per song.
+//
+//   ace-train mm3-condition --manifest <mm3_preprocess.json> --models <dir>
+//                           --captions <dataset dir> [--seed N] [--dit-quant Q]
+//
+// Per song: caption + lyrics -> AR rollout (LM + depth decoder) -> frame_hiddens
+// -> condition encoder -> condition, stored f16 beside the latents.
+//
+// ── The thing to understand before trusting this output ─────────────────────
+//
+// The rollout is SAMPLED FROM THE CAPTION. It is not, and cannot be, derived
+// from the training audio: MiniMax ships no audio->code encoder, so there are no
+// ground-truth codes for a real song and the conditioning cannot be
+// teacher-forced (see docs/plans/2026-08-14-mm3-training-feasibility.md). The
+// conditioning therefore matches the target only in caption, lyrics and
+// duration — never in musical content. That is a property of the release, not a
+// shortcut here, and it is why the DiT can learn the target's timbre/production
+// marginal but not its note content.
+//
+// ── Why the DiT is loaded at a tiny quant ───────────────────────────────────
+//
+// mm3_load_parts' `rest` covers cond+dit+voc, and only `cond` is used here. The
+// DiT is dead weight, so its role is pointed at the smallest quant on disk:
+// f16 is 4.8 GB against Q2_K's 0.83 GB, and at f16 the LM (17 GB) + depth +
+// DiT + KV (288 kB/position, ~2 GB at 6990 frames) + compute headroom does not
+// fit the card alongside a desktop. Nothing here ever executes a DiT graph.
+static int cmd_mm3_condition(int argc, char ** argv) {
+    std::string manifest_path, models_dir, captions_dir, dit_quant = "Q2_K", lm_quant;
+    int64_t     seed        = 42;
+    double      segment_sec = 60.0;   // 0 = one rollout for the whole song
+    bool        tf32        = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--manifest"))  manifest_path = next("--manifest");
+        else if (!strcmp(argv[i], "--models"))    models_dir    = next("--models");
+        else if (!strcmp(argv[i], "--captions"))  captions_dir  = next("--captions");
+        else if (!strcmp(argv[i], "--dit-quant")) dit_quant     = next("--dit-quant");
+        else if (!strcmp(argv[i], "--lm-quant"))  lm_quant      = next("--lm-quant");
+        else if (!strcmp(argv[i], "--seed"))      seed          = atoll(next("--seed"));
+        else if (!strcmp(argv[i], "--segment-sec")) segment_sec = atof(next("--segment-sec"));
+        else if (!strcmp(argv[i], "--tf32"))      tf32          = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (manifest_path.empty() || models_dir.empty() || captions_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-condition: --manifest, --models and --captions are required\n");
+        return 2;
+    }
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+
+    // ── manifest ──
+    FILE * mf = hs_fopen(manifest_path, "rb");
+    if (!mf) { fprintf(stderr, "cannot open %s\n", manifest_path.c_str()); return 1; }
+    fseek(mf, 0, SEEK_END);
+    const long msz = ftell(mf);
+    fseek(mf, 0, SEEK_SET);
+    std::string mbuf((size_t) msz, '\0');
+    if (fread(&mbuf[0], 1, (size_t) msz, mf) != (size_t) msz) { fclose(mf); fprintf(stderr, "short read\n"); return 1; }
+    fclose(mf);
+
+    yyjson_doc * doc = yyjson_read(mbuf.c_str(), mbuf.size(), 0);
+    if (!doc) { fprintf(stderr, "%s is not valid JSON\n", manifest_path.c_str()); return 1; }
+    yyjson_val * mroot = yyjson_doc_get_root(doc);
+    yyjson_val * arr   = yyjson_obj_get(mroot, "samples");
+    if (!arr || !yyjson_is_arr(arr)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "manifest has no `samples` array\n");
+        return 1;
+    }
+    std::string out_dir = manifest_path;
+    {
+        size_t s = out_dir.find_last_of("/\\");
+        out_dir  = (s == std::string::npos) ? std::string(".") : out_dir.substr(0, s);
+    }
+    if (!pm_mkdir_p(out_dir + "/condition")) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "cannot create %s/condition\n", out_dir.c_str());
+        return 1;
+    }
+
+    // ── model: LM + depth + rest, DiT pinned tiny ──
+    static MM3Model model;
+    std::string     roles[MM3_R_COUNT];
+    roles[MM3_R_DIT] = dit_quant;
+    mm3_discover(&model, models_dir.c_str(), lm_quant, roles);
+    std::string err;
+    if (!mm3_load_parts(&model, /*lm*/ true, /*depth*/ true, /*rest*/ true, &err)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "[mm3-condition] load failed: %s\n", err.c_str());
+        return 1;
+    }
+    fprintf(stderr, "[mm3-condition] lm=%s dit=%s (unused) cond=%s\n",
+            model.lm_file.name.c_str(), model.role_file[MM3_R_DIT].name.c_str(),
+            model.role_file[MM3_R_COND].name.c_str());
+
+    MM3Tokenizer tok;
+    if (!mm3_tokenizer_load(model, &tok, &err)) {
+        fprintf(stderr, "[mm3-condition] tokenizer: %s\n", err.c_str());
+        return 1;
+    }
+
+    const int64_t H   = (int64_t) model.lm_cfg.embedding_length;
+    const int64_t LAY = (int64_t) model.lm_cfg.num_codebooks;   // 8 = LM hidden + 7 depth
+    const int64_t FPS = (int64_t) model.lm_cfg.frame_rate;
+
+    yyjson_mut_doc * odoc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * oroot = yyjson_mut_obj(odoc);
+    yyjson_mut_doc_set_root(odoc, oroot);
+    yyjson_mut_val * oarr = yyjson_mut_arr(odoc);
+
+    size_t idx = 0, n_ok = 0, n_fail = 0;
+    double ar_ms_total = 0.0;
+    const size_t n_total = yyjson_arr_size(arr);
+
+    yyjson_val *    s;
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    while ((s = yyjson_arr_iter_next(&it))) {
+        idx++;
+        auto js = [&](const char * k) -> std::string {
+            yyjson_val * v = yyjson_obj_get(s, k);
+            return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+        };
+        const std::string id       = js("id");
+        const std::string filename = js("filename");
+        const std::string lyrics   = js("lyrics");
+        yyjson_val *      vL       = yyjson_obj_get(s, "latent_frames");
+        const int64_t     L_target = vL ? (int64_t) yyjson_get_int(vL) : 0;
+        yyjson_val *      vD       = yyjson_obj_get(s, "duration_sec");
+        const double      dur      = vD ? yyjson_get_num(vD) : 0.0;
+
+        // The MM3 caption lives beside the audio as <stem>.mm3.txt, NOT in the
+        // sidecar (see mm3-caption-restructure.py). Refuse rather than silently
+        // fall back to the ACE caption: an ACE caption produces the wrong genre
+        // (measured), so a silent fallback would poison the cache invisibly.
+        std::string stem = filename;
+        {
+            size_t d = stem.find_last_of('.');
+            if (d != std::string::npos) stem = stem.substr(0, d);
+        }
+        const std::string cap_path = captions_dir + "/" + stem + ".mm3.txt";
+        FILE *            cf       = hs_fopen(cap_path, "rb");
+        if (!cf) {
+            fprintf(stderr, "[mm3-condition] %zu/%zu SKIP %s: no %s.mm3.txt\n", idx, n_total,
+                    filename.c_str(), stem.c_str());
+            n_fail++;
+            continue;
+        }
+        std::string caption;
+        {
+            char   b[8192];
+            size_t r;
+            while ((r = fread(b, 1, sizeof(b), cf)) > 0) caption.append(b, r);
+            fclose(cf);
+        }
+
+        // ── segmented AR rollout ──
+        //
+        // A single rollout for a whole song UNDER-COVERS it: the LM emits EOS
+        // long before a 4-minute request is satisfied. Measured on this dataset,
+        // one-shot: sadie asked for 6990 frames and stopped at 4540 (65 % of the
+        // song), mercy_me 83 %, burn 84 %. Nothing is corrupt, but a third of
+        // some songs would silently have no conditioning and so could never be
+        // trained on. MM3's reference generates 30-40 s clips; 4.5 minutes in one
+        // unbroken rollout is far outside what it sustains.
+        //
+        // So roll out in segments and concatenate. This costs nothing musically:
+        // the conditioning is caption-derived and content-misaligned with the
+        // target audio by construction, so a seam every --segment-sec is no less
+        // faithful than the middle of a segment. Segment boundaries ARE recorded,
+        // so the trainer can decline to sample a window that straddles one.
+        //
+        // Lyrics are split proportionally across segments rather than repeated:
+        // handing every 60 s segment the whole song's lyrics would make each one
+        // try to sing all of them, giving implausibly dense vocal conditioning.
+        const int64_t frames_want = std::min<int64_t>((int64_t) llround(dur * (double) FPS),
+                                                      (int64_t) model.lm_cfg.max_audio_frames);
+        const int64_t seg_frames  = (segment_sec > 0.0)
+                                        ? std::max<int64_t>(1, (int64_t) llround(segment_sec * (double) FPS))
+                                        : frames_want;
+        const int64_t n_seg       = (frames_want + seg_frames - 1) / seg_frames;
+
+        std::vector<std::string> lyric_parts;
+        {
+            std::vector<std::string> lines;
+            size_t                   p = 0;
+            while (p <= lyrics.size()) {
+                size_t nl = lyrics.find('\n', p);
+                if (nl == std::string::npos) { lines.push_back(lyrics.substr(p)); break; }
+                lines.push_back(lyrics.substr(p, nl - p));
+                p = nl + 1;
+            }
+            lyric_parts.assign((size_t) n_seg, std::string());
+            for (size_t li = 0; li < lines.size(); li++) {
+                const size_t sidx = std::min<size_t>((size_t) n_seg - 1, li * (size_t) n_seg / std::max<size_t>(1, lines.size()));
+                if (!lyric_parts[sidx].empty()) lyric_parts[sidx] += "\n";
+                lyric_parts[sidx] += lines[li];
+            }
+        }
+
+        std::vector<float>   hiddens;      // [F_total, LAY, H]
+        std::vector<int64_t> seg_bounds;   // frame index of each segment start
+        int64_t              F        = 0;
+        int64_t              n_eos    = 0;
+        bool                 song_ok  = true;
+        const int64_t        t0       = ggml_time_ms();
+
+        for (int64_t sg = 0; sg < n_seg && song_ok; sg++) {
+            const int64_t want = std::min<int64_t>(seg_frames, frames_want - sg * seg_frames);
+            if (want <= 0) break;
+
+            MM3SynthRequest req;
+            req.caption  = caption;
+            req.lyrics   = lyric_parts[(size_t) sg];
+            req.duration = (double) want / (double) FPS;
+            req.prompt   = mm3_assemble_prompt(req.caption, req.lyrics, &req.instrumental);
+            req.max_frames = want;
+            req.seed_in    = seed + sg;
+            if (!mm3_request_tokenize(model, &tok, &req, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s seg %lld: %s\n", idx, n_total,
+                        filename.c_str(), (long long) sg, err.c_str());
+                song_ok = false;
+                break;
+            }
+
+            MM3ArOptions aopt;
+            aopt.max_frames      = want;
+            // Per-segment seed: identical segments would otherwise produce
+            // identical conditioning, which is a degenerate signal to train on.
+            aopt.seed            = (uint64_t) (seed + sg);
+            aopt.collect_hiddens = true;
+            MM3ArResult ar;
+            if (!mm3_ar_plan(model, req.gen.ids_cond.data(), req.gen.ids_uncond.data(),
+                             (int64_t) req.gen.ids_cond.size(), aopt, &ar, &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s seg %lld: AR: %s\n", idx, n_total,
+                        filename.c_str(), (long long) sg, err.c_str());
+                song_ok = false;
+                break;
+            }
+            seg_bounds.push_back(F);
+            hiddens.insert(hiddens.end(), ar.frame_hiddens.begin(), ar.frame_hiddens.end());
+            F += ar.n_frames;
+            if (ar.eos_hit) n_eos++;
+        }
+        if (!song_ok || F <= 0) {
+            n_fail++;
+            continue;
+        }
+        ar_ms_total += (double) (ggml_time_ms() - t0);
+        MM3ArResult ar;              // aggregate stand-in for the fields used below
+        ar.n_frames     = F;
+        ar.eos_hit      = n_eos > 0;
+        ar.total_ms     = (double) (ggml_time_ms() - t0);
+        ar.frame_hiddens.swap(hiddens);
+
+        // ── condition encode, chunked ──
+        //
+        // MM3_COND_MAX_FRAMES is 4096 and a 280 s song is ~6990 frames, so long
+        // songs need more than one pass. Chunks carry OVERLAP frames of context
+        // on each side and keep only their core; the frame->latent map is
+        // non-integer (x3.4453125, truncated), so each chunk's destination
+        // offset is taken from mm3_cond_latent_length() of its core start
+        // rather than computed by multiplication.
+        // F is the total across all segments, set by the rollout loop above.
+        const int64_t L_all = mm3_cond_latent_length(model.synth_cfg.cond, F);
+        const int64_t CHUNK = 3072, OVER = 128;
+        std::vector<float> cond_all((size_t) (L_all * (int64_t) model.synth_cfg.cond.out_dim), 0.0f);
+        const int64_t      CD = (int64_t) model.synth_cfg.cond.out_dim;
+        bool               cond_ok = true;
+
+        for (int64_t start = 0; start < F && cond_ok; start += CHUNK) {
+            const int64_t lead  = std::min<int64_t>(OVER, start);
+            const int64_t begin = start - lead;
+            const int64_t want  = std::min<int64_t>(CHUNK + lead + OVER, F - begin);
+            std::vector<float> part;
+            int64_t            pl = 0;
+            if (!mm3_cond_encode(model, ar.frame_hiddens.data() + (size_t) (begin * LAY * H), want, part, &pl,
+                                 &err)) {
+                fprintf(stderr, "[mm3-condition] %zu/%zu FAIL %s: cond: %s\n", idx, n_total, filename.c_str(),
+                        err.c_str());
+                cond_ok = false;
+                break;
+            }
+            const int64_t l_dst  = mm3_cond_latent_length(model.synth_cfg.cond, start);
+            const int64_t l_skip = mm3_cond_latent_length(model.synth_cfg.cond, begin + lead) -
+                                   mm3_cond_latent_length(model.synth_cfg.cond, begin);
+            const int64_t l_core = std::min<int64_t>(pl - l_skip, L_all - l_dst);
+            if (l_core > 0) {
+                memcpy(cond_all.data() + (size_t) (l_dst * CD), part.data() + (size_t) (l_skip * CD),
+                       (size_t) (l_core * CD) * sizeof(float));
+            }
+        }
+        if (!cond_ok) {
+            n_fail++;
+            continue;
+        }
+
+        // f16 on disk: this is conditioning, not a gradient target, and it
+        // halves a cache that is already the largest artifact in the pipeline.
+        std::vector<ggml_fp16_t> half(cond_all.size());
+        ggml_fp32_to_fp16_row(cond_all.data(), half.data(), (int) cond_all.size());
+        const std::string cp = out_dir + "/condition/" + id + ".f16";
+        FILE *            of = hs_fopen(cp, "wb");
+        if (!of) { fprintf(stderr, "[mm3-condition] cannot write %s\n", cp.c_str()); n_fail++; continue; }
+        fwrite(half.data(), sizeof(ggml_fp16_t), half.size(), of);
+        fclose(of);
+
+        yyjson_mut_val * e = yyjson_mut_obj(odoc);
+        yyjson_mut_obj_add_strcpy(odoc, e, "id", id.c_str());
+        yyjson_mut_obj_add_strcpy(odoc, e, "filename", filename.c_str());
+        yyjson_mut_obj_add_strcpy(odoc, e, "condition", ("condition/" + id + ".f16").c_str());
+        yyjson_mut_obj_add_int(odoc, e, "cond_frames", F);
+        yyjson_mut_obj_add_int(odoc, e, "cond_latents", L_all);
+        yyjson_mut_obj_add_int(odoc, e, "cond_dim", CD);
+        yyjson_mut_obj_add_int(odoc, e, "latent_frames", L_target);
+        yyjson_mut_obj_add_bool(odoc, e, "eos_hit", ar.eos_hit);
+        // Latent index of each segment start. A training window that straddles
+        // one of these spans two independent rollouts, so the trainer should
+        // either skip it or accept the seam knowingly.
+        yyjson_mut_val * sb = yyjson_mut_arr(odoc);
+        for (int64_t fb : seg_bounds) {
+            yyjson_mut_arr_add_int(odoc, sb, mm3_cond_latent_length(model.synth_cfg.cond, fb));
+        }
+        yyjson_mut_obj_add_val(odoc, e, "segment_latent_starts", sb);
+        yyjson_mut_obj_add_int(odoc, e, "n_segments", (int64_t) seg_bounds.size());
+        yyjson_mut_arr_append(oarr, e);
+        n_ok++;
+
+        const double cover = L_target > 0 ? 100.0 * (double) std::min<int64_t>(L_all, L_target) / (double) L_target
+                                          : 0.0;
+        fprintf(stderr, "[mm3-condition] %zu/%zu ok %-42s F=%-5lld cond L=%-6lld (audio L=%-6lld %5.1f%%) "
+                        "%lld seg %.1fs\n",
+                idx, n_total, filename.c_str(), (long long) F, (long long) L_all, (long long) L_target, cover,
+                (long long) seg_bounds.size(), ar.total_ms / 1000.0);
+    }
+
+    yyjson_doc_free(doc);
+
+    yyjson_mut_obj_add_str(odoc, oroot, "kind", "mm3_condition");
+    yyjson_mut_obj_add_int(odoc, oroot, "version", 1);
+    yyjson_mut_obj_add_int(odoc, oroot, "seed", seed);
+    yyjson_mut_obj_add_strcpy(odoc, oroot, "lm", model.lm_file.name.c_str());
+    yyjson_mut_obj_add_str(odoc, oroot, "dtype", "f16");
+    yyjson_mut_obj_add_uint(odoc, oroot, "n_ok", (uint64_t) n_ok);
+    yyjson_mut_obj_add_uint(odoc, oroot, "n_failed", (uint64_t) n_fail);
+    yyjson_mut_obj_add_val(odoc, oroot, "samples", oarr);
+
+    const std::string opath = out_dir + "/mm3_condition.json";
+    size_t            olen  = 0;
+    char *            ojson = yyjson_mut_write(odoc, YYJSON_WRITE_PRETTY, &olen);
+    int               rc    = 0;
+    if (ojson) {
+        FILE * o = hs_fopen(opath, "wb");
+        if (o) { fwrite(ojson, 1, olen, o); fclose(o); } else { rc = 1; }
+        free(ojson);
+    } else {
+        rc = 1;
+    }
+    yyjson_mut_doc_free(odoc);
+
+    fprintf(stderr, "[mm3-condition] done: %zu ok, %zu failed, %.1f min of AR -> %s\n", n_ok, n_fail,
+            ar_ms_total / 60000.0, opath.c_str());
+    return (n_fail && !n_ok) ? 1 : rc;
+}
+
+
+// ─── mm3-train-dit ──────────────────────────────────────────────────────────
+static int cmd_mm3_train_dit(int argc, char ** argv) {
+    MM3TrainArgs a;
+    bool tf32 = false;
+    bool bwd_outprod = false;   // --bwd outprod restores the slow CPU path
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * w) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", w); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--cache"))      a.cache_dir  = next("--cache");
+        else if (!strcmp(argv[i], "--models"))     a.models_dir = next("--models");
+        else if (!strcmp(argv[i], "--out"))        a.out_dir    = next("--out");
+        else if (!strcmp(argv[i], "--rank"))       a.rank       = atoll(next("--rank"));
+        else if (!strcmp(argv[i], "--alpha"))      a.alpha      = (float) atof(next("--alpha"));
+        else if (!strcmp(argv[i], "--lr"))         a.lr         = (float) atof(next("--lr"));
+        else if (!strcmp(argv[i], "--steps"))      a.steps      = atoll(next("--steps"));
+        else if (!strcmp(argv[i], "--crop"))       a.crop       = atoll(next("--crop"));
+        else if (!strcmp(argv[i], "--grad-accum")) a.grad_accum = atoll(next("--grad-accum"));
+        else if (!strcmp(argv[i], "--seed"))       a.seed       = (uint64_t) atoll(next("--seed"));
+        else if (!strcmp(argv[i], "--song"))       a.only_song  = next("--song");
+        // Sigma is 1 - sigmoid(N(mean, std)), so a POSITIVE mean pushes sigma
+        // toward 0, i.e. toward crops that are mostly REAL AUDIO. That is the
+        // knob that decides what the run can learn at all. At mean 0 most steps
+        // land near sigma 1 (near-pure noise), where the only signal available
+        // is the caption marginal -- and because our conditioning is sampled
+        // from the caption rather than teacher-forced from the target, those
+        // steps can only ever teach "what does this genre average to". Run 01
+        // did exactly that: loss fell 2% over 3000 steps and the adapter was
+        // only usable at scale 0.2 because most of what it learned was the mean.
+        else if (!strcmp(argv[i], "--logit-mean")) a.logit_mean = (float) atof(next("--logit-mean"));
+        else if (!strcmp(argv[i], "--logit-std"))  a.logit_std  = (float) atof(next("--logit-std"));
+        // Fixed stratified-sigma holdout. This is the ONLY number comparable
+        // between runs -- training loss is measured at whatever sigmas
+        // logit_mean happens to draw, so it changes meaning when that changes.
+        else if (!strcmp(argv[i], "--eval-every")) a.eval_every = atoll(next("--eval-every"));
+        else if (!strcmp(argv[i], "--eval-n"))     a.eval_n     = atoll(next("--eval-n"));
+        // Keep this PINNED across crop experiments. Default 689 so every run
+        // stays comparable to runs 06/07; 0 means "follow --crop", which makes
+        // the eval move with the variable under test.
+        else if (!strcmp(argv[i], "--eval-crop"))  a.eval_crop  = atoll(next("--eval-crop"));
+        else if (!strcmp(argv[i], "--crop-mode"))  a.crop_mode  = next("--crop-mode");
+        else if (!strcmp(argv[i], "--ckpt-segments")) a.ckpt_segments = atoll(next("--ckpt-segments"));
+        else if (!strcmp(argv[i], "--ckpt-verify"))   a.ckpt_verify   = true;
+        else if (!strcmp(argv[i], "--export-every"))  a.export_every  = atoll(next("--export-every"));
+        else if (!strcmp(argv[i], "--target")) {
+            a.target = next("--target");
+            if (a.target != "all" && a.target != "mlpv") {
+                fprintf(stderr, "ace-train: --target must be all or mlpv\n"); return 2;
+            }
+        }
+        else if (!strcmp(argv[i], "--sign-check")) a.sign_check = true;
+        else if (!strcmp(argv[i], "--tf32"))       tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (a.cache_dir.empty() || a.models_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-train-dit: --cache and --models are required\n");
+        return 2;
+    }
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+    // THE mul_mat BACKWARD REFORMULATION. Without it every LoRA weight gradient
+    // is an OUT_PROD, ggml-cuda cannot take it, and all 146 of them run on the
+    // CPU with a round trip each way -- measured as 292 backend crossings and
+    // 46 s per step at crop 344 while the GPU sat at 6%. engine/patches/
+    // mm-backward.patch rewrites out_prod(W, transpose(grad)) into the provably
+    // identical mul_mat(cont(transpose(W)), grad), which CUDA does implement.
+    //
+    // Must be set BEFORE any backward is built: the patch latches it into a
+    // static on first use. Same call ACE's train-lm/train-dit make for --bwd mm.
+    if (!bwd_outprod) {
+#ifdef _WIN32
+        _putenv("GGML_BACKWARD_MM=1");
+#else
+        setenv("GGML_BACKWARD_MM", "1", 1);
+#endif
+    }
+    return mm3_train_dit_run(a);
+}
+
 static int cmd_train_lm(int argc, char ** argv) {
-    LmTrainArgs a;
+    LmTrainArgs      a;
+    LmResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
     std::string stages_csv, dit_arg, lm_arg, lm_size_arg;
 
     for (int i = 1; i < argc; i++) {
@@ -942,8 +1933,9 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
         else if (!strcmp(argv[i], "--lm") && i + 1 < argc) lm_arg = argv[++i];
         else if (!strcmp(argv[i], "--lm-size") && i + 1 < argc) lm_size_arg = argv[++i];
-        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--init-adapter") && i + 1 < argc) a.init_adapter = argv[++i];
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) { a.rank = atoi(argv[++i]); saw.rank = true; }
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) { a.alpha = atoi(argv[++i]); saw.alpha = true; }
         else if (!strcmp(argv[i], "--lr") && i + 1 < argc) a.lr = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--epochs") && i + 1 < argc) a.epochs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--grad-accum") && i + 1 < argc) a.grad_accum = atoi(argv[++i]);
@@ -958,7 +1950,7 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--low-vram") && i + 1 < argc) a.low_vram = argv[++i];
         else if (!strcmp(argv[i], "--attn-head-block") && i + 1 < argc) a.attn_head_block = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lm-chunk") && i + 1 < argc) a.chunk = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--weights") && i + 1 < argc) a.weights = argv[++i];
+        else if (!strcmp(argv[i], "--weights") && i + 1 < argc) { a.weights = argv[++i]; saw.weights = true; }
         else if (!strcmp(argv[i], "--optimizer") && i + 1 < argc) a.optimizer = argv[++i];
         else if (!strcmp(argv[i], "--muon-lr-scale") && i + 1 < argc) a.muon_lr_scale = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--muon-momentum") && i + 1 < argc) a.muon_momentum = (float) atof(argv[++i]);
@@ -966,10 +1958,10 @@ static int cmd_train_lm(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--muon-min-dim") && i + 1 < argc) a.muon_min_dim = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--muon-bucket") && i + 1 < argc) a.muon_bucket = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-muon-nesterov")) a.muon_nesterov = false;
-        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
-        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) { a.adapter_type = argv[++i]; saw.adapter_type = true; }
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) { a.lokr_dim = atoi(argv[++i]); saw.lokr_dim = true; }
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) { a.lokr_alpha = (float) atof(argv[++i]); saw.lokr_alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) { a.lokr_factor = atoi(argv[++i]); saw.lokr_factor = true; }
         else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
         else if (!strcmp(argv[i], "--bwd") && i + 1 < argc) a.bwd = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) a.batch = argv[++i];
@@ -1005,6 +1997,32 @@ static int cmd_train_lm(int argc, char ** argv) {
             fprintf(stderr, "ace-train train-lm: --stages must name at least one of extract,train,export\n");
             return 2;
         }
+    }
+
+    // ── resume (--init-adapter): adopt the source run's identity ─────────
+    //
+    // BEFORE the sanity/lever checks so they validate the ADOPTED values, and
+    // before model resolution so the lm_size refuse below can use the source's
+    // recorded size. Explicit CLI contradictions exit 2 inside prepare.
+    LmResumeSource resume_src;
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        if (!lm_resume_prepare(&a, saw, &resume_src, &err)) {
+            fprintf(stderr, "ace-train train-lm: %s\n", err.c_str());
+            return 2;
+        }
+        a.init_from_loss = resume_src.saved_loss;
+        if (!lm_size_arg.empty() && !resume_src.lm_size.empty() && lm_size_arg != resume_src.lm_size) {
+            fprintf(stderr,
+                    "ace-train train-lm: --init-adapter %s was trained on a %s base but --lm-size says %s — "
+                    "a resumed adapter must stay on its own base size\n",
+                    a.init_adapter.c_str(), resume_src.lm_size.c_str(), lm_size_arg.c_str());
+            return 2;
+        }
+        fprintf(stderr,
+                "[train-lm] resuming %s (%s, saved_loss %.4f @ epoch %d) — identity adopted from its log\n",
+                a.init_adapter.c_str(), resume_src.adapter_type.c_str(), resume_src.saved_loss,
+                resume_src.saved_epoch);
     }
 
     // ── numeric sanity (the server clamps these too; be defensive) ───────
@@ -1151,6 +2169,23 @@ static int cmd_train_lm(int argc, char ** argv) {
             return 2;
         }
         a.lm_name = name;
+        // Resume base check: same SIZE is a hard rule (the shapes differ);
+        // a different file of the same size (quant/bf16 variant) only warns.
+        if (!a.init_adapter.empty() && !resume_src.lm_size.empty()) {
+            const std::string token = "-" + resume_src.lm_size + "-";
+            if (a.lm_name.find(token) == std::string::npos) {
+                fprintf(stderr,
+                        "ace-train train-lm: --init-adapter %s was trained on a %s base but --lm resolved to %s — "
+                        "a resumed adapter must stay on its own base size\n",
+                        a.init_adapter.c_str(), resume_src.lm_size.c_str(), a.lm_name.c_str());
+                return 2;
+            }
+            const std::string src_base = resume_src.lm_path.substr(resume_src.lm_path.find_last_of("/\\") + 1);
+            if (!src_base.empty() && src_base != a.lm_name) {
+                fprintf(stderr, "[train-lm] note: resuming on %s; the source run used %s (same size — proceeding)\n",
+                        a.lm_name.c_str(), src_base.c_str());
+            }
+        }
     }
     if (!dit_arg.empty()) {
         std::string name;
@@ -1212,7 +2247,8 @@ static int cmd_train_lm(int argc, char ** argv) {
 // ─── train-dit (plan §2.1) ──────────────────────────────────────────────────
 
 static int cmd_train_dit(int argc, char ** argv) {
-    DitTrainArgs a;
+    DitTrainArgs      a;
+    DitResumeExplicit saw;   // which identity flags were typed (resume adopt-or-refuse)
     std::string  stages_csv, dit_arg;
     bool         safety_user = false;
 
@@ -1222,17 +2258,18 @@ static int cmd_train_dit(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) a.out_dir = argv[++i];
         else if (!strcmp(argv[i], "--models") && i + 1 < argc) a.models_dir = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc) dit_arg = argv[++i];
-        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) a.adapter_type = argv[++i];
-        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) a.rank = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) a.alpha = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) a.lokr_dim = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) a.lokr_alpha = (float) atof(argv[++i]);
-        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) a.lokr_factor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--init-adapter") && i + 1 < argc) a.init_adapter = argv[++i];
+        else if (!strcmp(argv[i], "--adapter-type") && i + 1 < argc) { a.adapter_type = argv[++i]; saw.adapter_type = true; }
+        else if (!strcmp(argv[i], "--rank") && i + 1 < argc) { a.rank = atoi(argv[++i]); saw.rank = true; }
+        else if (!strcmp(argv[i], "--alpha") && i + 1 < argc) { a.alpha = atoi(argv[++i]); saw.alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-dim") && i + 1 < argc) { a.lokr_dim = atoi(argv[++i]); saw.lokr_dim = true; }
+        else if (!strcmp(argv[i], "--lokr-alpha") && i + 1 < argc) { a.lokr_alpha = (float) atof(argv[++i]); saw.lokr_alpha = true; }
+        else if (!strcmp(argv[i], "--lokr-factor") && i + 1 < argc) { a.lokr_factor = atoi(argv[++i]); saw.lokr_factor = true; }
         else if (!strcmp(argv[i], "--lokr-decompose-both")) a.lokr_decompose_both = true;
         else if (!strcmp(argv[i], "--no-lokr-decompose-both")) a.lokr_decompose_both = false;
-        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) a.layers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--target-mlp")) a.target_mlp = true;
-        else if (!strcmp(argv[i], "--no-target-mlp")) a.target_mlp = false;
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) { a.layers = atoi(argv[++i]); saw.layers = true; }
+        else if (!strcmp(argv[i], "--target-mlp")) { a.target_mlp = true; saw.target_mlp = true; }
+        else if (!strcmp(argv[i], "--no-target-mlp")) { a.target_mlp = false; saw.target_mlp = true; }
         else if (!strcmp(argv[i], "--loss-weighting") && i + 1 < argc) a.loss_weighting = argv[++i];
         else if (!strcmp(argv[i], "--snr-gamma") && i + 1 < argc) a.snr_gamma = (float) atof(argv[++i]);
         else if (!strcmp(argv[i], "--t-bias") && i + 1 < argc) a.t_bias = (float) atof(argv[++i]);
@@ -1299,6 +2336,22 @@ static int cmd_train_dit(int argc, char ** argv) {
             fprintf(stderr, "ace-train train-dit: --stages must name at least one of train,export\n");
             return 2;
         }
+    }
+
+    // ── resume (--init-adapter): adopt the source run's identity ─────────
+    // BEFORE the sanity checks so they validate the ADOPTED values. Explicit
+    // CLI contradictions exit 2 inside prepare. Same shape as train-lm's.
+    DitResumeSource resume_src;
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        if (!dit_resume_prepare(&a, saw, &resume_src, &err)) {
+            fprintf(stderr, "ace-train train-dit: %s\n", err.c_str());
+            return 2;
+        }
+        a.init_from_ma5 = resume_src.saved_ma5;
+        fprintf(stderr, "[train-dit] resuming %s (%s, saved ma5 %.4f @ epoch %d) — identity adopted from its log\n",
+                a.init_adapter.c_str(), resume_src.adapter_type.c_str(), resume_src.saved_ma5,
+                resume_src.saved_epoch);
     }
 
     // ── numeric sanity (the server clamps these too; be defensive) ───────
@@ -1394,6 +2447,16 @@ static int cmd_train_dit(int argc, char ** argv) {
             return 2;
         }
         a.dit_name = name;
+        // Resume base check: a DiT adapter is per-base (cross-base transfer is
+        // its own basin-sensitive minefield — docs/plans lokr-cross-base) so a
+        // different base file is a hard refuse, not a warn.
+        if (!a.init_adapter.empty() && !resume_src.dit_name.empty() && resume_src.dit_name != a.dit_name) {
+            fprintf(stderr,
+                    "ace-train train-dit: --init-adapter %s was trained on %s but --dit resolved to %s — "
+                    "a resumed adapter must stay on its own base\n",
+                    a.init_adapter.c_str(), resume_src.dit_name.c_str(), a.dit_name.c_str());
+            return 2;
+        }
     }
 
     // MUST precede every model load and graph build — the ggml patch latches
@@ -1424,6 +2487,18 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "train-dit")) {
         return cmd_train_dit(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-encode")) {
+        return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-preprocess")) {
+        return cmd_mm3_preprocess(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-condition")) {
+        return cmd_mm3_condition(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-train-dit")) {
+        return cmd_mm3_train_dit(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "spike")) {
         return cmd_spike(argc - 1, argv + 1);

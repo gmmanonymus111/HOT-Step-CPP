@@ -3,6 +3,7 @@
 // Loads from GGUF or safetensors, supports prefill + decode, tied lm_head
 #pragma once
 
+#include "concept-steer.h"
 #include "config-json.h"
 #include "graph-arena.h"
 #include "qwen3-enc.h"  // Qwen3Layer, Qwen3Config, layer build helpers
@@ -67,6 +68,20 @@ struct Qwen3LM {
     struct ggml_tensor *  lm_head_phase2;  // [H, V-lm_offset] same type as embed_tokens, or NULL
     struct ggml_context * lm_head_ctx;
     ggml_backend_buffer_t lm_head_buf;
+
+    // ─── Concept activation steering (CAA / TADA arXiv 2602.11910) ───
+    // Applied to each decoder layer's output: h'_l = h_l + alpha * v_c[l].
+    //
+    // Unlike the DiT, LM steering vectors are CONSTANT across the decode loop —
+    // there is no diffusion timestep to index — so they live in their own
+    // backend buffer (like lm_head_phase2) and are uploaded ONCE per generation
+    // rather than per token. That keeps them out of the graph allocator's reuse
+    // pool entirely, so the decode-loop CUDA graph replay stays hot and there is
+    // no per-token upload to clobber.
+    ConceptSteerRuntime               steer;
+    struct ggml_context *             steer_ctx;
+    ggml_backend_buffer_t             steer_buf;
+    std::vector<struct ggml_tensor *> steer_vecs;  // [H] per layer, or empty
 
     WeightCtx            wctx;
     ggml_backend_t       backend;
@@ -507,6 +522,86 @@ static struct ggml_tensor * qw3lm_build_attn(struct ggml_context * ctx,
 
 // Forward pass: token_ids[n_tokens] -> logits[vocab_size] (last token only)
 // kv_set: which KV cache set to use (0=conditional, 1=unconditional for CFG)
+// ─── Concept activation steering: per-generation setup ──────────────────────
+// Release any previously staged steering vectors.
+static void qw3lm_steer_free(Qwen3LM * m) {
+    if (m->steer_buf) {
+        ggml_backend_buffer_free(m->steer_buf);
+        m->steer_buf = nullptr;
+    }
+    if (m->steer_ctx) {
+        ggml_free(m->steer_ctx);
+        m->steer_ctx = nullptr;
+    }
+    m->steer_vecs.clear();
+    m->steer.reset();
+}
+
+// Resolve this request's "lm"-target concepts and stage them on the backend.
+// Call once per generation, BEFORE the first forward — the graph builders read
+// m->steer_vecs to decide whether to emit the add nodes.
+//
+// Safe to call on every generation: it fully tears down the previous staging, so
+// a request with no concepts leaves steering off rather than inheriting the last
+// request's vectors (the adapter cache-key class of bug, applied to activations).
+static void qw3lm_steer_prepare(Qwen3LM * m) {
+    qw3lm_steer_free(m);
+
+    concept_steer_prepare(&m->steer, "lm", m->cfg.n_layers, m->cfg.hidden_size);
+    if (!m->steer.active()) {
+        return;
+    }
+
+    // LM vectors carry no timestep axis; resolve once at t=0.
+    m->steer.resolve(0.0f);
+
+    const int H = m->cfg.hidden_size;
+    const int L = m->cfg.n_layers;
+
+    struct ggml_init_params ip = {
+        /*.mem_size   =*/ggml_tensor_overhead() * (size_t) (L + 2),
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
+    };
+    m->steer_ctx = ggml_init(ip);
+    if (!m->steer_ctx) {
+        fprintf(stderr, "[Concept] ERROR: LM steering ctx alloc failed — steering disabled\n");
+        m->steer.reset();
+        return;
+    }
+
+    m->steer_vecs.resize(L, nullptr);
+    for (int l = 0; l < L; l++) {
+        struct ggml_tensor * sv = ggml_new_tensor_1d(m->steer_ctx, GGML_TYPE_F32, H);
+        char                 nm[32];
+        snprintf(nm, sizeof(nm), "lm_steer_L%02d", l);
+        ggml_set_name(sv, nm);
+        m->steer_vecs[l] = sv;
+    }
+
+    m->steer_buf = ggml_backend_alloc_ctx_tensors(m->steer_ctx, m->backend);
+    if (!m->steer_buf) {
+        fprintf(stderr, "[Concept] ERROR: LM steering buffer alloc failed — steering disabled\n");
+        qw3lm_steer_free(m);
+        return;
+    }
+
+    for (int l = 0; l < L; l++) {
+        ggml_backend_tensor_set(m->steer_vecs[l], m->steer.layer_ptr(l), 0, (size_t) H * sizeof(float));
+    }
+
+    // Report the strongest layer so "is LM steering on?" is answerable from the log.
+    double best = 0.0;
+    int    bl   = 0;
+    for (int l = 0; l < L; l++) {
+        const float * p = m->steer.layer_ptr(l);
+        double        s = 0.0;
+        for (int h = 0; h < H; h++) s += (double) p[h] * p[h];
+        if (s > best) { best = s; bl = l; }
+    }
+    fprintf(stderr, "[Concept] LM steering staged: %d layers, |v|max=%.3f@L%d\n", L, std::sqrt(best), bl);
+}
+
 static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens, int kv_set, float * logits) {
     if (m->batch_graph.graph.sched_allocated) {
         static_graph_release(&m->batch_graph.graph, m->sched);
@@ -581,6 +676,11 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens, int 
         norm                     = qwen3_rms_norm(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
         struct ggml_tensor * mlp = qwen3_build_mlp(ctx, ly, norm, n_tokens);
         hidden                   = ggml_add(ctx, hidden, mlp);
+        // Concept steering on the layer output. Applied before the fp16 clamp so
+        // the clamp bounds the steered value too. [H] broadcasts over tokens.
+        if (!m->steer_vecs.empty() && m->steer_vecs[l]) {
+            hidden = ggml_add(ctx, hidden, m->steer_vecs[l]);
+        }
         if (m->clamp_fp16) {
             hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);
         }
@@ -713,6 +813,11 @@ static void qw3lm_forward_verify(Qwen3LM * m, const int * token_ids, int n_token
         norm                     = qwen3_rms_norm(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
         struct ggml_tensor * mlp = qwen3_build_mlp(ctx, ly, norm, n_tokens);
         hidden                   = ggml_add(ctx, hidden, mlp);
+        // Steering applies here too so the verify path stays bit-comparable with
+        // the production forward instead of diverging whenever steering is on.
+        if (!m->steer_vecs.empty() && m->steer_vecs[l]) {
+            hidden = ggml_add(ctx, hidden, m->steer_vecs[l]);
+        }
         if (m->clamp_fp16) {
             hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);
         }
@@ -969,6 +1074,13 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
             norm                     = qwen3_rms_norm(ctx, hidden, ly->post_attn_layernorm, c.rms_norm_eps);
             struct ggml_tensor * mlp = qwen3_build_mlp(ctx, ly, norm, N);
             hidden                   = ggml_add(ctx, hidden, mlp);
+            // Concept steering (see qw3lm_forward). Must be applied on the
+            // batched path too — phase-1/phase-2 generation runs through here,
+            // so hooking only the single-sequence forward would leave steering
+            // silently dead on the default path.
+            if (!m->steer_vecs.empty() && m->steer_vecs[l]) {
+                hidden = ggml_add(ctx, hidden, m->steer_vecs[l]);
+            }
             if (m->clamp_fp16) {
                 hidden = ggml_clamp(ctx, hidden, -65504.0f, 65504.0f);
             }
@@ -1070,6 +1182,7 @@ static void qw3lm_free(Qwen3LM * m) {
     if (m->lm_head_ctx) {
         ggml_free(m->lm_head_ctx);
     }
+    qw3lm_steer_free(m);
     if (m->kv_buf) {
         ggml_backend_buffer_free(m->kv_buf);
     }

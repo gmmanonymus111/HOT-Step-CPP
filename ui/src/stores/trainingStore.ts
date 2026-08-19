@@ -90,8 +90,14 @@ let ditVram = { crop: 0, layers: 0 };
 let lastStepSeen = -1;
 
 /** The chart slice, blanked. Every place that starts or swaps a job spreads
- *  this, and it is the only thing that may reset `lastStepSeen`. */
-function blankTrainSeries(): {
+ *  this, and it is the only thing that may reset `lastStepSeen`.
+ *
+ *  Exported because the bulk Monitor page swaps jobs too (PipelineStageProgress
+ *  adopts whichever stage is running). Skipping it there left the previous
+ *  stage's step points — trainStepSeries is SHARED by both training kinds — in
+ *  the series, so an LM run at epoch 15 drew into an axis still scaled to the
+ *  DiT's 500 (2026-07-31). */
+export function blankTrainSeries(): {
   trainStepSeries: TrainStepPoint[];
   trainMilestones: TrainMilestonePoint[];
   trainTargetLoss: number;
@@ -261,6 +267,8 @@ interface TrainingState {
   loadPipelines(): Promise<void>;
   startPipeline(input: StartPipelineInput): Promise<PipelineSummary>;
   cancelPipeline(id: string): Promise<void>;
+  pausePipeline(id: string): Promise<void>;
+  resumePipeline(id: string): Promise<void>;
 }
 
 /** Split a detail payload into the row map + display order. */
@@ -868,6 +876,24 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   cancelPipeline: async (id) => {
     try {
       await trainingApi.cancelPipeline(id);
+      await get().loadPipelines();
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  pausePipeline: async (id) => {
+    try {
+      await trainingApi.pausePipeline(id);
+      await get().loadPipelines();
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  resumePipeline: async (id) => {
+    try {
+      await trainingApi.resumePipeline(id);
       await get().loadPipelines();
     } catch (err) {
       set({ error: errMessage(err) });

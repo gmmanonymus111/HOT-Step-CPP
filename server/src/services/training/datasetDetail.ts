@@ -7,6 +7,7 @@
 //
 // Spec: docs/plans/2026-07-27-dataset-studio-implementation.md §2.0
 
+import { albumFromSamples, readDatasetAssets, syncAlbumName } from './datasetAssets.js';
 import { buildSamples } from './datasetScan.js';
 import * as repo from './datasetsRepo.js';
 import * as queue from './labelingQueue.js';
@@ -44,13 +45,22 @@ export async function detailFor(ds: TrainingDatasetRow): Promise<TrainingDataset
   let preprocessedVariants = 0;
   try { preprocessedVariants = countPreprocessedVariants(ds.slug); } catch { /* stays 0 */ }
 
-  return {
+  const labeledCount = samples.filter(s => !!s.caption.trim()).length;
+  const row: TrainingDatasetRow = {
     ...ds,
     // The DB counters are a cache; the fresh scan is what the client sees.
     sampleCount: samples.length,
-    labeledCount: samples.filter(s => !!s.caption.trim()).length,
+    labeledCount,
     excludedCount: samples.filter(s => s.excluded).length,
     status: computeStatus(ds, samples),
+    // The scan is holding every sample's tags — detect the album for free here
+    // rather than making the list pay for a probe (datasetAssets.ts).
+    albumName: albumFromSamples(ds, samples) || ds.albumName,
+  };
+
+  return {
+    ...row,
+    assets: readDatasetAssets(row),
     samples,
     warnings,
     activeJobId: active ? active.id : null,
@@ -63,6 +73,9 @@ export function syncCounters(ds: TrainingDatasetRow, samples: TrainingSample[]):
   const labeled = samples.filter(s => !!s.caption.trim()).length;
   const excluded = samples.filter(s => s.excluded).length;
   const status = computeStatus(ds, samples);
+  // Free while the samples are in hand, and it upgrades an album guessed from a
+  // bounded file probe the moment the Label job writes real tags.
+  try { syncAlbumName(ds, samples); } catch { /* display-only */ }
   try {
     repo.updateCounters(ds.id, {
       sampleCount: samples.length,

@@ -109,6 +109,7 @@ router.get('/recent', (req, res) => {
       title: s.title || 'Untitled',
       audio_url: s.audio_url || '',
       mastered_audio_url: s.mastered_audio_url || '',
+      noadapter_audio_url: s.noadapter_audio_url || '',
       latent_url: s.latent_url || '',
       kick_stem_url: s.kick_stem_url || '',
       snare_stem_url: s.snare_stem_url || '',
@@ -253,6 +254,14 @@ router.delete('/:id', (req, res) => {
       fs.unlinkSync(masteredFilepath);
     }
   }
+  // Delete no-adapter reference render if it exists
+  if (song.noadapter_audio_url) {
+    const refFilename = path.basename(song.noadapter_audio_url);
+    const refFilepath = path.join(config.data.audioDir, refFilename);
+    if (fs.existsSync(refFilepath)) {
+      fs.unlinkSync(refFilepath);
+    }
+  }
   // Delete latent file if it exists
   if (song.latent_url) {
     const latentFilename = path.basename(song.latent_url);
@@ -324,7 +333,7 @@ router.post('/bulk-delete', (req, res) => {
   // Fetch all matching songs to get file paths
   const placeholders = ids.map(() => '?').join(',');
   const songs = getDb()
-    .prepare(`SELECT id, audio_url, mastered_audio_url FROM songs WHERE id IN (${placeholders}) AND user_id = ?`)
+    .prepare(`SELECT id, audio_url, mastered_audio_url, noadapter_audio_url FROM songs WHERE id IN (${placeholders}) AND user_id = ?`)
     .all(...ids, userId) as any[];
 
   // Delete audio files from disk
@@ -335,6 +344,10 @@ router.post('/bulk-delete', (req, res) => {
     }
     if (song.mastered_audio_url) {
       const filepath = path.join(config.data.audioDir, path.basename(song.mastered_audio_url));
+      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+    }
+    if (song.noadapter_audio_url) {
+      const filepath = path.join(config.data.audioDir, path.basename(song.noadapter_audio_url));
       if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
     }
   }
@@ -359,7 +372,7 @@ router.post('/nuke-generations', (req, res) => {
 
   // 1. Collect all file-reference columns from songs table
   const songs = getDb()
-    .prepare(`SELECT id, audio_url, mastered_audio_url, latent_url,
+    .prepare(`SELECT id, audio_url, mastered_audio_url, noadapter_audio_url, latent_url,
                      kick_stem_url, snare_stem_url, hihat_stem_url,
                      disco_data_url, cover_url
               FROM songs WHERE user_id = ?`)
@@ -368,7 +381,7 @@ router.post('/nuke-generations', (req, res) => {
   // 2. Delete referenced files from disk
   let filesDeleted = 0;
   const fileColumns = [
-    'audio_url', 'mastered_audio_url', 'latent_url',
+    'audio_url', 'mastered_audio_url', 'noadapter_audio_url', 'latent_url',
     'kick_stem_url', 'snare_stem_url', 'hihat_stem_url',
     'disco_data_url', 'cover_url',
   ];

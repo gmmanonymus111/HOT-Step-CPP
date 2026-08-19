@@ -29,8 +29,9 @@
 
 // VRAM instrumentation: total GPU usage at pipeline phase boundaries, so we can
 // see the split between model weights, DiT activations and VAE-decode buffers.
+
 #ifdef GGML_USE_CUDA
-#include <cuda_runtime.h>
+#include "gpu.h"
 static void diag_vram(const char * label) {
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {

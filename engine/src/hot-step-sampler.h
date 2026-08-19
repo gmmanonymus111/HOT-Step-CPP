@@ -127,10 +127,17 @@ static int dit_ggml_generate(DiTGGML *           model,
     fprintf(stderr, "[DiT] Batch N=%d, T=%d, S=%d, enc_S=%d%s\n", N, T, S, enc_S,
             batch_cfg ? ", CFG batched 2N" : (do_cfg ? ", CFG 2-pass" : ""));
 
+    // Concept activation steering (CAA / TADA): resolve this request's concepts
+    // BEFORE the graph build — the build reads model->steer.active() to decide
+    // whether to create the per-layer steering inputs, and graph_cap below must
+    // account for them.
+    concept_steer_prepare(&model->steer, "dit", model->cfg.n_layers, model->cfg.hidden_size);
+
     // Graph context (generous fixed allocation, shapes are constant across steps).
     // Per-section masking multiplies the per-adapter LoRA nodes, so scale the node
     // budget with the separate-adapter count (m->loras) to avoid graph overflow.
-    size_t               graph_cap = 8192 + model->loras.size() * 4096 + dit_lora_unit_nodes(&model->lora);
+    size_t               graph_cap = 8192 + model->loras.size() * 4096 + dit_lora_unit_nodes(&model->lora) +
+                       concept_steer_graph_nodes(model->steer) + concept_tap_graph_nodes(model->cfg.n_layers);
     size_t               ctx_size = ggml_tensor_overhead() * graph_cap + ggml_graph_overhead_custom(graph_cap, false);
     std::vector<uint8_t> ctx_buf(ctx_size);
 
@@ -181,6 +188,11 @@ static int dit_ggml_generate(DiTGGML *           model,
         for (struct ggml_tensor * mk : model->lora_masks) {
             if (mk) ggml_backend_sched_set_tensor_backend(model->sched, mk, model->backend);
         }
+        // Concept steering vectors (steer_L*) — read at every cross-attn layer,
+        // so CPU aliasing would corrupt them mid-graph exactly like enc_hidden.
+        for (struct ggml_tensor * sv : model->steer_vecs) {
+            if (sv) ggml_backend_sched_set_tensor_backend(model->sched, sv, model->backend);
+        }
     };
 
     // Persistent inputs carry both flags: gallocr allocates inputs up front
@@ -202,6 +214,15 @@ static int dit_ggml_generate(DiTGGML *           model,
             if (mk) {
                 ggml_set_input(mk);
                 ggml_set_output(mk);
+            }
+        }
+        // Steering vectors are re-uploaded every evaluation, but must still be
+        // kept out of gallocr's intermediate reuse pool — otherwise a direct
+        // graph may alias them with scratch between upload and read.
+        for (struct ggml_tensor * sv : model->steer_vecs) {
+            if (sv) {
+                ggml_set_input(sv);
+                ggml_set_output(sv);
             }
         }
     };
@@ -263,7 +284,21 @@ static int dit_ggml_generate(DiTGGML *           model,
     // shares one temporal length T so the old padding mask was all-zero (dead).
     struct ggml_tensor * t_sa_mask_sw  = ggml_graph_get_tensor(gf, "sa_mask_sw");
 
-    int                   win = c.sliding_window;
+    // HOT-Step: sideband override. -1 keeps the model's own window (default,
+    // bit-identical to before); 0 removes the window entirely, which the fill
+    // below already handles via `win <= 0` -> every position in-window -> an
+    // all-zero mask, i.e. full attention on all 32 layers.
+    int win = g_hotstep_params.dit_sliding_window >= 0 ? g_hotstep_params.dit_sliding_window : c.sliding_window;
+    if (win != c.sliding_window) {
+        if (win <= 0) {
+            fprintf(stderr, "[HotStep] DiT sliding window override: %d -> off (full attention, all 32 layers)\n",
+                    c.sliding_window);
+        } else {
+            // Tokens run at 12.5 Hz (25 Hz latents / patch_size 2).
+            fprintf(stderr, "[HotStep] DiT sliding window override: %d -> %d tokens (bidirectional +/-%.1f s)\n",
+                    c.sliding_window, win, (double) win / 12.5);
+        }
+    }
     std::vector<uint16_t> sa_sw_data(S * S * N_graph);
 
     // Fill masks for real samples, then duplicate for uncond slots
@@ -435,6 +470,62 @@ static int dit_ggml_generate(DiTGGML *           model,
     };
     if (lora_gains_active) {
         fprintf(stderr, "[Adapter-RT] Timestep gains active: masks re-uploaded per evaluation\n");
+    }
+
+    // ── Concept activation steering: per-evaluation vector upload ─────────────
+    // v_c is indexed by diffusion time, so the steering tensors change at EVERY
+    // model evaluation. They are never resident-and-skipped on direct graphs
+    // (unlike enc_hidden/positions) and must be re-uploaded after any mid-sampling
+    // graph rebuild — Golden rule 1: GGML clobbers input buffers after compute.
+    auto upload_steer = [&](float t_val) {
+        if (model->steer_vecs.empty() || !model->steer.active()) return;
+        model->steer.resolve(t_val);
+        const size_t nb = (size_t) model->cfg.hidden_size * sizeof(float);
+        for (size_t l = 0; l < model->steer_vecs.size(); l++) {
+            if (!model->steer_vecs[l]) continue;
+            ggml_backend_tensor_set(model->steer_vecs[l], model->steer.layer_ptr((int) l), 0, nb);
+        }
+    };
+    // Per-step log suffix (" steer|v|=0.42") — the L2 of the summed steering
+    // vector at the strongest layer. Makes "is steering actually on?" answerable
+    // from the engine log alone, like the adapter gains=[..] suffix.
+    auto steer_log = [&](float t_val) -> std::string {
+        if (!model->steer.active()) return "";
+        double best = 0.0;
+        int    bl   = 0;
+        for (int l = 0; l < model->steer.n_layers; l++) {
+            const float * p = model->steer.layer_ptr(l);
+            double        s = 0.0;
+            for (int h = 0; h < model->steer.hidden; h++) s += (double) p[h] * p[h];
+            if (s > best) { best = s; bl = l; }
+        }
+        char buf[48];
+        snprintf(buf, sizeof(buf), " steer|v|=%.3f@L%d", std::sqrt(best), bl);
+        return buf;
+    };
+    if (model->steer.active()) {
+        fprintf(stderr, "[Concept] DiT steering active: vectors re-uploaded per evaluation\n");
+    }
+
+    // ── Concept extraction tap: per-step readback ─────────────────────────────
+    // Pulls the GPU-computed frame-means for all layers into g_concept_tap. Only
+    // batch slot 0 is read: extraction runs N=1, and under batched CFG slot 0 is
+    // the CONDITIONAL pass, which is the one CAA contrasts.
+    std::vector<float> tap_host;
+    auto               capture_taps = [&](float t_val) {
+        if (!g_concept_tap.recording || model->tap_vecs.empty()) return;
+        const int H = model->cfg.hidden_size;
+        const int L = (int) model->tap_vecs.size();
+        tap_host.assign((size_t) L * H, 0.0f);
+        for (int l = 0; l < L; l++) {
+            if (!model->tap_vecs[l]) continue;
+            ggml_backend_tensor_get(model->tap_vecs[l], tap_host.data() + (size_t) l * H, 0, (size_t) H * sizeof(float));
+        }
+        g_concept_tap.push(L, H, t_val, tap_host.data());
+    };
+    if (g_concept_tap.recording) {
+        fprintf(stderr, "[Concept] Extraction tap armed: %d layers x %d dims\n", model->cfg.n_layers,
+                model->cfg.hidden_size);
     }
 
     // ── P2: alignment-driven section boundaries ───────────────────────────────
@@ -721,6 +812,8 @@ static int dit_ggml_generate(DiTGGML *           model,
         if (!dit_graph.direct || lora_gains_active) {
             upload_lora_masks(t_val);
         }
+        // Steering vectors vary with t — always re-upload, direct graph or not.
+        upload_steer(t_val);
 
         // Pack xt into input tensor (cond + uncond slots)
         for (int b = 0; b < N; b++) {
@@ -738,6 +831,14 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // Forward pass
         static_graph_compute(&dit_graph, model->backend, model->sched, gf);
+
+        // Concept extraction: record this evaluation's per-layer frame-means.
+        // ONLY here — this is the conditional pass (batch slot 0 under batched
+        // CFG, the cond forward under 2-pass CFG). The uncond forward below and
+        // the generic helper used for x0 estimates / post_step plugin passes are
+        // deliberately not tapped: CAA contrasts prompt pairs, not CFG branches,
+        // and extra evaluations would desynchronise the (step -> t) record.
+        capture_taps(t_val);
 
         // Read output and apply CFG/APG
         if (batch_cfg) {
@@ -776,6 +877,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             if (!dit_graph.direct || lora_gains_active) {
                 upload_lora_masks(t_val);
             }
+            upload_steer(t_val);
             static_graph_compute(&dit_graph, model->backend, model->sched, gf);
             ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
             for (int b = 0; b < N; b++) {
@@ -835,6 +937,7 @@ static int dit_ggml_generate(DiTGGML *           model,
         if (!dit_graph.direct || lora_gains_active) {
             upload_lora_masks(t_val);
         }
+        upload_steer(t_val);
 
         // Forward pass
         static_graph_compute(&dit_graph, model->backend, model->sched, gf);
@@ -1050,15 +1153,17 @@ static int dit_ggml_generate(DiTGGML *           model,
                 // mask tensors (else the post-cutoff steps run with garbage masks).
                 // Scaled by the current step's timestep gain when active.
                 upload_lora_masks(t_curr);
+                // Same for steering: the rebuild allocated fresh steer_L* tensors.
+                upload_steer(t_curr);
 
                 fprintf(stderr, "[DiT] Graph rebuilt: %d nodes (was 2N, now N=%d, %s)\n",
                         ggml_graph_n_nodes(gf), N, dit_graph.direct ? "direct" : "scheduler");
             }
 
-            fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]%s%s\n",
+            fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]%s%s%s\n",
                     step_idx + 1, num_steps, t_curr, solver_plugin->display_name.c_str(),
                     (cached_count > 0 && !step_computes[step_idx]) ? " (cached)" : "",
-                    lora_gain_log(t_curr).c_str());
+                    lora_gain_log(t_curr).c_str(), steer_log(t_curr).c_str());
             return false;
         };
 
@@ -1199,6 +1304,8 @@ static int dit_ggml_generate(DiTGGML *           model,
             // uninitialised, silently corrupting the adapter effect for the final
             // (post-cutoff) steps. Scaled by the current step's timestep gain.
             upload_lora_masks(t_curr);
+            // Same for steering: the rebuild allocated fresh steer_L* tensors.
+            upload_steer(t_curr);
 
             fprintf(stderr, "[DiT] Graph rebuilt: %d nodes (was 2N, now N=%d, %s)\n",
                     ggml_graph_n_nodes(gf), N, dit_graph.direct ? "direct" : "scheduler");
@@ -1350,10 +1457,10 @@ static int dit_ggml_generate(DiTGGML *           model,
             }
         }
 
-        fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]%s%s\n", step + 1, num_steps, t_curr,
+        fprintf(stderr, "[DiT] Step %d/%d t=%.3f [%s]%s%s%s\n", step + 1, num_steps, t_curr,
                 solver_plugin->display_name.c_str(),
                 (!step_computes[step] && has_cached_vt) ? " (cached)" : "",
-                lora_gain_log(t_curr).c_str());
+                lora_gain_log(t_curr).c_str(), steer_log(t_curr).c_str());
     }
     } // else (per-step loop)
 

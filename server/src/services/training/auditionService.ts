@@ -24,9 +24,11 @@ import path from 'path';
 import crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import { aceClient, type AceRequest } from '../aceClient.js';
+import { mapPath } from '../pathMapper.js';
 import { getModelSnapshot, pickLmFor, tensorsRoot } from './aceTrain.js';
-import { lmSizeOfAdapterPath } from './adapterLayout.js';
+import { hasWeights, lmSizeOfAdapterPath } from './adapterLayout.js';
 import { readLabel } from './labelStore.js';
+import { adapterDitDirFor } from './trainDitStatus.js';
 import { newestVariantKey, variantDitModel, variantExists } from './trainLmStatus.js';
 import { writePreview, type PreviewAudio } from './auditionStore.js';
 import type {
@@ -89,11 +91,40 @@ function codesDuration(codesCount: number): number {
 function applyTriggerTag(caption: string, tag: string, position: string): string {
   const t = String(tag ?? '').trim();
   if (!t || !caption) return caption;
-  if (caption.toLowerCase().includes(t.toLowerCase())) return caption;
   const pos = position || 'prepend';
+  // 'replace' collapses the caption to the trigger, which is what the dataset
+  // was preprocessed with — so it runs BEFORE the already-contains check. That
+  // check exists to avoid duplicating a token in a caption that keeps its prose
+  // (pre-tagged lm_codes.jsonl rows, users typing the trigger themselves); for
+  // 'replace' the prose has to go regardless of whether the tag is in it.
+  if (pos === 'replace') return t;
+  if (caption.toLowerCase().includes(t.toLowerCase())) return caption;
   if (pos === 'prepend') return `${t}, ${caption}`;
   if (pos === 'append') return `${caption}, ${t}`;
-  return caption;   // 'replace'
+  return caption;
+}
+
+/**
+ * Inverse of applyTriggerTag / lm_apply_tag — remove the dataset trigger from a
+ * caption that carries it. The captionInput receipt MUST be genuinely untagged:
+ * in Dataset Sample mode the "input" caption is the lm_codes.jsonl row, which
+ * is PRE-TAGGED, so `caption`-before-applyTriggerTag is not it (found live:
+ * "boxcarracer, boxcarracer, …" after a Send to Custom-Gen — the generation
+ * side re-injects the adapter's embedded trigger with no skip-if-present).
+ * Prefix and suffix are both tried regardless of the declared position — the
+ * tag sits wherever the row put it. 'replace' captions have no prose left to
+ * recover; a mid-caption tag (user-typed) is left alone.
+ */
+function stripTriggerTag(caption: string, tag: string, position: string): string {
+  const t = String(tag ?? '').trim();
+  if (!t || !caption) return caption;
+  if ((position || 'prepend') === 'replace') return caption;
+  const lc = caption.toLowerCase();
+  const lt = t.toLowerCase();
+  if (lc === lt) return '';
+  if (lc.startsWith(`${lt}, `)) return caption.slice(t.length + 2);
+  if (lc.endsWith(`, ${lt}`)) return caption.slice(0, caption.length - t.length - 2);
+  return caption;
 }
 
 // ── Codes-row lookup ──────────────────────────────────────────────────────
@@ -174,9 +205,21 @@ export interface ResolvedAudition {
   kind: AuditionKind;
   sides: AuditionSideSpec[];
   caption: string;
+  /** The tagged caption with the dataset trigger STRIPPED (stripTriggerTag) —
+   *  what a mirrored generation must send when an LM adapter (whose embedded
+   *  trigger re-tags it) is in play. Not simply the pre-applyTriggerTag input:
+   *  the sample-mode row fallback arrives pre-tagged. */
+  captionUntagged: string;
   lyrics: string;
   seed: number;
   durationSec: number;
+  /** Dataset-sample metadata pinning (0/'' = let the LM predict). Filled from
+   *  the sample's lm_codes.jsonl row so both sides plan at the ground-truth
+   *  bpm/key/timesig — the engine force_fields any non-empty value into the
+   *  CoT FSM (pipeline-lm.cpp:1592-1606). */
+  bpm: number;
+  keyscale: string;
+  timesignature: string;
   lmModel: string;
   ditModel: string;
   vaeModel: string;
@@ -191,6 +234,9 @@ export interface ResolvedAudition {
   renderDit: boolean;
   renderSteps: number;
   renderDitModel: string;   // '' = let the engine resolve its default DiT
+  /** '' = no adapter renders. Else the resolved DiT-adapter run dir — every
+   *  side gets a SECOND render through it (the 2×2 matrix). */
+  renderDitAdapterPath: string;
 }
 
 /**
@@ -252,6 +298,25 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
 
   const ditModel = str(opts.ditModel) || variantDitModel(ds.slug, variantKey) || '';
 
+  // Opt-in DiT-adapter renders (Rob, 2026-08-12): the 2×2 matrix {base LM, LM
+  // adapter} × {bare DiT, DiT adapter}. Resolved server-side from the exact
+  // layout the DiT trainer writes — name defaults to the dataset slug, base is
+  // the variant's own training DiT — never a client-supplied path. A 409, not
+  // a silent skip: the card hides the toggle when nothing is trained, so
+  // reaching this without weights means the state is stale and the user should
+  // know rather than get a 3-artifact preview labelled as a 4-artifact one.
+  let renderDitAdapterPath = '';
+  if (opts.renderDit === true && opts.renderDitAdapter === true) {
+    const adapterName = str(opts.renderDitAdapterName).trim() || ds.slug;
+    const dir = adapterDitDirFor(adapterName, ditModel);
+    if (!hasWeights(dir)) {
+      throw new AuditionError(409,
+        `No trained DiT adapter for "${adapterName}" on base ${ditModel || '(unknown)'} — ` +
+        'train one first, or turn the DiT-adapter render off');
+    }
+    renderDitAdapterPath = dir;
+  }
+
   const sides: AuditionSideSpec[] = (Array.isArray(opts.sides) ? opts.sides : []).map(s => ({
     slot: s.slot === 'adapter' ? 'adapter' : 'base',
     label: str(s.label).slice(0, 64) || (s.slot === 'adapter' ? 'Adapter' : 'Base LM'),
@@ -299,11 +364,33 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     kind: opts.kind === 'milestone' ? 'milestone' : 'ab',
     sides,
     caption: taggedCaption,
+    // Stripped, not `caption`-as-received: the sample-mode row fallback is
+    // pre-tagged, so only an explicit strip guarantees this is untagged.
+    captionUntagged: stripTriggerTag(taggedCaption, ds.customTag, ds.tagPosition),
     lyrics,
     seed,
     // Cap raised 120 → 300 (Rob, 2026-07-29): a 3-minute audition is a
     // legitimate ask; the LM cost scales linearly and the deadline has slack.
-    durationSec: Math.trunc(clamp(opts.durationSec, 30, 10, 300)),
+    // Default 30 → 180 (Rob, 2026-08-12): a 30 s plan is too short to judge.
+    durationSec: Math.trunc(clamp(opts.durationSec, 180, 10, 300)),
+    // Dataset Sample mode: pin the plan to the sample's ground-truth metadata.
+    // Without this nothing anchors bpm/key/timesig, the FSM samples them
+    // freely, and the plan drifts from the trainer's conditioning (a 2/4
+    // timesig on a 4/4 dataset — Rob, 2026-08-12). Applied to BOTH sides
+    // identically (A/B discipline); free-text prompts (no row) still let the
+    // LM predict, which is the point of that mode. Duration is NOT taken from
+    // the row — the user's audition length wins; the engine pins it already.
+    // Explicit pins (Lyric Studio source) win over the sample row; both are
+    // normalized identically so either path forces the same tokens.
+    bpm: Math.trunc(num(opts.bpm)) > 0 ? Math.trunc(num(opts.bpm)) : (row ? row.bpm : 0),
+    keyscale: str(opts.keyscale).trim() || (row ? row.keyscale : ''),
+    // Numerator only ('4/4' → '4') — the exact normalization translateParams
+    // applies to every generation, so an audition and a generation force the
+    // same TIMESIG token into the CoT. (Rows store '4/4'; note the trainer
+    // conditioned on the row string — see 2026-08-12 parity investigation.)
+    timesignature: str(opts.timesignature).trim()
+      ? str(opts.timesignature).trim().split('/')[0]
+      : (row ? String(row.timesignature).split('/')[0] : ''),
     lmModel,
     ditModel,
     vaeModel: str(opts.vaeModel),
@@ -312,14 +399,23 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     temperature: clamp(opts.temperature, 0.85, 0.1, 2),
     topP: clamp(opts.topP, 0.9, 0.05, 1),
     cfgScale: clamp(opts.cfgScale, 2.0, 0, 10),
-    repPenalty: clamp(opts.repPenalty, 1.0, 1, 1.5),
+    // Default 1.0 → 1.1 (Rob, 2026-08-12): adapters sharpen the code
+    // distribution; a mild presence penalty is the better audition baseline.
+    repPenalty: clamp(opts.repPenalty, 1.1, 1, 1.5),
     format: opts.format === 'mp3' ? 'mp3' : 'wav16',
     coResident: opts.coResident !== false,
     renderDit: opts.renderDit === true,
     renderSteps: Math.trunc(clamp(opts.renderSteps, 8, 2, 60)),
-    renderDitModel: opts.renderDit === true
-      ? (str(opts.renderDitModel) || pickRenderDit(ditModel))
-      : '',
+    // With adapter renders, EVERY render is pinned to the adapter's training
+    // base (the variant's DiT), overriding the user's pick and the xl-turbo
+    // default: cross-base adapters are basin-sensitive, and the bare render
+    // must differ from the adapter render by the adapter alone.
+    renderDitModel: opts.renderDit !== true
+      ? ''
+      : renderDitAdapterPath && ditModel
+        ? ditModel
+        : (str(opts.renderDitModel) || pickRenderDit(ditModel)),
+    renderDitAdapterPath,
   };
 }
 
@@ -345,6 +441,18 @@ export function buildLmRequest(
     caption: resolved.caption,
     lyrics: resolved.lyrics,
     duration: resolved.durationSec,
+    // Sample-mode metadata pins (empty = absent = LM predicts). The engine
+    // force_fields these into the CoT, so the plan keeps the dataset's
+    // bpm/key/timesig while the CoT caption rewrite still shows the
+    // planner's own voice.
+    ...(resolved.bpm > 0 ? { bpm: resolved.bpm } : {}),
+    ...(resolved.keyscale ? { keyscale: resolved.keyscale } : {}),
+    ...(resolved.timesignature ? { timesignature: resolved.timesignature } : {}),
+    // Pin the CoT language like generations do (2026-08-11 ISO fix): adapters
+    // trained on `language: english` can't emit it under the FSM's ISO mask,
+    // so unpinned plans land on random codes (observed: fr). All datasets are
+    // English (Rob, 2026-08-12).
+    vocal_language: 'en',
     seed: resolved.seed,
     lm_seed: resolved.seed,
     lm_mode: 'generate',
@@ -408,9 +516,13 @@ async function awaitEngineJob(
 /**
  * The opt-in DiT render of one side's codes (§Rob 2026-07-29): a fresh /synth
  * request carrying the side's audio_codes and the ECHOED plan fields, at a
- * fixed step count on a DiT shared by both sides, with NO sound adapter — the
- * planner adapter must remain the A/B's only variable. Request built FRESH,
- * exactly like the /codes-decode one (module-header sideband rule).
+ * fixed step count on a DiT shared by both sides. The BARE pass carries NO
+ * sound adapter — the planner adapter must remain the A/B's only variable.
+ * `ditAdapter` (Rob, 2026-08-12) is the deliberate second pass through the
+ * dataset's trained DiT adapter, completing the 2×2 matrix; runtime mode so
+ * nothing is merged into the base and the delta unloads with the job. Request
+ * built FRESH, exactly like the /codes-decode one (module-header sideband
+ * rule).
  *
  * Called by the RUNNER after every LM side has finished and the pinned LM has
  * been evicted — never inside a side, where keep_loaded's EVICT_NEVER would
@@ -422,10 +534,15 @@ export async function renderSideThroughDit(
   result: AuditionSideResult,
   audioCodes: string,
   hooks: SideHooks,
+  ditAdapter = '',
 ): Promise<PreviewAudio> {
   const req: AceRequest = {
     caption: result.caption || resolved.caption,
     lyrics: result.lyrics || resolved.lyrics,
+    // Parity with generations (which always send 'en'): without this the
+    // engine's lyric-encoder input carries the unknown-language tag instead of
+    // [en] — a real conditioning difference (found 2026-08-12, parity test).
+    vocal_language: 'en',
     duration: result.durationSec || resolved.durationSec,
     ...(result.bpm > 0 ? { bpm: result.bpm } : {}),
     ...(result.keyscale ? { keyscale: result.keyscale } : {}),
@@ -436,15 +553,26 @@ export async function renderSideThroughDit(
     task_type: 'text2music',
     ...(resolved.renderDitModel ? { synth_model: resolved.renderDitModel } : {}),
     ...(resolved.vaeModel ? { vae_model: resolved.vaeModel } : {}),
-    // NO adapter / adapters / lm_* fields — deliberately.
+    // The bare pass carries NO adapter / adapters / lm_* fields — deliberately.
+    // The adapter pass carries exactly one adapter, scale 1.0, runtime mode.
+    // mapPath: the same Windows→Docker translation every Create-panel adapter
+    // path gets (identity in native mode).
+    ...(ditAdapter ? { adapter: mapPath(ditAdapter), adapter_scale: 1.0, adapter_mode: 'runtime' } : {}),
   };
+  const what = ditAdapter ? 'DiT-adapter render' : 'DiT render';
   const jobId = await aceClient.submitSynth(req, resolved.format);
-  await awaitEngineJob(jobId, 'DiT render', hooks);
+  await awaitEngineJob(jobId, what, hooks);
   const res = await aceClient.getJobResult(jobId);
-  if (!res.ok) throw new Error(`DiT render result fetch failed (${res.status})`);
+  if (!res.ok) throw new Error(`${what} result fetch failed (${res.status})`);
   const buf = Buffer.from(await res.arrayBuffer());
-  if (!buf.length) throw new Error('DiT render returned no audio');
-  return { slot: result.slot, buf, ext: resolved.format === 'mp3' ? 'mp3' : 'wav', render: true };
+  if (!buf.length) throw new Error(`${what} returned no audio`);
+  return {
+    slot: result.slot,
+    buf,
+    ext: resolved.format === 'mp3' ? 'mp3' : 'wav',
+    render: true,
+    ...(ditAdapter ? { renderAdapter: true } : {}),
+  };
 }
 
 /**

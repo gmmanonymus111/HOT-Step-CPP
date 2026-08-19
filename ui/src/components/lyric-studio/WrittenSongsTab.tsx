@@ -1,10 +1,53 @@
 import React, { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, Pencil, Music2, Wand2, Play, Loader2, ChevronDown, ChevronRight, Send, FileText, Headphones, Sparkles, Zap } from 'lucide-react';
+import { Trash2, Pencil, Music2, Wand2, Play, Loader2, ChevronDown, ChevronRight, Send, FileText, Headphones, Sparkles, Zap, Download } from 'lucide-react';
 import { lireekApi, streamRefine, skipThinking } from '../../services/lireekApi';
 import type { Generation, Profile } from '../../services/lireekApi';
 import { StreamingPanel } from './StreamingPanel';
 import { useStreamingStore, startStreamGenerate } from '../../stores/streamingStore';
+
+/**
+ * Whether these lyrics have already produced a track, and whether one was kept.
+ *
+ * "Kept" is the one that matters: a version was downloaded, so generating again
+ * only adds another good take to choose between. "Generated" means a track was
+ * made but nothing was kept — worth another roll. Both markers survive the audio
+ * being deleted, which is what normally happens once a track has been kept.
+ */
+const GenerationStatusBadge: React.FC<{ gen: Generation }> = ({ gen }) => {
+  const { t } = useTranslation();
+  const kept = gen.download_count ?? 0;
+  const made = gen.audio_generated_count ?? 0;
+
+  if (kept > 0) {
+    const first = gen.first_downloaded_at
+      ? ` ${t('lyric.badgeFirstOn', { date: new Date(gen.first_downloaded_at).toLocaleDateString() })}`
+      : '';
+    return (
+      <span
+        title={t('lyric.badgeKeptHint', { count: kept }) + first}
+        className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-400/30 flex items-center gap-1"
+      >
+        <Download className="w-2.5 h-2.5" />
+        {t('lyric.badgeKept')}{kept > 1 ? ` ×${kept}` : ''}
+      </span>
+    );
+  }
+
+  if (made > 0) {
+    return (
+      <span
+        title={t('lyric.badgeGeneratedHint', { count: made })}
+        className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300/90 flex items-center gap-1"
+      >
+        <Music2 className="w-2.5 h-2.5" />
+        {t('lyric.badgeGenerated')}{made > 1 ? ` ×${made}` : ''}
+      </span>
+    );
+  }
+
+  return null;
+};
 
 interface WrittenSongsTabProps {
   generations: Generation[];
@@ -236,6 +279,7 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
         <div className="space-y-1">
           {generations.map((gen, idx) => {
             const isExpanded = expandedId === gen.id;
+            const kept = (gen.download_count ?? 0) > 0;
 
             return (
               <div
@@ -260,15 +304,22 @@ export const WrittenSongsTab: React.FC<WrittenSongsTabProps> = ({
                     </p>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
+                    <GenerationStatusBadge gen={gen} />
                     {gen.parent_generation_id && (
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 flex items-center gap-0.5">
                         <Sparkles className="w-2.5 h-2.5" /> {t('lyric.refined')}
                       </span>
                     )}
+                    {/* Still offered on a kept song — just played down, so the eye
+                        goes to the ones with nothing kept yet. */}
                     <button
                       onClick={(e) => { e.stopPropagation(); onGenerateAudio(gen); }}
-                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-                      title="Generate audio from these lyrics"
+                      className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] transition-colors ${
+                        kept
+                          ? 'text-zinc-500 hover:text-emerald-400 hover:bg-emerald-500/10'
+                          : 'text-emerald-400 hover:bg-emerald-500/10'
+                      }`}
+                      title={kept ? t('lyric.audioAgainHint') : t('lyric.audioHint')}
                     >
                       <Play className="w-3 h-3" />
                       {t('lyric.audio')}

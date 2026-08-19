@@ -21,6 +21,7 @@ import { useVstChainStore } from '../../stores/vstChainStore';
 import { ToggleSwitch } from './BarSection';
 import { formatReferenceName } from './modelLabels';
 import { VstChainDropdown } from './VstChainDropdown';
+import { useCapabilities } from '../../hooks/useCapabilities';
 import { CoverArtContent, CoverArtBadge } from './CoverArtDropdown';
 import { PluginControls } from './PluginControls';
 import { EditableSlider } from '../shared/EditableSlider';
@@ -265,6 +266,22 @@ export const PostProcessingDropdown: React.FC = () => {
   const gp = useGlobalParams();
   const { chain } = useVstChainStore();
   const vstEnabled = chain.filter(p => p.enabled).length;
+  const { capabilities } = useCapabilities();
+
+  // Which post stages the ACTIVE backend can actually run.
+  //
+  // PP-VAE re-encode and Spectral Lifter round-trip audio through ACE's own
+  // VAE / 48 kHz-tuned endpoints, so they are meaningless on another backend
+  // and are hidden rather than shown-and-ignored. The VST chain, mastering and
+  // StableStep read the rate from the audio and are model-agnostic, so they
+  // stay. `!capabilities` (still loading) shows everything — ACE's behaviour.
+  const aceCoupledOk = !capabilities || capabilities.features.plugins;
+  const stableStepOk = !capabilities || capabilities.features.stableStep !== false;
+  // Whisper reads the rendered file and nothing else, so it is valid for any
+  // backend. LRC timestamps are NOT: they come from ACE's DiT lyric
+  // cross-attention, which MiniMax-Music3's DiT does not have.
+  const whisperOk = !capabilities || capabilities.features.whisper !== false;
+  const lrcOk = !capabilities || capabilities.features.lyricTimestamps !== false;
 
   // PP-VAE availability — auto-detect from models directory
   const [ppVaeAvailable, setPpVaeAvailable] = useState(false);
@@ -333,7 +350,8 @@ export const PostProcessingDropdown: React.FC = () => {
 
   return (
     <div className="space-y-2">
-      {/* LRC Subtitle Generation Toggle */}
+      {/* LRC Subtitle Generation Toggle — needs generation-time lyric attention */}
+      {lrcOk && (
       <div className="flex items-center justify-between px-1 py-1.5">
         <div className="flex items-center gap-2">
           <AudioWaveform size={14} className={gp.skipLrc ? 'text-zinc-500' : 'text-sky-400'} />
@@ -344,8 +362,11 @@ export const PostProcessingDropdown: React.FC = () => {
         </div>
         <ToggleSwitch checked={!gp.skipLrc} onChange={v => gp.setSkipLrc(!v)} accentColor="sky" />
       </div>
+      )}
 
-      {/* Whisper Lyrics Transcription */}
+      {/* Whisper Lyrics Transcription — backend-agnostic (whisper-cli reads the
+          rendered file and resamples internally). */}
+      {whisperOk && (
       <Accordion
         icon={<Mic2 size={14} />}
         label="Whisper Lyrics"
@@ -427,9 +448,13 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
-      {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline */}
-      {postprocessPlugins.length > 0 && (
+      {/* 0. Postprocess Plugin (Tiled Decoder) — runs before PP-VAE in pipeline.
+          These are Lua plugins that hook ACE's VAE DECODE (md_audio_tiled.lua =
+          "Tiled VAE decode"), so they have nothing to hook on a backend that
+          does not use that VAE. */}
+      {postprocessPlugins.length > 0 && aceCoupledOk && (
         <Accordion
           icon={<Zap size={14} />}
           label="Tiled Decoder"
@@ -479,7 +504,7 @@ export const PostProcessingDropdown: React.FC = () => {
       )}
 
       {/* 1. PP-VAE Re-encode (only visible when PP-VAE model is available) */}
-      {ppVaeAvailable && (
+      {ppVaeAvailable && aceCoupledOk && (
         <Accordion
           icon={<AudioWaveform size={14} />}
           label={t('pp.ppVaeReencode')}
@@ -523,7 +548,10 @@ export const PostProcessingDropdown: React.FC = () => {
         </Accordion>
       )}
 
-      {/* 1.5. StableStep — SA3 refine of the instrumental */}
+      {/* 1.5. StableStep — SA3 refine. Model-agnostic: SA3 is natively
+          44.1 kHz and its whole-mix path passes the input rate straight
+          through, so it is not tied to ACE's 48 kHz output. */}
+      {stableStepOk && (
       <Accordion
         icon={<Sparkles size={14} />}
         label="StableStep"
@@ -701,6 +729,26 @@ export const PostProcessingDropdown: React.FC = () => {
                 </span>
               </label>
 
+              {/* Vocal stem handling: leave the AS1.5 vocals alone, or smooth
+                  them through the PP-VAE at the cost of high-end detail */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={gp.stableStepVocalPpVae === true}
+                  onChange={e => gp.setStableStepVocalPpVae(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span className="flex-1">
+                  <span className="block text-xs text-zinc-700 dark:text-zinc-300">Re-encode vocals through PP-VAE</span>
+                  <span className="block text-[10px] text-zinc-500 leading-relaxed">
+                    Smooths fizzy or mechanical AS1.5 vocals, but the round trip is
+                    lossy — it costs about 5 dB of air above 10 kHz and resynthesises
+                    the top octaves rather than reproducing them. Off: the original
+                    vocal stem is recombined with the SA3 instrumental untouched.
+                  </span>
+                </span>
+              </label>
+
               {/* Source blend: crossover splice or full-band mix with the AS1.5 source */}
               <div>
                 <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Source blend</label>
@@ -790,8 +838,10 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
-      {/* 1. Spectral Lifter */}
+      {/* 1. Spectral Lifter — ACE-VAE coupled, hidden on other backends */}
+      {aceCoupledOk && (
       <Accordion
         icon={<Zap size={14} />}
         label={t('pp.spectralLifter')}
@@ -869,6 +919,7 @@ export const PostProcessingDropdown: React.FC = () => {
           )}
         </div>
       </Accordion>
+      )}
 
       {/* 2. Vocal Naturalizer */}
       <Accordion

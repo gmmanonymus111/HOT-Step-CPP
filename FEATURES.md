@@ -312,16 +312,17 @@ Audio-to-MIDI transcription on HOT-Step's **native `ace-midi` engine** — a C++
 
 ## StableStep
 
-Post-processing refiner that re-renders the instrumental of a generated track through **Stable Audio 3** (SDEdit-style partial re-noising) running natively in the C++ engine — no Python. Replaces autoencoder fizz with real spectral detail while vocals are separated, cleaned, and remixed byte-untouched. *Powered by Stability AI* (models under the [Stability AI Community License](https://stability.ai/community-license-agreement)).
+Post-processing refiner that re-renders the instrumental of a generated track through **Stable Audio 3** (SDEdit-style partial re-noising) running natively in the C++ engine — no Python. Replaces autoencoder fizz with real spectral detail while the vocals are separated out and remixed unprocessed. *Powered by Stability AI* (models under the [Stability AI Community License](https://stability.ai/community-license-agreement)).
 
 | Feature | Description |
 |---------|-------------|
 | **SDEdit Instrumental Refine** | The instrumental is encoded into SAME-L latent space, partially re-noised at the chosen strength, and denoised by the SA3 DiT (8-step distilled rectified flow) conditioned on a prompt derived from the track's own caption (vocal descriptors stripped, length appended). |
-| **Vocal-Safe Pipeline** | BS-RoFormer splits vocals (lead + backing) from the mix; the instrumental is derived as the exact complement so no content is lost. Vocals get a PP-VAE polish and are remixed over the refined instrumental — lyrics and performance are never re-generated. |
+| **Vocal-Safe Pipeline** | BS-RoFormer splits vocals (lead + backing) from the mix; the instrumental is derived as the exact complement so no content is lost. The vocal stem is remixed over the refined instrumental with nothing but a sample-rate conversion applied — lyrics and performance are never re-generated. |
+| **Optional Vocal PP-VAE** | Off by default. Re-encodes the vocal stem through the PP-VAE, which smooths fizzy or mechanical AS1.5 vocals at a measured cost: ~2 dB across the midrange rising to ~6 dB above 16 kHz, roughly half the energy above 10 kHz, and input/output coherence below 0.1 above 4 kHz — the top octaves come back resynthesised rather than reproduced. Enable it only when the fizz bothers you more than the loss of air. |
 | **Refine Strength** | 0.10–0.60 slider (default 0.30). Low = cleanup; high = re-interpretation of the instrumentation. |
 | **Dual Engine Backends** | GGML (CUDA / Vulkan / CPU, 4 GGUF files ~5.8 GB — fastest option on NVIDIA in current testing) or ONNX Runtime with TensorRT (NVIDIA, ~12 GB). Auto mode picks whichever is installed. |
 | **In-App Model Download** | Model Manager → StableStep tab, with license acceptance and optional Hugging Face token. Both backend sets from [scragnog/HOT-Step-CPP-StableStep](https://huggingface.co/scragnog/HOT-Step-CPP-StableStep). |
-| **Level Matching** | The refined instrumental and cleaned vocals are RMS-matched to their pre-processing levels, preserving the original vocal/instrumental balance through the chain. |
+| **Level Matching** | The refined instrumental is RMS-matched to its pre-processing level and the vocal stem's level is preserved through the sample-rate conversion, so the original vocal/instrumental balance survives the chain. |
 
 ## AI Assistant
 

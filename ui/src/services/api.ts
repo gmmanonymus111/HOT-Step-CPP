@@ -118,6 +118,8 @@ function normalizeSong(s: any): Song {
     createdAt: s.created_at ? new Date(s.created_at) : undefined,
     masteredAudioUrl: s.mastered_audio_url || s.masteredAudioUrl || '',
     mastered_audio_url: s.mastered_audio_url,
+    noAdapterAudioUrl: s.noadapter_audio_url || s.noAdapterAudioUrl || '',
+    noadapter_audio_url: s.noadapter_audio_url,
     latentUrl: s.latent_url || s.latentUrl || '',
     latent_url: s.latent_url,
     quality_scores: s.quality_scores,
@@ -277,6 +279,7 @@ export const healthApi = {
     status: string;
     aceServer: { status: string; url: string; version: string };
     server: { port: number; uptime: number };
+    engine?: { ready: boolean; bootStatus: string };
   }>('/health'),
 };
 
@@ -326,8 +329,12 @@ export const adapterApi = {
    *  name suffix; `trigger` is the embedded trigger word when present. */
   lmList: (folder?: string) =>
     get<{ root: string; adapters: {
-      name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
-      lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | '';
+      name: string; path: string; kind: 'peft' | 'lokr' | 'safetensors'; size: number; mtime: number;
+      /** Eval-score sidecar (hot_step_eval.json): marginal+transition JS to the
+       *  artist — LOWER = closer. null = never evaluated. */
+      evalScore: number | null;
+      evalVerdict: string;
+      lmSize?: string; run?: string; trigger?: string; triggerPosition?: 'prepend' | 'append' | 'replace' | '';
     }[] }>(
       `/adapters/lm${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 };

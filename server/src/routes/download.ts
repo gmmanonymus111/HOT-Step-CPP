@@ -13,6 +13,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { config, getFFmpegPath } from '../config.js';
 import { getDb } from '../db/database.js';
+import { markDownloadedByAudioUrl } from '../db/lireekDb.js';
 import {
   gatherSongMetadata, buildMetadataArgs, buildCoverArtArgs,
   type AudioMetadata,
@@ -156,6 +157,10 @@ router.get('/:id', async (req, res) => {
       const filename = path.basename(audioUrlParam);
       const sourcePath = path.join(config.data.audioDir, filename);
       if (fs.existsSync(sourcePath)) {
+        // Same marking as the main path — this branch serves Lyric Studio queue
+        // items whose songs row isn't there, which is exactly the case that
+        // matters most for tracking what's been kept.
+        try { markDownloadedByAudioUrl(audioUrlParam); } catch { /* lireek tables may not exist */ }
         // Clean up parsed parameters just in case DB doesn't have standard naming
         const badPrefixes = /^_?(XL|STD)(\s*\(CPP\))?_?\s*-?\s*/i;
         const cleanPrepend = prepend.trim();
@@ -210,6 +215,11 @@ router.get('/:id', async (req, res) => {
     fs.createReadStream(latentPath).pipe(res);
     return;
   }
+
+  // Flag the lyrics this track came from as having a version worth keeping.
+  // Deliberately after the latent branch above — grabbing the latent file is not
+  // the same as keeping the song. Best-effort: never fail a download over it.
+  try { markDownloadedByAudioUrl(song.audio_url); } catch { /* lireek tables may not exist */ }
 
   // Determine which audio URL to use
   let audioUrl: string;

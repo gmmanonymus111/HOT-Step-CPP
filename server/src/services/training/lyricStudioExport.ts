@@ -23,11 +23,11 @@ import {
 } from '../../db/lireekDb.js';
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
 import { resolveArtistTitle } from './enhanceService.js';
-import { latestRunDir, lmSizeFromSlug } from './adapterLayout.js';
-import { readTrainDitStatus } from './trainDitStatus.js';
-import { adapterLmRoot, lmArtistDirFor, safeAdapterName } from './trainLmStatus.js';
+import * as audioMeta from './audioMeta.js';
+import { updateDataset } from './datasetsRepo.js';
+import { findDitAdapter, findLmAdapter } from './datasetAssets.js';
 import type {
-  LmSize, LyricStudioAdapterHit, LyricStudioExportInput, LyricStudioExportPreview,
+  LyricStudioExportInput, LyricStudioExportPreview,
   LyricStudioExportResult, LyricStudioExportSong, LyricStudioFieldSource,
   TrainingDatasetRow, TrainingSample,
 } from './types.js';
@@ -73,54 +73,38 @@ function detectAlbum(
   return { value: ds.name, source: 'dataset-name' };
 }
 
-// ── Trained-adapter lookup ───────────────────────────────────────────────
+/**
+ * Fill in tagArtist/tagAlbum from the AUDIO FILES when the label store has none.
+ *
+ * buildSamples reads those two off the label record (datasetScan.ts:250) and
+ * only the Label job ever writes it. A pipeline run that skips Label therefore
+ * arrives here with every tag blank, and detectAlbum — which has no filename
+ * fallback, unlike detectArtist — drops all the way through to the SOURCE
+ * FOLDER NAME. That is how a bulk run published "4yearstrong_someway" as a new
+ * album alongside the existing "In Some Way, Shape Or Form" instead of merging
+ * into it (2026-07-31): the existing-album lookup was working fine, it was just
+ * being handed a name no album could ever match.
+ *
+ * The tags are sitting in the files either way, so read them. Only the fields
+ * that are actually empty are filled, so a labelled dataset is untouched and
+ * the label store stays authoritative where it has an opinion.
+ *
+ * Bounded and best-effort: a dataset only needs enough of a majority to name an
+ * artist and an album, and an unreadable file must never fail an export.
+ */
+const TAG_PROBE_LIMIT = 24;
 
-const LM_SIZES: LmSize[] = ['4B', '1.7B', '0.6B'];
-
-function weightsMtime(dir: string): number {
-  for (const f of ['adapter_model.safetensors', 'lokr_weights.safetensors']) {
-    try { return fs.statSync(path.join(dir, f)).mtimeMs; } catch { /* next */ }
+async function fillTagsFromFiles(included: TrainingSample[]): Promise<void> {
+  const needs = included.filter(s => !s.tagArtist.trim() || !s.tagAlbum.trim());
+  if (needs.length === 0) return;
+  for (const s of needs.slice(0, TAG_PROBE_LIMIT)) {
+    try {
+      const md = await audioMeta.read(s.audioPath);
+      if (!s.tagArtist.trim() && md.artist) s.tagArtist = md.artist;
+      if (!s.tagAlbum.trim() && md.album) s.tagAlbum = md.album;
+      if (!s.tagTitle.trim() && md.title) s.tagTitle = md.title;
+    } catch { /* unreadable file — the existing fallbacks still apply */ }
   }
-  return 0;
-}
-
-/** Newest trained planner-LM adapter for this dataset across every size root
- *  (plus the legacy flat `lm/<name>-<size>` dir). null when none trained. */
-function findLmAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
-  let best: { hit: LyricStudioAdapterHit; mtime: number } | null = null;
-  for (const size of LM_SIZES) {
-    const candidates = [
-      latestRunDir(lmArtistDirFor(ds.slug, size)),
-      path.join(adapterLmRoot(), `${safeAdapterName(ds.slug)}-${size}`),
-    ];
-    for (const dir of candidates) {
-      if (!dir) continue;
-      const mtime = weightsMtime(dir);
-      if (!mtime || (best && mtime <= best.mtime)) continue;
-      // A legacy flat dir's parent is `lm/`, whose slug lookup fails → keep the
-      // loop's size; a per-size run dir confirms it from the folder itself.
-      const sizeOfDir = lmSizeFromSlug(path.basename(path.dirname(path.dirname(dir)))) || size;
-      best = {
-        mtime,
-        hit: { path: dir, kind: 'lm', detail: sizeOfDir, trainedAt: new Date(mtime).toISOString() },
-      };
-    }
-  }
-  return best ? best.hit : null;
-}
-
-/** The dataset's newest trained DiT adapter, resolved exactly the way the
- *  Train panel resolves it (newest preprocess variant → base → latest run). */
-function findDitAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
-  const status = readTrainDitStatus(ds, {});
-  if (!status.adapterExists) return null;
-  return {
-    path: status.adapterDir,
-    kind: 'dit',
-    // The per-base folder the run lives in (…/dit-<base>/<artist>/<stamp>).
-    detail: path.basename(path.dirname(path.dirname(status.adapterDir))),
-    trainedAt: status.trainedAt || new Date(weightsMtime(status.adapterDir) || Date.now()).toISOString(),
-  };
 }
 
 // ── Song assembly ────────────────────────────────────────────────────────
@@ -158,15 +142,24 @@ function toStoredSong(s: TrainingSample, ds: TrainingDatasetRow, setAlbum: strin
   if (s.key.trim()) song.key = s.key.trim();
   if (s.signature.trim()) song.signature = s.signature.trim();
   if (s.language.trim()) song.language = s.language.trim();
+  // Duration is what lets Lyric Studio measure THIS artist's vocal pacing
+  // (words/sec) — per-artist medians span 0.51-3.29 w/s, and without it the
+  // planner falls back to a global constant that misprices most artists.
+  if (typeof s.duration === 'number' && Number.isFinite(s.duration) && s.duration > 0) {
+    song.duration = Math.round(s.duration * 100) / 100;
+  }
   return song;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
 
-export function previewLyricStudioExport(
+export async function previewLyricStudioExport(
   ds: TrainingDatasetRow, samples: TrainingSample[],
-): LyricStudioExportPreview {
+): Promise<LyricStudioExportPreview> {
   const split = splitSamples(samples);
+  // Before detection, not after: detectAlbum's folder-name fallback is
+  // indistinguishable from a real answer once it has been taken.
+  await fillTagsFromFiles(split.included);
   const artist = detectArtist(ds, split.included);
   const album = detectAlbum(ds, split.included);
 
@@ -291,6 +284,12 @@ export async function commitLyricStudioExport(
     throw new LyricStudioExportError('No exportable songs — every sample is excluded, instrumental, or has no lyrics.');
   }
 
+  // Only when the caller did NOT name both: the manual path posts explicit
+  // artist/album from the preview the user confirmed, and probing files behind
+  // an explicit choice would be pure latency.
+  if (!(input.artist ?? '').trim() || !(input.album ?? '').trim()) {
+    await fillTagsFromFiles(split.included);
+  }
   const artistName = (input.artist ?? '').trim() || detectArtist(ds, split.included).value;
   const albumName = (input.album ?? '').trim() || detectAlbum(ds, split.included).value;
 
@@ -315,6 +314,10 @@ export async function commitLyricStudioExport(
     const created = saveLyricsSet(artist.id, albumName, songs.length, songs, imageUrl || null);
     lyricsSetId = Number(created.id);
   }
+
+  // Persist the dataset → album link on the row (Rob, 2026-08-13): the
+  // audition's Lyric Studio prompt source reads it without re-detecting.
+  try { updateDataset(ds.id, { lyricsSetId }); } catch { /* link is a convenience — never fail the export */ }
 
   if (!artist.image_url && config.lireek.geniusAccessToken) {
     try {

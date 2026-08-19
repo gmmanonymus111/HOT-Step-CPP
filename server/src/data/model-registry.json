@@ -86,6 +86,98 @@
       ]
     },
     {
+      "id": "minimax-music3",
+      "name": "MiniMax-Music3 (F16)",
+      "description": "All five MiniMax-Music3 components at full precision — the reference quality bar. ~24 GB download.",
+      "fileIds": [
+        "mm3-lm-f16",
+        "mm3-synth-f16"
+      ],
+      "components": [
+        "mm3-lm-f16",
+        "mm3-dit-f16",
+        "mm3-depth-f16",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
+      "id": "minimax-music3-q8",
+      "name": "MiniMax-Music3 (Q8_0)",
+      "description": "LM, DiT and depth decoder at Q8_0 with the frontends near-native — near-lossless, about half the size and a faster LM step. Recommended. ~13 GB download.",
+      "fileIds": [
+        "mm3-lm-q8_0",
+        "mm3-synth-q8_0"
+      ],
+      "components": [
+        "mm3-lm-q8_0",
+        "mm3-dit-q8_0",
+        "mm3-depth-q8_0",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
+      "id": "minimax-music3-balanced",
+      "name": "MiniMax-Music3 (Balanced mix)",
+      "description": "The split format's point: LM at Q8_0 (quality lives in the language model) with the DiT at Q4_K_M (VRAM lives in the flow stack), depth at Q8_0, frontends near-native. ~12 GB download.",
+      "components": [
+        "mm3-lm-q8_0",
+        "mm3-dit-Q4_K_M",
+        "mm3-depth-q8_0",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
+      "id": "minimax-music3-q6",
+      "name": "MiniMax-Music3 (Q6_K)",
+      "description": "LM and DiT at Q6_K, depth at Q8_0 (its validated floor), frontends near-native. ~10 GB download.",
+      "fileIds": [
+        "mm3-lm-Q6_K",
+        "mm3-synth-Q6_K"
+      ],
+      "components": [
+        "mm3-lm-Q6_K",
+        "mm3-dit-Q6_K",
+        "mm3-depth-q8_0",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
+      "id": "minimax-music3-q4",
+      "name": "MiniMax-Music3 (Q4_K_M)",
+      "description": "LM and DiT at Q4_K_M, depth at Q8_0, frontends near-native — the compact option for limited VRAM. ~8 GB download.",
+      "fileIds": [
+        "mm3-lm-Q4_K_M",
+        "mm3-synth-Q4_K_M"
+      ],
+      "components": [
+        "mm3-lm-Q4_K_M",
+        "mm3-dit-Q4_K_M",
+        "mm3-depth-q8_0",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
+      "id": "minimax-music3-nvfp4",
+      "name": "MiniMax-Music3 (NVFP4)",
+      "description": "LM and DiT at NVFP4 — the FASTEST option measured (~18 ms/frame in the autoregressive stage vs ~117 for the K-quants) using Blackwell (RTX 50-series) native FP4 kernels; depth at Q8_0, frontends near-native. Quality is not yet judged by ear. ~8 GB download.",
+      "fileIds": [
+        "mm3-lm-NVFP4",
+        "mm3-synth-NVFP4"
+      ],
+      "components": [
+        "mm3-lm-NVFP4",
+        "mm3-dit-NVFP4",
+        "mm3-depth-q8_0",
+        "mm3-cond-f16",
+        "mm3-voc-f16"
+      ]
+    },
+    {
       "id": "stem-separation",
       "name": "Stem Separation",
       "description": "All 4 models for multi-stem audio separation in Cover Studio. Required for the SuperSep pipeline.",
@@ -121,6 +213,15 @@
         "supersep-rt-cudnn-graph",
         "supersep-rt-cudnn-heuristic",
         "supersep-rt-cudnn-ops"
+      ]
+    },
+    {
+      "id": "moss-captioning",
+      "name": "Local Captioning (MOSS)",
+      "description": "Caption your own tracks locally in the Training Studio — MOSS listens to the audio instead of rewriting text. Also emits MM3 Structured Captions.",
+      "fileIds": [
+        "moss-lm-q8_0",
+        "moss-aud-f16"
       ]
     }
   ],
@@ -2250,6 +2351,1166 @@
         "cuda12"
       ],
       "repoPath": "runtime/cuda12/cudart64_12.dll"
+    },
+    {
+      "id": "mm3-lm-f16",
+      "filename": "mm3-lm-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (F16)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "F16",
+      "sizeBytes": 17176762656,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Full precision. The reference quality bar. Both mm3-lm and mm3-synth are required; this file is ~17.2 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-q8_0",
+      "filename": "mm3-lm-q8_0.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q8_0)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q8_0",
+      "sizeBytes": 9129105696,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Near-lossless and roughly twice as fast on the LM step. The recommended default. Both mm3-lm and mm3-synth are required; this file is ~9.1 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q6_K",
+      "filename": "mm3-lm-Q6_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q6_K)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q6_K",
+      "sizeBytes": 7050127712,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Very close to q8_0 quality at a smaller footprint. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~7.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q5_K_M",
+      "filename": "mm3-lm-Q5_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q5_K_M)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q5_K_M",
+      "sizeBytes": 6257994080,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Good quality/size balance. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~6.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q5_K_S",
+      "filename": "mm3-lm-Q5_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q5_K_S)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q5_K_S",
+      "sizeBytes": 6127642976,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Slightly smaller than Q5_K_M, marginally lower quality. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~6.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q4_K_M",
+      "filename": "mm3-lm-Q4_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q4_K_M)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q4_K_M",
+      "sizeBytes": 5512456544,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Compact. The usual choice for limited VRAM. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~5.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q4_K_S",
+      "filename": "mm3-lm-Q4_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q4_K_S)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q4_K_S",
+      "sizeBytes": 5286685024,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Smaller than Q4_K_M with a little more quality loss. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~5.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-NVFP4",
+      "filename": "mm3-lm-NVFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (NVFP4)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "NVFP4",
+      "sizeBytes": 5656222048,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. 4-bit float, fastest on Blackwell (RTX 50-series) native FP4 kernels. Experimental. Both mm3-lm and mm3-synth are required; this file is ~5.7 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-MXFP4",
+      "filename": "mm3-lm-MXFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (MXFP4)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "MXFP4",
+      "sizeBytes": 5439166816,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. 4-bit float, portable variant. Experimental. Both mm3-lm and mm3-synth are required; this file is ~5.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_L",
+      "filename": "mm3-lm-Q3_K_L.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_L)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_L",
+      "sizeBytes": 4998719840,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Aggressive. Quality loss is audible; verify before relying on it. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~5.0 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_M",
+      "filename": "mm3-lm-Q3_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_M)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_M",
+      "sizeBytes": 4589971808,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Aggressive. Quality loss is audible; verify before relying on it. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~4.6 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q3_K_S",
+      "filename": "mm3-lm-Q3_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q3_K_S)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q3_K_S",
+      "sizeBytes": 4336937312,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Very aggressive. Expect noticeable degradation. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~4.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-lm-Q2_K",
+      "filename": "mm3-lm-Q2_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Language Model (Q2_K)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q2_K",
+      "sizeBytes": 3682625888,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 autoregressive language model — generates the semantic/acoustic token sequence from the Structured Caption. Smallest and lowest quality. Experimental — the flow model may not hold up. NOTE: measured 5-6x slower than Q8_0 or NVFP4 in the autoregressive stage on CUDA — pick NVFP4 or Q8_0 for speed. Both mm3-lm and mm3-synth are required; this file is ~3.7 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-f16",
+      "filename": "mm3-synth-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (F16) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "F16",
+      "sizeBytes": 6424997824,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Full precision. The reference quality bar. Both mm3-lm and mm3-synth are required; this file is ~6.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-q8_0",
+      "filename": "mm3-synth-q8_0.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q8_0) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q8_0",
+      "sizeBytes": 3545427904,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Near-lossless and roughly twice as fast on the LM step. The recommended default. Both mm3-lm and mm3-synth are required; this file is ~3.5 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q6_K",
+      "filename": "mm3-synth-Q6_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q6_K) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q6_K",
+      "sizeBytes": 2801538788,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Very close to q8_0 quality at a smaller footprint. Both mm3-lm and mm3-synth are required; this file is ~2.8 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q5_K_M",
+      "filename": "mm3-synth-Q5_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q5_K_M) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q5_K_M",
+      "sizeBytes": 2456164068,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Good quality/size balance. Both mm3-lm and mm3-synth are required; this file is ~2.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q5_K_S",
+      "filename": "mm3-synth-Q5_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q5_K_S) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q5_K_S",
+      "sizeBytes": 2404914916,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Slightly smaller than Q5_K_M, marginally lower quality. Both mm3-lm and mm3-synth are required; this file is ~2.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q4_K_M",
+      "filename": "mm3-synth-Q4_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q4_K_M) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q4_K_M",
+      "sizeBytes": 2131105508,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Compact. The usual choice for limited VRAM. Both mm3-lm and mm3-synth are required; this file is ~2.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q4_K_S",
+      "filename": "mm3-synth-Q4_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q4_K_S) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q4_K_S",
+      "sizeBytes": 2060981988,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Smaller than Q4_K_M with a little more quality loss. Both mm3-lm and mm3-synth are required; this file is ~2.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-NVFP4",
+      "filename": "mm3-synth-NVFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (NVFP4) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "NVFP4",
+      "sizeBytes": 2052255460,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. 4-bit float, fastest on Blackwell (RTX 50-series) native FP4 kernels. Experimental. Both mm3-lm and mm3-synth are required; this file is ~2.1 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-MXFP4",
+      "filename": "mm3-synth-MXFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (MXFP4) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "MXFP4",
+      "sizeBytes": 1958932196,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. 4-bit float, portable variant. Experimental. Both mm3-lm and mm3-synth are required; this file is ~2.0 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q3_K_L",
+      "filename": "mm3-synth-Q3_K_L.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q3_K_L) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q3_K_L",
+      "sizeBytes": 1890195172,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Aggressive. Quality loss is audible; verify before relying on it. Both mm3-lm and mm3-synth are required; this file is ~1.9 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q3_K_M",
+      "filename": "mm3-synth-Q3_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q3_K_M) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q3_K_M",
+      "sizeBytes": 1734481636,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Aggressive. Quality loss is audible; verify before relying on it. Both mm3-lm and mm3-synth are required; this file is ~1.7 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q3_K_S",
+      "filename": "mm3-synth-Q3_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q3_K_S) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q3_K_S",
+      "sizeBytes": 1634997988,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Very aggressive. Expect noticeable degradation. Both mm3-lm and mm3-synth are required; this file is ~1.6 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-synth-Q2_K",
+      "filename": "mm3-synth-Q2_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Synth / Flow Model (Q2_K) — legacy bundle",
+      "scale": null,
+      "variant": "synth",
+      "quant": "Q2_K",
+      "sizeBytes": 1386747620,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching synth model — turns the LM's token sequence into audio latents, vocoded to 44.1 kHz. Includes the depth decoder, condition encoder, flow DiT and vocoder. Smallest and lowest quality. Experimental — the flow model may not hold up. Both mm3-lm and mm3-synth are required; this file is ~1.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-cond-f16",
+      "filename": "mm3-cond-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Condition Encoder (F16)",
+      "scale": null,
+      "variant": "cond",
+      "quant": "F16",
+      "sizeBytes": 50341120,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 condition encoder (~25M) — fuses the AR stage's hidden states into the DiT's conditioning track. Never quantised (bandwidth-bound frontend); this f16 file serves every quant combination. Full precision — the reference quality bar. This file is ~0.1 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-MXFP4",
+      "filename": "mm3-depth-MXFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (MXFP4)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "MXFP4",
+      "sizeBytes": 383668128,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. 4-bit float, portable variant. Experimental. This file is ~0.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-NVFP4",
+      "filename": "mm3-depth-NVFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (NVFP4)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "NVFP4",
+      "sizeBytes": 401493920,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. 4-bit float, Blackwell-native kernels. Experimental. This file is ~0.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q2_K",
+      "filename": "mm3-depth-Q2_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q2_K)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q2_K",
+      "sizeBytes": 288837536,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Smallest and lowest quality. Experimental. This file is ~0.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q3_K_L",
+      "filename": "mm3-depth-Q3_K_L.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q3_K_L)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q3_K_L",
+      "sizeBytes": 368005024,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Aggressive; verify by ear. This file is ~0.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q3_K_M",
+      "filename": "mm3-depth-Q3_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q3_K_M)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q3_K_M",
+      "sizeBytes": 329076640,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Aggressive; verify by ear. This file is ~0.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q3_K_S",
+      "filename": "mm3-depth-Q3_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q3_K_S)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q3_K_S",
+      "sizeBytes": 307449760,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Very aggressive; expect degradation. This file is ~0.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q4_K_M",
+      "filename": "mm3-depth-Q4_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q4_K_M)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q4_K_M",
+      "sizeBytes": 404836256,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Compact — the usual limited-VRAM choice. This file is ~0.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q4_K_S",
+      "filename": "mm3-depth-Q4_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q4_K_S)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q4_K_S",
+      "sizeBytes": 404180896,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Smaller than Q4_K_M, a little more loss. This file is ~0.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q5_K_M",
+      "filename": "mm3-depth-Q5_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q5_K_M)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q5_K_M",
+      "sizeBytes": 465653664,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Good quality/size balance. This file is ~0.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q5_K_S",
+      "filename": "mm3-depth-Q5_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q5_K_S)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q5_K_S",
+      "sizeBytes": 454512544,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Slightly smaller than Q5_K_M. This file is ~0.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-Q6_K",
+      "filename": "mm3-depth-Q6_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q6_K)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q6_K",
+      "sizeBytes": 530272160,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Close to Q8_0 quality, smaller. This file is ~0.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-f16",
+      "filename": "mm3-depth-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (F16)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "F16",
+      "sizeBytes": 1292259232,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Full precision — the reference quality bar. This file is ~1.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-depth-q8_0",
+      "filename": "mm3-depth-q8_0.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Depth Decoder (Q8_0)",
+      "scale": null,
+      "variant": "depth",
+      "quant": "Q8_0",
+      "sizeBytes": 686706592,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 RVQ depth decoder (0.6B) — predicts the 7 acoustic codebooks per frame inside the AR loop. Split-format file. Q8_0 is the validated floor for quality; sub-Q8 variants exist for experiments. Near-lossless. The recommended default. This file is ~0.7 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-MXFP4",
+      "filename": "mm3-dit-MXFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (MXFP4)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "MXFP4",
+      "sizeBytes": 1308286784,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. 4-bit float, portable variant. Experimental. This file is ~1.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-NVFP4",
+      "filename": "mm3-dit-NVFP4.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (NVFP4)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "NVFP4",
+      "sizeBytes": 1383784256,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. 4-bit float, Blackwell-native kernels. Experimental. This file is ~1.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q2_K",
+      "filename": "mm3-dit-Q2_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q2_K)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q2_K",
+      "sizeBytes": 830932800,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Smallest and lowest quality. Experimental. This file is ~0.8 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q3_K_L",
+      "filename": "mm3-dit-Q3_K_L.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q3_K_L)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q3_K_L",
+      "sizeBytes": 1255212864,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Aggressive; verify by ear. This file is ~1.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q3_K_M",
+      "filename": "mm3-dit-Q3_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q3_K_M)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q3_K_M",
+      "sizeBytes": 1138427712,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Aggressive; verify by ear. This file is ~1.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q3_K_S",
+      "filename": "mm3-dit-Q3_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q3_K_S)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q3_K_S",
+      "sizeBytes": 1060570944,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Very aggressive; expect degradation. This file is ~1.1 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q4_K_M",
+      "filename": "mm3-dit-Q4_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q4_K_M)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q4_K_M",
+      "sizeBytes": 1459291968,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Compact — the usual limited-VRAM choice. This file is ~1.5 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q4_K_S",
+      "filename": "mm3-dit-Q4_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q4_K_S)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q4_K_S",
+      "sizeBytes": 1389823808,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Smaller than Q4_K_M, a little more loss. This file is ~1.4 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q5_K_M",
+      "filename": "mm3-dit-Q5_K_M.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q5_K_M)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q5_K_M",
+      "sizeBytes": 1723533120,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Good quality/size balance. This file is ~1.7 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q5_K_S",
+      "filename": "mm3-dit-Q5_K_S.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q5_K_S)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q5_K_S",
+      "sizeBytes": 1683425088,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Slightly smaller than Q5_K_M. This file is ~1.7 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-Q6_K",
+      "filename": "mm3-dit-Q6_K.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q6_K)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q6_K",
+      "sizeBytes": 2004289344,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Close to Q8_0 quality, smaller. This file is ~2.0 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-f16",
+      "filename": "mm3-dit-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (F16)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "F16",
+      "sizeBytes": 4865761088,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Full precision — the reference quality bar. This file is ~4.9 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-dit-q8_0",
+      "filename": "mm3-dit-q8_0.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Flow DiT (Q8_0)",
+      "scale": null,
+      "variant": "dit",
+      "quant": "Q8_0",
+      "sizeBytes": 2591743808,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 flow-matching DiT (2.4B) — denoises the latent track under the condition encoder's conditioning. Split-format file (one GGUF per component); pairs with any mm3-lm/depth quant. cond+voc ride along near-native. Near-lossless. The recommended default. This file is ~2.6 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "mm3-voc-f16",
+      "filename": "mm3-voc-f16.gguf",
+      "role": "mm3",
+      "subdir": "mm3",
+      "displayName": "MM3 Vocoder (F16)",
+      "scale": null,
+      "variant": "voc",
+      "quant": "F16",
+      "sizeBytes": 216638016,
+      "repo": "scragnog/MiniMax-Music3-GGUF",
+      "description": "MiniMax-Music3 DAC-style vocoder — decodes latents to 44.1 kHz stereo. Never quantised (bandwidth-bound frontend); this f16 file serves every quant combination. Full precision — the reference quality bar. This file is ~0.2 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-lm-q8_0",
+      "filename": "moss-lm-q8_0.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Captioner LM (Q8_0)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "Q8_0",
+      "sizeBytes": 8709513792,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music-8B-Instruct language model — writes the caption from what the audio encoder heard. Near-lossless and half the size of F16; the recommended default. Requires moss-aud-f16 as well; this file is ~8.1 GB.",
+      "tags": [
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-lm-f16",
+      "filename": "moss-lm-f16.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Captioner LM (F16)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "F16",
+      "sizeBytes": 16388039232,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music-8B-Instruct language model at full precision — the reference quality bar, and what the parity fixtures were captured against. Requires moss-aud-f16 as well; this file is ~15.3 GB.",
+      "tags": [],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "moss-aud-f16",
+      "filename": "moss-aud-f16.gguf",
+      "role": "moss",
+      "subdir": "moss",
+      "displayName": "MOSS Audio Tower (F16)",
+      "scale": null,
+      "variant": "aud",
+      "quant": "F16",
+      "sizeBytes": 1724480640,
+      "repo": "scragnog/MOSS-Music-8B-Instruct-GGUF",
+      "description": "MOSS-Music audio encoder — 32-layer Whisper-style tower plus the SwiGLU adapter and deepstack mergers that inject audio into the LM. F16 only, never quantised: the adapter output runs ~770x hotter than the encoder's, so quantisation error lands straight in the LM's input embeddings. Required by every moss-lm file; ~1.6 GB.",
+      "tags": [
+        "required"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
     },
     {
       "id": "whisper-large-v3-turbo",

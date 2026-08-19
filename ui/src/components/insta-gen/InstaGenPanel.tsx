@@ -377,6 +377,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
               audioUrl,
               songId,
               masteredAudioUrl: status.result?.masteredAudioUrl,
+              noAdapterAudioUrl: status.result?.noAdapterAudioUrl,
               audioDuration: status.result?.duration,
             });
             // Notify App to refresh library
@@ -629,6 +630,7 @@ export const InstaGenPanel: React.FC<InstaGenPanelProps> = ({ onSongCreated, act
               audioUrl,
               songId,
               masteredAudioUrl: status.result?.masteredAudioUrl,
+              noAdapterAudioUrl: status.result?.noAdapterAudioUrl,
               audioDuration: status.result?.duration,
             });
             // Notify App to refresh library

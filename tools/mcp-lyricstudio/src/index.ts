@@ -12,6 +12,7 @@ import * as prompts from './prompts.js';
 // shared with the in-app pipeline; appended HERE (not in the LLM prompt) so it
 // is deterministic.
 import { withModelSuffix } from '../../../server/src/services/lireek/modelName.js';
+import { recalculateProfileStats } from '../../../server/src/services/lireek/profilerService.js';
 
 const server = new McpServer({
   name: 'lyricstudio',
@@ -154,9 +155,11 @@ server.tool(
     const pd = profile.profile_data;
     const history = db.getGenerationHistory(profile.artist_id);
 
-    // Profiles built before audio enrichment existed: derive it live from the
-    // lyrics set (Training Studio exports carry bpm/key/genre/caption per song).
-    if (!pd.audio_enrichment) {
+    // Enrichment is PURE derived data — recompute from the lyrics set every
+    // time rather than trusting the copy frozen into profile_data at build
+    // time, which goes stale when the set gains captions or the distillation
+    // changes (see the same note in server/src/routes/lireek/llmRoutes.ts).
+    {
       const set = db.getLyricsSet(profile.lyrics_set_id);
       if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
     }
@@ -217,8 +220,8 @@ server.tool(
     }
     const pd = profile.profile_data;
 
-    // Same live-derivation fallback as prepare_generation (old profiles).
-    if (!pd.audio_enrichment) {
+    // Same live re-derivation as prepare_generation.
+    {
       const set = db.getLyricsSet(profile.lyrics_set_id);
       if (set) pd.audio_enrichment = prompts.computeAlbumEnrichment(set.songs);
     }
@@ -278,6 +281,29 @@ server.tool(
       return { content: [{ type: 'text', text: `Profile ${profile_id} not found.` }] };
     }
 
+    // Same arrangement + duration policy as the in-app path (orchestration.ts).
+    // Intro FIRST — a declared instrumental intro is time the duration
+    // derivation counts, so applying it afterwards would under-time the song.
+    let introNote = '';
+    const withIntro = prompts.ensureInstrumentalIntro(lyrics, `${profile.artist_name}|${title}`);
+    if (withIntro !== null) {
+      lyrics = withIntro;
+      introNote = `\n🎸 Instrumental intro applied (${prompts.INSTRUMENTAL_INTRO_TAG})`;
+    }
+
+    // The final duration derives from the written lyrics at the artist's
+    // measured pacing, so duration==content holds no matter what was planned.
+    let durationNote = '';
+    {
+      const set = db.getLyricsSet(profile.lyrics_set_id);
+      const rate = set ? (prompts.computeAlbumEnrichment(set.songs)?.wordsPerSec || 0) : 0;
+      const reconciled = prompts.reconcileDurationToLyrics(lyrics, bpm ?? 0, duration ?? 0, rate);
+      if (reconciled !== (duration ?? 0)) {
+        durationNote = `\n⏱ Duration reconciled to lyrics: ${duration ?? 0}s → ${reconciled}s (${rate > 0 ? `artist rate ${rate.toFixed(2)} w/s` : 'global rate'})`;
+        duration = reconciled;
+      }
+    }
+
     const saved = db.saveGeneration({
       profileId: profile_id,
       provider: 'mcp',
@@ -302,6 +328,8 @@ server.tool(
           `**Artist:** ${profile.artist_name}${profile.album ? ` — ${profile.album}` : ''}`,
           `**Subject:** ${saved.subject}`,
           `**BPM:** ${saved.bpm} | **Key:** ${saved.key} | **Duration:** ${saved.duration}s`,
+          introNote,
+          durationNote,
           '',
           'The generation is now visible in the Lyric Studio UI.',
         ].join('\n'),
@@ -559,7 +587,7 @@ server.tool(
       '',
       'After generating all 4 JSON responses, call `save_profile` with the merged data.',
       '',
-      '> **Note:** Rule-based stats (rhyme analysis, meter, syllable counts, structure blueprints, etc.) are computed by the app\'s profiler service, not by the LLM. When saving the profile, include the LLM-generated fields. The app will have partial data but the most important parts (themes, vocabulary, tone, imagery, subjects) will be present.',
+      '> **Note:** Rule-based stats (rhyme analysis, meter, syllable counts, structure blueprints, representative excerpts, etc.) are computed deterministically from the lyrics — do NOT invent them. Just include the LLM-generated prose fields; `save_profile` computes and attaches all rule-based stats automatically on save.',
     ].join('\n');
 
     return { content: [{ type: 'text', text }] };
@@ -574,8 +602,12 @@ server.tool(
   {
     lyrics_set_id: z.number().describe('Lyrics set ID the profile was built from'),
     profile_data: z.string().describe('JSON string of the merged profile data object'),
+    model: z.string().describe(MODEL_PARAM_DESC),
+    provider: z.string().optional().describe(
+      "Where the model ran (e.g. 'anthropic', 'mcp'). Defaults to 'mcp'.",
+    ),
   },
-  async ({ lyrics_set_id, profile_data }) => {
+  async ({ lyrics_set_id, profile_data, model, provider }) => {
     const lyricsSet = db.getLyricsSet(lyrics_set_id);
     if (!lyricsSet) {
       return { content: [{ type: 'text', text: `Lyrics set ${lyrics_set_id} not found.` }] };
@@ -591,10 +623,18 @@ server.tool(
     // Add artist name to the profile data
     parsed.artist = lyricsSet.artist_name;
     if (lyricsSet.album) parsed.album = lyricsSet.album;
-    // Deterministic, never agent-derived — measured facts from the source audio.
-    parsed.audio_enrichment = prompts.computeAlbumEnrichment(lyricsSet.songs);
+    // Rule-based stats (meter, rhyme, repetition, vocabulary), structure
+    // blueprints, representative excerpts and audio enrichment are deterministic
+    // and computed from the lyrics — never agent-derived. Without this, MCP-built
+    // profiles render "Average verse length: undefined lines" and carry no
+    // excerpts or structural vocabulary into generation prompts.
+    parsed = recalculateProfileStats(lyricsSet.songs, parsed);
 
-    const saved = db.saveProfile(lyrics_set_id, 'antigravity', 'claude-opus-4', parsed);
+    // The provider/model were hardcoded to 'antigravity'/'claude-opus-4' here, so
+    // EVERY profile built through MCP was stamped claude-opus-4 whatever actually
+    // wrote it — 36 of them, unattributable after the fact. save_generation has
+    // taken a real `model` since it was written; this now matches it (2026-08-06).
+    const saved = db.saveProfile(lyrics_set_id, provider || 'mcp', model, parsed);
 
     return {
       content: [{

@@ -12,6 +12,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { readDatasetJsonMetadata } from './datasetBuilder.js';
 import { detailFor, syncCounters } from './datasetDetail.js';
+import { normalizeLanguage } from '../languageCodes.js';
 import { scanPreview as scanPreviewFolder } from './datasetScan.js';
 import * as repo from './datasetsRepo.js';
 import { labelsDir, slugify, uniqueSlug } from './paths.js';
@@ -103,15 +104,22 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
     defaultArtist: typeof body.defaultArtist === 'string' ? body.defaultArtist : metaString(priorMeta, 'default_artist'),
     defaultAlbum: typeof body.defaultAlbum === 'string' ? body.defaultAlbum : metaString(priorMeta, 'default_album'),
     defaultGenre: typeof body.defaultGenre === 'string' ? body.defaultGenre : metaString(priorMeta, 'default_genre'),
-    defaultLanguage: typeof body.defaultLanguage === 'string' && body.defaultLanguage.trim()
-      ? body.defaultLanguage.trim().toLowerCase()
-      : (metaString(priorMeta, 'default_language') || 'english'),
+    // Normalized to an ISO code the inference FSM can emit — a full name like
+    // 'english' trains adapters to produce a token the sampler forbids
+    // (languageCodes.ts has the full account).
+    defaultLanguage: normalizeLanguage(
+      typeof body.defaultLanguage === 'string' && body.defaultLanguage.trim()
+        ? body.defaultLanguage
+        : metaString(priorMeta, 'default_language')),
     sampleCount: preview.audioFiles,
     labeledCount: preview.withCaption,
     excludedCount: 0,
     status: 'draft',
     builtAt: '',
     datasetJsonPath: '',
+    // Detected from the tracks' tags on the first scan below (syncCounters →
+    // syncAlbumName), or lazily by the list endpoint — never guessed here.
+    albumName: '',
     createdAt: now,
     updatedAt: now,
   };

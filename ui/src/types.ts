@@ -37,6 +37,9 @@ export interface Song {
   // Mastered version
   masteredAudioUrl?: string;
   mastered_audio_url?: string;
+  // No-adapter reference render (bare-DiT low-step output, no post-processing)
+  noAdapterAudioUrl?: string;
+  noadapter_audio_url?: string;
   kickStemUrl?: string;
   kick_stem_url?: string;
   snareStemUrl?: string;
@@ -52,6 +55,8 @@ export interface Song {
   quality_scores?: string;
   // Cover art subject — custom prompt stored for "Regenerate Cover"
   cover_art_subject?: string;
+  // Generation backend that produced this song ('ace', future: 'minimax-m3', ...)
+  backend?: string;
 }
 
 /** Normalized recent song returned by /api/songs/recent — unified across all modes */
@@ -60,6 +65,7 @@ export interface UnifiedRecentSong {
   title: string;
   audio_url: string;
   mastered_audio_url: string;
+  noadapter_audio_url?: string;
   latent_url: string;
   cover_url: string;
   duration: number;
@@ -75,6 +81,12 @@ export interface UnifiedRecentSong {
   album: string;
   generation_id: number | null;
 }
+
+/** How the LM repetition penalty is turned into a per-code logit adjustment.
+ *  'presence'  — legacy: one flat penalty per distinct code in the window.
+ *  'frequency' — penalty^occurrences, so loops are hit far harder than one-offs.
+ *  'dry'       — penalise only codes that would extend a verbatim recent cycle. */
+export type LmRepMode = 'presence' | 'frequency' | 'dry';
 
 /** Parameters sent to the generation API */
 export interface GenerationParams {
@@ -103,6 +115,11 @@ export interface GenerationParams {
   /** LM repetition penalty (>1 enables) + lookback window in codes. */
   lmRepPenalty?: number;
   lmRepWindow?: number;
+  /** How the penalty is applied: 'presence' (legacy), 'frequency', or 'dry'. */
+  lmRepMode?: LmRepMode;
+  /** 'dry' only. */
+  lmDryBase?: number;
+  lmDryMinLen?: number;
   useCotCaption: boolean;
   skipLrc?: boolean;  // Skip LRC (timed-lyrics) generation
 
@@ -113,6 +130,9 @@ export interface GenerationParams {
   lmCfgCutoffRatio?: number;
   cacheRatio?: number;
   shift: number;
+  /** DiT self-attention window in tokens for the 16 windowed layers.
+   *  Omitted/-1 = the model's own 128 (±10.2 s); 0 = full attention. */
+  ditSlidingWindow?: number;
   inferMethod: string;
   scheduler: string;
   guidanceMode: string;
@@ -161,6 +181,9 @@ export interface GenerationParams {
   /** Merge-mode low-VRAM storage: re-encode merged weights to the base's native
    *  quant instead of F32 promotion. */
   adapterMergeLowVram?: boolean;
+  /** Optional 3rd output: raw 20-step render on the bare DiT (adapter bypassed,
+   *  LM adapter kept, no post-processing) for A/B-ing the DiT adapter. */
+  noAdapterRender?: boolean;
   /** Basin re-base: source DiT model name + nudge strength (merge mode only). */
   rebaseSource?: string;
   rebaseBeta?: number;
@@ -269,6 +292,7 @@ export interface GenerationParams {
   stableStepBackend?: 'auto' | 'onnx' | 'gguf'; // engine backend (default 'auto')
   stableStepAdapters?: Array<{ name: string; scale: number }>; // DoRA adapters (GGML backend only)
   stableStepPreserveDynamics?: boolean; // envelope-match refined audio to source dynamics
+  stableStepVocalPpVae?: boolean; // re-encode the vocal stem through PP-VAE (default off — lossy)
   stableStepBlendMode?: 'off' | 'crossover' | 'mix'; // source blending mode
   stableStepCrossoverHz?: number;      // crossover center (crossover mode)
   stableStepCrossoverWidthHz?: number; // transition width (crossover mode)
@@ -312,6 +336,10 @@ export interface GenerationParams {
   whisperLanguage?: string;
   whisperBeamSize?: number;
   whisperIsolateVocals?: boolean;
+
+  // Multi-backend: which engine backend this request targets ('ace', future:
+  // 'minimax-m3', ...). See docs/plans/multi-backend-architecture.md §4.5.
+  backend?: string;
 }
 
 /** Generation job status from the server */
@@ -328,6 +356,7 @@ export interface GenerationJob {
     keyScale?: string;
     timeSignature?: string;
     masteredAudioUrl?: string;
+    noAdapterAudioUrl?: string;
   };
   error?: string;
 }
@@ -381,15 +410,21 @@ export interface AdapterFile {
   size: number;
   /** Trigger word embedded in the adapter's safetensors metadata ('' = none). */
   trigger?: string;
-  /** The position that trigger sat at in the training captions. */
-  triggerPosition?: 'prepend' | 'append' | '';
+  /**
+   * The position that trigger sat at in the training captions. 'replace' means
+   * the trigger WAS the whole caption, so inference must drop the caption too.
+   */
+  triggerPosition?: 'prepend' | 'append' | 'replace' | '';
 }
 
 /** Model registry file entry */
 export interface RegistryFile {
   id: string;
   filename: string;
-  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime';
+  // 'moss' is the odd one out: an ANALYSIS model (audio -> caption), not a
+  // generation component. It is in this registry because it downloads the same
+  // way, but nothing in the generation pipeline reads it.
+  role: 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'supersep' | 'whisper' | 'stablestep' | 'runtime' | 'mm3' | 'moss';
   subdir?: string;
   displayName: string;
   scale?: 'standard' | 'xl' | null;

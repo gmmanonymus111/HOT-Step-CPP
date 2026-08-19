@@ -15,6 +15,13 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 >
 > This is **very much experimental right now** — it's brand new, GPU-hungry (16 GB+ recommended, 24 GB+ for full-depth DiT training), and rough edges are guaranteed. If you try it, we'd love to hear how it goes on the Discord. Find it in the sidebar as **Training**.
 
+> ### 🧪 New: MiniMax-Music3 backend *(rudimentary — under heavy development)*
+> HOT-Step now contains a **native C++/GGML port of [MiniMax-Music3](https://huggingface.co/MiniMaxAI/MiniMax-Music3)** as a second generation backend alongside ACE-Step 1.5 — to our knowledge the first implementation of this model outside Python. A backend switch appears in the global bar once the models are installed (Model Manager → any **MiniMax-Music3** pack; **Q8_0 recommended**, ~13 GB download / ~13 GB VRAM; full-precision F16 is ~24 GB / ~24 GB; a Balanced mix pack squeezes to ~12 GB).
+>
+> MM3 ships in a **split model format** — one GGUF per pipeline component (language model, flow DiT, depth decoder, condition encoder, vocoder), each selectable at its own quantisation from the global bar's Models section. Mix a high-precision language model with a compact DiT, and swap the DiT quant without reloading the 17 GB LM. The split-model design follows [minimaxmusic.cpp](https://github.com/ServeurpersoCom/minimaxmusic.cpp); older two-file installs keep working unchanged.
+>
+> Current support is **text-to-music with LRC lyric timestamps** (caption + lyrics + duration + seed): no covers, repaint, stems, adapters, or training for MM3 yet, and output is stored as raw 44.1 kHz WAV. Expect rough edges, breaking changes, and rapid movement. Feedback very welcome on the Discord.
+
 ## Download
 
 Pre-built portable releases — no installation required. Extract, run, done.
@@ -542,6 +549,9 @@ If you see errors about Metal Toolchain, these can usually be ignored — the em
 
 - **[ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5)** — The AI music generation model by ACE Studio and StepFun
 - **[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)** — The C++ GGML inference engine by ServeurpersoCom
+- **[minimaxmusic.cpp](https://github.com/ServeurpersoCom/minimaxmusic.cpp)** — ServeurpersoCom's independent MiniMax-Music3 port; HOT-Step's MM3 split-model format follows its per-component design, reused with the author's blessing
+- **[MiniMax-Music3](https://huggingface.co/MiniMaxAI/MiniMax-Music3)** — Text-to-music model by [MiniMax](https://huggingface.co/MiniMaxAI); powers HOT-Step's second generation backend via our native C++/GGML port ([GGUF conversion](https://huggingface.co/scragnog/MiniMax-Music3-GGUF)). The MM3 Structured Caption format is MiniMax's design. Weights under the [MiniMax-Music3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE)
+- **[MOSS-Music-8B-Instruct](https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct)** — Music understanding/captioning model by the [OpenMOSS Team](https://huggingface.co/OpenMOSS-Team); powers local dataset captioning in Training Studio via our native GGML port ([GGUF conversion](https://huggingface.co/scragnog/MOSS-Music-8B-Instruct-GGUF)). Shipping local captioning in a free tool was only possible because they released it under Apache 2.0
 - **[HOT-Step 9000](https://github.com/scragnog/HOT-Step-9000)** — The Python-based sister project with full feature support
 - **Alexander Allan ([MDMAchine](https://github.com/MDMAchine))** — STORM solver plugin (adaptive STORK/DPM++3M hybrid) and MD Audio Tiled Core postprocess plugin (advanced tiled VAE decode with OLA crossfading, dual-pass merge, and DSP chain)
 - **[ComfyUI_MusicTools](https://github.com/jeankassio/ComfyUI_MusicTools)** — Vocal Naturalizer DSP algorithm by Jean Kassio (MIT License)

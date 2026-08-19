@@ -248,7 +248,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   // Subsection open/close state
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    engine: true, server: true, apiKeys: true, llmConfig: true, llmEndpoints: false, paths: true,
+    engine: true, server: true, apiKeys: true, llmConfig: true, llmEndpoints: false,
+    labeling: false, paths: true,
   });
   const toggleSection = (key: string) =>
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -455,6 +456,20 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 value={envValues.SERVER_PORT || ''} onChange={handleEnvChange} type="number" placeholder="3001" />
               <EnvPathRow envKey="DATA_DIR" label={t('settings.env.dataDir')} description={t('settings.env.dataDirDesc')}
                 value={envValues.DATA_DIR || ''} onChange={handleEnvChange} onBrowse={handleBrowse} placeholder="./data" />
+            </EnvSubsection>
+
+            {/* Dataset labeling throughput */}
+            <EnvSubsection title={t('settings.env.labeling')} isOpen={openSections.labeling} onToggle={() => toggleSection('labeling')}>
+              <EnvTextRow envKey="LABEL_ESSENTIA_CONCURRENCY" label={t('settings.env.labelEssentiaConcurrency')} description={t('settings.env.labelEssentiaConcurrencyDesc')}
+                value={envValues.LABEL_ESSENTIA_CONCURRENCY || ''} onChange={handleEnvChange} type="number" placeholder="2" />
+              <EnvTextRow envKey="LABEL_GENIUS_CONCURRENCY" label={t('settings.env.labelGeniusConcurrency')} description={t('settings.env.labelGeniusConcurrencyDesc')}
+                value={envValues.LABEL_GENIUS_CONCURRENCY || ''} onChange={handleEnvChange} type="number" placeholder="1" />
+              <EnvTextRow envKey="LABEL_GENIUS_MIN_INTERVAL_MS" label={t('settings.env.labelGeniusInterval')} description={t('settings.env.labelGeniusIntervalDesc')}
+                value={envValues.LABEL_GENIUS_MIN_INTERVAL_MS || ''} onChange={handleEnvChange} type="number" placeholder="400" />
+              <EnvTextRow envKey="LABEL_CAPTION_CONCURRENCY" label={t('settings.env.labelCaptionConcurrency')} description={t('settings.env.labelCaptionConcurrencyDesc')}
+                value={envValues.LABEL_CAPTION_CONCURRENCY || ''} onChange={handleEnvChange} type="number" placeholder="1" />
+              <EnvTextRow envKey="LABEL_CAPTION_MIN_INTERVAL_MS" label={t('settings.env.labelCaptionInterval')} description={t('settings.env.labelCaptionIntervalDesc')}
+                value={envValues.LABEL_CAPTION_MIN_INTERVAL_MS || ''} onChange={handleEnvChange} type="number" placeholder="250" />
             </EnvSubsection>
 
             {/* Paths */}

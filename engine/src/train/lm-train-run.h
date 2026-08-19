@@ -17,6 +17,7 @@
 #include "train/lm-extract.h"
 #include "train/lm-graph.h"
 #include "train/lm-optim.h"
+#include "train/lm-resume.h"
 #include "train/lm-selftest.h"
 #include "train/lm-vram.h"
 #include "version.h"
@@ -97,6 +98,14 @@ struct LmTrainArgs {
     float milestone_step = 1.0f;
     int   milestone_keep = 6;
 
+    // Resume (--init-adapter, 2026-08-09): dir of an exported run whose
+    // factors seed this one. Identity hyperparams are adopted from its
+    // lm_train_log.json by lm_resume_prepare (cmd_train_lm); an explicit CLI
+    // contradiction is exit 2. init_from_loss carries the source's saved_loss
+    // for the epoch-1 honesty log and the train-log provenance keys.
+    std::string init_adapter;
+    double      init_from_loss = -1.0;
+
     bool overwrite = false;
     int  limit     = 0;
     bool self_test = false;
@@ -132,6 +141,11 @@ struct LmTrainOutcome {
     double    final_loss       = -1.0;
     double    best_loss        = -1.0;
     int       best_epoch       = 0;
+    // Which epoch's adapter is actually in out_dir (2026-07-30). Since the
+    // export became best-only, final_loss is no longer what shipped.
+    double      saved_loss   = -1.0;
+    int         saved_epoch  = 0;
+    std::string saved_reason;
     bool      stopped_on_target = false;
     int       samples          = 0;
     int       skipped_long     = 0;
@@ -564,6 +578,24 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
             return 1;
         }
     }
+    // Resume: overwrite the fresh init with the source run's factors. After
+    // lm_lora_init/lm_lokr_init so the tensors exist and the RNG stream stays
+    // identical to a scratch run (a resumed run that falls back to scratch
+    // would otherwise train from different noise than a bare run).
+    if (!a.init_adapter.empty()) {
+        std::string err;
+        int         n_loaded = 0;
+        if (!lm_resume_load(&lora, a.init_adapter, &n_loaded, &err)) {
+            lm_fatal("resume", err);
+            return 1;
+        }
+        char b[320];
+        snprintf(b, sizeof(b), "resumed %d tensors from %s (source saved_loss %.4f) — expect epoch 1 near that loss",
+                 n_loaded, a.init_adapter.c_str(), a.init_from_loss);
+        lm_log("info", b);
+        jl("{\"type\":\"resume\",\"initAdapter\":\"%s\",\"tensors\":%d,\"sourceLoss\":%.6f}",
+           lm_json_escape(a.init_adapter).c_str(), n_loaded, a.init_from_loss);
+    }
     if (lora.n_params != vm.lora_params) {
         char b[192];
         snprintf(b, sizeof(b), "LoRA parameter count %zu != predicted %zu", lora.n_params, vm.lora_params);
@@ -835,6 +867,8 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
     meta->chunk           = low ? lc.chunk : 0;
     meta->weights         = weights_used;   // §2.3 — recorded so a resume can refuse (S6); ACTUAL mode, not requested
     meta->batch           = 1;
+    meta->init_adapter    = a.init_adapter;
+    meta->init_from_loss  = a.init_from_loss;
     meta->vram_mode       = low ? "lowvram" : "naive";
     meta->vram_base_mb    = (size_t) ((low ? (double) base_bytes : (double) mirror.bytes) / 1048576.0);
     meta->vram_ckpt_mb    = (size_t) (ckpt_bytes / 1048576.0);
@@ -908,6 +942,18 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         const long long ems = (long long) (ggml_time_ms() - t_ep0);
         ep_ms_sum += ems;
 
+        // Resume honesty gate (observational): epoch 1 of a resumed run is a
+        // teacher-forced pass from the loaded factors, so it should land near
+        // the source's saved_loss. A large gap = wrong init mapping, or the
+        // dataset/prompt format changed since the source run.
+        if (epoch == 0 && !a.init_adapter.empty() && a.init_from_loss > 0.0) {
+            const double gap = fabs(avg - a.init_from_loss);
+            char b[224];
+            snprintf(b, sizeof(b), "resume check: epoch 1 loss %.4f vs source saved_loss %.4f (|gap| %.4f)%s", avg,
+                     a.init_from_loss, gap, gap > 0.35 ? " — LARGER THAN EXPECTED, verify dataset/init" : "");
+            lm_log(gap > 0.35 ? "warn" : "info", b);
+        }
+
         const bool best = (out->best_loss < 0.0) || (avg < out->best_loss);
         if (best) {
             out->best_loss  = avg;
@@ -924,14 +970,34 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
         rec.ms        = ems;
         meta->epoch_log.push_back(rec);
 
-        // Export EVERY epoch, BEFORE the stop test — the checkpoint that
-        // triggered the stop is already on disk (train_lm.py:325,333), and a
-        // cancelled/crashed run still leaves a usable adapter.
+        // Export the BEST epoch, not the last one (2026-07-30) — mirrors the
+        // same change in dit-train-run.h. This used to export unconditionally
+        // every epoch, so a run that never reached its target shipped whatever
+        // the final epoch produced. Exporting only on improvement still leaves
+        // a usable adapter on disk from epoch 1 onward (the original reason for
+        // the unconditional export) and writes strictly less.
+        //
+        // Selection is on the per-epoch mean, NOT an MA5 as on the DiT: an LM
+        // epoch is a full teacher-forced pass over every sample with no random
+        // timestep draw, so its loss is far less noisy than a DiT epoch's and
+        // needs no smoothing. It is also the metric the target test below uses,
+        // so the two stay consistent.
+        //
+        // hit_target forces the export even when it is not an improvement: a
+        // run that stops on target must ship the epoch that tripped it.
         meta->epochs_run = out->epochs_run;
         meta->final_loss = out->final_loss;
         meta->best_loss  = out->best_loss;
         meta->best_epoch = out->best_epoch;
-        {
+        const bool lm_hit_target = (a.target_loss > 0.0f && avg <= (double) a.target_loss);
+        if (best || lm_hit_target) {
+            out->saved_loss   = best ? avg : out->saved_loss;
+            out->saved_epoch  = epoch + 1;
+            out->saved_reason = lm_hit_target ? "target" : "best";
+            meta->saved_loss   = out->saved_loss;
+            meta->saved_epoch  = out->saved_epoch;
+            meta->saved_reason = out->saved_reason;
+
             LmExportResult xr;
             const bool xok = lora.is_lokr ? lm_export_lokr(lora, *meta, a.out_dir, &xr, &export_err)
                                           : lm_export_peft(lora, c, *meta, a.out_dir, &xr, &export_err);
@@ -1019,9 +1085,15 @@ static int lm_train_stage(const LmTrainArgs & a, LmExportMeta * meta, LmTrainOut
        (long long) tracker.base_mb, (long long) tracker.peak_mb, tracker.max_delta, global_step);
 
     if (rc == 0) {
+        // savedEpoch/savedLoss/savedReason say which epoch's adapter is in the
+        // run dir. finalLoss is the LAST epoch and is usually NOT it.
+        fprintf(stderr, "[train-lm] adapter saved from epoch %d (loss %.4f, %s) of %d run\n",
+                out->saved_epoch, out->saved_loss, out->saved_reason.c_str(), out->epochs_run);
         jl("{\"type\":\"stage\",\"stage\":\"train\",\"state\":\"end\",\"epochsRun\":%d,\"finalLoss\":%.6f,"
-           "\"bestLoss\":%.6f,\"stoppedOnTarget\":%s,\"ms\":%lld}",
-           out->epochs_run, out->final_loss, out->best_loss, out->stopped_on_target ? "true" : "false", out->ms);
+           "\"bestLoss\":%.6f,\"savedEpoch\":%d,\"savedLoss\":%.6f,\"savedReason\":\"%s\","
+           "\"stoppedOnTarget\":%s,\"ms\":%lld}",
+           out->epochs_run, out->final_loss, out->best_loss, out->saved_epoch, out->saved_loss,
+           out->saved_reason.c_str(), out->stopped_on_target ? "true" : "false", out->ms);
     }
 
     // teardown (free the GPU before the export stage does its file writes)

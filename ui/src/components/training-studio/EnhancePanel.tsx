@@ -28,8 +28,23 @@ export const EnhancePanel: React.FC<EnhancePanelProps> = ({ selectedSampleIds, d
   const [provider, setProvider] = useState('');
   const [model, setModel] = useState('');
 
-  const providers = caps?.llm.providers.filter(p => p.available) ?? [];
+  // MOSS is not an LLM provider — no API key, no model list — but it belongs in
+  // the same dropdown because it answers the same question the user is asking:
+  // who writes the caption? Listed first because it is the only option that
+  // actually hears the track rather than rewriting the local analysis.
+  //
+  // It does NOT become the default just by being available: `defaultProvider`
+  // still wins if it resolves, so an existing Gemini setup is left alone. MOSS
+  // is only auto-selected when nothing else is configured.
+  const mossProvider = caps?.moss.available
+    ? { id: 'moss', name: 'MOSS-Music 8B — local, hears the audio', available: true, models: [] as string[], defaultModel: '' }
+    : null;
+  const providers = [
+    ...(mossProvider ? [mossProvider] : []),
+    ...(caps?.llm.providers.filter(p => p.available) ?? []),
+  ];
   const activeProvider = providers.find(p => p.id === (provider || caps?.llm.defaultProvider)) ?? providers[0];
+  const isMoss = activeProvider?.id === 'moss';
 
   const scoped = selectedSampleIds.length > 0 ? { sampleIds: selectedSampleIds } : {};
 
@@ -89,7 +104,10 @@ export const EnhancePanel: React.FC<EnhancePanelProps> = ({ selectedSampleIds, d
 
           {/* LLM caption */}
           <div className="flex flex-col gap-1.5">
-            {caps?.llm.configured && activeProvider ? (
+            {/* MOSS needs no credentials, so `llm.configured` must not gate the
+                whole block — otherwise the one provider that works offline is
+                hidden precisely when no API key is set. */}
+            {(caps?.llm.configured || caps?.moss.available) && activeProvider ? (
               <>
                 <div className="flex items-end gap-2 flex-wrap">
                   <div className="flex flex-col gap-1 min-w-40">
@@ -102,17 +120,21 @@ export const EnhancePanel: React.FC<EnhancePanelProps> = ({ selectedSampleIds, d
                       options={providers.map(p => ({ value: p.id, label: p.name }))}
                     />
                   </div>
-                  <div className="flex flex-col gap-1 min-w-48">
-                    <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.enhance.model')}</span>
-                    <StyledSelect
-                      accent="amber"
-                      size="sm"
-                      value={model || activeProvider.defaultModel}
-                      onChange={(v) => setModel(v)}
-                      options={activeProvider.models.map(m => ({ value: m, label: m }))}
-                      searchPlaceholder="Filter models…"
-                    />
-                  </div>
+                  {/* MOSS is one fixed local model — an empty picker beside it
+                      reads as "still loading", so it is omitted entirely. */}
+                  {!isMoss && (
+                    <div className="flex flex-col gap-1 min-w-48">
+                      <span className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">{t('trainingStudio.enhance.model')}</span>
+                      <StyledSelect
+                        accent="amber"
+                        size="sm"
+                        value={model || activeProvider.defaultModel}
+                        onChange={(v) => setModel(v)}
+                        options={activeProvider.models.map(m => ({ value: m, label: m }))}
+                        searchPlaceholder="Filter models…"
+                      />
+                    </div>
+                  )}
                   <button
                     onClick={() => void runCaption()}
                     disabled={disabled || busy !== null}

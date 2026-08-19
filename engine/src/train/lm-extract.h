@@ -117,7 +117,7 @@ static bool lm_codes_parse_line(const char * data, size_t len, LmCodeRow * out) 
 // Read a whole lm_codes.jsonl. Missing file -> true with an empty vector.
 static bool lm_codes_read_file(const char * path, std::vector<LmCodeRow> * out, std::string * err) {
     out->clear();
-    FILE * f = fopen(path, "rb");
+    FILE * f = hs_fopen(path, "rb");
     if (!f) {
         return true;
     }
@@ -425,8 +425,12 @@ static bool lm_extract_run(const LmExtractOpts & o, std::string * err) {
                                          lm_md_get(md, "tag_position"));
         row.lyrics        = lm_md_get(md, "lyrics");
         row.keyscale      = lm_md_get(md, "keyscale");
-        row.timesignature = lm_md_get(md, "timesignature");
-        row.language      = lm_md_get(md, "language");
+        // Numerator only ('4/4' → '4') — matches inference conditioning
+        // (2026-08-12 parity test); same class of fix as the language line.
+        row.timesignature = pm_timesig_numerator(lm_md_get(md, "timesignature"));
+        // Normalized: the preprocess __metadata__ this reads carries the
+        // dataset's raw default_language, which was 'english' corpus-wide.
+        row.language      = lm_normalize_language(lm_md_get(md, "language"));
         row.bpm           = atoi(lm_md_get(md, "bpm").c_str());
         row.duration      = atoi(lm_md_get(md, "duration").c_str());
         row.id            = s.id.empty() ? lm_md_get(md, "sample_id") : s.id;

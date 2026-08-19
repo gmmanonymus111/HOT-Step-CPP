@@ -5,6 +5,7 @@
 //
 // docs/plans/2026-07-27-preprocess-implementation.md §2.3, §2.5, §2.6, §3.3
 
+#include "hot-step-fsutf8.h"  // hs_fopen/hs_stat/… — UTF-8 paths, not ANSI
 #include "safetensors.h"
 #include "yyjson.h"
 
@@ -70,31 +71,23 @@ struct PreprocessMeta {  // everything §2.5 needs, filled by ace-train.cpp
 };
 
 // ─── small filesystem helpers ───────────────────────────────────────────────
-
-#ifdef _WIN32
-#    define PM_STAT_T struct _stat64
-#    define PM_STAT(p, s) _stat64((p), (s))
-#    define PM_ISREG(m) (((m) &_S_IFREG) != 0)
-#else
-#    define PM_STAT_T struct stat
-#    define PM_STAT(p, s) stat((p), (s))
-#    define PM_ISREG(m) S_ISREG(m)
-#endif
+//
+// All of these go through hot-step-fsutf8.h rather than the narrow CRT calls:
+// dataset paths are UTF-8 and Windows' narrow API would decode them in the ANSI
+// codepage. See that header for the album this silently ate.
 
 static bool pm_path_exists(const std::string & path) {
-    PM_STAT_T st;
-    return PM_STAT(path.c_str(), &st) == 0;
+    return hs_path_exists(path);
 }
 
 static bool pm_file_exists(const std::string & path) {
-    PM_STAT_T st;
-    return PM_STAT(path.c_str(), &st) == 0 && PM_ISREG(st.st_mode);
+    return hs_file_exists(path);
 }
 
 // stat() a file -> byte size + mtime in epoch ms. Returns false when absent.
 static bool pm_stat_file(const std::string & path, long long * bytes, long long * mtime_ms) {
-    PM_STAT_T st;
-    if (PM_STAT(path.c_str(), &st) != 0) {
+    HS_STAT_T st;
+    if (hs_stat(path, &st) != 0) {
         return false;
     }
     if (bytes) {
@@ -119,11 +112,7 @@ static bool pm_mkdir_p(const std::string & dir) {
         if (i == dir.size() || dir[i] == '/' || dir[i] == '\\') {
             if (!acc.empty() && acc != "." && !(acc.size() == 2 && acc[1] == ':')) {
                 if (!pm_path_exists(acc)) {
-#ifdef _WIN32
-                    _mkdir(acc.c_str());
-#else
-                    mkdir(acc.c_str(), 0755);
-#endif
+                    hs_mkdir(acc);
                 }
             }
         }
@@ -235,6 +224,16 @@ static std::string pm_iso8601_utc_now() {
     snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
              tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     return std::string(buf);
+}
+
+// Time signatures are labeled '4/4', but the ACE-Step convention everywhere at
+// inference is the NUMERATOR only ('4'): translateParams sends it that way for
+// every generation and the audition pins match it (2026-08-12 parity test).
+// Training must condition on the same token, so every trainer-facing consumer
+// (LM extract/prompt build, DiT preprocess metas) routes through this.
+static inline std::string pm_timesig_numerator(const std::string & ts) {
+    const size_t slash = ts.find('/');
+    return slash == std::string::npos ? ts : ts.substr(0, slash);
 }
 
 // ─── yyjson accessors (tolerant: wrong type == missing) ─────────────────────
@@ -462,7 +461,7 @@ static bool pm_load_dataset_json(const char * path, PManifest & out, std::string
 // Write bytes to `path + ".__writing__"`, then rename over `path`.
 static bool pm_write_atomic(const std::string & path, const std::string & bytes) {
     std::string tmp = path + ".__writing__";
-    FILE *      f   = fopen(tmp.c_str(), "wb");
+    FILE *      f   = hs_fopen(tmp, "wb");
     if (!f) {
         fprintf(stderr, "[Preprocess] cannot open %s for writing\n", tmp.c_str());
         return false;
@@ -471,12 +470,12 @@ static bool pm_write_atomic(const std::string & path, const std::string & bytes)
     ok      = ok && (fflush(f) == 0) && (ferror(f) == 0);
     fclose(f);
     if (!ok) {
-        remove(tmp.c_str());
+        hs_remove(tmp);
         return false;
     }
     if (!stw_replace_file(tmp.c_str(), path.c_str())) {
         fprintf(stderr, "[Preprocess] rename %s -> %s failed (previous file left intact)\n", tmp.c_str(), path.c_str());
-        remove(tmp.c_str());
+        hs_remove(tmp);
         return false;
     }
     return true;
@@ -654,7 +653,7 @@ static bool pm_read_cached_latents(const char * path, std::vector<float> & out, 
             meta_out->s_total_genre = (int) ehg->shape[0];
         }
 
-        FILE * f = fopen(path, "rb");
+        FILE * f = hs_fopen(path, "rb");
         if (f) {
             uint8_t hl_le[8];
             if (fread(hl_le, 1, 8, f) == 8) {
@@ -702,13 +701,19 @@ static bool pm_read_cached_latents(const char * path, std::vector<float> & out, 
 // path compares these and re-encodes on a mismatch.
 struct PCacheSettings {
     std::string compat, dtype, timbre, normalize, model_variant, target_db;
+    // The trigger pair is part of the CAPTION the text encoder baked into this
+    // file (preprocess-run.h pp_caption_text), so a change to either has to
+    // re-encode. Without them, flipping tag_position prepend→replace left every
+    // cached file "matching" and the run silently trained on the old captions
+    // while preprocess_meta.json advertised the new setting (2026-08-12).
+    std::string custom_tag, tag_position;
     int         max_duration = -1, max_caption_tokens = -1, max_lyric_tokens = -1;
     int         vae_chunk = -1, vae_overlap = -1;
     bool        valid = false;  // false = no readable __metadata__ (legacy/corrupt file)
 };
 
 static bool pm_read_cached_settings(const char * path, PCacheSettings & s) {
-    FILE * f = fopen(path, "rb");
+    FILE * f = hs_fopen(path, "rb");
     if (!f) {
         return false;
     }
@@ -744,6 +749,8 @@ static bool pm_read_cached_settings(const char * path, PCacheSettings & s) {
         s.normalize     = pm_js_str(md, "normalize");
         s.model_variant = pm_js_str(md, "model_variant");
         s.target_db     = pm_js_str(md, "target_db");
+        s.custom_tag    = pm_js_str(md, "custom_tag");
+        s.tag_position  = pm_js_str(md, "tag_position");
 
         std::string v;
         v = pm_js_str(md, "max_duration");
