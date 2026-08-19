@@ -103,6 +103,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Start background sync of settings to server
     startSettingsSync(response.token);
+
+    // Notify listeners (e.g. App.tsx) to refresh library state after login.
+    // This fixes the "songs missing after logout/login mid-batch" issue:
+    // queue store may have completed jobs while App wasn't mounted;
+    // firing this event ensures the library re-fetches on re-auth.
+    try {
+      window.dispatchEvent(new CustomEvent('auth-logged-in'));
+    } catch {
+      // ignore — dispatchEvent should never fail in a browser context
+    }
   }, []);
 
   const logout = useCallback(async () => {

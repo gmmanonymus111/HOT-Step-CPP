@@ -494,13 +494,30 @@ const AppContent: React.FC = () => {
     return active?.jobId || null;
   });
 
-  // Load songs on mount
-  useEffect(() => {
+  // Shared helper to reload the library from the server.
+  const reloadSongs = useCallback(() => {
     if (!token) return;
     songApi.list(token)
       .then(({ songs }) => setSongs(songs))
       .catch(err => console.error('[App] Failed to load songs:', err));
   }, [token]);
+
+  // Load songs on mount (when authenticated).
+  useEffect(() => {
+    if (!token) return;
+    reloadSongs();
+  }, [reloadSongs]);
+
+  // Refresh library after login (e.g. after logout/login mid-batch).
+  // The queue store may complete jobs while AppContent wasn't mounted;
+  // this ensures we re-fetch the authoritative list from the server.
+  useEffect(() => {
+    const handler = () => {
+      if (token) reloadSongs();
+    };
+    window.addEventListener('auth-logged-in', handler);
+    return () => window.removeEventListener('auth-logged-in', handler);
+  }, [token, reloadSongs]);
 
   // Refresh songs (kept for future use — e.g. after external DB changes)
   // const refreshSongsList = useCallback(() => {
