@@ -66,6 +66,8 @@ export interface SongLyric {
   album?: string;
   /** Enriched fields from a Training Studio export (absent on plain Genius fetches). */
   caption?: string;
+  /** MM3 Structured Caption (Global Metadata / Vocal Details / Arrangement), when a MOSS run wrote one. */
+  mm3Caption?: string;
   genre?: string;
   bpm?: number;
   key?: string;

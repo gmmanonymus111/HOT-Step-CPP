@@ -100,7 +100,7 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
             {isExpanded && (
               <div className="border-t border-zinc-200 dark:border-white/5">
                 {/* Enriched metadata from a Training Studio export */}
-                {(song.caption || song.genre || song.bpm || song.key || song.signature) && (
+                {(song.caption || song.mm3Caption || song.genre || song.bpm || song.key || song.signature) && (
                   <div className="px-4 pt-3 space-y-3">
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       {song.genre && (
@@ -138,6 +138,12 @@ export const SourceLyricsTab: React.FC<SourceLyricsTabProps> = ({ album, onDelet
                       <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
                         <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Caption</label>
                         <p className="text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed">{song.caption}</p>
+                      </div>
+                    )}
+                    {song.mm3Caption && (
+                      <div className="px-3 py-2 rounded-lg bg-white/5 border border-zinc-200 dark:border-white/5">
+                        <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">MM3 Caption</label>
+                        <pre className="text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap font-sans m-0">{song.mm3Caption}</pre>
                       </div>
                     )}
                   </div>

@@ -137,6 +137,17 @@ function toStoredSong(s: TrainingSample, ds: TrainingDatasetRow, setAlbum: strin
     lyrics: s.lyrics,
   };
   if (s.caption.trim()) song.caption = s.caption.trim();
+  // The MM3 Structured Caption lives beside the audio (<stem>.mm3.txt), not in
+  // the sidecar, so the sample object never carries it — read it here or lose
+  // it. It is the second of the two caption formats a MOSS labeling run
+  // writes, and Lyric Studio is where Rob reviews source tracks.
+  try {
+    const mm3Path = `${s.audioPath.replace(/\.[^.\\/]+$/, '')}.mm3.txt`;
+    if (fs.existsSync(mm3Path)) {
+      const mm3 = fs.readFileSync(mm3Path, 'utf8').trim();
+      if (mm3) song.mm3Caption = mm3;
+    }
+  } catch { /* a caption we cannot read is a caption we do not export */ }
   if (s.genre.trim()) song.genre = s.genre.trim();
   if (typeof s.bpm === 'number' && Number.isFinite(s.bpm) && s.bpm > 0) song.bpm = s.bpm;
   if (s.key.trim()) song.key = s.key.trim();
