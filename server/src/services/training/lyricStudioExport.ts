@@ -21,6 +21,7 @@ import {
   findArtistByName, findLyricsSetByAlbum, getAllPresets, getOrCreateArtist, getPreset,
   replaceLyricsSetSongs, saveLyricsSet, updateArtistImage, upsertPreset,
 } from '../../db/lireekDb.js';
+import { getDb } from '../../db/database.js';
 import { getAlbumImageUrl, getArtistImageUrl } from '../lireek/geniusService.js';
 import { resolveArtistTitle } from './enhanceService.js';
 import { latestRunDir, lmSizeFromSlug } from './adapterLayout.js';
@@ -164,7 +165,7 @@ function toStoredSong(s: TrainingSample, ds: TrainingDatasetRow, setAlbum: strin
 // ── Public API ───────────────────────────────────────────────────────────
 
 export function previewLyricStudioExport(
-  ds: TrainingDatasetRow, samples: TrainingSample[],
+  userId: string, ds: TrainingDatasetRow, samples: TrainingSample[],
 ): LyricStudioExportPreview {
   const split = splitSamples(samples);
   const artist = detectArtist(ds, split.included);
@@ -177,8 +178,8 @@ export function previewLyricStudioExport(
     hasCaption: !!s.caption.trim(),
   }));
 
-  const existingArtist = findArtistByName(artist.value);
-  const existingSet = existingArtist ? findLyricsSetByAlbum(existingArtist.id, album.value) : null;
+  const existingArtist = findArtistByName(userId, artist.value);
+  const existingSet = existingArtist ? findLyricsSetByAlbum(userId, existingArtist.id, album.value) : null;
 
   return {
     artist: artist.value,
@@ -249,7 +250,9 @@ export function refreshPresetsForNewRun(newRunDir: string, kind: 'dit' | 'lm'): 
     const artistName = path.basename(artistDir);
     const column = kind === 'dit' ? 'adapter_path' : 'lm_adapter_path';
     const otherColumn = kind === 'dit' ? 'lm_adapter_path' : 'adapter_path';
-    for (const preset of getAllPresets()) {
+    // Background job: scan all presets across all users.
+    const allPresets = getAllPresetsForAllUsers();
+    for (const preset of allPresets) {
       const stored = preset[column];
       let retarget = false;
       if (stored && typeof stored === 'string') {
@@ -273,7 +276,7 @@ export function refreshPresetsForNewRun(newRunDir: string, kind: 'dit' | 'lm'): 
       const data = presetDataFromRow(preset);
       if (kind === 'dit') data.adapterPath = newRunDir;
       else data.lmAdapterPath = newRunDir;
-      upsertPreset(preset.lyrics_set_id, data);
+      upsertPresetForAllUsers(preset.user_id, preset.lyrics_set_id, data);
       updated++;
       console.log(`[Training] Album preset (lyrics set ${preset.lyrics_set_id}) ${column} → ${newRunDir}`);
     }
@@ -283,8 +286,31 @@ export function refreshPresetsForNewRun(newRunDir: string, kind: 'dit' | 'lm'): 
   return updated;
 }
 
+/** System-level helpers for background jobs that operate without a current user. */
+function getAllPresetsForAllUsers(): Record<string, any>[] {
+  return getDb().prepare(
+    `SELECT ap.*, a.name as artist_name, ls.album, ls.artist_id
+     FROM album_presets ap
+     JOIN lyrics_sets ls ON ls.id = ap.lyrics_set_id
+     JOIN artists a ON a.id = ls.artist_id
+     ORDER BY ap.created_at DESC`
+  ).all() as any[];
+}
+
+function upsertPresetForAllUsers(userId: string, lyricsSetId: number, data: {
+  adapterPath?: string | null;
+  adapterScale?: number | null;
+  adapterGroupScales?: any;
+  referenceTrackPath?: string | null;
+  audioCoverStrength?: number | null;
+  lmAdapterPath?: string | null;
+  lmAdapterScale?: number | null;
+}): void {
+  upsertPreset(userId, lyricsSetId, data);
+}
+
 export async function commitLyricStudioExport(
-  ds: TrainingDatasetRow, samples: TrainingSample[], input: LyricStudioExportInput,
+  userId: string, ds: TrainingDatasetRow, samples: TrainingSample[], input: LyricStudioExportInput,
 ): Promise<LyricStudioExportResult> {
   const split = splitSamples(samples);
   if (!split.included.length) {
@@ -304,22 +330,22 @@ export async function commitLyricStudioExport(
     catch { /* art stays '' */ }
   }
 
-  const artist = getOrCreateArtist(artistName);
-  const existingSet = findLyricsSetByAlbum(artist.id, albumName);
+  const artist = getOrCreateArtist(userId, artistName);
+  const existingSet = findLyricsSetByAlbum(userId, artist.id, albumName);
 
   let lyricsSetId: number;
   if (existingSet) {
-    replaceLyricsSetSongs(existingSet.id, albumName, songs, imageUrl || null);
+    replaceLyricsSetSongs(userId, existingSet.id, albumName, songs, imageUrl || null);
     lyricsSetId = existingSet.id;
   } else {
-    const created = saveLyricsSet(artist.id, albumName, songs.length, songs, imageUrl || null);
+    const created = saveLyricsSet(userId, artist.id, albumName, songs.length, songs, imageUrl || null);
     lyricsSetId = Number(created.id);
   }
 
   if (!artist.image_url && config.lireek.geniusAccessToken) {
     try {
       const artistImage = await getArtistImageUrl(artistName);
-      if (artistImage) updateArtistImage(artist.id, artistImage);
+      if (artistImage) updateArtistImage(userId, artist.id, artistImage);
     } catch { /* portrait stays empty */ }
   }
 
@@ -331,10 +357,10 @@ export async function commitLyricStudioExport(
     const dit = findDitAdapter(ds);
     const lm = findLmAdapter(ds);
     if (dit || lm) {
-      const data = presetDataFromRow(getPreset(lyricsSetId));
+      const data = presetDataFromRow(getPreset(userId, lyricsSetId));
       if (dit) data.adapterPath = dit.path;
       if (lm) data.lmAdapterPath = lm.path;
-      upsertPreset(lyricsSetId, data);
+      upsertPreset(userId, lyricsSetId, data);
       presetUpdated = true;
     }
   }

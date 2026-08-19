@@ -3,11 +3,15 @@
 // Artists, Lyrics Sets, Genius fetch, Profiles, Generations,
 // Export, Audio Generations, Album Presets.
 // Registered on the parent router by lireek.ts.
+//
+// USER ISOLATION: every route extracts userId from req.user and passes it
+// to all db functions. No cross-user data leakage.
 
 import type { Router, Request, Response } from 'express';
 import * as db from '../../db/lireekDb.js';
 import * as genius from '../../services/lireek/geniusService.js';
 import { exportGeneration } from '../../services/lireek/exportService.js';
+import { getUserId } from '../auth.js';
 
 /** Safely extract a route param as string (Express 5 types params as string | string[]) */
 function param(req: Request, name: string): string {
@@ -31,13 +35,22 @@ function hydratePreset(preset: any): any {
   return hydrated;
 }
 
+/** Require auth and return userId, or respond 401 */
+function requireUserId(req: Request, res: Response): string | null {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  return userId;
+}
+
 export function registerCrudRoutes(router: Router): void {
 
   // ── Artists ─────────────────────────────────────────────────────────────────
 
-  router.get('/artists', (_req: Request, res: Response) => {
+  router.get('/artists', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
-      const artists = db.listArtists();
+      const artists = db.listArtists(userId);
       res.json(artists);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -45,13 +58,15 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/artists/create', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const { name } = req.body;
       if (!name?.trim()) {
         res.status(400).json({ error: 'Artist name required' });
         return;
       }
-      const artist = db.getOrCreateArtist(name.trim());
+      const artist = db.getOrCreateArtist(userId, name.trim());
       res.json(artist);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -59,9 +74,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/artists/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const deleted = db.deleteArtist(id);
+      const deleted = db.deleteArtist(userId, id);
       if (!deleted) { res.status(404).json({ error: 'Artist not found' }); return; }
       res.json({ success: true });
     } catch (err: any) {
@@ -70,12 +87,14 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/artists/:id/refresh-image', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const artist = db.getArtist(id);
+      const artist = db.getArtist(userId, id);
       if (!artist) { res.status(404).json({ error: 'Artist not found' }); return; }
       const imageUrl = await genius.getArtistImageUrl(artist.name);
-      if (imageUrl) db.updateArtistImage(id, imageUrl);
+      if (imageUrl) db.updateArtistImage(userId, id, imageUrl);
       res.json({ image_url: imageUrl });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -83,10 +102,12 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/artists/:id/set-image', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { image_url } = req.body;
-      db.updateArtistImage(id, image_url ?? null);
+      db.updateArtistImage(userId, id, image_url ?? null);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -96,9 +117,11 @@ export function registerCrudRoutes(router: Router): void {
   // ── Lyrics Sets ─────────────────────────────────────────────────────────────
 
   router.get('/lyrics-sets', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const artistId = req.query.artist_id ? parseInt(req.query.artist_id as string, 10) : undefined;
-      const sets = db.getLyricsSets(artistId);
+      const sets = db.getLyricsSets(userId, artistId);
       res.json(sets);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -106,20 +129,22 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/lyrics-sets/create', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const { artist_name, artist_id, album, songs = [], image_url } = req.body;
       let artist: Record<string, any> | undefined;
       if (artist_id) {
-        artist = db.getArtist(artist_id);
+        artist = db.getArtist(userId, artist_id);
         if (!artist) { res.status(404).json({ error: 'Artist not found' }); return; }
       } else if (artist_name?.trim()) {
-        artist = db.getOrCreateArtist(artist_name.trim());
+        artist = db.getOrCreateArtist(userId, artist_name.trim());
       } else {
         res.status(400).json({ error: 'artist_name or artist_id required' });
         return;
       }
       const songList = Array.isArray(songs) ? songs : [];
-      const set = db.saveLyricsSet(artist!.id as number, album ?? null, songList.length, songList, image_url ?? null);
+      const set = db.saveLyricsSet(userId, artist!.id as number, album ?? null, songList.length, songList, image_url ?? null);
       res.json({ lyrics_set: set });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -127,9 +152,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.get('/lyrics-sets/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const set = db.getLyricsSet(id);
+      const set = db.getLyricsSet(userId, id);
       if (!set) { res.status(404).json({ error: 'Lyrics set not found' }); return; }
       res.json(set);
     } catch (err: any) {
@@ -138,13 +165,15 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.get('/lyrics-sets/:id/full-detail', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const set = db.getLyricsSet(id);
+      const set = db.getLyricsSet(userId, id);
       if (!set) { res.status(404).json({ error: 'Lyrics set not found' }); return; }
-      const profiles = db.getProfiles(id);
-      const generations = db.getGenerations(undefined, id);
-      const preset = db.getPreset(id);
+      const profiles = db.getProfiles(userId, id);
+      const generations = db.getGenerations(userId, undefined, id);
+      const preset = db.getPreset(userId, id);
       res.json({ lyrics_set: set, profiles, generations, preset });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -152,9 +181,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/lyrics-sets/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const deleted = db.deleteLyricsSet(id);
+      const deleted = db.deleteLyricsSet(userId, id);
       if (!deleted) { res.status(404).json({ error: 'Lyrics set not found' }); return; }
       res.json({ success: true });
     } catch (err: any) {
@@ -163,10 +194,12 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/lyrics-sets/:id/songs/:index', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const index = intParam(req, 'index');
-      const updated = db.removeSongFromSet(id, index);
+      const updated = db.removeSongFromSet(userId, id, index);
       if (!updated) { res.status(404).json({ error: 'Song not found' }); return; }
       res.json(updated);
     } catch (err: any) {
@@ -175,11 +208,13 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.put('/lyrics-sets/:id/songs/:index', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const index = intParam(req, 'index');
       const { lyrics } = req.body;
-      const updated = db.editSongInSet(id, index, lyrics);
+      const updated = db.editSongInSet(userId, id, index, lyrics);
       if (!updated) { res.status(404).json({ error: 'Song not found' }); return; }
       res.json(updated);
     } catch (err: any) {
@@ -188,14 +223,16 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/lyrics-sets/:id/refresh-image', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const set = db.getLyricsSet(id);
+      const set = db.getLyricsSet(userId, id);
       if (!set) { res.status(404).json({ error: 'Lyrics set not found' }); return; }
       const imageUrl = set.album
         ? await genius.getAlbumImageUrl(set.album, set.artist_name)
         : await genius.getArtistImageUrl(set.artist_name);
-      if (imageUrl) db.updateLyricsSetImage(id, imageUrl);
+      if (imageUrl) db.updateLyricsSetImage(userId, id, imageUrl);
       res.json({ image_url: imageUrl });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -203,10 +240,12 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/lyrics-sets/:id/set-image', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { image_url } = req.body;
-      db.updateLyricsSetImage(id, image_url ?? null);
+      db.updateLyricsSetImage(userId, id, image_url ?? null);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -214,6 +253,8 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/lyrics-sets/:id/add-song', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { title, album, lyrics } = req.body;
@@ -221,7 +262,7 @@ export function registerCrudRoutes(router: Router): void {
         res.status(400).json({ error: 'title and lyrics required' });
         return;
       }
-      const updated = db.addSongToSet(id, { title, album, lyrics });
+      const updated = db.addSongToSet(userId, id, { title, album, lyrics });
       if (!updated) { res.status(404).json({ error: 'Lyrics set not found' }); return; }
       res.json(updated);
     } catch (err: any) {
@@ -232,6 +273,8 @@ export function registerCrudRoutes(router: Router): void {
   // ── Fetch Lyrics (Genius) ───────────────────────────────────────────────────
 
   router.post('/fetch-lyrics', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const { artist, album, max_songs = 10 } = req.body;
       if (!artist?.trim()) {
@@ -241,11 +284,11 @@ export function registerCrudRoutes(router: Router): void {
 
       const result = await genius.fetchLyrics(artist.trim(), album?.trim() || null, max_songs);
 
-      const artistRow = db.getOrCreateArtist(result.artist);
+      const artistRow = db.getOrCreateArtist(userId, result.artist);
 
       if (!artistRow.image_url) {
         genius.getArtistImageUrl(result.artist).then(url => {
-          if (url) db.updateArtistImage(artistRow.id as number, url);
+          if (url) db.updateArtistImage(userId, artistRow.id as number, url);
         }).catch(() => {});
       }
 
@@ -257,6 +300,7 @@ export function registerCrudRoutes(router: Router): void {
       }
 
       const lyricsSet = db.saveLyricsSet(
+        userId,
         artistRow.id as number,
         result.album,
         result.songs.length,
@@ -276,6 +320,7 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.post('/search-song-lyrics', async (req: Request, res: Response) => {
+    // Read-only, no user data stored — auth not strictly required but kept consistent
     try {
       const { artist, title } = req.body;
       if (!artist || !title) {
@@ -293,18 +338,22 @@ export function registerCrudRoutes(router: Router): void {
   // ── Profiles ────────────────────────────────────────────────────────────────
 
   router.get('/profiles', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const lyricsSetId = req.query.lyrics_set_id ? parseInt(req.query.lyrics_set_id as string, 10) : undefined;
-      res.json(db.getProfiles(lyricsSetId));
+      res.json(db.getProfiles(userId, lyricsSetId));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   router.get('/profiles/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const profile = db.getProfile(id);
+      const profile = db.getProfile(userId, id);
       if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
       res.json(profile);
     } catch (err: any) {
@@ -313,9 +362,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/profiles/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const deleted = db.deleteProfile(id);
+      const deleted = db.deleteProfile(userId, id);
       if (!deleted) { res.status(404).json({ error: 'Profile not found' }); return; }
       res.json({ success: true });
     } catch (err: any) {
@@ -326,27 +377,33 @@ export function registerCrudRoutes(router: Router): void {
   // ── Generations ─────────────────────────────────────────────────────────────
 
   router.get('/generations', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const profileId = req.query.profile_id ? parseInt(req.query.profile_id as string, 10) : undefined;
       const lyricsSetId = req.query.lyrics_set_id ? parseInt(req.query.lyrics_set_id as string, 10) : undefined;
-      res.json(db.getGenerations(profileId, lyricsSetId));
+      res.json(db.getGenerations(userId, profileId, lyricsSetId));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  router.get('/generations/all', (_req: Request, res: Response) => {
+  router.get('/generations/all', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
-      res.json(db.getAllGenerationsWithContext());
+      res.json(db.getAllGenerationsWithContext(userId));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   router.get('/generations/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const gen = db.getGeneration(id);
+      const gen = db.getGeneration(userId, id);
       if (!gen) { res.status(404).json({ error: 'Generation not found' }); return; }
       res.json(gen);
     } catch (err: any) {
@@ -355,10 +412,12 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.patch('/generations/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      db.updateGenerationFields(id, req.body);
-      const updated = db.getGeneration(id);
+      db.updateGenerationFields(userId, id, req.body);
+      const updated = db.getGeneration(userId, id);
       if (!updated) { res.status(404).json({ error: 'Generation not found' }); return; }
       res.json(updated);
     } catch (err: any) {
@@ -367,9 +426,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/generations/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const deleted = db.deleteGeneration(id);
+      const deleted = db.deleteGeneration(userId, id);
       if (!deleted) { res.status(404).json({ error: 'Generation not found' }); return; }
       res.json({ success: true });
     } catch (err: any) {
@@ -380,16 +441,18 @@ export function registerCrudRoutes(router: Router): void {
   // ── Export ───────────────────────────────────────────────────────────────────
 
   router.post('/generations/:id/export', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const gen = db.getGeneration(id);
+      const gen = db.getGeneration(userId, id);
       if (!gen) { res.status(404).json({ error: 'Generation not found' }); return; }
 
-      const profile = db.getProfile(gen.profile_id);
+      const profile = db.getProfile(userId, gen.profile_id);
       let artistName = 'Unknown';
       let albumName: string | undefined;
       if (profile) {
-        const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
+        const lyricsSet = db.getLyricsSet(userId, profile.lyrics_set_id);
         if (lyricsSet) {
           artistName = lyricsSet.artist_name;
           albumName = lyricsSet.album ?? undefined;
@@ -420,11 +483,13 @@ export function registerCrudRoutes(router: Router): void {
   // ── Audio Generations ───────────────────────────────────────────────────────
 
   router.post('/generations/:id/audio', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { job_id } = req.body;
       if (!job_id) { res.status(400).json({ error: 'job_id required' }); return; }
-      const link = db.linkAudioGeneration(id, job_id);
+      const link = db.linkAudioGeneration(userId, id, job_id);
       res.json(link);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -432,9 +497,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.get('/generations/:id/audio', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const rows = db.getAudioGenerations(id);
+      const rows = db.getAudioGenerations(userId, id);
       res.json({ audio_generations: rows });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -442,9 +509,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/audio-generations/:id', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const deleted = db.deleteAudioGeneration(id);
+      const deleted = db.deleteAudioGeneration(userId, id);
       if (!deleted) { res.status(404).json({ error: 'Audio generation not found' }); return; }
       res.json({ success: true });
     } catch (err: any) {
@@ -453,10 +522,12 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.patch('/audio-generations/resolve', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const { job_id, audio_url, cover_url } = req.body;
       if (!job_id || !audio_url) { res.status(400).json({ error: 'job_id and audio_url required' }); return; }
-      db.resolveAudioGeneration(job_id, audio_url, cover_url);
+      db.resolveAudioGeneration(userId, job_id, audio_url, cover_url);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -466,9 +537,11 @@ export function registerCrudRoutes(router: Router): void {
   // ── Album Presets ───────────────────────────────────────────────────────────
 
   router.get('/lyrics-sets/:id/preset', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const preset = db.getPreset(id);
+      const preset = db.getPreset(userId, id);
       res.json({ preset: hydratePreset(preset) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -476,9 +549,11 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.put('/lyrics-sets/:id/preset', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const preset = db.upsertPreset(id, {
+      const preset = db.upsertPreset(userId, id, {
         adapterPath: req.body.adapter_path,
         adapterScale: req.body.adapter_scale,
         adapterGroupScales: req.body.adapter_group_scales,
@@ -494,18 +569,22 @@ export function registerCrudRoutes(router: Router): void {
   });
 
   router.delete('/lyrics-sets/:id/preset', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      db.deletePreset(id);
+      db.deletePreset(userId, id);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  router.get('/presets', (_req: Request, res: Response) => {
+  router.get('/presets', (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
-      const presets = db.getAllPresets().map(hydratePreset);
+      const presets = db.getAllPresets(userId).map(hydratePreset);
       res.json({ presets });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

@@ -277,7 +277,7 @@ router.post('/llm', async (req, res) => {
     const genreStr = genres.join(', ');
 
     // Resolve system prompt: client override → DB custom → default
-    const dbCustom = getSetting('instagen_system_prompt');
+    const dbCustom = getSetting(userId, 'instagen_system_prompt');
     const systemPrompt = clientPrompt?.trim() || dbCustom || INSTAGEN_FULL_SYSTEM_PROMPT;
 
     // Build user prompt
@@ -442,9 +442,11 @@ router.post('/llm/subject', async (req, res) => {
 // ── InstaGen system prompt CRUD ──────────────────────────────────────
 // Reuses Lireek DB settings table (same as Lyric Studio's prompt editor).
 
-router.get('/llm/prompt', (_req, res) => {
+router.get('/llm/prompt', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
   try {
-    const custom = getSetting('instagen_system_prompt') || null;
+    const custom = getSetting(userId, 'instagen_system_prompt') || null;
     res.json({
       name: 'instagen_system',
       default_content: INSTAGEN_FULL_SYSTEM_PROMPT,
@@ -456,10 +458,12 @@ router.get('/llm/prompt', (_req, res) => {
 });
 
 router.put('/llm/prompt', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
   try {
     const { value } = req.body;
     if (!value) { res.status(400).json({ error: 'value required' }); return; }
-    setSetting('instagen_system_prompt', value);
+    setSetting(userId, 'instagen_system_prompt', value);
     console.log('[Inspire/LLM] Custom InstaGen system prompt saved');
     res.json({ success: true });
   } catch (err: any) {
@@ -467,9 +471,11 @@ router.put('/llm/prompt', (req, res) => {
   }
 });
 
-router.delete('/llm/prompt', (_req, res) => {
+router.delete('/llm/prompt', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
   try {
-    setSetting('instagen_system_prompt', '');
+    setSetting(userId, 'instagen_system_prompt', '');
     console.log('[Inspire/LLM] InstaGen system prompt reset to default');
     res.json({ success: true });
   } catch (err: any) {

@@ -3,12 +3,16 @@
 // Build Profile, Generate Lyrics, Refine Lyrics (streaming + non-streaming),
 // Provider listing, Recalculate Stats, Skip Thinking.
 // Registered on the parent router by lireek.ts.
+//
+// USER ISOLATION: every route extracts userId from req.user and passes it
+// to all db functions. No cross-user data leakage.
 
 import type { Router, Request, Response } from 'express';
 import * as db from '../../db/lireekDb.js';
 import * as llmService from '../../services/lireek/llmService.js';
 import * as profilerService from '../../services/lireek/profilerService.js';
 import { computeAlbumEnrichment } from '../../services/lireek/prompts.js';
+import { getUserId } from '../auth.js';
 
 /** Safely extract a route param as string (Express 5 types params as string | string[]) */
 function param(req: Request, name: string): string {
@@ -33,10 +37,17 @@ function initSse(res: Response): (type: string, data: any) => void {
   };
 }
 
-/** Resolve past generation history for diversity tracking */
-function resolveHistory(artistId: number | undefined) {
+/** Require auth and return userId, or respond 401 */
+function requireUserId(req: Request, res: Response): string | null {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  return userId;
+}
+
+/** Resolve past generation history for diversity tracking (user-scoped) */
+function resolveHistory(userId: string, artistId: number | undefined) {
   const pastGenerations = artistId
-    ? db.getAllGenerationsWithContext().filter((g: any) => g.artist_id === artistId)
+    ? db.getAllGenerationsWithContext(userId).filter((g: any) => g.artist_id === artistId)
     : [];
   return {
     usedSubjects: pastGenerations.map((g: any) => g.subject || g.song_subject).filter(Boolean) as string[],
@@ -63,12 +74,14 @@ export function registerLlmRoutes(router: Router): void {
   // ── Build Profile ───────────────────────────────────────────────────────────
 
   router.post('/lyrics-sets/:id/build-profile', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { provider_name, model } = req.body;
-      const lyricsSet = db.getLyricsSet(id);
+      const lyricsSet = db.getLyricsSet(userId, id);
       if (!lyricsSet) return res.status(404).json({ error: 'Lyrics set not found' });
-      const artist = db.getArtist(lyricsSet.artist_id);
+      const artist = db.getArtist(userId, lyricsSet.artist_id);
       if (!artist) return res.status(404).json({ error: 'Artist not found' });
       
       const profileData = await profilerService.buildProfile(
@@ -78,7 +91,7 @@ export function registerLlmRoutes(router: Router): void {
         provider_name, 
         model
       );
-      const profile = db.saveProfile(lyricsSet.id, provider_name, model || '', profileData);
+      const profile = db.saveProfile(userId, lyricsSet.id, provider_name, model || '', profileData);
       res.json(profile);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -86,12 +99,14 @@ export function registerLlmRoutes(router: Router): void {
   });
 
   router.post('/lyrics-sets/:id/build-profile-stream', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
       const { provider_name, model } = req.body;
-      const lyricsSet = db.getLyricsSet(id);
+      const lyricsSet = db.getLyricsSet(userId, id);
       if (!lyricsSet) throw new Error('Lyrics set not found');
-      const artist = db.getArtist(lyricsSet.artist_id);
+      const artist = db.getArtist(userId, lyricsSet.artist_id);
       if (!artist) throw new Error('Artist not found');
 
       const sendSse = initSse(res);
@@ -105,7 +120,7 @@ export function registerLlmRoutes(router: Router): void {
         (phase) => sendSse('phase', { phase }),
         (chunk) => sendSse('chunk', { text: chunk })
       );
-      const profile = db.saveProfile(lyricsSet.id, provider_name, model || '', profileData);
+      const profile = db.saveProfile(userId, lyricsSet.id, provider_name, model || '', profileData);
       sendSse('complete', profile);
       res.end();
     } catch (err: any) {
@@ -117,6 +132,8 @@ export function registerLlmRoutes(router: Router): void {
   // ── Recalculate Stats (no LLM) ──────────────────────────────────────────────
 
   router.post('/profiles/recalculate-stats', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       // Optional profile_ids narrows the run to specific profiles. Omit it to
       // recalculate every profile, which is the original behaviour.
@@ -124,7 +141,7 @@ export function registerLlmRoutes(router: Router): void {
         ? req.body.profile_ids.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
         : undefined;
 
-      const allProfiles = db.getProfiles();
+      const allProfiles = db.getProfiles(userId);
       const profiles = requestedIds?.length
         ? allProfiles.filter((p: any) => requestedIds.includes(p.id))
         : allProfiles;
@@ -132,7 +149,7 @@ export function registerLlmRoutes(router: Router): void {
       const updated: number[] = [];
       const skipped: { id: number; reason: string }[] = [];
       for (const profile of profiles) {
-        const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
+        const lyricsSet = db.getLyricsSet(userId, profile.lyrics_set_id);
         if (!lyricsSet) {
           skipped.push({ id: profile.id, reason: 'lyrics set not found' });
           continue;
@@ -143,7 +160,7 @@ export function registerLlmRoutes(router: Router): void {
           continue;
         }
         const patched = profilerService.recalculateProfileStats(songs, profile.profile_data);
-        db.updateProfileData(profile.id, patched);
+        db.updateProfileData(userId, profile.id, patched);
         updated.push(profile.id);
       }
 
@@ -166,16 +183,18 @@ export function registerLlmRoutes(router: Router): void {
   // ── Generate Lyrics ─────────────────────────────────────────────────────────
 
   router.post('/profiles/:id/generate', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const profile = db.getProfile(id);
+      const profile = db.getProfile(userId, id);
       if (!profile) return res.status(404).json({ error: 'Profile not found' });
       
       const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
 
-      const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
+      const lyricsSet = db.getLyricsSet(userId, profile.lyrics_set_id);
       const artistId = lyricsSet?.artist_id;
-      const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
+      const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(userId, artistId);
 
       // Profiles built before audio enrichment existed: derive it live from the
       // lyrics set (Training Studio exports carry bpm/key/genre/caption per
@@ -193,6 +212,7 @@ export function registerLlmRoutes(router: Router): void {
       
       if (auto_save) {
         const saved = db.saveGeneration({
+          userId,
           profileId: id,
           provider: provider_name,
           model: generated.model,
@@ -216,9 +236,11 @@ export function registerLlmRoutes(router: Router): void {
   });
 
   router.post('/profiles/:id/generate-stream', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const profile = db.getProfile(id);
+      const profile = db.getProfile(userId, id);
       if (!profile) throw new Error('Profile not found');
       
       const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
@@ -226,9 +248,9 @@ export function registerLlmRoutes(router: Router): void {
       const sendSse = initSse(res);
       llmService.resetSkipThinking();
 
-      const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
+      const lyricsSet = db.getLyricsSet(userId, profile.lyrics_set_id);
       const artistId = lyricsSet?.artist_id;
-      const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(artistId);
+      const { usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations } = resolveHistory(userId, artistId);
 
       // Profiles built before audio enrichment existed: derive it live from the
       // lyrics set (Training Studio exports carry bpm/key/genre/caption per
@@ -248,6 +270,7 @@ export function registerLlmRoutes(router: Router): void {
 
       if (auto_save) {
         const saved = db.saveGeneration({
+          userId,
           profileId: id,
           provider: provider_name,
           model: generated.model,
@@ -275,15 +298,17 @@ export function registerLlmRoutes(router: Router): void {
   // ── Refine Lyrics ───────────────────────────────────────────────────────────
 
   router.post('/generations/:id/refine', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const existing = db.getGeneration(id);
+      const existing = db.getGeneration(userId, id);
       if (!existing) return res.status(404).json({ error: 'Generation not found' });
       
       const { provider_name, model, auto_save = true } = req.body;
-      const profile = db.getProfile(existing.profile_id);
-      const lyricsSet = profile ? db.getLyricsSet(profile.lyrics_set_id) : null;
-      const artist = lyricsSet ? db.getArtist(lyricsSet.artist_id) : undefined;
+      const profile = db.getProfile(userId, existing.profile_id);
+      const lyricsSet = profile ? db.getLyricsSet(userId, profile.lyrics_set_id) : null;
+      const artist = lyricsSet ? db.getArtist(userId, lyricsSet.artist_id) : undefined;
 
       const refined = await llmService.refineLyricsStreaming(
         existing.lyrics, artist?.name || 'Unknown', existing.title, provider_name, model, profile?.profile_data || undefined
@@ -291,6 +316,7 @@ export function registerLlmRoutes(router: Router): void {
 
       if (auto_save) {
         const saved = db.saveGeneration({
+          userId,
           profileId: existing.profile_id,
           provider: provider_name,
           model: refined.model,
@@ -315,15 +341,17 @@ export function registerLlmRoutes(router: Router): void {
   });
 
   router.post('/generations/:id/refine-stream', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const id = intParam(req, 'id');
-      const existing = db.getGeneration(id);
+      const existing = db.getGeneration(userId, id);
       if (!existing) throw new Error('Generation not found');
       
       const { provider_name, model, auto_save = true } = req.body;
-      const profile = db.getProfile(existing.profile_id);
-      const lyricsSet = profile ? db.getLyricsSet(profile.lyrics_set_id) : null;
-      const artist = lyricsSet ? db.getArtist(lyricsSet.artist_id) : undefined;
+      const profile = db.getProfile(userId, existing.profile_id);
+      const lyricsSet = profile ? db.getLyricsSet(userId, profile.lyrics_set_id) : null;
+      const artist = lyricsSet ? db.getArtist(userId, lyricsSet.artist_id) : undefined;
       
       const sendSse = initSse(res);
       llmService.resetSkipThinking();
@@ -335,6 +363,7 @@ export function registerLlmRoutes(router: Router): void {
 
       if (auto_save) {
         const saved = db.saveGeneration({
+          userId,
           profileId: existing.profile_id,
           provider: provider_name,
           model: refined.model,
@@ -373,19 +402,21 @@ export function registerLlmRoutes(router: Router): void {
   // ── Generate Style Caption ─────────────────────────────────────────────────
 
   router.post('/artists/:id/generate-caption', async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
     try {
       const artistId = intParam(req, 'id');
       const { provider, model, force } = req.body;
       if (!provider) return res.status(400).json({ error: 'provider is required' });
 
-      const artist = db.getArtist(artistId);
+      const artist = db.getArtist(userId, artistId);
       if (!artist) return res.status(404).json({ error: 'Artist not found' });
 
-      // Find the first profile across all lyrics sets
-      const lyricsSets = db.getLyricsSets(artistId);
+      // Find the first profile across all lyrics sets (user-scoped)
+      const lyricsSets = db.getLyricsSets(userId, artistId);
       let profileRow: any = null;
       for (const ls of lyricsSets) {
-        const profiles = db.getProfiles(ls.id);
+        const profiles = db.getProfiles(userId, ls.id);
         if (profiles.length) { profileRow = profiles[0]; break; }
       }
       if (!profileRow) return res.status(404).json({ error: 'No profile found for this artist' });
@@ -414,7 +445,7 @@ export function registerLlmRoutes(router: Router): void {
 
       // Persist back to profile
       profileData.style_caption = caption;
-      db.updateProfileData(profileRow.id, profileData);
+      db.updateProfileData(userId, profileRow.id, profileData);
 
       res.json({ caption });
     } catch (err: any) {

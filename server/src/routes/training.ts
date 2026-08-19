@@ -92,6 +92,7 @@ import {
   adapterDitRoot, ditRunDirFor, readTrainDitStatus,
 } from '../services/training/trainDitStatus.js';
 import { hasWeights, lmAdapterRoots } from '../services/training/adapterLayout.js';
+import { getUserId } from './auth.js';
 import {
   deleteDatasetPreviews, isPreviewFileKey, isPreviewId, listPreviews, previewsRoot,
   prunePreviews, resolvePreviewFile,
@@ -1147,13 +1148,15 @@ router.get('/datasets/:id/dataset-json', (req: Request, res: Response) => {
 
 router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
     const ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
     }
     const samples = await buildSamples(ds, { warnings: [] });
-    res.json(previewLyricStudioExport(ds, samples));
+    res.json(previewLyricStudioExport(userId, ds, samples));
   } catch (err: any) {
     if (err instanceof ScanLimitError) {
       res.status(400).json({ error: err.message });
@@ -1166,6 +1169,8 @@ router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => 
 
 router.post('/datasets/:id/lyric-studio', async (req: Request, res: Response) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
     const ds = repo.getDataset(req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
@@ -1178,7 +1183,7 @@ router.post('/datasets/:id/lyric-studio', async (req: Request, res: Response) =>
       linkAdapters: body.linkAdapters !== false,
     };
     const samples = await buildSamples(ds, { warnings: [] });
-    const result = await commitLyricStudioExport(ds, samples, input);
+    const result = await commitLyricStudioExport(userId, ds, samples, input);
     res.json(result);
   } catch (err: any) {
     if (err instanceof LyricStudioExportError || err instanceof ScanLimitError) {

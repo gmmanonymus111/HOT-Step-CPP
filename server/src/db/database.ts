@@ -346,6 +346,61 @@ export function initDb(): void {
     try { db.exec(sql); } catch { /* column already exists */ }
   }
 
+  // ── Lireek user-isolation migrations ──────────────────────────────────────
+  // Add user_id column to all Lyric Studio tables and migrate existing data
+  // to the first admin user (or first user if no admin exists).
+  const lireekUserIsolation = [
+    { table: 'artists', check: 'user_id', alter: "ALTER TABLE artists ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'lyrics_sets', check: 'user_id', alter: "ALTER TABLE lyrics_sets ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'profiles', check: 'user_id', alter: "ALTER TABLE profiles ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'generations', check: 'user_id', alter: "ALTER TABLE generations ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'album_presets', check: 'user_id', alter: "ALTER TABLE album_presets ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'audio_generations', check: 'user_id', alter: "ALTER TABLE audio_generations ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+    { table: 'settings', check: 'user_id', alter: "ALTER TABLE settings ADD COLUMN user_id TEXT NOT NULL DEFAULT ''" },
+  ];
+  for (const m of lireekUserIsolation) {
+    const row = db.prepare(`SELECT COUNT(*) as c FROM pragma_table_info('${m.table}') WHERE name='${m.check}'`).get() as any;
+    if (row.c === 0) {
+      db.exec(m.alter);
+      console.log(`[DB] Migration: ${m.alter}`);
+    }
+  }
+
+  // Migrate existing Lireek rows to first admin user (or first user).
+  // Only runs if any table has rows with empty user_id.
+  const adminUser = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get() as any;
+  const firstUser = db.prepare("SELECT id FROM users LIMIT 1").get() as any;
+  const targetUserId = adminUser?.id || firstUser?.id;
+
+  if (targetUserId) {
+    const tablesToMigrate = [
+      'artists', 'lyrics_sets', 'profiles', 'generations', 'album_presets', 'audio_generations', 'settings',
+    ];
+    for (const table of tablesToMigrate) {
+      const needsMigration = db.prepare(
+        `SELECT COUNT(*) as c FROM ${table} WHERE user_id = ''`
+      ).get() as any;
+      if (needsMigration.c > 0) {
+        db.prepare(`UPDATE ${table} SET user_id = ? WHERE user_id = ''`).run(targetUserId);
+        console.log(`[DB] Migration: assigned ${needsMigration.c} rows in ${table} to user ${targetUserId}`);
+      }
+    }
+  }
+
+  // Indexes for user_id lookups
+  const lireekUserIndexes = [
+    "CREATE INDEX IF NOT EXISTS idx_artists_user ON artists(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lyrics_sets_user ON lyrics_sets(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_profiles_user ON profiles(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_generations_user ON generations(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_album_presets_user ON album_presets(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audio_generations_user ON audio_generations(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id)",
+  ];
+  for (const sql of lireekUserIndexes) {
+    try { db.exec(sql); } catch { /* index already exists */ }
+  }
+
   // ── One-time migration: import data from lireek.db if it exists ───────────
   migrateLireekData();
 

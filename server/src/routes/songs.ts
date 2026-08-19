@@ -275,7 +275,7 @@ router.delete('/:id', (req, res) => {
   getDb().prepare('DELETE FROM songs WHERE id = ?').run(req.params.id);
 
   // Cascade to Lireek DB — remove matching audio_generation records
-  try { deleteAudioGenerationsByJobIds([req.params.id]); } catch { /* lireek DB may not be initialized */ }
+  try { deleteAudioGenerationsByJobIds(userId, [req.params.id]); } catch { /* lireek DB may not be initialized */ }
 
   res.json({ success: true });
 });
@@ -305,7 +305,7 @@ router.delete('/', (req, res) => {
   const result = getDb().prepare('DELETE FROM songs WHERE user_id = ?').run(userId);
 
   // Cascade to Lireek DB
-  try { deleteAudioGenerationsByJobIds(allIds); } catch { /* lireek DB may not be initialized */ }
+  try { deleteAudioGenerationsByJobIds(userId, allIds); } catch { /* lireek DB may not be initialized */ }
 
   res.json({ success: true, deletedCount: result.changes });
 });
@@ -347,7 +347,7 @@ router.post('/bulk-delete', (req, res) => {
   console.log(`[Songs] Bulk deleted ${result.changes}/${ids.length} songs`);
 
   // Cascade to Lireek DB
-  try { deleteAudioGenerationsByJobIds(ids); } catch { /* lireek DB may not be initialized */ }
+  try { deleteAudioGenerationsByJobIds(userId, ids); } catch { /* lireek DB may not be initialized */ }
 
   res.json({ success: true, deletedCount: result.changes });
 });
@@ -402,10 +402,10 @@ router.post('/nuke-generations', (req, res) => {
   let lireekDeleted = 0;
   try {
     if (songIds.length > 0) {
-      lireekDeleted += deleteAudioGenerationsByJobIds(songIds);
+      lireekDeleted += deleteAudioGenerationsByJobIds(userId, songIds);
     }
     // Also nuke ALL audio_generations (catches any orphans)
-    const allResult = getDb().prepare('DELETE FROM audio_generations').run();
+    const allResult = getDb().prepare('DELETE FROM audio_generations WHERE user_id = ?').run(userId);
     lireekDeleted = Math.max(lireekDeleted, allResult.changes);
   } catch (err) {
     console.error('[Songs] NUKE audio_generations cleanup error:', err);
