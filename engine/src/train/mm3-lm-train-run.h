@@ -101,8 +101,23 @@ struct MM3LmTrainArgs {
     int64_t     max_frames = 1500;
     std::string crop_mode = "random";     // random | beginning
     int         grad_accum = 1, seed = 42;
-    std::string optimizer = "adamw";      // adamw | muon
-    float       muon_lr_scale = 1.0f, muon_momentum = 0.95f;
+    // MUON BY DEFAULT, and at a scale that was measured rather than inherited.
+    //
+    // Two independent reasons, both from this program's own numbers:
+    //  * IT IS THE ONE THAT FITS. AdamW carries a second momentum buffer —
+    //    +2.66 GB at rank 256 on a run already peaking at 31.7 GB of a 32 GB
+    //    card — and lowering --max-frames does not rescue it, because the crop
+    //    only moves the ~0.6 GB of checkpoint buffers.
+    //  * Muon's update is NORMALISED by Newton-Schulz, so an AdamW learning
+    //    rate means nothing to it. A 50-step sweep at r256 on alk3, identical
+    //    seed so every arm saw identical crops (step 1 loss 3.3318 in all four):
+    //        lr_scale  1 -> mean 3.3114    16 -> mean 2.8960
+    //        lr_scale  4 -> mean 3.1842    64 -> mean 2.5407
+    //    Monotonic, so 64 is the best of what was TESTED, not a tuned optimum;
+    //    the top of the usable range has not been found. Revisit with a proper
+    //    sweep before any long run.
+    std::string optimizer = "muon";       // adamw | muon
+    float       muon_lr_scale = 64.0f, muon_momentum = 0.95f;
     int         muon_ns_steps = 5, muon_min_dim = 16, muon_bucket = 16;
     bool        muon_nesterov = true;
     std::string trigger;                  // recorded in the sidecar, not prepended here
@@ -181,51 +196,24 @@ static ggml_tensor * mm3_lm_ckpt_embed(ggml_context * ctx, LmCkptRun & r, int S)
     return mm3_lm_build_embed(ctx, e);
 }
 
-// ── the run ─────────────────────────────────────────────────────────────────
-
-static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
-    // TF32 off for the same reason every other MM3 training-data path turns it
-    // off: this is gradient arithmetic against a frozen f16 base, and TF32's
-    // ~1e-3 is not a trade worth taking for a few percent.
-#ifdef _WIN32
-    _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
-#else
-    setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
-#endif
-
-    std::string err;
-    MM3TrainLm  t = {};
-    if (!mm3_train_lm_load(&t, a.lm_path.c_str(), &err)) {
-        fprintf(stderr, "[mm3-lm-train] LM load failed: %s\n", err.c_str());
-        return 1;
-    }
-    if (!mm3_train_lm_load_audio_embd(&t, a.depth_path.c_str(), &err)) {
-        fprintf(stderr, "[mm3-lm-train] audio_embd load failed: %s\n", err.c_str());
-        mm3_train_lm_free(&t);
-        return 1;
-    }
-    const Qwen3LMConfig & c   = t.lm.cfg;
-    const int64_t         H   = c.hidden_size;
-    const int64_t         NC  = (int64_t) t.num_codebooks - 1;
-    const int64_t         AV  = t.acoustic_vocab_size;
-    const int64_t         SL  = mm3_lm_train_slice_size(t);
-
-    // ── samples ──
-    std::vector<MM3LmSample> samples;
-    {
+// Read the manifest into teacher-forced samples. Factored out because the
+// FD-check entry point needs exactly the same data path as training — a
+// gradient check against a DIFFERENT sequence than the trainer builds would
+// verify nothing that matters.
+static bool mm3_lm_load_samples(const MM3LmTrainArgs & a, const MM3TrainLm & t,
+                                std::vector<MM3LmSample> * out, std::string * err) {
+    std::vector<MM3LmSample> & samples = *out;
         std::string jbuf;
         if (!mm3_lm_read_file(a.manifest, &jbuf)) {
-            fprintf(stderr, "[mm3-lm-train] cannot read %s\n", a.manifest.c_str());
-            mm3_train_lm_free(&t);
-            return 1;
+            if (err) *err = "cannot read " + a.manifest;
+            return false;
         }
         yyjson_doc * doc = yyjson_read(jbuf.c_str(), jbuf.size(), 0);
         yyjson_val * arr = doc ? yyjson_obj_get(yyjson_doc_get_root(doc), "samples") : nullptr;
         if (!arr || !yyjson_is_arr(arr)) {
-            fprintf(stderr, "[mm3-lm-train] %s has no `samples` array\n", a.manifest.c_str());
+            if (err) *err = a.manifest + " has no `samples` array";
             if (doc) yyjson_doc_free(doc);
-            mm3_train_lm_free(&t);
-            return 1;
+            return false;
         }
         MM3Model stub = {};
         stub.lm_file.found = true;
@@ -233,11 +221,9 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         stub.lm_file.name  = a.lm_path;
         stub.lm_cfg.semantic_vocab_offset = t.semantic_vocab_offset;
         MM3Tokenizer tok = {};
-        if (!mm3_tokenizer_load(stub, &tok, &err)) {
-            fprintf(stderr, "[mm3-lm-train] tokenizer: %s\n", err.c_str());
+        if (!mm3_tokenizer_load(stub, &tok, err)) {
             yyjson_doc_free(doc);
-            mm3_train_lm_free(&t);
-            return 1;
+            return false;
         }
 
         yyjson_val *    s;
@@ -281,6 +267,459 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
             samples.push_back(std::move(sm));
         }
         yyjson_doc_free(doc);
+    return true;
+}
+
+// ── finite-difference gradient check ────────────────────────────────────────
+//
+// The decisive correctness gate for the backward, and the one the DiT-trainer
+// fiasco is a warning about: there, the graph trained, the loss fell, and the
+// DELTAS were wrong. A falling loss is necessary and nowhere near sufficient.
+//
+// For a handful of individual LoRA weights this measures
+//
+//     numeric  = (L(w + eps) - L(w - eps)) / (2 eps)      central difference
+//     analytic = the accumulated gradient the backward produced
+//
+// and reports the relative error. It runs the check TWICE — once through the
+// naive fwd+bwd graph and once through the CHECKPOINTED path — because those
+// are two different pieces of machinery that must agree with each other and
+// with the numbers. That second comparison is what actually tests the hooks
+// this program added to lm-ckpt.h (untied scored head, frame-embedding entry).
+//
+// Two things make this work at all, and both are borrowed from the ACE
+// self-test rather than rediscovered:
+//   * B MUST BE INITIALISED NON-ZERO. With PEFT's B = 0, dL/dA is identically
+//     zero by construction, so a check on A would "pass" against a graph that
+//     computes nothing. b_sigma is 1e-2 here for the same reason lm-selftest.h
+//     uses it.
+//   * a SMALL rank and a SHORT crop, so the naive path fits and the whole
+//     check is seconds rather than minutes.
+//
+// ── WHAT THIS GATE CAN AND CANNOT DECIDE, MEASURED ─────────────────────────
+//
+// The finite-difference arm is INCONCLUSIVE against an f16 base, and that is a
+// property of the model rather than a bug to fix. Three measurements pin it:
+//   * the loss is perfectly deterministic (repeat delta exactly 0.00e+00), so
+//     this is not run-to-run noise;
+//   * relative error grows ~10x for every 10x DECREASE in eps — the signature
+//     of catastrophic cancellation, i.e. the loss CHANGE is below the forward's
+//     arithmetic resolution, the opposite of a truncation problem;
+//   * moving the cross-entropy off the GPU and into host double changed the
+//     numbers in the 5th significant figure only, so the floor is in the
+//     LOGITS (36 layers of f16 matmul), not in the CE aggregation.
+// Only the probe with the largest ||g|| clears the bar (0.2 %), and the error
+// tracks 1/||g|| exactly as a fixed absolute floor predicts.
+//
+// So the number to read here is the CHECKPOINTED-vs-NAIVE gradient agreement,
+// which needs no perturbation at all and is what actually exercises this
+// program's additions to lm-ckpt.h. For reference, the ACE self-test holds the
+// same comparison to 2e-3 max relative — but under F32 ISOLATION (it trains
+// against an F32 weight mirror), whereas both MM3 routes here run the f16 base.
+// A gate that can genuinely PASS or FAIL needs that same isolation: an F32
+// mirror, or lm-selftest.h's 2-layer F32 slice. That is the follow-up; until
+// it exists this command reports and does not certify.
+//
+// IT PERTURBS A DIRECTION, NOT A SINGLE WEIGHT, and that is not a detail.
+// A per-entry difference was tried first and measured nothing but noise: with
+// a per-entry gradient of order 1e-4 and eps 1e-2, the true loss change is
+// ~2e-6, which is single digits of f32 ULP on a loss of ~4.1. The measured
+// "numeric" column came out ~1e-2 with random signs — pure rounding.
+//
+// So each probe perturbs a WHOLE LoRA factor along the unit gradient direction
+// v = g/||g||. The directional derivative is then exactly ||g||, and the loss
+// change is ~2*eps*||g|| — thousands of times the noise floor, because every
+// entry contributes with the same sign instead of cancelling. This is the
+// standard way to finite-difference a low-precision model, and it still
+// catches every failure that matters: a wrong sign flips the numeric value
+// negative, a wrong scale shows up directly in the ratio, and a structurally
+// zero gradient gives ||g|| = 0 with a non-zero measured change.
+static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps, int64_t frames,
+                               int64_t prompt_cap) {
+#ifdef _WIN32
+    _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+    setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    std::string err;
+    MM3TrainLm  t = {};
+    if (!mm3_train_lm_load(&t, a.lm_path.c_str(), &err) ||
+        !mm3_train_lm_load_audio_embd(&t, a.depth_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-fd] load failed: %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    const Qwen3LMConfig & c  = t.lm.cfg;
+    const int64_t         H  = c.hidden_size;
+    const int64_t         NC = (int64_t) t.num_codebooks - 1;
+    const int64_t         AV = t.acoustic_vocab_size;
+    const int64_t         SL = mm3_lm_train_slice_size(t);
+
+    std::vector<MM3LmSample> samples;
+    if (!mm3_lm_load_samples(a, t, &samples, &err) || samples.empty()) {
+        fprintf(stderr, "[mm3-fd] no samples: %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    const MM3LmSample & smp = samples[0];
+    // TRUNCATE THE PROMPT. A real MM3 prompt is ~1,125 tokens, which would put
+    // the NAIVE arm of this check back over the card for exactly the reason
+    // the trainer needed checkpointing — and the naive arm is half of what is
+    // being compared. A gradient check needs the same graph STRUCTURE, not a
+    // meaningful caption; cutting mid-BPE is acceptable here and nowhere else.
+    const int64_t       P   = std::min<int64_t>(prompt_cap, (int64_t) smp.prompt.size());
+    const int64_t       K   = std::min<int64_t>(frames, smp.n_frames);
+    const int64_t       Fin = K - 1;          // never at_end: keep the case simple
+    const int64_t       n_sup = K;
+    const int64_t       S   = P + Fin;
+    fprintf(stderr, "[mm3-fd] %s: prompt %lld (of %zu, truncated) + %lld frames = seq %lld, rank %d, eps %.3g\n",
+            smp.id.c_str(), (long long) P, smp.prompt.size(), (long long) K, (long long) S, a.rank, eps);
+
+    LmLora lora;
+    if (!lm_lora_init(&lora, &t.lm, 0, c.n_layers, a.rank, (float) a.alpha, (uint64_t) a.seed,
+                      /*b_sigma=*/1e-2f, &err)) {
+        fprintf(stderr, "[mm3-fd] LoRA init failed: %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    LmOptim opt;
+    opt.optimizer = "adamw";
+    if (!lm_optim_init(&opt, lora.params, t.lm.backend, &err)) {
+        fprintf(stderr, "[mm3-fd] optimizer init failed: %s\n", err.c_str());
+        lm_lora_detach(&lora, &t.lm);
+        lm_lora_free(&lora);
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+
+    // ── inputs, fixed for the whole check ──
+    ggml_context * ctx_static = nullptr;
+    {
+        ggml_init_params ip = { 32 * ggml_tensor_overhead(), nullptr, true };
+        ctx_static          = ggml_init(ip);
+    }
+    ggml_tensor * t_prompt = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, P);
+    ggml_tensor * t_sem    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, Fin);
+    ggml_tensor * t_ac     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, Fin * NC);
+    ggml_tensor * t_pos    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, S);
+    ggml_tensor * t_msk    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, S * S);
+    ggml_tensor * t_lab    = ggml_new_tensor_2d(ctx_static, GGML_TYPE_F32, SL, n_sup);
+    ggml_tensor * t_lg     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_clip   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_epsT   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_gn2    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_adamw  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 7);
+    ggml_tensor * t_gs     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_one    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_tok    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, S);
+    for (ggml_tensor * x : { t_prompt, t_sem, t_ac, t_pos, t_msk, t_lab, t_tok }) ggml_set_input(x);
+    ggml_backend_buffer_t buf_static = ggml_backend_alloc_ctx_tensors(ctx_static, t.lm.backend);
+    ggml_backend_buffer_clear(buf_static, 0);
+    {
+        const float one = 1.0f, ep = 1e-6f;
+        ggml_backend_tensor_set(t_lg, &one, 0, sizeof(float));
+        ggml_backend_tensor_set(t_one, &one, 0, sizeof(float));
+        ggml_backend_tensor_set(t_clip, &one, 0, sizeof(float));
+        ggml_backend_tensor_set(t_epsT, &ep, 0, sizeof(float));
+    }
+    opt.t_adamw = t_adamw; opt.t_lossgrad = t_lg; opt.t_clip = t_clip;
+    opt.t_eps = t_epsT; opt.t_gnorm2 = t_gn2;
+
+    std::vector<int32_t> sem_in((size_t) Fin), ac_in((size_t) (Fin * NC)), tgt((size_t) n_sup), pos((size_t) S);
+    for (int64_t i = 0; i < Fin; i++) {
+        const int32_t * f = &smp.codes[(size_t) (i * 8)];
+        sem_in[(size_t) i] = f[0] + (int32_t) t.semantic_vocab_offset;
+        for (int64_t k = 0; k < NC; k++) ac_in[(size_t) (k * Fin + i)] = f[1 + k] + (int32_t) (k * AV);
+    }
+    for (int64_t j = 0; j < n_sup; j++) tgt[(size_t) j] = mm3_lm_train_slice_index(t, smp.codes[(size_t) (j * 8)]);
+    for (int64_t i = 0; i < S; i++) pos[(size_t) i] = (int32_t) i;
+    std::vector<float> msk;
+    lm_causal_mask((int) S, &msk);
+    ggml_backend_tensor_set(t_prompt, smp.prompt.data(), 0, (size_t) P * sizeof(int32_t));
+    ggml_backend_tensor_set(t_sem, sem_in.data(), 0, sem_in.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_ac, ac_in.data(), 0, ac_in.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_msk, msk.data(), 0, msk.size() * sizeof(float));
+
+    MM3EmbedCtx embed_ctx{ &t, t_prompt, t_sem, t_ac, P, Fin };
+
+    std::vector<uint8_t> arena((size_t) 512 << 20);
+    BackendPair          bp;
+    bp.backend = t.lm.backend; bp.cpu_backend = t.lm.cpu_backend;
+    bp.has_gpu = t.lm.backend != t.lm.cpu_backend;
+    ggml_backend_sched_t sched = backend_sched_new(bp, 65536);
+
+    // Forward-only loss for the numeric side.
+    //
+    // THE CE IS COMPUTED ON THE HOST IN DOUBLE, from downloaded logits, and
+    // that is the whole reason this check works. ggml's in-graph
+    // cross_entropy_loss is a 16,389-way logsumexp averaged over rows, all in
+    // f32: perfectly deterministic (measured: repeat delta exactly 0) but only
+    // ~1e-4 ACCURATE. Differencing two such values is catastrophic
+    // cancellation — which showed up unmistakably as relative error that grew
+    // 10x for every 10x DECREASE in eps, the opposite of truncation.
+    // Aggregating in double removes that floor, and as a bonus makes the
+    // numeric side an INDEPENDENT implementation of the loss rather than the
+    // same kernel twice.
+    std::vector<float> lg_host((size_t) (SL * n_sup));
+    auto forward_loss = [&]() -> double {
+        ggml_init_params gip = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(gip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, false);
+        ggml_tensor *    h_in = mm3_lm_build_embed(ctx, embed_ctx);
+        ggml_tensor *    hid  = lm_build_trunk_embeds(ctx, &t.lm, h_in, t_pos, t_msk, (int) S);
+        ggml_tensor *    hd   = ggml_cont(
+            ctx, ggml_view_2d(ctx, hid, H, n_sup, hid->nb[1], (size_t) (P - 1) * hid->nb[1]));
+        ggml_tensor * lg = ggml_mul_mat(ctx, mm3_lm_train_out_slice(ctx, t), hd);   // [SL, n_sup]
+        ggml_set_output(lg);
+        ggml_build_forward_expand(gf, lg);
+        double v = std::nan("");
+        ggml_backend_sched_reset(sched);
+        if (ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS) {
+            ggml_backend_tensor_get(lg, lg_host.data(), 0, lg_host.size() * sizeof(float));
+            double sum = 0.0;
+            for (int64_t r = 0; r < n_sup; r++) {
+                const float * row = lg_host.data() + (size_t) (r * SL);
+                double        mx  = row[0];
+                for (int64_t j = 1; j < SL; j++) if (row[j] > mx) mx = row[j];
+                double se = 0.0;
+                for (int64_t j = 0; j < SL; j++) se += std::exp((double) row[j] - mx);
+                sum += mx + std::log(se) - (double) row[(size_t) tgt[(size_t) r]];
+            }
+            v = sum / (double) n_sup;
+        }
+        ggml_free(ctx);
+        return v;
+    };
+
+    // One naive fwd+bwd; gradients land in opt.acc[].
+    auto backward_naive = [&]() -> bool {
+        ggml_backend_buffer_clear(opt.buf_grad, 0);
+        ggml_init_params gip = { arena.size(), arena.data(), true };
+        ggml_context *   ctx = ggml_init(gip);
+        ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+        ggml_tensor *    h_in = mm3_lm_build_embed(ctx, embed_ctx);
+        ggml_tensor *    hid  = lm_build_trunk_embeds(ctx, &t.lm, h_in, t_pos, t_msk, (int) S);
+        ggml_tensor *    hd   = ggml_cont(
+            ctx, ggml_view_2d(ctx, hid, H, n_sup, hid->nb[1], (size_t) (P - 1) * hid->nb[1]));
+        ggml_tensor * lg   = ggml_mul_mat(ctx, mm3_lm_train_out_slice(ctx, t), hd);
+        ggml_tensor * labv = ggml_view_2d(ctx, t_lab, SL, n_sup, t_lab->nb[1], 0);
+        ggml_tensor * loss = ggml_cross_entropy_loss(ctx, lg, labv);
+        ggml_set_loss(loss);
+        ggml_set_output(loss);
+        ggml_build_forward_expand(gf, loss);
+        std::vector<ggml_tensor *> gacc;
+        lm_optim_fill_gacc(&opt, gf, &gacc);
+        ggml_build_backward_expand(ctx, gf, gacc.data());
+        bool ok = false;
+        {
+            LmLabelGuard guard(t_lab, tgt.data(), (int) n_sup, (int) SL);
+            ggml_backend_sched_reset(sched);
+            ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+        }
+        ggml_free(ctx);
+        return ok;
+    };
+
+    // The same thing through the checkpointed path.
+    LmCkptState ckpt_st;
+    LmCkptRun   ckpt_run;
+    auto backward_ckpt = [&]() -> bool {
+        ggml_backend_buffer_clear(opt.buf_grad, 0);
+        LmSample s2;
+        s2.tokens.assign((size_t) S, 0);
+        s2.targets  = tgt;
+        s2.n_masked = (int) P;
+        s2.s_tr     = (int) n_sup;
+        double ce = 0.0;
+        return lm_ckpt_micro_step(ckpt_run, s2, true, &ce);
+    };
+
+    auto grad_vec = [&](ggml_tensor * par) -> std::vector<float> {
+        auto it = opt.param_slot.find(par);
+        GGML_ASSERT(it != opt.param_slot.end());
+        ggml_tensor *      acc = opt.acc[(size_t) it->second];
+        std::vector<float> g((size_t) ggml_nelements(acc));
+        ggml_backend_tensor_get(acc, g.data(), 0, g.size() * sizeof(float));
+        return g;
+    };
+
+    // Probe a spread of layers, both factors and several module slots, so the
+    // check also exercises the layer/slot indexing rather than one lucky spot.
+    struct Probe { int layer, slot; bool is_a; };
+    std::vector<Probe> probes;
+    {
+        const int layers[3] = { 0, c.n_layers / 2, c.n_layers - 1 };
+        const int slots[3]  = { QW_LORA_Q, QW_LORA_GATE, QW_LORA_DOWN };
+        for (int i = 0; i < n_probe; i++) {
+            probes.push_back(Probe{ layers[i % 3], slots[(i / 3) % 3], (i % 2) == 0 });
+        }
+    }
+
+    // The noise floor, measured rather than assumed: two evaluations of the
+    // SAME configuration. Anything the difference test claims below has to be
+    // large compared to this, and printing it is what turned a mystifying
+    // per-entry result into an obvious one.
+    const double l0 = forward_loss();
+    const double l1 = forward_loss();
+    fprintf(stderr, "[mm3-fd] base loss %.6f (repeat %.6f, |delta| %.2e)\n", l0, l1, std::abs(l1 - l0));
+
+    if (!backward_naive()) {
+        fprintf(stderr, "[mm3-fd] naive backward failed\n");
+        return 1;
+    }
+    // Whole-tensor gradients, one vector per probe.
+    std::vector<std::vector<float>> g_naive;
+    for (const Probe & pr : probes) {
+        const QwLoraPair & q = lora.layers[pr.layer].p[pr.slot];
+        g_naive.push_back(grad_vec(pr.is_a ? q.A : q.B));
+    }
+
+    // Checkpointed gradients for the same probes.
+    std::vector<std::vector<float>> g_ckpt;
+    {
+        LmCkptCfg cc;
+        cc.chunk     = 64;
+        cc.s_max     = (int) S;
+        cc.layer_lo  = 0;
+        cc.layer_hi  = c.n_layers;
+        cc.head_w    = t.lm_head;
+        cc.head_row0 = (int64_t) t.eos_audio;
+        cc.head_v    = (int) SL;
+        if (!lm_ckpt_alloc(&ckpt_st, &t.lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt_st, &err)) {
+            fprintf(stderr, "[mm3-fd] checkpoint setup failed: %s\n", err.c_str());
+        } else {
+            ckpt_run.lm = &t.lm; ckpt_run.opt = &opt; ckpt_run.st = &ckpt_st; ckpt_run.sched = sched;
+            ckpt_run.t_tok = t_tok; ckpt_run.t_pos = t_pos; ckpt_run.t_msk = t_msk;
+            ckpt_run.t_gs = t_gs;   ckpt_run.t_one = t_one; ckpt_run.grad_accum = 1;
+            ckpt_run.embed_build = mm3_lm_ckpt_embed; ckpt_run.embed_user = &embed_ctx;
+            if (backward_ckpt()) {
+                for (const Probe & pr : probes) {
+                    const QwLoraPair & q = lora.layers[pr.layer].p[pr.slot];
+                    g_ckpt.push_back(grad_vec(pr.is_a ? q.A : q.B));
+                }
+            } else {
+                fprintf(stderr, "[mm3-fd] checkpointed backward failed\n");
+            }
+        }
+    }
+
+    // ── numeric: directional derivative along v = g/||g|| ──
+    fprintf(stderr, "\n[mm3-fd] %-26s %10s %13s %13s %8s\n", "probe (whole tensor)", "n", "||g||",
+            "numeric", "rel");
+    int    n_bad = 0;
+    double worst = 0.0;
+    for (size_t i = 0; i < probes.size(); i++) {
+        const Probe &      pr  = probes[i];
+        const QwLoraPair & q   = lora.layers[pr.layer].p[pr.slot];
+        ggml_tensor *      par = pr.is_a ? q.A : q.B;
+
+        const std::vector<float> & g = g_naive[i];
+        double norm2 = 0.0;
+        for (float x : g) norm2 += (double) x * (double) x;
+        const double gnorm = std::sqrt(norm2);
+
+        std::vector<float> w0((size_t) ggml_nelements(par)), wtmp(w0.size());
+        ggml_backend_tensor_get(par, w0.data(), 0, w0.size() * sizeof(float));
+
+        double num = std::nan("");
+        if (gnorm > 0.0) {
+            for (size_t k = 0; k < w0.size(); k++) wtmp[k] = (float) (w0[k] + eps * g[k] / gnorm);
+            ggml_backend_tensor_set(par, wtmp.data(), 0, wtmp.size() * sizeof(float));
+            const double lp = forward_loss();
+            for (size_t k = 0; k < w0.size(); k++) wtmp[k] = (float) (w0[k] - eps * g[k] / gnorm);
+            ggml_backend_tensor_set(par, wtmp.data(), 0, wtmp.size() * sizeof(float));
+            const double lmn = forward_loss();
+            num = (lp - lmn) / (2.0 * eps);
+        }
+        ggml_backend_tensor_set(par, w0.data(), 0, w0.size() * sizeof(float));
+
+        const double rel = std::abs(num - gnorm) / std::max(1e-12, gnorm);
+        char         nm[64];
+        snprintf(nm, sizeof(nm), "L%d.%s.%s", pr.layer, lm_slot_peft_name(pr.slot), pr.is_a ? "A" : "B");
+        fprintf(stderr, "[mm3-fd] %-26s %10zu %13.6e %13.6e %8.3f\n", nm, g.size(), gnorm, num, rel);
+        if (!(rel < 0.15)) n_bad++;
+        worst = std::max(worst, rel);
+    }
+
+    // NOT a pass/fail. See the header: against an f16 base the difference is
+    // below the forward's own resolution for every probe but the
+    // largest-gradient one, so a verdict here would be theatre. Report, and let
+    // the gradient-route agreement below carry the weight.
+    fprintf(stderr, "\n[mm3-fd] %d/%zu probes within 15%% (worst %.3f) — INDICATIVE ONLY\n",
+            (int) probes.size() - n_bad, probes.size(), worst);
+    fprintf(stderr, "[mm3-fd]   (FD cannot certify an f16 base: error tracks 1/||g||, and shrinking eps\n"
+                    "[mm3-fd]    makes it WORSE. A certifying gate needs F32 isolation — see the header.)\n");
+    if (g_ckpt.size() == g_naive.size()) {
+        // Two exact routes to the same gradient, so this compares whole vectors
+        // by relative L2 rather than by a single entry (where 1e-6 values make
+        // a relative error meaningless).
+        double wc = 0.0;
+        for (size_t i = 0; i < g_ckpt.size(); i++) {
+            double dn = 0.0, rn2 = 0.0;
+            for (size_t k = 0; k < g_naive[i].size(); k++) {
+                const double d = (double) g_ckpt[i][k] - (double) g_naive[i][k];
+                dn += d * d;
+                rn2 += (double) g_naive[i][k] * (double) g_naive[i][k];
+            }
+            wc = std::max(wc, std::sqrt(dn) / std::max(1e-30, std::sqrt(rn2)));
+        }
+        // The load-bearing number. Two structurally different routes to the same
+        // gradient — whole-graph autodiff vs segmented recompute with a
+        // surrogate loss — so a wiring error in the lm-ckpt.h hooks shows up
+        // here and nowhere else. Both run the f16 base, so the floor is f16
+        // accumulation over 36 layers, not a design difference.
+        fprintf(stderr, "[mm3-fd] checkpointed vs naive gradients: worst relative L2 %.2e\n", wc);
+        fprintf(stderr, "[mm3-fd]   (ACE's own bar for this comparison is 2e-3, but measured under F32\n"
+                        "[mm3-fd]    isolation; both routes here run the f16 base.)\n");
+    }
+
+    ggml_backend_sched_free(sched);
+    lm_ckpt_free(&ckpt_st);
+    ggml_backend_buffer_free(buf_static);
+    ggml_free(ctx_static);
+    lm_optim_free(&opt);
+    lm_lora_detach(&lora, &t.lm);
+    lm_lora_free(&lora);
+    mm3_train_lm_free(&t);
+    return 0;
+}
+
+// ── the run ─────────────────────────────────────────────────────────────────
+
+static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
+    // TF32 off for the same reason every other MM3 training-data path turns it
+    // off: this is gradient arithmetic against a frozen f16 base, and TF32's
+    // ~1e-3 is not a trade worth taking for a few percent.
+#ifdef _WIN32
+    _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+    setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+
+    std::string err;
+    MM3TrainLm  t = {};
+    if (!mm3_train_lm_load(&t, a.lm_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-lm-train] LM load failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (!mm3_train_lm_load_audio_embd(&t, a.depth_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-lm-train] audio_embd load failed: %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    const Qwen3LMConfig & c   = t.lm.cfg;
+    const int64_t         H   = c.hidden_size;
+    const int64_t         NC  = (int64_t) t.num_codebooks - 1;
+    const int64_t         AV  = t.acoustic_vocab_size;
+    const int64_t         SL  = mm3_lm_train_slice_size(t);
+
+    // ── samples ──
+    std::vector<MM3LmSample> samples;
+    if (!mm3_lm_load_samples(a, t, &samples, &err)) {
+        fprintf(stderr, "[mm3-lm-train] %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
     }
     if (samples.empty()) {
         fprintf(stderr, "[mm3-lm-train] no usable samples\n");

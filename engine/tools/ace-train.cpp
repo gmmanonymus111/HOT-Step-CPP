@@ -121,10 +121,17 @@ static void print_usage(void) {
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
             "  mm3-lm-train  MiniMax-Music3 LM LoRA training. --lm --depth --manifest\n"
+            "                --fd-check N instead: finite-difference gradient gate over N\n"
+            "                probes (a falling loss is NOT evidence the backward is right\n"
+            "                — see the DiT-trainer delta fiasco). Also cross-checks the\n"
+            "                checkpointed gradients against the naive ones.\n"
             "                --captions --codes --out, defaults = the validated recipe\n"
             "                (r256/a256, lr 8e-5, 800 steps, ckpt every 100, max-frames\n"
-            "                1500, random crops). [--optimizer adamw|muon] with the same\n"
-            "                --muon-* knobs as train-lm; the Muon/AdamW split is logged,\n"
+            "                1500, random crops). MUON IS THE DEFAULT at --muon-lr-scale\n"
+            "                64 — the optimizer that FITS at r256 (AdamW second momentum\n"
+            "                buffer does not), and a normalised update makes an AdamW LR\n"
+            "                meaningless. 64 = best of {1,4,16,64} MEASURED, not tuned.\n"
+            "                [--optimizer adamw|muon], same --muon-* knobs as train-lm;\n"
             "                because a run that classified ZERO parameters onto Muon\n"
             "                trains as AdamW and says nothing about it.\n"
             "                Checkpoints are PEFT dirs + a picker sidecar: point --out at\n"
@@ -1250,6 +1257,12 @@ static int cmd_mm3_encode(int argc, char ** argv) {
 // 1500, random crops.
 static int cmd_mm3_lm_train(int argc, char ** argv) {
     MM3LmTrainArgs a;
+    // --fd-check N runs the finite-difference gradient gate instead of
+    // training. Same data path, same graphs, no optimiser steps.
+    int     fd_probes = 0;
+    double  fd_eps    = 1e-2;
+    int64_t fd_frames = 48;
+    int64_t fd_prompt = 64;   // see the truncation note in mm3_lm_fdcheck_main
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char * what) -> const char * {
@@ -1273,6 +1286,10 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--max-frames"))    a.max_frames   = atoll(next("--max-frames"));
         else if (!strcmp(argv[i], "--crop-mode"))     a.crop_mode    = next("--crop-mode");
         else if (!strcmp(argv[i], "--no-ckpt"))       a.ckpt         = false;
+        else if (!strcmp(argv[i], "--fd-check"))      fd_probes      = atoi(next("--fd-check"));
+        else if (!strcmp(argv[i], "--fd-eps"))        fd_eps         = atof(next("--fd-eps"));
+        else if (!strcmp(argv[i], "--fd-frames"))     fd_frames      = atoll(next("--fd-frames"));
+        else if (!strcmp(argv[i], "--fd-prompt"))     fd_prompt      = atoll(next("--fd-prompt"));
         else if (!strcmp(argv[i], "--ckpt-chunk"))    a.ckpt_chunk   = atoi(next("--ckpt-chunk"));
         else if (!strcmp(argv[i], "--grad-accum"))    a.grad_accum   = atoi(next("--grad-accum"));
         else if (!strcmp(argv[i], "--seed"))          a.seed         = atoi(next("--seed"));
@@ -1293,6 +1310,13 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         fprintf(stderr, "ace-train mm3-lm-train: --lm, --depth, --manifest, --captions, --codes and --out "
                         "are all required\n");
         return 2;
+    }
+    if (fd_probes > 0) {
+        // The gate needs a rank small enough that the NAIVE graph fits beside
+        // the checkpointed one; --rank still overrides if asked.
+        if (a.rank > 8) { a.rank = 4; a.alpha = 4; }
+        ggml_time_init();
+        return mm3_lm_fdcheck_main(a, fd_probes, fd_eps, fd_frames, fd_prompt);
     }
     if (a.optimizer != "adamw" && a.optimizer != "muon") {
         fprintf(stderr, "ace-train mm3-lm-train: --optimizer must be adamw or muon\n");

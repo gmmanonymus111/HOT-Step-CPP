@@ -724,19 +724,31 @@ static inline ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggm
 // caller and handed in whole (train/mm3-lm-load.h, tools/ace-train.cpp
 // mm3-lm-loss). Nothing below the embedding differs, which is the entire point
 // of splitting here rather than forking the trunk.
+// The opts overload exists for symmetry with lm_build_trunk; note that
+// cast_weights is DOCUMENTATION ONLY (see the LmLayerOpts note above —
+// lm_linear routes every weight through qwen3_f32, which returns an already-F32
+// tensor unchanged), so it does not switch precision and cannot be used to make
+// two paths numerically comparable.
 static ggml_tensor * lm_build_trunk_embeds(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * h, ggml_tensor * pos,
-                                           ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi) {
+                                           ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi,
+                                           const LmLayerOpts & opts) {
     const Qwen3LMConfig & c = lm->cfg;
 
     ggml_tensor * pos_v = (pos->ne[0] == S) ? pos : ggml_view_1d(ctx, pos, S, 0);
     ggml_tensor * mask  = ggml_view_2d(ctx, t_msk_flat, S, S, (size_t) S * sizeof(float), 0);
     for (int l = layer_lo; l < layer_hi; l++) {
-        h = lm_train_layer(ctx, c, &lm->layers[l], h, pos_v, mask, S);
+        h = lm_train_layer(ctx, c, &lm->layers[l], h, pos_v, mask, S, opts);
     }
     return lm_rms(ctx, h, lm->final_norm, c.rms_norm_eps);
 }
 
 static inline ggml_tensor * lm_build_trunk_embeds(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * h,
+                                                  ggml_tensor * pos, ggml_tensor * t_msk_flat, int S,
+                                                  int layer_lo, int layer_hi) {
+    return lm_build_trunk_embeds(ctx, lm, h, pos, t_msk_flat, S, layer_lo, layer_hi, LmLayerOpts{});
+}
+
+static inline ggml_tensor * lm_build_trunk_embeds(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * h,
                                                   ggml_tensor * pos, ggml_tensor * t_msk_flat, int S) {
-    return lm_build_trunk_embeds(ctx, lm, h, pos, t_msk_flat, S, 0, lm->cfg.n_layers);
+    return lm_build_trunk_embeds(ctx, lm, h, pos, t_msk_flat, S, 0, lm->cfg.n_layers, LmLayerOpts{});
 }
