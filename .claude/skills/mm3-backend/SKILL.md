@@ -346,6 +346,42 @@ targets (docs/plans/2026-08-20-mm3-training-server-design.md §5). r256 ≈ 1.4 
 resident, ≈ +9 % AR cost (unmeasurable at short lengths). Smoke-validated:
 252 modules load, base + adapter renders complete same wall time.
 
+## Native codes export: `ace-train mm3-codes` (SHIPPED 2026-08-20)
+
+Audio -> RVQ codes, natively. `engine/src/minimax/mm3-rvq-encode.h` ports
+PurpleOrc's V4Encoder (169M: conv stack + 3 dilated ResBlocks + frame pooling +
+8 pre-LN transformer layers + causal depth decoder). The graph is
+**weights-agnostic** — the whole community encoder lineage shares this
+architecture, so a new checkpoint is a `engine/tools/convert-rvq-encoder.py`
+run (arch `mm3rvq`, verbatim PyTorch tensor names), never a code change.
+Adopted checkpoint: `models/mm3/mm3-rvq-53kpooled-f32.gguf`.
+
+```
+ace-train mm3-codes --dataset <ds.json> --rvq <mm3-rvq-*.gguf> --enc <mm3-enc-*.gguf> --out <dir>
+ace-train mm3-codes --rvq <mm3-rvq-*.gguf> --fixture <f.fix>     # standing gate, no audio needed
+```
+
+Four traps, all pinned in the header because each is SILENT if wrong:
+1. **GELU must be `ggml_gelu_erf`**, not `ggml_gelu` — torch's default is
+   erf-exact, ggml_gelu is the tanh approximation, ~1e-3 apart, against a
+   semantic argmax margin whose p05 is 0.06.
+2. **`GroupNorm(1, C)` reduces over channels AND positions jointly**, not per
+   position — a [T,1,C,1] reshape into `ggml_group_norm(n_groups=1)`.
+3. **The encoder stack is pre-LN with NO final norm**; `norm_out` is applied by
+   V4Encoder outside `nn.TransformerEncoder`.
+4. **Windowing is the model's own `frame_latent_starts`**, integer for integer,
+   constants carried in the GGUF; windows are FIRST-WINS.
+
+**Parity, and the lesson in how to gate an argmax port**: the fixture rung is
+exact (feats/logits cos=1.000000000, 0/128 semantic codes differ). End-to-end
+against the python exporter over 13 tracks: row counts identical, semantic
+99.910% identical, acoustic 99.412%. The residual is f32 GEMM ordering, MEASURED
+not assumed — the reference encoder run on OUR latents shows the same ~0.05%
+(so it is not the DAV port), and every flipped frame sits at a reference argmax
+margin of 0.0002-0.0028 against an all-frame median of 1.05. **"Bit-exact codes"
+is the wrong unit gate for any argmax port**; split flips by margin, which the
+fixture mode does.
+
 ## Training: DiT yes, LM ~~never~~ — SUPERSEDED (see below), assessed 2026-08-14
 
 Full teardown + staged plan: `docs/plans/2026-08-14-mm3-training-feasibility.md` (local).
