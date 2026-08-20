@@ -66,6 +66,11 @@ struct MM3TrainLm {
     uint32_t      num_codebooks         = 0;
     uint32_t      eos_audio             = 0;
     float         embedding_scale       = 0.0f;  // 1/sqrt(8), applied to frame embeddings
+
+    // The acoustic embedding table, which lives in the SYNTH file, not the LM.
+    // Its own context/buffer so the LM loads and validates without it.
+    WeightCtx     ae_wctx = {};
+    ggml_tensor * audio_embd = nullptr;   // [H, (num_codebooks-1) * acoustic_vocab_size]
 };
 
 // llama.cpp name -> the ACE trainer's slot, per layer. Kept as one table so a
@@ -91,6 +96,9 @@ static const MM3LmNameMap MM3_LM_LAYER_MAP[] = {
 };
 
 static void mm3_train_lm_free(MM3TrainLm * t) {
+    if (t->ae_wctx.buffer) { ggml_backend_buffer_free(t->ae_wctx.buffer); t->ae_wctx.buffer = nullptr; }
+    if (t->ae_wctx.ctx)    { ggml_free(t->ae_wctx.ctx); t->ae_wctx.ctx = nullptr; }
+    t->ae_wctx = {};
     Qwen3LM & m = t->lm;
     if (m.wctx.buffer) { ggml_backend_buffer_free(m.wctx.buffer); m.wctx.buffer = nullptr; }
     if (m.wctx.ctx)    { ggml_free(m.wctx.ctx); m.wctx.ctx = nullptr; }
@@ -225,6 +233,54 @@ static bool mm3_train_lm_load(MM3TrainLm * t, const char * path, std::string * e
     fprintf(stderr, "[MM3TrainLM] %s: %dL H=%d V=%d Nh=%d Nkv=%d D=%d FF=%d, untied head, %.2f GB\n", path,
             c.n_layers, c.hidden_size, c.vocab_size, c.n_heads, c.n_kv_heads, c.head_dim,
             c.intermediate_size, (double) bytes / (1024.0 * 1024.0 * 1024.0));
+    return true;
+}
+
+/** Load `depth.audio_embd.weight` from the SYNTH/depth GGUF into the same
+ *  weight context.
+ *
+ *  MM3's frame embedding is not a token lookup: it is
+ *      (token_embd[semantic + offset] + SUM_c audio_embd[code_c + (c-1)*1024])
+ *      * num_codebooks^-0.5
+ *  and the two tables live in DIFFERENT FILES — token_embd in the LM,
+ *  audio_embd in the synth/depth file. Teacher-forced training knows all eight
+ *  codes per frame, so the depth decoder itself is never run; only this one
+ *  table (7168 x H, ~59 MB at f16) is needed.
+ *
+ *  Must be called BEFORE mm3_train_lm_load's buffer is allocated? No — it takes
+ *  its own context and buffer, precisely so the LM can be loaded and validated
+ *  independently of whether a depth file was supplied. */
+static bool mm3_train_lm_load_audio_embd(MM3TrainLm * t, const char * depth_path, std::string * err) {
+    GGUFModel gf = {};
+    if (!gf_load(&gf, depth_path)) {
+        if (err) *err = std::string("cannot open ") + depth_path;
+        return false;
+    }
+    MM3SynthConfig sc = {};
+    mm3_parse_depth_config(gf, &sc);
+    const int64_t H    = t->lm.cfg.hidden_size;
+    const int64_t rows = sc.depth.audio_embd_rows;
+    if (rows != (int64_t) (t->num_codebooks - 1) * (int64_t) t->acoustic_vocab_size) {
+        gf_close(&gf);
+        if (err) *err = "depth.audio_embd_rows disagrees with the LM's codebook geometry";
+        return false;
+    }
+
+    wctx_init(&t->ae_wctx, 4);
+    std::vector<std::string> errs;
+    MM3Loader                ld{ &t->ae_wctx, &gf, nullptr, &errs };
+    t->audio_embd = ld.req("depth.audio_embd.weight", H, rows);
+    if (!errs.empty()) {
+        gf_close(&gf);
+        if (err) *err = errs[0];
+        return false;
+    }
+    const bool ok = wctx_alloc(&t->ae_wctx, t->lm.backend);
+    gf_close(&gf);
+    if (!ok) {
+        if (err) *err = "backend buffer allocation failed for depth.audio_embd";
+        return false;
+    }
     return true;
 }
 

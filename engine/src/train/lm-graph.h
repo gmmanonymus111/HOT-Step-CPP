@@ -714,3 +714,29 @@ static inline ggml_tensor * lm_build_trunk(ggml_context * ctx, Qwen3LM * lm, ggm
                                            ggml_tensor * t_msk_flat, int S) {
     return lm_build_trunk(ctx, lm, tokens, pos, t_msk_flat, S, 0, lm->cfg.n_layers);
 }
+
+// Same trunk, entered from INPUTS-EMBEDS [H, S] instead of token ids.
+//
+// ACE's planner LM is fed tokens and nothing else, so the id form above is the
+// only entry it ever needed. MiniMax-Music3 is not: an audio frame's input is
+// (token_embd[semantic] + SUM_c audio_embd[code_c]) * num_codebooks^-0.5, built
+// from two tables in two different files, so the embedding is computed by the
+// caller and handed in whole (train/mm3-lm-load.h, tools/ace-train.cpp
+// mm3-lm-loss). Nothing below the embedding differs, which is the entire point
+// of splitting here rather than forking the trunk.
+static ggml_tensor * lm_build_trunk_embeds(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * h, ggml_tensor * pos,
+                                           ggml_tensor * t_msk_flat, int S, int layer_lo, int layer_hi) {
+    const Qwen3LMConfig & c = lm->cfg;
+
+    ggml_tensor * pos_v = (pos->ne[0] == S) ? pos : ggml_view_1d(ctx, pos, S, 0);
+    ggml_tensor * mask  = ggml_view_2d(ctx, t_msk_flat, S, S, (size_t) S * sizeof(float), 0);
+    for (int l = layer_lo; l < layer_hi; l++) {
+        h = lm_train_layer(ctx, c, &lm->layers[l], h, pos_v, mask, S);
+    }
+    return lm_rms(ctx, h, lm->final_norm, c.rms_norm_eps);
+}
+
+static inline ggml_tensor * lm_build_trunk_embeds(ggml_context * ctx, Qwen3LM * lm, ggml_tensor * h,
+                                                  ggml_tensor * pos, ggml_tensor * t_msk_flat, int S) {
+    return lm_build_trunk_embeds(ctx, lm, h, pos, t_msk_flat, S, 0, lm->cfg.n_layers);
+}

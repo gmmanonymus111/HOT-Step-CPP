@@ -119,6 +119,12 @@ static void print_usage(void) {
             "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-lm-loss   Teacher-forced training forward, scored. --lm --depth --codes\n"
+            "                --caption [--lyrics] [--max-frames N] [--crop-offset N]\n"
+            "                [--target-shift N] [--no-prompt]  (falsification diagnostics).\n"
+            "                Reports the frozen base's semantic cross-entropy: ~6.9 nats\n"
+            "                means the whole input path is right, ~9.7 (= ln 16384) means\n"
+            "                the model is learning nothing from the sequence.\n"
             "  mm3-lm-probe  Wiring gate for the MM3 LM trainer: load the MM3 LM into the\n"
             "                ACE LM trainer's struct and compare its cache-free forward\n"
             "                against the engine's own prefill. --lm <mm3-lm-*.gguf>\n"
@@ -1215,6 +1221,321 @@ static int cmd_mm3_encode(int argc, char ** argv) {
 
     mm3_enc_free(&enc);
     return rc;
+}
+
+// ─── mm3-lm-loss ────────────────────────────────────────────────────────────
+//
+// S2 rung 2: the teacher-forced training FORWARD, end to end, scored.
+//
+//   ace-train mm3-lm-loss --lm <mm3-lm-*.gguf> --depth <mm3-depth-*.gguf>
+//                         --codes <id.codes> --caption <f.txt> [--lyrics <f.txt>]
+//                         [--max-frames N] [--crop-offset N]
+//
+// WHY A LOSS COMMAND BEFORE A TRAINER
+//
+// Everything that can be silently wrong about MM3 LM training is in the INPUT
+// CONSTRUCTION, not in the optimiser: the prompt template (the reference says
+// outright that "even whitespace-level changes to the assembled prompt change
+// the generated audio"), the frame embedding (two tables in two different
+// files, summed then scaled by 1/sqrt(8)), and the off-by-one between codes,
+// frames and targets. A backward pass over a wrong sequence trains perfectly
+// well and produces a useless adapter — which is exactly how the DiT-trainer
+// delta fiasco happened.
+//
+// So this rung computes ONE number with no optimiser attached: the mean
+// cross-entropy of the frozen base over the semantic codebook. That number is
+// independently known. The encoder scoreboard (docs/plans/2026-08-18-encoder-
+// training-plan.md) measures the same quantity from the python side with the
+// same frozen LM, and for the adopted 53k-pooled encoder on alk3 it is
+// **~6.9 nats**. Uniform over 16384 codes would be ln(16384) = 9.70. So:
+//
+//   ~6.5-7.5  -> the whole input path is right
+//   ~9.7      -> the model is learning nothing from the sequence: alignment,
+//                prompt or embedding is broken
+//   >9.7      -> actively misaligned
+//
+// A gate that can only be passed by being correct, costing one forward.
+//
+// ── THE OFF-BY-ONE, WRITTEN OUT ─────────────────────────────────────────────
+//
+// A `.codes` file is [F+1, 8] where row 0 duplicates row 1 (the un-emitted
+// warm-up row the cache format carries). Dropping it gives arr[0..F-1], frame
+// i's own eight codes.
+//
+// In inference: prefill over the P prompt tokens predicts frame 0; feeding
+// frame i's embedding predicts frame i+1. So teacher-forced:
+//
+//   inputs   = [prompt tokens 0..P-1] ++ [frame embeddings 0..F-2]
+//   position   P-1  predicts frame 0
+//   position   P+i  predicts frame i+1
+//   supervised positions = P-1 .. P+F-2   (F of them, targets frames 0..F-1)
+//
+// The last frame (F-1) is a TARGET but never an INPUT, which is why the
+// sequence is P+F-1 long and not P+F.
+static int cmd_mm3_lm_loss(int argc, char ** argv) {
+    std::string lm_path, depth_path, codes_path, caption_path, lyrics_path;
+    int64_t     max_frames = 400, crop_offset = 0;
+    // Diagnostics. Neither belongs in training; both exist so this gate can be
+    // FALSIFIED, which is the only thing that makes a good-looking number mean
+    // anything.
+    int         target_shift = 0;   // -1 turns the task into "copy the input"
+    bool        no_prompt    = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--lm"))          lm_path      = next("--lm");
+        else if (!strcmp(argv[i], "--depth"))       depth_path   = next("--depth");
+        else if (!strcmp(argv[i], "--codes"))       codes_path   = next("--codes");
+        else if (!strcmp(argv[i], "--caption"))     caption_path = next("--caption");
+        else if (!strcmp(argv[i], "--lyrics"))      lyrics_path  = next("--lyrics");
+        else if (!strcmp(argv[i], "--max-frames"))  max_frames   = atoll(next("--max-frames"));
+        else if (!strcmp(argv[i], "--crop-offset")) crop_offset  = atoll(next("--crop-offset"));
+        else if (!strcmp(argv[i], "--target-shift")) target_shift = atoi(next("--target-shift"));
+        else if (!strcmp(argv[i], "--no-prompt"))    no_prompt    = true;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (lm_path.empty() || depth_path.empty() || codes_path.empty() || caption_path.empty()) {
+        fprintf(stderr, "ace-train mm3-lm-loss: --lm, --depth, --codes and --caption are required\n");
+        return 2;
+    }
+#ifdef _WIN32
+    _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+    setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+
+    auto slurp = [](const std::string & path, std::string * out) -> bool {
+        FILE * f = hs_fopen(path, "rb");
+        if (!f) return false;
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        out->assign((size_t) n, '\0');
+        const bool ok = n == 0 || fread(&(*out)[0], 1, (size_t) n, f) == (size_t) n;
+        fclose(f);
+        return ok;
+    };
+
+    std::string caption, lyrics;
+    if (!slurp(caption_path, &caption)) {
+        fprintf(stderr, "[mm3-lm-loss] cannot read %s\n", caption_path.c_str());
+        return 1;
+    }
+    if (!lyrics_path.empty() && !slurp(lyrics_path, &lyrics)) {
+        fprintf(stderr, "[mm3-lm-loss] cannot read %s\n", lyrics_path.c_str());
+        return 1;
+    }
+
+    // ── codes ──
+    std::vector<int32_t> rows;
+    {
+        FILE * f = hs_fopen(codes_path, "rb");
+        if (!f) { fprintf(stderr, "[mm3-lm-loss] cannot read %s\n", codes_path.c_str()); return 1; }
+        fseek(f, 0, SEEK_END);
+        const long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        rows.resize((size_t) (n / (long) sizeof(int32_t)));
+        const bool ok = fread(rows.data(), sizeof(int32_t), rows.size(), f) == rows.size();
+        fclose(f);
+        if (!ok || rows.size() % 8 != 0 || rows.size() < 16) {
+            fprintf(stderr, "[mm3-lm-loss] %s is not an int32 [n,8] codes file\n", codes_path.c_str());
+            return 1;
+        }
+    }
+    // Drop the warm-up row: arr[i] is frame i's own eight codes.
+    const int32_t * arr     = rows.data() + 8;
+    const int64_t   n_avail = (int64_t) rows.size() / 8 - 1;
+
+    if (crop_offset < 0 || crop_offset >= n_avail) crop_offset = 0;
+    int64_t F = n_avail - crop_offset;
+    if (max_frames > 0 && F > max_frames) F = max_frames;
+    if (F < 2) {
+        fprintf(stderr, "[mm3-lm-loss] only %lld frames available\n", (long long) F);
+        return 1;
+    }
+    arr += crop_offset * 8;
+
+    // ── model ──
+    std::string err;
+    MM3TrainLm  t = {};
+    if (!mm3_train_lm_load(&t, lm_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-lm-loss] LM load failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (!mm3_train_lm_load_audio_embd(&t, depth_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-lm-loss] audio_embd load failed: %s\n", err.c_str());
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+
+    // ── prompt ──
+    // The tokenizer reads the LM GGUF's own vocab; a stub MM3Model is all it
+    // needs, and building one here keeps this command free of the residency
+    // machinery /mm3/warm exists for.
+    std::vector<int32_t> prompt_ids;
+    {
+        MM3Model stub = {};
+        stub.lm_file.found = true;
+        stub.lm_file.path  = lm_path;
+        stub.lm_file.name  = lm_path;
+        stub.lm_cfg.semantic_vocab_offset = t.semantic_vocab_offset;
+        MM3Tokenizer tok = {};
+        if (!mm3_tokenizer_load(stub, &tok, &err)) {
+            fprintf(stderr, "[mm3-lm-loss] tokenizer: %s\n", err.c_str());
+            mm3_train_lm_free(&t);
+            return 1;
+        }
+        // The SAME assembler inference uses — whitespace included, deliberately.
+        // --no-prompt keeps the template but empties the caption and lyrics, so
+        // the frame structure the model expects is intact and only the CONTENT
+        // is gone: that measures what the prompt is worth, rather than feeding
+        // the model an out-of-distribution sequence and calling it a control.
+        const std::string text = no_prompt ? mm3_assemble_prompt("", "")
+                                           : mm3_assemble_prompt(caption, lyrics);
+        mm3_tokenizer_encode(tok, text, &prompt_ids);
+    }
+    const int64_t P = (int64_t) prompt_ids.size();
+    if (P < 1) {
+        fprintf(stderr, "[mm3-lm-loss] the assembled prompt tokenised to nothing\n");
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+
+    const int64_t Fin = F - 1;               // frames used as INPUT
+    const int64_t S   = P + Fin;             // sequence length
+    const int64_t H   = t.lm.cfg.hidden_size;
+    const int64_t SV  = t.semantic_vocab_size;
+    const int64_t NC  = (int64_t) t.num_codebooks - 1;   // 7 acoustic books
+    const int64_t AV  = t.acoustic_vocab_size;
+
+    fprintf(stderr, "[mm3-lm-loss] prompt %lld tok + %lld frames (of %lld, offset %lld) = seq %lld\n",
+            (long long) P, (long long) F, (long long) n_avail, (long long) crop_offset, (long long) S);
+
+    // ── host-side index buffers ──
+    std::vector<int32_t> sem_in((size_t) Fin);        // LM vocab ids of frames 0..Fin-1
+    std::vector<int32_t> ac_in((size_t) (Fin * NC));  // BOOK-MAJOR flat rows into audio_embd
+    std::vector<int32_t> targets((size_t) F);         // semantic CODE (0..SV) of frames 0..F-1
+    for (int64_t i = 0; i < Fin; i++) {
+        sem_in[(size_t) i] = arr[i * 8] + (int32_t) t.semantic_vocab_offset;
+        for (int64_t c = 0; c < NC; c++) {
+            // Book-major so the gather comes back as [H, Fin, NC] and the sum
+            // over books is NC-1 whole-slab adds instead of a strided gather.
+            ac_in[(size_t) (c * Fin + i)] = arr[i * 8 + 1 + c] + (int32_t) (c * AV);
+        }
+    }
+    for (int64_t i = 0; i < F; i++) {
+        targets[(size_t) i] = arr[i * 8];
+    }
+
+    // ── graph ──
+    std::vector<uint8_t> arena((size_t) 256 << 20);
+    ggml_init_params     ip  = { arena.size(), arena.data(), true };
+    ggml_context *       ctx = ggml_init(ip);
+    if (!ctx) { fprintf(stderr, "[mm3-lm-loss] ggml_init failed\n"); mm3_train_lm_free(&t); return 1; }
+
+    ggml_tensor * t_prompt = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, P);
+    ggml_tensor * t_sem    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Fin);
+    ggml_tensor * t_ac     = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Fin * NC);
+    ggml_tensor * t_pos    = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
+    ggml_tensor * t_msk    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, S * S);
+    for (ggml_tensor * x : { t_prompt, t_sem, t_ac, t_pos, t_msk }) ggml_set_input(x);
+
+    ggml_tensor * e_prompt = ggml_get_rows(ctx, t.lm.embed_tokens, t_prompt);       // [H, P]
+    ggml_tensor * e_sem    = ggml_get_rows(ctx, t.lm.embed_tokens, t_sem);          // [H, Fin]
+    ggml_tensor * e_ac     = ggml_get_rows(ctx, t.audio_embd, t_ac);                // [H, Fin*NC]
+    e_ac = ggml_reshape_3d(ctx, e_ac, H, Fin, NC);
+    ggml_tensor * acc = ggml_view_2d(ctx, e_ac, H, Fin, e_ac->nb[1], 0);
+    for (int64_t c = 1; c < NC; c++) {
+        acc = ggml_add(ctx, acc, ggml_view_2d(ctx, e_ac, H, Fin, e_ac->nb[1], (size_t) c * e_ac->nb[2]));
+    }
+    // The reference's _embed_audio_frame, verbatim: sum both tables, then scale
+    // by num_codebooks^-0.5 (mm3.ar.embedding_scale).
+    ggml_tensor * e_frame = ggml_scale(ctx, ggml_add(ctx, e_sem, acc), t.embedding_scale);   // [H, Fin]
+    ggml_tensor * h_in    = ggml_concat(ctx, e_prompt, e_frame, 1);                          // [H, S]
+
+    ggml_tensor * hidden = lm_build_trunk_embeds(ctx, &t.lm, h_in, t_pos, t_msk, (int) S);
+    // Semantic slice of the untied head: 16384 of 200000 rows, one view.
+    ggml_tensor * logits = ggml_mul_mat(ctx, mm3_lm_train_sem_head(ctx, t), hidden);          // [SV, S]
+    ggml_set_output(logits);
+
+    ggml_cgraph * gf2 = ggml_new_graph_custom(ctx, 65536, false);
+    ggml_build_forward_expand(gf2, logits);
+
+    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(t.lm.backend));
+    if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf2)) {
+        fprintf(stderr, "[mm3-lm-loss] graph allocation failed (out of VRAM? try --max-frames)\n");
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    std::vector<int32_t> pos((size_t) S);
+    for (int64_t i = 0; i < S; i++) pos[(size_t) i] = (int32_t) i;
+    std::vector<float> msk;
+    lm_causal_mask((int) S, &msk);
+    ggml_backend_tensor_set(t_prompt, prompt_ids.data(), 0, (size_t) P * sizeof(int32_t));
+    ggml_backend_tensor_set(t_sem, sem_in.data(), 0, sem_in.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_ac, ac_in.data(), 0, ac_in.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(t_msk, msk.data(), 0, msk.size() * sizeof(float));
+
+    const int64_t tc0 = ggml_time_ms();
+    if (ggml_backend_graph_compute(t.lm.backend, gf2) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[mm3-lm-loss] forward compute failed\n");
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    const int64_t fwd_ms = ggml_time_ms() - tc0;
+
+    std::vector<float> lg((size_t) (SV * S));
+    ggml_backend_tensor_get(logits, lg.data(), 0, lg.size() * sizeof(float));
+
+    // ── cross-entropy over the supervised positions ──
+    // Position P-1+i predicts frame i, for i in [0, F).
+    double  sum_ce = 0.0;
+    int64_t n_ce = 0, n_top1 = 0;
+    for (int64_t i = 0; i < F; i++) {
+        const int64_t p = P - 1 + i;
+        const int64_t ti = i + target_shift;
+        if (p >= S || ti < 0 || ti >= F) continue;
+        const float * row = lg.data() + (size_t) (p * SV);
+        const int32_t tgt = targets[(size_t) ti];
+        if (tgt < 0 || tgt >= SV) continue;
+        float mx = row[0];
+        int64_t best = 0;
+        for (int64_t j = 1; j < SV; j++) {
+            if (row[j] > mx) { mx = row[j]; best = j; }
+        }
+        double se = 0.0;
+        for (int64_t j = 0; j < SV; j++) se += std::exp((double) row[j] - (double) mx);
+        sum_ce += (double) mx + std::log(se) - (double) row[tgt];
+        if (best == tgt) n_top1++;
+        n_ce++;
+    }
+
+    const double ce = n_ce ? sum_ce / (double) n_ce : 0.0;
+    fprintf(stderr, "[mm3-lm-loss] forward %lld ms for seq %lld\n", (long long) fwd_ms, (long long) S);
+    fprintf(stderr, "[mm3-lm-loss] semantic CE = %.4f nats over %lld frames   top-1 = %.2f%%\n", ce,
+            (long long) n_ce, 100.0 * (double) n_top1 / (double) (n_ce ? n_ce : 1));
+    fprintf(stderr, "[mm3-lm-loss] (uniform over %lld codes would be %.2f)\n", (long long) SV,
+            std::log((double) SV));
+    if (target_shift || no_prompt) {
+        fprintf(stderr, "[mm3-lm-loss] DIAGNOSTIC RUN: target_shift=%d no_prompt=%d — not a training number\n",
+                target_shift, (int) no_prompt);
+        if (target_shift == -1) {
+            fprintf(stderr, "[mm3-lm-loss]   shift -1 asks the model to repeat the semantic code it was just\n"
+                            "[mm3-lm-loss]   FED. Near-zero CE here is the expected result and proves the\n"
+                            "[mm3-lm-loss]   frame embeddings really reach the model; if the UNSHIFTED run\n"
+                            "[mm3-lm-loss]   were also near zero, that would be a leak.\n");
+        }
+    }
+
+    ggml_gallocr_free(alloc);
+    ggml_free(ctx);
+    mm3_train_lm_free(&t);
+    return 0;
 }
 
 // ─── mm3-lm-probe ───────────────────────────────────────────────────────────
@@ -3344,6 +3665,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-encode")) {
         return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-lm-loss")) {
+        return cmd_mm3_lm_loss(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "mm3-lm-probe")) {
         return cmd_mm3_lm_probe(argc - 1, argv + 1);
