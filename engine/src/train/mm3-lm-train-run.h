@@ -93,6 +93,12 @@
 #include <string>
 #include <vector>
 
+// jl() / json_escape() are defined in tools/ace-train.cpp, which includes this
+// header. Declared here so the emitter below can be written next to the code
+// it describes rather than in the CLI file.
+static void        jl(const char * fmt, ...);
+static std::string json_escape(const std::string & s);
+
 struct MM3LmTrainArgs {
     std::string lm_path, depth_path, manifest, captions_dir, codes_dir, out_dir;
     int         rank = 256, alpha = 256;
@@ -701,10 +707,12 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     MM3TrainLm  t = {};
     if (!mm3_train_lm_load(&t, a.lm_path.c_str(), &err)) {
         fprintf(stderr, "[mm3-lm-train] LM load failed: %s\n", err.c_str());
+        jl("{\"type\":\"fatal\",\"message\":\"%s\"}", json_escape(err).c_str());
         return 1;
     }
     if (!mm3_train_lm_load_audio_embd(&t, a.depth_path.c_str(), &err)) {
         fprintf(stderr, "[mm3-lm-train] audio_embd load failed: %s\n", err.c_str());
+        jl("{\"type\":\"fatal\",\"message\":\"%s\"}", json_escape(err).c_str());
         mm3_train_lm_free(&t);
         return 1;
     }
@@ -733,6 +741,14 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     const int64_t S_max = max_prompt + K_max;
     fprintf(stderr, "[mm3-lm-train] %zu songs, longest prompt %lld tok, crop <= %lld frames, seq <= %lld\n",
             samples.size(), (long long) max_prompt, (long long) K_max, (long long) S_max);
+    // ── JSONL (--jsonl), the contract the server runner relays ──
+    // Same vocabulary as `train-lm` so mm3TrainLmRunner is a relay clone and the
+    // Monitor's loss chart works with no new event types:
+    // init / step / milestone / progress / export / fatal / done.
+    jl("{\"type\":\"init\",\"samples\":%zu,\"stepsPerEpoch\":%d,\"maxPrompt\":%lld,\"maxFrames\":%lld,"
+       "\"seqMax\":%lld,\"rank\":%d,\"alpha\":%d,\"optimizer\":\"%s\"}",
+       samples.size(), a.steps, (long long) max_prompt, (long long) K_max, (long long) S_max, a.rank, a.alpha,
+       a.optimizer.c_str());
 
     // ── LoRA (attaches to the model) + optimizer ──
     LmLora lora;
@@ -761,6 +777,10 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     fprintf(stderr, "[mm3-lm-train] %zu LoRA tensors (rank %d, alpha %d) — %d on Muon in %zu buckets, %zu on AdamW\n",
             lora.params.size(), a.rank, a.alpha, opt.n_muon, opt.muon_buckets.size(),
             lora.params.size() - (size_t) opt.n_muon);
+    // The split is an EVENT, not just a log line: a run that put zero
+    // parameters on Muon trained as AdamW, and the UI should be able to say so.
+    jl("{\"type\":\"optimizer\",\"name\":\"%s\",\"tensors\":%zu,\"muon\":%d,\"buckets\":%zu,\"lrScale\":%.4f}",
+       a.optimizer.c_str(), lora.params.size(), opt.n_muon, opt.muon_buckets.size(), (double) a.muon_lr_scale);
 
     // ── persistent tensors ──
     ggml_context * ctx_static = nullptr;
@@ -985,6 +1005,10 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
             fclose(sf);
         }
         fprintf(stderr, "[mm3-lm-train] saved %s (loss %.4f)\n", dir.c_str(), loss);
+        jl("{\"type\":\"milestone\",\"step\":%d,\"loss\":%.6f,\"path\":\"%s\"}", step, loss,
+           json_escape(dir).c_str());
+        jl("{\"type\":\"export\",\"tensors\":%zu,\"path\":\"%s\"}", lora.params.size(),
+           json_escape(dir).c_str());
     };
 
     for (int step = 1; step <= a.steps && rc == 0; step++) {
@@ -1087,6 +1111,13 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
             break;
         }
         const double win = acc_loss / std::max(1, a.grad_accum);
+        // Every step, unlike the human log: the chart wants them all, and one
+        // JSON line per step is nothing next to a 3.9 s step.
+        jl("{\"type\":\"step\",\"step\":%d,\"totalSteps\":%d,\"loss\":%.6f,\"lr\":%.9g,"
+           "\"gradNorm\":%.6f,\"clipScale\":%.6f,\"ms\":%lld}",
+           step, a.steps, win, (double) stats.lr, (double) stats.grad_norm, (double) stats.clip,
+           (long long) (ggml_time_ms() - t_start));
+        jl("{\"type\":\"progress\",\"completed\":%d,\"total\":%d,\"phase\":\"train\"}", step, a.steps);
         if (step == 1 || step % 10 == 0 || step == a.steps) {
             fprintf(stderr, "[mm3-lm-train] step %d/%d loss %.4f lr %.3g |g| %.3f clip %.3f %lld s\n", step,
                     a.steps, win, (double) stats.lr, (double) stats.grad_norm, (double) stats.clip,
@@ -1100,6 +1131,12 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     fprintf(stderr, "[mm3-lm-train] %s after %d micro-steps, mean loss %.4f, %lld s\n",
             rc ? "STOPPED" : "done", n_micro, n_micro ? running / n_micro : 0.0,
             (long long) ((ggml_time_ms() - t_start) / 1000));
+    if (rc) {
+        jl("{\"type\":\"fatal\",\"message\":\"training stopped early — see the engine log\"}");
+    } else {
+        jl("{\"type\":\"done\",\"steps\":%d,\"meanLoss\":%.6f,\"ms\":%lld}", n_micro,
+           n_micro ? running / n_micro : 0.0, (long long) (ggml_time_ms() - t_start));
+    }
 
     ggml_backend_sched_free(sched);
     if (a.ckpt) {

@@ -1285,6 +1285,7 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--warmup"))        a.warmup       = atoi(next("--warmup"));
         else if (!strcmp(argv[i], "--max-frames"))    a.max_frames   = atoll(next("--max-frames"));
         else if (!strcmp(argv[i], "--crop-mode"))     a.crop_mode    = next("--crop-mode");
+        else if (!strcmp(argv[i], "--jsonl"))         g_jsonl        = true;
         else if (!strcmp(argv[i], "--no-ckpt"))       a.ckpt         = false;
         else if (!strcmp(argv[i], "--fd-check"))      fd_probes      = atoi(next("--fd-check"));
         else if (!strcmp(argv[i], "--fd-eps"))        fd_eps         = atof(next("--fd-eps"));
@@ -1919,6 +1920,7 @@ static int cmd_mm3_codes(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--ffmpeg"))       ffmpeg       = next("--ffmpeg");
         else if (!strcmp(argv[i], "--max-duration")) max_duration = atoi(next("--max-duration"));
         else if (!strcmp(argv[i], "--tf32"))         tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "--jsonl"))        g_jsonl      = true;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
         else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
     }
@@ -2313,6 +2315,8 @@ static int cmd_mm3_codes(int argc, char ** argv) {
         ok_n++;
         fprintf(stderr, "[mm3-codes] %zu/%zu %s  %lld frames -> %s\n", idx, n_samples, stem.c_str(),
                 (long long) n_frames, cp.c_str());
+        jl("{\"type\":\"progress\",\"completed\":%zu,\"total\":%zu,\"failed\":%zu,\"phase\":\"codes\"}",
+           idx, n_samples, fail_n);
     }
 
     yyjson_doc_free(doc);
@@ -2342,6 +2346,11 @@ static int cmd_mm3_codes(int argc, char ** argv) {
     mm3_enc_free(&enc);
     mm3_rvq_free(&rvq);
     fprintf(stderr, "[mm3-codes] done: %zu ok, %zu failed\n", ok_n, fail_n);
+    if (ok_n == 0 && fail_n > 0) {
+        jl("{\"type\":\"fatal\",\"message\":\"every track failed to encode\"}");
+    } else {
+        jl("{\"type\":\"done\",\"ok\":%zu,\"failed\":%zu}", ok_n, fail_n);
+    }
     return (ok_n == 0 && fail_n > 0) ? 1 : 0;
 }
 
