@@ -83,6 +83,7 @@
 #include "train/lm-optim.h"
 #include "train/lm-data.h"
 #include "train/lm-export.h"
+#include "train/lm-ckpt.h"
 #include "train/mm3-lm-load.h"
 #include "minimax/mm3-request.h"
 #include "minimax/mm3-tokenizer.h"
@@ -106,6 +107,13 @@ struct MM3LmTrainArgs {
     bool        muon_nesterov = true;
     std::string trigger;                  // recorded in the sidecar, not prepended here
     std::string dataset_name;
+    // Per-layer gradient checkpointing. ON by default and that is not a
+    // preference: the MM3 prompt is ~1,100 tokens, so even a 128-frame crop
+    // gives S > 1,200 and a naive fwd+bwd retains ~18 GB of activations on top
+    // of a 16 GB f16 base. Measured: it spills into WDDM shared memory and a
+    // step takes 38 s that should take under one.
+    bool        ckpt       = true;
+    int         ckpt_chunk = 128;
 };
 
 struct MM3LmSample {
@@ -129,6 +137,48 @@ static bool mm3_lm_read_file(const std::string & path, std::string * out) {
     const bool ok = n == 0 || fread(&(*out)[0], 1, (size_t) n, f) == (size_t) n;
     fclose(f);
     return ok;
+}
+
+// ── the MM3 input embedding ─────────────────────────────────────────────────
+//
+// (token_embd[semantic + offset] + SUM_c audio_embd[code_c + (c-1)*1024])
+// * num_codebooks^-0.5 — the reference's _embed_audio_frame, verbatim, for a
+// whole crop at once, with the prompt's ordinary token embeddings in front.
+//
+// The acoustic indices are uploaded BOOK-MAJOR so the gather comes back as
+// [H, Fin, NC] and the sum over books is NC-1 whole-slab adds rather than a
+// strided gather.
+struct MM3EmbedCtx {
+    const MM3TrainLm * t   = nullptr;
+    ggml_tensor *      t_prompt = nullptr, * t_sem = nullptr, * t_ac = nullptr;
+    int64_t            P = 0, Fin = 0;
+};
+
+static ggml_tensor * mm3_lm_build_embed(ggml_context * ctx, const MM3EmbedCtx & e) {
+    const MM3TrainLm & t   = *e.t;
+    const int64_t      H   = t.lm.cfg.hidden_size;
+    const int64_t      NC  = (int64_t) t.num_codebooks - 1;
+
+    ggml_tensor * e_prompt = ggml_get_rows(ctx, t.lm.embed_tokens, ggml_view_1d(ctx, e.t_prompt, e.P, 0));
+    if (e.Fin <= 0) {
+        return e_prompt;
+    }
+    ggml_tensor * e_sem = ggml_get_rows(ctx, t.lm.embed_tokens, ggml_view_1d(ctx, e.t_sem, e.Fin, 0));
+    ggml_tensor * e_ac  = ggml_reshape_3d(
+        ctx, ggml_get_rows(ctx, t.audio_embd, ggml_view_1d(ctx, e.t_ac, e.Fin * NC, 0)), H, e.Fin, NC);
+    ggml_tensor * acc = ggml_view_2d(ctx, e_ac, H, e.Fin, e_ac->nb[1], 0);
+    for (int64_t k = 1; k < NC; k++) {
+        acc = ggml_add(ctx, acc, ggml_view_2d(ctx, e_ac, H, e.Fin, e_ac->nb[1], (size_t) k * e_ac->nb[2]));
+    }
+    ggml_tensor * frames = ggml_scale(ctx, ggml_add(ctx, e_sem, acc), t.embedding_scale);
+    return ggml_concat(ctx, e_prompt, frames, 1);
+}
+
+// The LmCkptRun hook. P1 calls this instead of get_rows on token ids.
+static ggml_tensor * mm3_lm_ckpt_embed(ggml_context * ctx, LmCkptRun & r, int S) {
+    const MM3EmbedCtx & e = *(const MM3EmbedCtx *) r.embed_user;
+    GGML_ASSERT(e.P + e.Fin == (int64_t) S);
+    return mm3_lm_build_embed(ctx, e);
 }
 
 // ── the run ─────────────────────────────────────────────────────────────────
@@ -284,13 +334,26 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     ggml_tensor * t_ac     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, K_max * NC);
     ggml_tensor * t_pos    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, S_max);
     ggml_tensor * t_msk    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, S_max * S_max);
-    ggml_tensor * t_lab    = ggml_new_tensor_2d(ctx_static, GGML_TYPE_F32, SL, K_max + 1);
+    // The [SL, K_max+1] one-hot buffer is a NAIVE-path structure (98 MB at
+    // K_max 1500). The checkpointed head chunks its own labels into a
+    // [SL, chunk] buffer inside LmCkptState, so allocating this too would be
+    // pure waste on the path that actually runs.
+    ggml_tensor * t_lab    = a.ckpt ? nullptr
+                                    : ggml_new_tensor_2d(ctx_static, GGML_TYPE_F32, SL, K_max + 1);
     ggml_tensor * t_adamw  = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 7);
     ggml_tensor * t_lg     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_clip   = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_eps    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
     ggml_tensor * t_gn2    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
-    for (ggml_tensor * x : { t_prompt, t_sem, t_ac, t_pos, t_msk, t_lab }) ggml_set_input(x);
+    // Checkpointed path only: the per-chunk upstream scalar and the segment
+    // surrogate's loss gradient (which is exactly 1.0 — see lm-ckpt.h D9).
+    ggml_tensor * t_gs     = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    ggml_tensor * t_one    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_F32, 1);
+    // Sized but never read under checkpointing (the override supplies the
+    // embedding); lm_ckpt_micro_step skips its upload.
+    ggml_tensor * t_tok    = ggml_new_tensor_1d(ctx_static, GGML_TYPE_I32, S_max);
+    for (ggml_tensor * x : { t_prompt, t_sem, t_ac, t_pos, t_msk, t_tok }) ggml_set_input(x);
+    if (t_lab) ggml_set_input(t_lab);
 
     ggml_backend_buffer_t buf_static = ggml_backend_alloc_ctx_tensors(ctx_static, t.lm.backend);
     if (!buf_static) {
@@ -308,6 +371,8 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         ggml_backend_tensor_set(t_lg, &lg, 0, sizeof(float));
         ggml_backend_tensor_set(t_clip, &cl, 0, sizeof(float));
         ggml_backend_tensor_set(t_eps, &ep, 0, sizeof(float));
+        const float one = 1.0f;
+        ggml_backend_tensor_set(t_one, &one, 0, sizeof(float));
     }
     opt.t_adamw      = t_adamw;
     opt.t_lossgrad   = t_lg;
@@ -320,6 +385,58 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     opt.total_steps  = a.steps;
     opt.warmup_steps = a.warmup;
 
+    // ── per-layer gradient checkpointing ──
+    //
+    // Not an optimisation here. A naive fwd+bwd retains every layer's
+    // activations at once; with one segment per layer exactly ONE is live, and
+    // the chunked CE head keeps the [16389, chunk] logits off the peak too.
+    // The head override is what makes the second half work for MM3: an UNTIED
+    // head, scored only over [eos_audio, semantic_offset + semantic_size).
+    LmCkptState ckpt_st;
+    LmCkptRun   ckpt_run;
+    MM3EmbedCtx embed_ctx;
+    if (a.ckpt) {
+        if (!lm_ckpt_check_base(&t.lm, &err)) {
+            fprintf(stderr, "[mm3-lm-train] %s\n", err.c_str());
+            lm_lora_detach(&lora, &t.lm);
+            lm_lora_free(&lora);
+            mm3_train_lm_free(&t);
+            return 1;
+        }
+        LmCkptCfg cc;
+        cc.chunk     = a.ckpt_chunk;
+        cc.s_max     = (int) S_max;
+        cc.layer_lo  = 0;
+        cc.layer_hi  = c.n_layers;
+        cc.head_w    = t.lm_head;                       // UNTIED
+        cc.head_row0 = (int64_t) t.eos_audio;           // slice starts at EOS
+        cc.head_v    = (int) SL;
+        if (!lm_ckpt_alloc(&ckpt_st, &t.lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt_st, &err)) {
+            fprintf(stderr, "[mm3-lm-train] checkpoint setup failed: %s\n", err.c_str());
+            lm_ckpt_free(&ckpt_st);
+            lm_lora_detach(&lora, &t.lm);
+            lm_lora_free(&lora);
+            mm3_train_lm_free(&t);
+            return 1;
+        }
+        embed_ctx.t        = &t;
+        embed_ctx.t_prompt = t_prompt;
+        embed_ctx.t_sem    = t_sem;
+        embed_ctx.t_ac     = t_ac;
+
+        ckpt_run.lm          = &t.lm;
+        ckpt_run.opt         = &opt;
+        ckpt_run.st          = &ckpt_st;
+        ckpt_run.t_tok       = t_tok;
+        ckpt_run.t_pos       = t_pos;
+        ckpt_run.t_msk       = t_msk;
+        ckpt_run.t_gs        = t_gs;
+        ckpt_run.t_one       = t_one;
+        ckpt_run.grad_accum  = std::max(1, a.grad_accum);
+        ckpt_run.embed_build = mm3_lm_ckpt_embed;
+        ckpt_run.embed_user  = &embed_ctx;
+    }
+
     // ── graph sizing + scheduler ──
     // The scheduler is SHARED with the optimizer step, so it must be sized for
     // whichever graph is larger. This bit a real 4B Muon run: Muon's optimizer
@@ -331,19 +448,8 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     auto build_graph = [&](ggml_context * ctx, ggml_cgraph * gf, int64_t P, int64_t Fin, int64_t n_sup,
                            ggml_tensor ** out_loss) {
         const int64_t S = P + Fin;
-        ggml_tensor * pv = ggml_view_1d(ctx, t_prompt, P, 0);
-        ggml_tensor * sv = ggml_view_1d(ctx, t_sem, Fin, 0);
-        ggml_tensor * av = ggml_view_1d(ctx, t_ac, Fin * NC, 0);
-
-        ggml_tensor * e_prompt = ggml_get_rows(ctx, t.lm.embed_tokens, pv);
-        ggml_tensor * e_sem    = ggml_get_rows(ctx, t.lm.embed_tokens, sv);
-        ggml_tensor * e_ac     = ggml_reshape_3d(ctx, ggml_get_rows(ctx, t.audio_embd, av), H, Fin, NC);
-        ggml_tensor * acc      = ggml_view_2d(ctx, e_ac, H, Fin, e_ac->nb[1], 0);
-        for (int64_t k = 1; k < NC; k++) {
-            acc = ggml_add(ctx, acc, ggml_view_2d(ctx, e_ac, H, Fin, e_ac->nb[1], (size_t) k * e_ac->nb[2]));
-        }
-        ggml_tensor * frames = ggml_scale(ctx, ggml_add(ctx, e_sem, acc), t.embedding_scale);
-        ggml_tensor * h_in   = ggml_concat(ctx, e_prompt, frames, 1);
+        MM3EmbedCtx   ec{ &t, t_prompt, t_sem, t_ac, P, Fin };
+        ggml_tensor * h_in = mm3_lm_build_embed(ctx, ec);
 
         ggml_tensor * hidden = lm_build_trunk_embeds(ctx, &t.lm, h_in, t_pos, t_msk, (int) S);
         // Supervised positions are a contiguous tail starting at P-1.
@@ -358,7 +464,16 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         *out_loss = loss;
     };
 
-    {   // size from the worst case
+    if (a.ckpt) {
+        // The worst checkpointed graph is ONE backward segment at S_max — the
+        // trunk is never built whole, so sizing from it would over-allocate the
+        // scheduler by ~L x. embed_ctx must describe a real crop first: the
+        // probe builds P1, which calls the override.
+        embed_ctx.P   = max_prompt;
+        embed_ctx.Fin = K_max;
+        ckpt_run.sched = nullptr;
+        graph_nodes    = lm_ckpt_probe_segment_nodes(ckpt_run, (int) S_max);
+    } else {
         ggml_init_params gip = { arena.size(), arena.data(), true };
         ggml_context *   ctx = ggml_init(gip);
         ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
@@ -370,7 +485,8 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         graph_nodes = ggml_graph_n_nodes(gf);
         ggml_free(ctx);
     }
-    fprintf(stderr, "[mm3-lm-train] fwd+bwd graph: %d nodes\n", graph_nodes);
+    fprintf(stderr, "[mm3-lm-train] %s graph: %d nodes\n",
+            a.ckpt ? "worst backward segment" : "fwd+bwd", graph_nodes);
 
     BackendPair bp;
     bp.backend     = t.lm.backend;
@@ -379,6 +495,9 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     const int sched_nodes = std::max(std::max(8192, graph_nodes + graph_nodes / 2 + 2048),
                                      opt.est_nodes + opt.est_nodes / 4 + 1024);
     ggml_backend_sched_t sched = backend_sched_new(bp, sched_nodes);
+    if (a.ckpt) {
+        ckpt_run.sched = sched;
+    }
 
     // ── training loop ──
     LmRng rng;
@@ -477,30 +596,49 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
             ggml_backend_tensor_set(t_ac, ac_in.data(), 0, ac_in.size() * sizeof(int32_t));
             ggml_backend_tensor_set(t_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
 
-            ggml_init_params gip = { arena.size(), arena.data(), true };
-            ggml_context *   ctx = ggml_init(gip);
-            ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
-            ggml_tensor *    loss = nullptr;
-            build_graph(ctx, gf, P, Fin, n_sup, &loss);
-            std::vector<ggml_tensor *> gacc;
-            lm_optim_fill_gacc(&opt, gf, &gacc);
-            ggml_build_backward_expand(ctx, gf, gacc.data());
-
-            {
-                LmLabelGuard guard(t_lab, tgt.data(), (int) n_sup, (int) SL);
-                ggml_backend_sched_reset(sched);
-                if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
-                    fprintf(stderr, "[mm3-lm-train] graph compute failed (lower --max-frames?)\n");
-                    rc = 1;
-                } else {
-                    float ce = 0.0f;
-                    ggml_backend_tensor_get(loss, &ce, 0, sizeof(float));
-                    acc_loss += (double) ce;
-                    running += (double) ce;
-                    n_micro++;
+            double ce = 0.0;
+            bool   ok = false;
+            if (a.ckpt) {
+                // lm_ckpt_micro_step reads S from tokens.size() and the trained
+                // span from (n_masked, s_tr); the ids themselves are never read
+                // because the embedding is overridden.
+                embed_ctx.P   = P;
+                embed_ctx.Fin = Fin;
+                LmSample smp;
+                smp.tokens.assign((size_t) S, 0);
+                smp.targets  = tgt;
+                smp.n_masked = (int) P;
+                smp.s_tr     = (int) n_sup;
+                ok = lm_ckpt_micro_step(ckpt_run, smp, true, &ce);
+            } else {
+                ggml_init_params gip = { arena.size(), arena.data(), true };
+                ggml_context *   ctx = ggml_init(gip);
+                ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 65536, true);
+                ggml_tensor *    loss = nullptr;
+                build_graph(ctx, gf, P, Fin, n_sup, &loss);
+                std::vector<ggml_tensor *> gacc;
+                lm_optim_fill_gacc(&opt, gf, &gacc);
+                ggml_build_backward_expand(ctx, gf, gacc.data());
+                {
+                    LmLabelGuard guard(t_lab, tgt.data(), (int) n_sup, (int) SL);
+                    ggml_backend_sched_reset(sched);
+                    ok = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+                    if (ok) {
+                        float lv = 0.0f;
+                        ggml_backend_tensor_get(loss, &lv, 0, sizeof(float));
+                        ce = (double) lv;
+                    }
                 }
+                ggml_free(ctx);
             }
-            ggml_free(ctx);
+            if (!ok) {
+                fprintf(stderr, "[mm3-lm-train] micro-step failed (lower --max-frames?)\n");
+                rc = 1;
+            } else {
+                acc_loss += ce;
+                running  += ce;
+                n_micro++;
+            }
         }
         if (rc) break;
 
@@ -525,6 +663,9 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
             (long long) ((ggml_time_ms() - t_start) / 1000));
 
     ggml_backend_sched_free(sched);
+    if (a.ckpt) {
+        lm_ckpt_free(&ckpt_st);
+    }
     ggml_backend_buffer_free(buf_static);
     ggml_free(ctx_static);
     lm_optim_free(&opt);

@@ -1272,6 +1272,8 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--warmup"))        a.warmup       = atoi(next("--warmup"));
         else if (!strcmp(argv[i], "--max-frames"))    a.max_frames   = atoll(next("--max-frames"));
         else if (!strcmp(argv[i], "--crop-mode"))     a.crop_mode    = next("--crop-mode");
+        else if (!strcmp(argv[i], "--no-ckpt"))       a.ckpt         = false;
+        else if (!strcmp(argv[i], "--ckpt-chunk"))    a.ckpt_chunk   = atoi(next("--ckpt-chunk"));
         else if (!strcmp(argv[i], "--grad-accum"))    a.grad_accum   = atoi(next("--grad-accum"));
         else if (!strcmp(argv[i], "--seed"))          a.seed         = atoi(next("--seed"));
         else if (!strcmp(argv[i], "--trigger"))       a.trigger      = next("--trigger");

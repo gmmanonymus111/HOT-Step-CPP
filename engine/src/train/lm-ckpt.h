@@ -167,7 +167,31 @@ struct LmCkptCfg {
     // Lever A (--weights bf16). Default OFF => lm_ckpt_layer_opts() returns a
     // default LmLayerOpts and every graph below is emitted verbatim (§6.0).
     bool weights_bf16   = false;
+
+    // ── OUTPUT-HEAD OVERRIDE (MiniMax-Music3) ──────────────────────────────
+    //
+    // ACE's planner LM ties its head to embed_tokens and scores the whole
+    // vocabulary. MM3 ships an UNTIED head and only ever scores a contiguous
+    // slice of it (semantic codes + EOS: 16,389 of 200,000 rows), so the
+    // chunked CE head takes a weight, a first row and a row count.
+    //
+    // ALL THREE DEFAULT TO THE TIED FULL-VOCAB CASE, so an ACE run emits
+    // byte-identical graphs — the same discipline as Lever A above. Note this
+    // is the PARENT tensor plus an offset, not a pre-made view: t_embT is
+    // built by a host-side transpose that reads the parent's buffer directly.
+    ggml_tensor * head_w    = nullptr;  // nullptr => lm->embed_tokens
+    int64_t       head_row0 = 0;        // first scored row of head_w
+    int           head_v    = 0;        // 0 => cfg.vocab_size
 };
+
+// The scored head and its width, resolved. One place, so no call site can
+// disagree about which of the two cases it is in.
+static inline ggml_tensor * lm_ckpt_head_src(const Qwen3LM * lm, const LmCkptCfg & cfg) {
+    return cfg.head_w ? cfg.head_w : lm->embed_tokens;
+}
+static inline int lm_ckpt_head_width(const Qwen3LM * lm, const LmCkptCfg & cfg) {
+    return cfg.head_v > 0 ? cfg.head_v : lm->cfg.vocab_size;
+}
 
 // Each group gets its OWN backend buffer because ggml_backend_buffer_clear()
 // is whole-buffer.
@@ -275,8 +299,10 @@ static bool lm_ckpt_check_base(Qwen3LM * lm, std::string * err) {
 // Allocate after sample building, when S_max / V are known.
 static bool lm_ckpt_alloc(LmCkptState * st, Qwen3LM * lm, const LmCkptCfg & cfg, std::string * err) {
     const Qwen3LMConfig & c = lm->cfg;
-    const int             L = c.n_layers, H = c.hidden_size, V = c.vocab_size;
+    const int             L = c.n_layers, H = c.hidden_size;
     const int             D = c.head_dim, Nh = c.n_heads;
+    // V is the SCORED width, which is the vocabulary only in the tied case.
+    const int             V = lm_ckpt_head_width(lm, cfg);
 
     st->lm  = lm;
     st->cfg = cfg;
@@ -343,7 +369,7 @@ static bool lm_ckpt_alloc(LmCkptState * st, Qwen3LM * lm, const LmCkptCfg & cfg,
 
     // Dtype stays the base's own (D4): the chunked head never runs out_prod on
     // it, so no F32 copy is needed — 1,060 MiB instead of 2,120 MiB at 4B.
-    st->t_embT = ggml_new_tensor_2d(st->ctx_embt, lm->embed_tokens->type, V, H);
+    st->t_embT = ggml_new_tensor_2d(st->ctx_embt, lm_ckpt_head_src(lm, cfg)->type, V, H);
     ggml_set_name(st->t_embT, "ckpt.embT");
     ggml_set_input(st->t_embT);
 
@@ -383,19 +409,28 @@ static bool lm_ckpt_alloc(LmCkptState * st, Qwen3LM * lm, const LmCkptCfg & cfg,
 // preserved. PyTorch gets lm_head.weight.T free as a cuBLAS transa flag; ggml's
 // mul_mat reduces over ne0 only, so a physical transpose is unavoidable (§6.2).
 static bool lm_ckpt_build_embed_t(LmCkptState * st, std::string * err) {
-    Qwen3LM * lm = st->lm;
-    const int H = lm->cfg.hidden_size, V = lm->cfg.vocab_size;
-    if (st->t_embT->type != lm->embed_tokens->type) {
+    Qwen3LM *     lm  = st->lm;
+    ggml_tensor * src_t = lm_ckpt_head_src(lm, st->cfg);
+    const int     H   = lm->cfg.hidden_size;
+    const int     V   = lm_ckpt_head_width(lm, st->cfg);
+    const int64_t row0 = st->cfg.head_w ? st->cfg.head_row0 : 0;
+    if (st->t_embT->type != src_t->type) {
         *err = "embedT dtype mismatch";
         return false;
     }
-    const size_t ts = ggml_type_size(lm->embed_tokens->type);
-    if (ggml_blck_size(lm->embed_tokens->type) != 1) {
-        *err = "embed_tokens is block-quantized — cannot transpose";
+    const size_t ts = ggml_type_size(src_t->type);
+    if (ggml_blck_size(src_t->type) != 1) {
+        *err = "the output head is block-quantized — cannot transpose";
         return false;
     }
-    std::vector<uint8_t> src(ggml_nbytes(lm->embed_tokens)), dst(ggml_nbytes(st->t_embT));
-    ggml_backend_tensor_get(lm->embed_tokens, src.data(), 0, src.size());
+    if (row0 + (int64_t) V > src_t->ne[1]) {
+        *err = "the scored head slice runs past the head tensor";
+        return false;
+    }
+    // Read only the scored rows. In the tied case row0 == 0 and V == vocab, so
+    // this is the whole tensor and the behaviour is unchanged.
+    std::vector<uint8_t> src((size_t) V * (size_t) H * ts), dst(ggml_nbytes(st->t_embT));
+    ggml_backend_tensor_get(src_t, src.data(), (size_t) row0 * (size_t) H * ts, src.size());
     for (int64_t v = 0; v < V; v++) {
         for (int64_t h = 0; h < H; h++) {
             memcpy(&dst[(size_t) (h * (int64_t) V + v) * ts], &src[(size_t) (v * (int64_t) H + h) * ts], ts);
@@ -462,6 +497,16 @@ struct LmCkptRun {
     // chunking from the BF16 GEMM). Production leaves the head in the base's
     // own dtype, exactly as Side-Step does.
     bool          head_f32_embed = false;
+
+    // ── INPUT-EMBEDDING OVERRIDE (MiniMax-Music3) ──────────────────────────
+    //
+    // ACE's LM is fed token ids and P1 is `get_rows(embed_tokens, t_tok)`. An
+    // MM3 audio frame is (token_embd[semantic] + SUM_c audio_embd[code_c]) *
+    // num_codebooks^-0.5, built from two tables in two different FILES, so the
+    // caller builds the [H, S] input itself. nullptr keeps the token path
+    // exactly as it was; `user` carries whatever the builder needs.
+    ggml_tensor * (*embed_build)(ggml_context * ctx, LmCkptRun & r, int S) = nullptr;
+    void *          embed_user = nullptr;
 };
 
 static inline void lm_ckpt_upload_mask(LmCkptRun & r, int S) {
@@ -489,7 +534,8 @@ static inline LmLayerOpts lm_ckpt_layer_opts(const LmCkptState & st) {
 static bool lm_ckpt_head_chunked(LmCkptRun & r, const LmSample & s, bool count_loss, double * ce_out) {
     LmCkptState &         st   = *r.st;
     const Qwen3LMConfig & c    = r.lm->cfg;
-    const int             H    = c.hidden_size, V = c.vocab_size;
+    const int             H    = c.hidden_size;
+    const int             V    = lm_ckpt_head_width(r.lm, st.cfg);   // scored width, not the vocab
     const int             s_tr = s.s_tr, CH = st.cfg.chunk;
     const int             GA   = std::max(1, r.grad_accum);
 
@@ -513,7 +559,12 @@ static bool lm_ckpt_head_chunked(LmCkptRun & r, const LmSample & s, bool count_l
 
         const size_t  col = (size_t) (s.n_masked - 1 + i);  // [P] L6a offset
         ggml_tensor * hd  = ggml_cont(ctx, ggml_view_2d(ctx, st.t_H, H, Sc, st.t_H->nb[1], col * st.t_H->nb[1]));
-        ggml_tensor * emb = r.head_f32_embed ? qwen3_f32(ctx, r.lm->embed_tokens) : r.lm->embed_tokens;
+        ggml_tensor * hw  = lm_ckpt_head_src(r.lm, st.cfg);
+        if (st.cfg.head_w) {
+            hw = ggml_view_2d(ctx, hw, hw->ne[0], (int64_t) V, hw->nb[1],
+                              (size_t) st.cfg.head_row0 * hw->nb[1]);
+        }
+        ggml_tensor * emb = r.head_f32_embed ? qwen3_f32(ctx, hw) : hw;
         ggml_tensor * ebt = r.head_f32_embed ? qwen3_f32(ctx, st.t_embT) : st.t_embT;
         ggml_tensor * lg  = ggml_mul_mat(ctx, emb, hd);  // [V, Sc]
         ggml_tensor * lb  = ggml_view_2d(ctx, st.t_labc, V, Sc, st.t_labc->nb[1], 0);
@@ -554,6 +605,10 @@ static bool lm_ckpt_head_chunked(LmCkptRun & r, const LmSample & s, bool count_l
 static bool lm_ckpt_head_naive(LmCkptRun & r, const LmSample & s, bool count_loss, double * ce_out) {
     LmCkptState &         st   = *r.st;
     const Qwen3LMConfig & c    = r.lm->cfg;
+    // Tied-head only, on purpose: this is the self-test rung that isolates
+    // checkpointing from chunked loss, and it has no reason to grow a second
+    // case. Loud rather than silently scoring the wrong rows.
+    GGML_ASSERT(st.cfg.head_w == nullptr && "lm_ckpt_head_naive is tied-head only");
     const int             H    = c.hidden_size, V = c.vocab_size;
     const int             s_tr = s.s_tr;
     GGML_ASSERT(r.t_lab_full != nullptr);
@@ -652,7 +707,11 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
 
     // ── P0: inputs ───────────────────────────────────────────────────────
     lm_ckpt_upload_mask(r, S);
-    ggml_backend_tensor_set(r.t_tok, s.tokens.data(), 0, (size_t) S * 4);
+    // `tokens` still SIZES the sequence, but with an embedding override its
+    // contents are meaningless and t_tok is never read — do not pretend.
+    if (!r.embed_build) {
+        ggml_backend_tensor_set(r.t_tok, s.tokens.data(), 0, (size_t) S * 4);
+    }
     for (int i = 0; i < S; i++) {
         st.pos_scratch[(size_t) i] = i;
     }
@@ -682,11 +741,13 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
         ggml_init_params ip  = { st.arena.size(), st.arena.data(), true };
         ggml_context *   ctx = ggml_init(ip);
         ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, 64, /*grads=*/false);
-        ggml_tensor *    tv  = ggml_view_1d(ctx, r.t_tok, S, 0);
         // get_rows on a BF16 source yields F32 (exact upcast) and needs no
         // backward: embed_tokens is frozen and GET_ROWS' row indices are on
-        // ggml's "not differentiable" list.
-        ggml_tensor * h0 = ggml_get_rows(ctx, lm.embed_tokens, tv);
+        // ggml's "not differentiable" list. The override (MM3 frames) is held
+        // to the same contract — it must be frozen and gradient-free.
+        ggml_tensor * h0 = r.embed_build
+                             ? r.embed_build(ctx, r, S)
+                             : ggml_get_rows(ctx, lm.embed_tokens, ggml_view_1d(ctx, r.t_tok, S, 0));
         ggml_build_forward_expand(gf,
                                   ggml_cpy(ctx, h0, ggml_view_2d(ctx, st.C[(size_t) Lo], H, S,
                                                                  st.C[(size_t) Lo]->nb[1], 0)));
