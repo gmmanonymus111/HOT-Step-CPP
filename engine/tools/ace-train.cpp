@@ -17,6 +17,7 @@
 #include "minimax/mm3-cond-graph.h"
 #include "minimax/mm3-rvq-encode.h"  // audio -> RVQ codes (open-RVQ 169M)
 #include "train/mm3-lm-load.h"          // MM3 LM -> the ACE LM trainer's struct
+#include "train/mm3-lm-train-run.h"     // MM3 LM LoRA trainer
 #include "train/mm3-dit-train-run.h"   // MM3 flow-DiT LoRA trainer
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
@@ -119,6 +120,15 @@ static void print_usage(void) {
             "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-lm-train  MiniMax-Music3 LM LoRA training. --lm --depth --manifest\n"
+            "                --captions --codes --out, defaults = the validated recipe\n"
+            "                (r256/a256, lr 8e-5, 800 steps, ckpt every 100, max-frames\n"
+            "                1500, random crops). [--optimizer adamw|muon] with the same\n"
+            "                --muon-* knobs as train-lm; the Muon/AdamW split is logged,\n"
+            "                because a run that classified ZERO parameters onto Muon\n"
+            "                trains as AdamW and says nothing about it.\n"
+            "                Checkpoints are PEFT dirs + a picker sidecar: point --out at\n"
+            "                <adapters>/mm3-lm-adapters/<run> and they appear in the UI.\n"
             "  mm3-lm-loss   Teacher-forced training forward, scored. --lm --depth --codes\n"
             "                --caption [--lyrics] [--max-frames N] [--crop-offset N]\n"
             "                [--target-shift N] [--no-prompt]  (falsification diagnostics).\n"
@@ -1221,6 +1231,77 @@ static int cmd_mm3_encode(int argc, char ** argv) {
 
     mm3_enc_free(&enc);
     return rc;
+}
+
+// ─── mm3-lm-train ───────────────────────────────────────────────────────────
+//
+// S2 rung 3: the MiniMax-Music3 LM LoRA trainer. Implementation and the design
+// notes live in train/mm3-lm-train-run.h; this is argument parsing.
+//
+//   ace-train mm3-lm-train --lm <mm3-lm-*.gguf> --depth <mm3-depth-*.gguf>
+//       --manifest <mm3_preprocess.json> --captions <dataset dir>
+//       --codes <dir from mm3-codes> --out <dir>
+//       [--rank 256] [--alpha 256] [--lr 8e-5] [--steps 800] [--save-every 100]
+//       [--max-frames 1500] [--crop-mode random|beginning] [--grad-accum 1]
+//       [--optimizer adamw|muon] [--muon-*] [--trigger word] [--seed 42]
+//
+// Defaults ARE the validated recipe (docs/plans/2026-08-20-mm3-training-studio.md):
+// r256/alpha256, lr 8e-5 constant, 800 steps, checkpoint every 100, max_frames
+// 1500, random crops.
+static int cmd_mm3_lm_train(int argc, char ** argv) {
+    MM3LmTrainArgs a;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--lm"))            a.lm_path      = next("--lm");
+        else if (!strcmp(argv[i], "--depth"))         a.depth_path   = next("--depth");
+        else if (!strcmp(argv[i], "--manifest"))      a.manifest     = next("--manifest");
+        else if (!strcmp(argv[i], "--captions"))      a.captions_dir = next("--captions");
+        else if (!strcmp(argv[i], "--codes"))         a.codes_dir    = next("--codes");
+        else if (!strcmp(argv[i], "--out"))           a.out_dir      = next("--out");
+        else if (!strcmp(argv[i], "--rank"))          a.rank         = atoi(next("--rank"));
+        else if (!strcmp(argv[i], "--alpha"))         a.alpha        = atoi(next("--alpha"));
+        else if (!strcmp(argv[i], "--lr"))            a.lr           = atof(next("--lr"));
+        else if (!strcmp(argv[i], "--weight-decay"))  a.weight_decay = atof(next("--weight-decay"));
+        else if (!strcmp(argv[i], "--grad-clip"))     a.grad_clip    = atof(next("--grad-clip"));
+        else if (!strcmp(argv[i], "--steps"))         a.steps        = atoi(next("--steps"));
+        else if (!strcmp(argv[i], "--save-every"))    a.save_every   = atoi(next("--save-every"));
+        else if (!strcmp(argv[i], "--warmup"))        a.warmup       = atoi(next("--warmup"));
+        else if (!strcmp(argv[i], "--max-frames"))    a.max_frames   = atoll(next("--max-frames"));
+        else if (!strcmp(argv[i], "--crop-mode"))     a.crop_mode    = next("--crop-mode");
+        else if (!strcmp(argv[i], "--grad-accum"))    a.grad_accum   = atoi(next("--grad-accum"));
+        else if (!strcmp(argv[i], "--seed"))          a.seed         = atoi(next("--seed"));
+        else if (!strcmp(argv[i], "--trigger"))       a.trigger      = next("--trigger");
+        else if (!strcmp(argv[i], "--dataset-name"))  a.dataset_name = next("--dataset-name");
+        else if (!strcmp(argv[i], "--optimizer"))     a.optimizer    = next("--optimizer");
+        else if (!strcmp(argv[i], "--muon-lr-scale")) a.muon_lr_scale = (float) atof(next("--muon-lr-scale"));
+        else if (!strcmp(argv[i], "--muon-momentum")) a.muon_momentum = (float) atof(next("--muon-momentum"));
+        else if (!strcmp(argv[i], "--muon-ns-steps")) a.muon_ns_steps = atoi(next("--muon-ns-steps"));
+        else if (!strcmp(argv[i], "--muon-min-dim"))  a.muon_min_dim  = atoi(next("--muon-min-dim"));
+        else if (!strcmp(argv[i], "--muon-bucket"))   a.muon_bucket   = atoi(next("--muon-bucket"));
+        else if (!strcmp(argv[i], "--muon-nesterov")) a.muon_nesterov = strcmp(next("--muon-nesterov"), "off") != 0;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (a.lm_path.empty() || a.depth_path.empty() || a.manifest.empty() || a.captions_dir.empty() ||
+        a.codes_dir.empty() || a.out_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-lm-train: --lm, --depth, --manifest, --captions, --codes and --out "
+                        "are all required\n");
+        return 2;
+    }
+    if (a.optimizer != "adamw" && a.optimizer != "muon") {
+        fprintf(stderr, "ace-train mm3-lm-train: --optimizer must be adamw or muon\n");
+        return 2;
+    }
+    if (!pm_mkdir_p(a.out_dir)) {
+        fprintf(stderr, "ace-train mm3-lm-train: cannot create %s\n", a.out_dir.c_str());
+        return 1;
+    }
+    ggml_time_init();
+    return mm3_lm_train_main(a);
 }
 
 // ─── mm3-lm-loss ────────────────────────────────────────────────────────────
@@ -3665,6 +3746,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-encode")) {
         return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-lm-train")) {
+        return cmd_mm3_lm_train(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "mm3-lm-loss")) {
         return cmd_mm3_lm_loss(argc - 1, argv + 1);

@@ -165,6 +165,14 @@ static bool mm3_train_lm_load(MM3TrainLm * t, const char * path, std::string * e
         if (err) *err = "the semantic slice runs past the vocabulary";
         return false;
     }
+    // The training slice is [eos_audio, semantic_offset+size) and is only ONE
+    // contiguous range because EOS sits below the semantic block. A checkpoint
+    // that moved it would silently train against the wrong rows.
+    if (t->eos_audio >= t->semantic_vocab_offset) {
+        gf_close(&gf);
+        if (err) *err = "eos_audio is not below semantic_vocab_offset; the training slice is not contiguous";
+        return false;
+    }
 
     if (!t->lm.backend) {
         BackendPair bp  = backend_init("MM3TrainLM");
@@ -285,9 +293,45 @@ static bool mm3_train_lm_load_audio_embd(MM3TrainLm * t, const char * depth_path
 }
 
 /** The semantic slice of the untied head, as a VIEW — no copy, no gather.
- *  This is the whole "chunked CE" lever: 16384 rows instead of 200000. */
+ *  This is the whole "chunked CE" lever: 16384 rows instead of 200000.
+ *  Used for SCORING (mm3-lm-loss), where EOS is not supervised. */
 static ggml_tensor * mm3_lm_train_sem_head(ggml_context * ctx, const MM3TrainLm & t) {
     ggml_tensor * W = t.lm_head;                        // [H, V]
     return ggml_view_2d(ctx, W, W->ne[0], (int64_t) t.semantic_vocab_size, W->nb[1],
                         (size_t) t.semantic_vocab_offset * W->nb[1]);
+}
+
+// ── The TRAINING output slice: semantic codes + EOS ─────────────────────────
+//
+// The AR loop masks its logits to "semantic + EOS" — 16,385 live candidates out
+// of 200,000 rows. `eos_audio` (151670) sits just BELOW `semantic_vocab_offset`
+// (151675), so [eos_audio, semantic_offset + semantic_size) is one CONTIGUOUS
+// range of 16,389 rows: a single view, no gather, no copy.
+//
+// The four rows in between are the caption/lyric delimiters. They ride along in
+// the softmax denominator, which is a deliberate, stated approximation: at
+// inference they are masked out, and the base already puts negligible mass on a
+// caption delimiter at an audio position. The exact alternative is a
+// concatenated [H, 16385] head built ONCE outside the graph (134 MB at f16) —
+// the right fix if this is ever measured to matter, which it has not been.
+
+static inline int64_t mm3_lm_train_slice_size(const MM3TrainLm & t) {
+    return (int64_t) t.semantic_vocab_offset + (int64_t) t.semantic_vocab_size - (int64_t) t.eos_audio;
+}
+
+static ggml_tensor * mm3_lm_train_out_slice(ggml_context * ctx, const MM3TrainLm & t) {
+    ggml_tensor * W = t.lm_head;                        // [H, V]
+    return ggml_view_2d(ctx, W, W->ne[0], mm3_lm_train_slice_size(t), W->nb[1],
+                        (size_t) t.eos_audio * W->nb[1]);
+}
+
+/** Row of a semantic CODE (0..semantic_vocab_size) within the training slice. */
+static inline int32_t mm3_lm_train_slice_index(const MM3TrainLm & t, int32_t sem_code) {
+    return (int32_t) (t.semantic_vocab_offset - t.eos_audio) + sem_code;
+}
+
+/** Row of the audio-end token within the training slice — 0 by construction,
+ *  since the slice starts AT it. */
+static inline int32_t mm3_lm_train_slice_eos(const MM3TrainLm &) {
+    return 0;
 }
