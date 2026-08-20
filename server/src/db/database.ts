@@ -246,6 +246,10 @@ export function initDb(): void {
       check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='default_language'`,
       alter: `ALTER TABLE training_datasets ADD COLUMN default_language TEXT NOT NULL DEFAULT 'english'`,
     },
+    {
+      check: `SELECT COUNT(*) as c FROM pragma_table_info('training_datasets') WHERE name='user_id'`,
+      alter: `ALTER TABLE training_datasets ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
+    },
   ];
   for (const m of trainingMigrations) {
     const row = db.prepare(m.check).get() as { c: number };
@@ -400,6 +404,19 @@ export function initDb(): void {
   for (const sql of lireekUserIndexes) {
     try { db.exec(sql); } catch { /* index already exists */ }
   }
+
+  // ── Training Studio user-isolation migration ─────────────────────────────
+  // Migrate existing training_datasets rows to first admin user (or first user).
+  if (targetUserId) {
+    const needsMigration = db.prepare(
+      `SELECT COUNT(*) as c FROM training_datasets WHERE user_id = ''`
+    ).get() as any;
+    if (needsMigration.c > 0) {
+      db.prepare(`UPDATE training_datasets SET user_id = ? WHERE user_id = ''`).run(targetUserId);
+      console.log(`[DB] Migration: assigned ${needsMigration.c} training_datasets rows to user ${targetUserId}`);
+    }
+  }
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_training_datasets_user ON training_datasets(user_id)"); } catch { /* exists */ }
 
   // ── One-time migration: import data from lireek.db if it exists ───────────
   migrateLireekData();

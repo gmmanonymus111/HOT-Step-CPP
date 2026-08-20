@@ -18,7 +18,7 @@ import { randomUUID } from 'crypto';
 import { config } from '../../config.js';
 import { pushLog } from '../../routes/logs.js';
 import { aceClient } from '../aceClient.js';
-import { getDataset } from './datasetsRepo.js';
+
 import { writePreview, type PreviewAudio } from './auditionStore.js';
 import {
   renderSideThroughDit, resolveAuditionInputs, runOneSide, type SideOutcome,
@@ -26,6 +26,7 @@ import {
 import {
   emitJob, emitProgress, finishJob, isCancelled, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
+import * as repo from './datasetsRepo.js';
 import type { AuditionOptions, AuditionPreview, AuditionSideResult } from './types.js';
 
 function log(job: TrainingJob, level: 'info' | 'warn' | 'error', message: string): void {
@@ -71,7 +72,7 @@ export async function runAuditionJob(job: TrainingJob): Promise<void> {
   };
 
   try {
-    const ds = getDataset(job.datasetId);
+    const ds = repo.getDatasetById(job.datasetId);
     if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
     const opts = (job.opts || {}) as AuditionOptions;

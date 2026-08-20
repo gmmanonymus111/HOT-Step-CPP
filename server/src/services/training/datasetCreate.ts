@@ -41,7 +41,7 @@ function isWritableDir(dir: string): boolean {
   }
 }
 
-export async function createDatasetFromFolder(input: CreateDatasetInput): Promise<TrainingDatasetDetail> {
+export async function createDatasetFromFolder(input: CreateDatasetInput, userId: string): Promise<TrainingDatasetDetail> {
   // Typed at the boundary, untyped inside: these are the route's own defensive
   // reads of a raw request body and they must keep accepting anything.
   const body = (input || {}) as Record<string, any>;
@@ -62,7 +62,7 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
   if (!isWritableDir(sourceDir)) {
     throw new DatasetCreateError(400, 'sourceDir is not writable — sidecars cannot be saved there');
   }
-  if (repo.getDatasetBySourceDir(sourceDir)) {
+  if (repo.getDatasetBySourceDir(userId, sourceDir)) {
     throw new DatasetCreateError(409, 'A dataset already exists for this folder');
   }
 
@@ -72,7 +72,7 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
     throw new DatasetCreateError(400, 'No audio files found in sourceDir');
   }
 
-  const slug = uniqueSlug(slugify(name), repo.listSlugs());
+  const slug = uniqueSlug(slugify(name), repo.listSlugs(userId));
 
   // §8.5 — a folder that already has a dataset.json owns these settings.
   // Seeding the row from it is what makes "existing labels will be imported
@@ -106,6 +106,7 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
     defaultLanguage: typeof body.defaultLanguage === 'string' && body.defaultLanguage.trim()
       ? body.defaultLanguage.trim().toLowerCase()
       : (metaString(priorMeta, 'default_language') || 'english'),
+    userId,
     sampleCount: preview.audioFiles,
     labeledCount: preview.withCaption,
     excludedCount: 0,
@@ -116,8 +117,8 @@ export async function createDatasetFromFolder(input: CreateDatasetInput): Promis
     updatedAt: now,
   };
 
-  repo.insertDataset(row);
-  fs.mkdirSync(labelsDir(slug), { recursive: true });
+  repo.insertDataset(row, userId);
+  fs.mkdirSync(labelsDir(userId, slug), { recursive: true });
 
   const detail = await detailFor(row);
   syncCounters(row, detail.samples);

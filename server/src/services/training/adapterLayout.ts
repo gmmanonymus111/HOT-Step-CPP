@@ -49,13 +49,13 @@ export function lmSizeFromSlug(dirName: string): LmSize | '' {
 
 /** Every folder GET /api/adapters/lm scans: the three size roots plus the
  *  legacy flat `lm/` so a pre-migration install keeps working. */
-export function lmAdapterRoots(): Array<{ dir: string; size: LmSize | '' }> {
+export function lmAdapterRoots(userId: string): Array<{ dir: string; size: LmSize | '' }> {
   const root = config.aceServer.adapters;
   return [
-    { dir: path.join(root, 'lm-06b'), size: '0.6B' },
-    { dir: path.join(root, 'lm-17b'), size: '1.7B' },
-    { dir: path.join(root, 'lm-4b'), size: '4B' },
-    { dir: path.join(root, 'lm'), size: '' },   // legacy — size read off the -<size> suffix
+    { dir: path.join(root, userId, 'lm-06b'), size: '0.6B' },
+    { dir: path.join(root, userId, 'lm-17b'), size: '1.7B' },
+    { dir: path.join(root, userId, 'lm-4b'), size: '4B' },
+    { dir: path.join(root, userId, 'lm'), size: '' },   // legacy — size read off the -<size> suffix
   ];
 }
 

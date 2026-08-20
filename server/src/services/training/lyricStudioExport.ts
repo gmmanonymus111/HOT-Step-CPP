@@ -91,8 +91,8 @@ function findLmAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
   let best: { hit: LyricStudioAdapterHit; mtime: number } | null = null;
   for (const size of LM_SIZES) {
     const candidates = [
-      latestRunDir(lmArtistDirFor(ds.slug, size)),
-      path.join(adapterLmRoot(), `${safeAdapterName(ds.slug)}-${size}`),
+      latestRunDir(lmArtistDirFor(ds.userId, ds.slug, size)),
+      path.join(adapterLmRoot(ds.userId), `${safeAdapterName(ds.slug)}-${size}`),
     ];
     for (const dir of candidates) {
       if (!dir) continue;
@@ -113,7 +113,7 @@ function findLmAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
 /** The dataset's newest trained DiT adapter, resolved exactly the way the
  *  Train panel resolves it (newest preprocess variant → base → latest run). */
 function findDitAdapter(ds: TrainingDatasetRow): LyricStudioAdapterHit | null {
-  const status = readTrainDitStatus(ds, {});
+  const status = readTrainDitStatus(ds.userId, ds, {});
   if (!status.adapterExists) return null;
   return {
     path: status.adapterDir,

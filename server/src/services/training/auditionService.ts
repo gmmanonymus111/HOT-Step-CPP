@@ -118,10 +118,10 @@ export interface CodesRow {
  * `-([0-9a-f]{8}).safetensors` pair trainLmStatus.countCodes matches on. Falls
  * back to the id embedded in `row.file` when `_id` is missing (legacy rows).
  */
-export function findCodesRow(slug: string, variantKey: string, sampleId: string): CodesRow | null {
+export function findCodesRow(userId: string, slug: string, variantKey: string, sampleId: string): CodesRow | null {
   const id8 = String(sampleId ?? '').toLowerCase().slice(0, 8);
   if (!id8 || !variantKey) return null;
-  const codesPath = path.join(tensorsRoot(slug), variantKey, CODES_FILE);
+  const codesPath = path.join(tensorsRoot(userId, slug), variantKey, CODES_FILE);
   let raw = '';
   try {
     if (!fs.existsSync(codesPath)) return null;
@@ -215,12 +215,12 @@ function pickRenderDit(detokDit: string): string {
  * by Rob). An explicit lmModel that contradicts the adapter's size is a 400.
  */
 export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOptions): ResolvedAudition {
-  const variantKey = (typeof opts.variantKey === 'string' && variantExists(ds.slug, opts.variantKey))
+  const variantKey = (typeof opts.variantKey === 'string' && variantExists(ds.userId, ds.slug, opts.variantKey))
     ? opts.variantKey
-    : newestVariantKey(ds.slug);
+    : newestVariantKey(ds.userId, ds.slug);
 
   const sampleId = str(opts.sampleId);
-  const row = sampleId ? findCodesRow(ds.slug, variantKey, sampleId) : null;
+  const row = sampleId ? findCodesRow(ds.userId, ds.slug, variantKey, sampleId) : null;
 
   // The literal strings the trainer conditioned on (C12a) fill the gaps, but
   // never override what the user actually typed. The fallback can only fire when
@@ -250,7 +250,7 @@ export function resolveAuditionInputs(ds: TrainingDatasetRow, opts: AuditionOpti
     ? Math.trunc(Number(opts.seed))
     : Math.floor(Math.random() * 2 ** 31);
 
-  const ditModel = str(opts.ditModel) || variantDitModel(ds.slug, variantKey) || '';
+  const ditModel = str(opts.ditModel) || variantDitModel(ds.userId, ds.slug, variantKey) || '';
 
   const sides: AuditionSideSpec[] = (Array.isArray(opts.sides) ? opts.sides : []).map(s => ({
     slot: s.slot === 'adapter' ? 'adapter' : 'base',
@@ -566,8 +566,8 @@ export async function decodeStoredCodes(
   sampleId: string,
   format: 'wav16' | 'mp3',
 ): Promise<SampleAuditionResponse> {
-  const variantKey = newestVariantKey(ds.slug);
-  const row = findCodesRow(ds.slug, variantKey, sampleId);
+  const variantKey = newestVariantKey(ds.userId, ds.slug);
+  const row = findCodesRow(ds.userId, ds.slug, variantKey, sampleId);
 
   let codesCsv = '';
   let source: 'lm_codes' | 'label' = 'lm_codes';
@@ -586,7 +586,7 @@ export async function decodeStoredCodes(
     keyscale = row.keyscale;
     timesignature = row.timesignature;
   } else {
-    const label = readLabel(ds.slug, sampleId);
+    const label = readLabel(ds.userId, ds.slug, sampleId);
     const stored = str(label?.audioCodes).trim();
     if (stored) {
       codesCsv = stored;
@@ -605,7 +605,7 @@ export async function decodeStoredCodes(
   }
 
   const codesCount = codesCsv.split(',').filter(t => t.trim().length > 0).length;
-  const ditModel = variantDitModel(ds.slug, variantKey) || '';
+  const ditModel = variantDitModel(ds.userId, ds.slug, variantKey) || '';
 
   const t0 = Date.now();
   const buf = await aceClient.codesDecode({

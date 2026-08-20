@@ -272,7 +272,7 @@ export async function buildSamples(
   const warnings = opts?.warnings;
 
   const scanned = dedupeBySidecar(scanAudioFiles(ds.sourceDir, ds.recursive), warnings);
-  const labels = readAllLabels(ds.slug);
+  const labels = readAllLabels(ds.userId, ds.slug);
   const seen = new Set<string>();
   const samples: TrainingSample[] = [];
 

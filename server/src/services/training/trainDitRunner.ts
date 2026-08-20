@@ -21,7 +21,7 @@ import { config } from '../../config.js';
 import { pushLog } from '../../routes/logs.js';
 import { restartAceServer, stopAceServer } from '../aceEngineProcess.js';
 import { aceTrainExe, buildTrainDitArgs, type ResolvedTrainDitOptions } from './aceTrain.js';
-import { getDataset } from './datasetsRepo.js';
+
 import { refreshPresetsForNewRun } from './lyricStudioExport.js';
 import {
   emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
@@ -286,13 +286,15 @@ function countTensorFiles(dir: string): number {
  *  such a base at mirror time — after the engine has already been stopped. */
 const QUANTIZED_NAME_RE = /(^|[^a-z])(i?q\d)/i;
 
+import * as repo from './datasetsRepo.js';
+
 export async function runTrainDitJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
 
   const opts = job.opts as ResolvedTrainDitOptions;
 
   try {
-    const ds = getDataset(job.datasetId);
+    const ds = repo.getDatasetById(job.datasetId);
     if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
     job.status = 'running';

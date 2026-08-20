@@ -60,6 +60,7 @@ const IDLE_WAIT_MS = 10 * 60 * 1000;
 const MAX_LISTED = 20;
 
 interface PipelineState extends PipelineSummary {
+  userId: string;
   /** Set by cancelPipeline; every loop checks it between awaits. */
   cancelRequested: boolean;
   /** Per-item creation inputs — not part of the wire contract. */
@@ -179,8 +180,9 @@ export function listPipelines(): PipelineSummary[] {
   return [...running, ...rest].slice(0, MAX_LISTED);
 }
 
-export function startPipeline(folders: PipelineFolderSpec[], stages: PipelineStage[]): PipelineSummary {
+export function startPipeline(folders: PipelineFolderSpec[], stages: PipelineStage[], userId: string): PipelineSummary {
   const state: PipelineState = {
+    userId,
     id: randomUUID(),
     status: 'running',
     stages: [...stages],
@@ -248,7 +250,7 @@ async function runPipeline(state: PipelineState): Promise<void> {
         cancelItem(item);
         continue;
       }
-      await runItem(state, item, state.specs[i]);
+      await runItem(state, item, state.specs[i], state.userId);
     }
   } catch (err: any) {
     // A throw here would leave the pipeline 'running' forever — the finaliser
@@ -285,7 +287,7 @@ function failItem(state: PipelineState, item: PipelineItem, error: string): void
   console.warn(`[Training] Pipeline ${state.id}: ${item.name} failed — ${error}`);
 }
 
-async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineFolderSpec): Promise<void> {
+async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineFolderSpec, userId: string): Promise<void> {
   // ── 1. dataset create/reuse (§3.3) — direct service calls, not HTTP ────
   const sourceDir = path.resolve(item.sourceDir);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
@@ -293,7 +295,7 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
     return;
   }
 
-  const existing = repo.getDatasetBySourceDir(sourceDir);
+  const existing = repo.getDatasetBySourceDir(userId, sourceDir);
   if (existing) {
     item.datasetId = existing.id;
     item.reusedExisting = true;
@@ -303,10 +305,10 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
     persist(state);
     try {
       const detail = await createDatasetFromFolder({
-        name: item.name,
-        sourceDir,
-        ...(spec.customTag ? { customTag: spec.customTag } : {}),
-      });
+              name: item.name,
+              sourceDir,
+              ...(spec.customTag ? { customTag: spec.customTag } : {}),
+            }, state.userId);
       item.datasetId = detail.id;
     } catch (err: any) {
       failItem(state, item, err?.message || String(err));
@@ -340,7 +342,7 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
     // captions, and the result is silent garbage nobody notices until it is
     // trained. Only a fresh scan can answer this.
     if (result.stage === 'label') {
-      const gate = await labelGateError(item.datasetId);
+      const gate = await labelGateError(item.datasetId, state.userId);
       if (gate) {
         failItem(state, item, gate);
         return;
@@ -354,8 +356,8 @@ async function runItem(state: PipelineState, item: PipelineItem, spec: PipelineF
 }
 
 /** `null` when the dataset has at least one caption after labeling. */
-async function labelGateError(datasetId: string): Promise<string | null> {
-  const ds = repo.getDataset(datasetId);
+async function labelGateError(datasetId: string, userId: string): Promise<string | null> {
+  const ds = repo.getDataset(userId, datasetId);
   if (!ds) return 'Dataset disappeared';
   try {
     const detail = await detailFor(ds);

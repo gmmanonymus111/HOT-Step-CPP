@@ -22,7 +22,7 @@ import {
 } from '../aceEngineProcess.js';
 import { aceTrainExe, buildPreprocessArgs, type ResolvedPreprocessOptions } from './aceTrain.js';
 import { buildSamples } from './datasetScan.js';
-import { getDataset } from './datasetsRepo.js';
+
 import {
   emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
@@ -122,13 +122,15 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, sampleIdByCacheId:
   }
 }
 
+import * as repo from './datasetsRepo.js';
+
 export async function runPreprocessJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
 
   const opts = job.opts as ResolvedPreprocessOptions;
 
   try {
-    const ds = getDataset(job.datasetId);
+    const ds = repo.getDatasetById(job.datasetId);
     if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
     job.status = 'running';

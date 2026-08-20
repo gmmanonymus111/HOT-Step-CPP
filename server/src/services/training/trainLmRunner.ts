@@ -20,7 +20,7 @@ import { config } from '../../config.js';
 import { pushLog } from '../../routes/logs.js';
 import { restartAceServer, stopAceServer } from '../aceEngineProcess.js';
 import { aceTrainExe, buildTrainLmArgs, type ResolvedTrainLmOptions } from './aceTrain.js';
-import { getDataset } from './datasetsRepo.js';
+
 import { refreshPresetsForNewRun } from './lyricStudioExport.js';
 import {
   emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
@@ -289,13 +289,15 @@ function countTensorFiles(dir: string): number {
   }
 }
 
+import * as repo from './datasetsRepo.js';
+
 export async function runTrainLmJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
 
   const opts = job.opts as ResolvedTrainLmOptions;
 
   try {
-    const ds = getDataset(job.datasetId);
+    const ds = repo.getDatasetById(job.datasetId);
     if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
     job.status = 'running';

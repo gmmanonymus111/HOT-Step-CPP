@@ -42,7 +42,7 @@ export async function detailFor(ds: TrainingDatasetRow): Promise<TrainingDataset
   const active = queue.activeJobForDataset(ds.id);
 
   let preprocessedVariants = 0;
-  try { preprocessedVariants = countPreprocessedVariants(ds.slug); } catch { /* stays 0 */ }
+  try { preprocessedVariants = countPreprocessedVariants(ds.userId, ds.slug); } catch { /* stays 0 */ }
 
   return {
     ...ds,
@@ -64,7 +64,7 @@ export function syncCounters(ds: TrainingDatasetRow, samples: TrainingSample[]):
   const excluded = samples.filter(s => s.excluded).length;
   const status = computeStatus(ds, samples);
   try {
-    repo.updateCounters(ds.id, {
+    repo.updateCounters(ds.userId, ds.id, {
       sampleCount: samples.length,
       labeledCount: labeled,
       excludedCount: excluded,

@@ -134,7 +134,7 @@ function reloadSample(ds: TrainingDatasetRow, sample: TrainingSample): TrainingS
     sizeBytes = st.size;
     mtimeMs = st.mtimeMs;
   } catch { /* file vanished — keep the sizes we already had */ }
-  const label = readLabel(ds.slug, sample.sampleId) ?? undefined;
+  const label = readLabel(ds.userId, ds.slug, sample.sampleId) ?? undefined;
   const meta = loadSidecarMetadata(sample.audioPath);
   return sampleFromParts(
     ds.id,
@@ -165,7 +165,8 @@ const SOURCE_TRACKED_FIELDS: ReadonlySet<string> = new Set([
 
 // ── Capabilities (§2.1) ──────────────────────────────────────────────────
 
-router.get('/capabilities', async (_req: Request, res: Response) => {
+router.get('/capabilities', async (req: Request, res: Response) => {
+  const userId = req.user!.userId;
   // Every probe degrades independently — this endpoint never throws upward.
   const caps: TrainingCapabilities = {
     engine: { up: false, ready: engineReady, understandSupported: false, missingModels: [], queueDepth: 0, lmModels: [], defaultLmModel: '' },
@@ -239,7 +240,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
   // model list comes from the cached snapshot so the picker survives the engine
   // being stopped by a running training job.
   try { caps.trainLm.available = !!aceTrainExe(); } catch { /* stays false */ }
-  try { caps.trainLm.adaptersRoot = adapterLmRoot(); } catch { /* stays '' */ }
+  try { caps.trainLm.adaptersRoot = adapterLmRoot(userId); } catch { /* stays '' */ }
   try {
     const snap = getModelSnapshot();
     caps.trainLm.lmModels = snap.lm;
@@ -256,7 +257,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
   // gate is ace-train's own footprint solve, which can only run once the base
   // is loaded and the engine is already down (§4.5).
   try { caps.trainDit.available = !!aceTrainExe(); } catch { /* stays false */ }
-  try { caps.trainDit.adaptersRoot = adapterDitRoot(); } catch { /* stays '' */ }
+  try { caps.trainDit.adaptersRoot = adapterDitRoot(userId); } catch { /* stays '' */ }
 
   res.json(caps);
 });
@@ -265,6 +266,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
 
 router.get('/scan-preview', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const raw = (req.query.path as string) || '';
     if (!raw.trim()) {
       res.status(400).json({ error: 'path is required' });
@@ -293,9 +295,10 @@ router.get('/scan-preview', (req: Request, res: Response) => {
 
 // ── Dataset list / create (§2.3) ─────────────────────────────────────────
 
-router.get('/datasets', (_req: Request, res: Response) => {
+router.get('/datasets', (req: Request, res: Response) => {
   try {
-    res.json({ datasets: repo.listDatasets() });
+    const userId = req.user!.userId;
+    res.json({ datasets: repo.listDatasets(userId) });
   } catch (err: any) {
     console.error(`[Training] List datasets failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -304,10 +307,8 @@ router.get('/datasets', (_req: Request, res: Response) => {
 
 router.post('/datasets', async (req: Request, res: Response) => {
   try {
-    // The whole creation block lives in the service so the batch pipeline can
-    // create datasets without going through HTTP; DatasetCreateError carries the
-    // status this handler used to send inline.
-    const detail = await createDatasetFromFolder((req.body || {}) as CreateDatasetInput);
+    const userId = req.user!.userId;
+    const detail = await createDatasetFromFolder((req.body || {}) as CreateDatasetInput, userId);
     res.status(201).json({ dataset: detail });
   } catch (err: any) {
     if (err instanceof DatasetCreateError) {
@@ -354,6 +355,7 @@ router.get('/jobs/:jobId', (req: Request, res: Response) => {
 
 router.delete('/jobs/:jobId', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const jobId = req.params.jobId as string;
     if (!queue.cancelJob(jobId)) {
       res.status(404).json({ error: 'Job not found' });
@@ -367,6 +369,7 @@ router.delete('/jobs/:jobId', (req: Request, res: Response) => {
 
 router.get('/jobs/:jobId/stream', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const job = queue.getJob(req.params.jobId as string);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -394,6 +397,7 @@ router.get('/jobs/:jobId/stream', (req: Request, res: Response) => {
 // editable set and a shared helper would drag it in.
 router.get('/previews/:previewId/:slot', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const previewId = req.params.previewId;
     const slot = req.params.slot;   // 'base' | 'adapter' | '<slot>-render'
     if (!isPreviewId(previewId) || !isPreviewFileKey(slot)) {
@@ -441,6 +445,7 @@ router.get('/previews/:previewId/:slot', (req: Request, res: Response) => {
 
 router.post('/pipeline', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const body = req.body || {};
     const rawFolders = Array.isArray(body.folders) ? body.folders : [];
     if (rawFolders.length === 0) {
@@ -486,7 +491,7 @@ router.post('/pipeline', (req: Request, res: Response) => {
       return;
     }
 
-    res.status(202).json({ pipeline: startPipeline(folders, stages) });
+    res.status(202).json({ pipeline: startPipeline(folders, stages, userId) });
   } catch (err: any) {
     console.error(`[Training] Pipeline start failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -504,6 +509,7 @@ router.get('/pipeline', (_req: Request, res: Response) => {
 
 router.get('/pipeline/:id', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const pipeline = getPipeline(req.params.id as string);
     if (!pipeline) {
       res.status(404).json({ error: 'Pipeline not found' });
@@ -518,6 +524,7 @@ router.get('/pipeline/:id', (req: Request, res: Response) => {
 
 router.delete('/pipeline/:id', (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     if (!cancelPipeline(req.params.id as string)) {
       res.status(404).json({ error: 'Pipeline not found' });
       return;
@@ -549,6 +556,7 @@ router.get('/defaults', (_req: Request, res: Response) => {
 
 router.put('/defaults', (req: Request, res: Response) => {
   try {
+  const userId = req.user!.userId;
     const body = req.body || {};
     const patch: Partial<TrainingDefaults> = {};
     for (const section of DEFAULTS_SECTIONS) {
@@ -571,7 +579,8 @@ router.put('/defaults', (req: Request, res: Response) => {
 
 router.get('/datasets/:id', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -591,8 +600,9 @@ router.get('/datasets/:id', async (req: Request, res: Response) => {
 
 router.patch('/datasets/:id', (req: Request, res: Response) => {
   try {
+  const userId = req.user!.userId;
     const id = req.params.id as string;
-    const ds = repo.getDataset(id);
+    const ds = repo.getDataset(userId, id);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -631,8 +641,8 @@ router.patch('/datasets/:id', (req: Request, res: Response) => {
     if (typeof body.recursive === 'boolean') patch.recursive = body.recursive;
 
     // slug and sourceDir are immutable after creation.
-    repo.updateDataset(id, patch);
-    const updated = repo.getDataset(id);
+    repo.updateDataset(userId, id, patch);
+    const updated = repo.getDataset(userId, id);
     res.json({ dataset: updated });
   } catch (err: any) {
     console.error(`[Training] Patch dataset failed: ${err.message}`);
@@ -642,7 +652,8 @@ router.patch('/datasets/:id', (req: Request, res: Response) => {
 
 router.post('/datasets/:id/rescan', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -659,18 +670,18 @@ router.post('/datasets/:id/rescan', async (req: Request, res: Response) => {
     const now = Date.now();
     let pruned = false;
     for (const sample of detail.samples) {
-      const rec = readLabel(ds.slug, sample.sampleId);
+      const rec = readLabel(ds.userId, ds.slug, sample.sampleId);
       if (!rec) continue;
       if (!sample.fileMissing) {
-        if (rec.missingSince) patchLabel(ds.slug, sample.sampleId, { missingSince: null });
+        if (rec.missingSince) patchLabel(userId, ds.slug, sample.sampleId, { missingSince: null });
         continue;
       }
       if (!rec.missingSince) {
-        patchLabel(ds.slug, sample.sampleId, { missingSince: now });
+        patchLabel(userId, ds.slug, sample.sampleId, { missingSince: now });
         continue;
       }
       // Second consecutive miss — the ghost row goes, and with it the Build block.
-      deleteLabel(ds.slug, sample.sampleId);
+      deleteLabel(userId, ds.slug, sample.sampleId);
       pruned = true;
     }
     if (pruned) detail = await detailFor(ds);
@@ -689,7 +700,8 @@ router.post('/datasets/:id/rescan', async (req: Request, res: Response) => {
 
 router.delete('/datasets/:id', (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -700,8 +712,8 @@ router.delete('/datasets/:id', (req: Request, res: Response) => {
     }
     // D20: the DB row and data/training/datasets/<slug>/ only. The user's audio,
     // sidecars and dataset.json are their files and are never touched.
-    repo.deleteDataset(ds.id);
-    deleteLabels(ds.slug);
+    repo.deleteDataset(userId, ds.id);
+    deleteLabels(userId, ds.slug);
     deleteDatasetPreviews(ds.id);
     console.log(`[Training] Deleted dataset ${ds.slug} (source folder untouched: ${ds.sourceDir})`);
     res.json({ ok: true });
@@ -715,6 +727,7 @@ router.delete('/datasets/:id', (req: Request, res: Response) => {
 
 /** Apply a patch to one sample: sidecar fields to disk, `excluded` to the label. */
 async function applySamplePatch(
+  userId: string,
   ds: TrainingDatasetRow,
   sample: TrainingSample,
   patch: PatchSampleInput,
@@ -741,7 +754,7 @@ async function applySamplePatch(
 
   if (touchedSidecar) await writeSidecar(sample.sidecarPath, meta);
 
-  patchLabel(ds.slug, sample.sampleId, {
+  patchLabel(userId, ds.slug, sample.sampleId, {
     relPath: sample.relPath,
     sources,
     ...(typeof patch.excluded === 'boolean' ? { excluded: patch.excluded } : {}),
@@ -752,7 +765,8 @@ async function applySamplePatch(
 
 router.post('/datasets/:id/samples/bulk', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -785,7 +799,7 @@ router.post('/datasets/:id/samples/bulk', async (req: Request, res: Response) =>
         continue;
       }
       try {
-        await applySamplePatch(ds, sample, set as PatchSampleInput);
+        await applySamplePatch(userId, ds, sample, set as PatchSampleInput);
         updated++;
       } catch (err: any) {
         failed.push({ sampleId, error: err.message });
@@ -801,7 +815,8 @@ router.post('/datasets/:id/samples/bulk', async (req: Request, res: Response) =>
 
 router.patch('/datasets/:id/samples/:sampleId', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -830,7 +845,7 @@ router.patch('/datasets/:id/samples/:sampleId', async (req: Request, res: Respon
       return;
     }
 
-    const updated = await applySamplePatch(ds, sample, body);
+    const updated = await applySamplePatch(userId, ds, sample, body);
     res.json({ sample: updated });
   } catch (err: any) {
     console.error(`[Training] Sample patch failed: ${err.message}`);
@@ -840,7 +855,8 @@ router.patch('/datasets/:id/samples/:sampleId', async (req: Request, res: Respon
 
 router.get('/datasets/:id/samples/:sampleId/audio', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Sample not found' });
       return;
@@ -910,7 +926,8 @@ function pickTargets(
 
 router.post('/datasets/:id/label', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -990,7 +1007,7 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
       useCaption,
       mergePolicy: body.mergePolicy || 'fill_missing',
     });
-    repo.updateDataset(ds.id, { status: 'labeling' });
+    repo.updateDataset(userId, ds.id, { status: 'labeling' });
     res.status(202).json({ jobId: job.id });
   } catch (err: any) {
     console.error(`[Training] Label start failed: ${err.message}`);
@@ -1002,7 +1019,8 @@ router.post('/datasets/:id/label', async (req: Request, res: Response) => {
 
 router.post('/datasets/:id/enhance/genius', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1038,7 +1056,8 @@ router.post('/datasets/:id/enhance/genius', async (req: Request, res: Response) 
 
 router.post('/datasets/:id/enhance/caption', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1089,7 +1108,8 @@ router.post('/datasets/:id/enhance/caption', async (req: Request, res: Response)
 
 router.post('/datasets/:id/build', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1126,7 +1146,8 @@ router.post('/datasets/:id/build', async (req: Request, res: Response) => {
 
 router.get('/datasets/:id/dataset-json', (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+    const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1150,7 +1171,7 @@ router.get('/datasets/:id/lyric-studio', async (req: Request, res: Response) => 
   try {
     const userId = getUserId(req);
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
-    const ds = repo.getDataset(req.params.id as string);
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1171,7 +1192,7 @@ router.post('/datasets/:id/lyric-studio', async (req: Request, res: Response) =>
   try {
     const userId = getUserId(req);
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
-    const ds = repo.getDataset(req.params.id as string);
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1205,7 +1226,8 @@ function numOpt(value: unknown, fallback: number): number {
 
 router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1295,7 +1317,7 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
     }
 
     const variantKey = variantKeyFor(dit);
-    let outputDir = tensorsDir(ds.slug, dit);
+    let outputDir = tensorsDir(userId, ds.slug, dit);
     if (typeof body.outputDir === 'string' && body.outputDir.trim()) {
       // Containment, same rule the sibling DELETE handler applies (§7.8). This
       // path is mkdir'd, ace-train creates <out>/.tmp/ in it and deletes orphan
@@ -1303,7 +1325,7 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
       // request body is a write primitive. Staying under the dataset's tensors
       // root also keeps the cache visible to GET/DELETE .../preprocess — a
       // cache written anywhere else is unmanaged disk the UI can never see.
-      const root = tensorsRoot(ds.slug);
+      const root = tensorsRoot(userId, ds.slug);
       const resolved = path.resolve(body.outputDir.trim());
       if (!isInside(root, resolved) || path.resolve(root) === resolved) {
         res.status(400).json({ error: `outputDir must be a subdirectory of ${root}` });
@@ -1342,7 +1364,8 @@ router.post('/datasets/:id/preprocess', async (req: Request, res: Response) => {
 
 router.get('/datasets/:id/preprocess', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1356,7 +1379,8 @@ router.get('/datasets/:id/preprocess', async (req: Request, res: Response) => {
 
 router.delete('/datasets/:id/preprocess/:variantKey', (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1365,7 +1389,7 @@ router.delete('/datasets/:id/preprocess/:variantKey', (req: Request, res: Respon
       res.status(409).json({ error: 'A job is running for this dataset' });
       return;
     }
-    const root = tensorsRoot(ds.slug);
+    const root = tensorsRoot(userId, ds.slug);
     const dir = path.join(root, path.basename(String(req.params.variantKey ?? '')));
     // §7.8 — the client-supplied key never escapes the dataset's tensors root.
     if (!isInside(root, dir) || root === path.resolve(dir) || !fs.existsSync(dir)) {
@@ -1394,7 +1418,8 @@ function outOfRange(name: string, n: number, min: number, max: number): string |
 
 router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1420,11 +1445,11 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // single directory name: without it `../../otherslug/…` escapes the tensors
     // root and ace-train would read from — and write lm_codes.jsonl into — an
     // arbitrary directory. Same §7.8 rule the two preprocess routes apply.
-    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+    if (requestedVariant && !variantExists(userId, ds.slug, requestedVariant)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
       return;
     }
-    const variantKey = requestedVariant || newestVariantKey(ds.slug);
+    const variantKey = requestedVariant || newestVariantKey(userId, ds.slug);
     if (!variantKey) {
       res.status(400).json({ error: 'Dataset has no preprocessed tensors — run Preprocess first' });
       return;
@@ -1457,7 +1482,7 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // The FSQ tokenizer lives inside the DiT, and it must be the one the
     // latents were made against — the variant's own record wins by default.
     const ditOverride = typeof body.ditModel === 'string' ? body.ditModel.trim() : '';
-    const ditModel = ditOverride || variantDitModel(ds.slug, variantKey);
+    const ditModel = ditOverride || variantDitModel(userId, ds.slug, variantKey);
 
     // ── adapter name / dir ───────────────────────────────────────────────
     const adapterName = (typeof body.adapterName === 'string' ? body.adapterName.trim() : '') || ds.slug;
@@ -1476,8 +1501,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // refusing the root itself and any size root — this path is mkdir'd and
     // written into by a spawned process (§7.8).
     const adaptersRoot = config.aceServer.adapters;
-    const adapterDir = lmRunDirFor(adapterName, lmSize);
-    const isARoot = [adaptersRoot, adapterLmRoot(), ...lmAdapterRoots().map(r => r.dir)]
+    const adapterDir = lmRunDirFor(userId, adapterName, lmSize);
+    const isARoot = [adaptersRoot, adapterLmRoot(userId), ...lmAdapterRoots(userId).map(r => r.dir)]
       .some(r => path.resolve(r) === path.resolve(adapterDir));
     if (!isInside(adaptersRoot, adapterDir) || isARoot) {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
@@ -1650,8 +1675,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
 
     // Belt and braces: the key is already segment-validated above, but this is
     // the path a spawned process reads and writes, so assert containment too.
-    const tensorsPath = path.join(tensorsRoot(ds.slug), variantKey);
-    if (!isInside(tensorsRoot(ds.slug), tensorsPath)) {
+    const tensorsPath = path.join(tensorsRoot(userId, ds.slug), variantKey);
+    if (!isInside(tensorsRoot(userId, ds.slug), tensorsPath)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${variantKey}` });
       return;
     }
@@ -1712,7 +1737,8 @@ router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
 
 router.get('/datasets/:id/train-lm', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1727,7 +1753,7 @@ router.get('/datasets/:id/train-lm', async (req: Request, res: Response) => {
     // cache, not the dataset). buildSamples walks the whole source tree, stats
     // every audio file and reads every sidecar — a full recursive scan per poll,
     // thrown away, on the same process relaying the training JSONL.
-    res.json(readTrainLmStatus(ds, [], {
+    res.json(readTrainLmStatus(userId, ds, [], {
       variantKey: typeof req.query.variantKey === 'string' ? req.query.variantKey : undefined,
       adapterName: typeof req.query.adapterName === 'string' ? req.query.adapterName : undefined,
       lmSize: lmSizeQuery,
@@ -1744,8 +1770,9 @@ const TRAIN_DIT_STAGES: readonly TrainDitStage[] = ['train', 'export'];
 
 router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
   try {
+  const userId = req.user!.userId;
     // ── 1. dataset / job / binary ────────────────────────────────────────
-    const ds = repo.getDataset(req.params.id as string);
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -1772,19 +1799,19 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // root and ace-train would read an arbitrary directory. Same §7.8 rule the
     // preprocess and train-lm routes apply.
     const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
-    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+    if (requestedVariant && !variantExists(userId, ds.slug, requestedVariant)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
       return;
     }
-    const variantKey = requestedVariant || newestVariantKey(ds.slug);
+    const variantKey = requestedVariant || newestVariantKey(userId, ds.slug);
     if (!variantKey) {
       res.status(400).json({ error: 'Dataset has no preprocessed tensors — run Preprocess first' });
       return;
     }
     // Belt and braces: the key is already segment-validated above, but this is
     // the path a spawned process reads, so assert containment too.
-    const tensorsPath = path.join(tensorsRoot(ds.slug), variantKey);
-    if (!isInside(tensorsRoot(ds.slug), tensorsPath)) {
+    const tensorsPath = path.join(tensorsRoot(userId, ds.slug), variantKey);
+    if (!isInside(tensorsRoot(userId, ds.slug), tensorsPath)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${variantKey}` });
       return;
     }
@@ -1805,7 +1832,7 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
     // NEVER from user input: the cached encoder states and context latents are
     // this exact model's outputs, so training against another base is silently
     // wrong (§4.2 base-match guard).
-    const ditModel = variantDitModel(ds.slug, variantKey);
+    const ditModel = variantDitModel(userId, ds.slug, variantKey);
     const ditPath = pickDitBaseFor(variantKey, tensorsPath);
     if (!ditPath) {
       res.status(400).json({
@@ -1824,19 +1851,19 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
       return;
     }
-    const adaptersRoot = adapterDitRoot();
+    const adaptersRoot = adapterDitRoot(userId);
     // Per-base + per-run layout: <adapters>/dit-<shorthand>/<name>/<stamp>,
     // the shorthand coming from the variant's base resolved above
     // (adapterLayout.ts). A fresh stamped dir per run — retraining an artist
     // never overwrites an earlier adapter.
-    const adapterDir = ditRunDirFor(adapterName, ditModel);
+    const adapterDir = ditRunDirFor(userId, adapterName, ditModel);
     // Containment, same rule the preprocess outputDir uses (§7.8): this path is
     // mkdir'd and written into by a spawned process. The root itself is refused
     // — a run writing adapter_model.safetensors into the adapters root would
     // put a nameless adapter in every user's dropdown — and so are the LM
     // adapter roots (legacy flat `lm/` and the per-size `lm-*` dirs), where a
     // DiT PEFT dir would show up in the planner-adapter dropdown.
-    const clashesRoot = [adaptersRoot, adapterLmRoot(), ...lmAdapterRoots().map(r => r.dir)]
+    const clashesRoot = [adaptersRoot, adapterLmRoot(userId), ...lmAdapterRoots(userId).map(r => r.dir)]
       .some(r => path.resolve(r) === path.resolve(adapterDir));
     if (!isInside(adaptersRoot, adapterDir) || clashesRoot) {
       res.status(400).json({ error: 'adapterName must match [A-Za-z0-9._-]{1,64}' });
@@ -2089,12 +2116,13 @@ router.post('/datasets/:id/train-dit', async (req: Request, res: Response) => {
 
 router.get('/datasets/:id/train-dit', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
     }
-    res.json(readTrainDitStatus(ds, {
+    res.json(readTrainDitStatus(userId, ds, {
       variantKey: typeof req.query.variantKey === 'string' ? req.query.variantKey : undefined,
       adapterName: typeof req.query.adapterName === 'string' ? req.query.adapterName : undefined,
     }));
@@ -2118,7 +2146,7 @@ const AUDITION_SLOTS: readonly string[] = ['base', 'adapter'];
  * arbitrary absolute path. A Training-Studio route has no reason to be as
  * permissive as the Create panel.
  */
-function auditionAdapterError(value: string): string | null {
+function auditionAdapterError(value: string, userId: string): string | null {
   if (value === '') return null;
   // The regex alone accepts '.', '..', '...' and '-'. Both other adapter-name
   // validators in this file (train-lm and train-dit) pair it with the
@@ -2135,7 +2163,7 @@ function auditionAdapterError(value: string): string | null {
   }
   // Any planner-adapter root counts: the per-size lm-* dirs plus the legacy
   // flat lm/ (adapterLayout.ts). Milestone dirs inside an adapter dir pass too.
-  const roots = lmAdapterRoots().map(r => r.dir);
+  const roots = lmAdapterRoots(userId).map(r => r.dir);
   const resolved = path.resolve(value);
   const insideSome = roots.some(r => isInside(r, resolved) && path.resolve(r) !== resolved);
   if (!insideSome) {
@@ -2154,10 +2182,11 @@ function auditionAdapterError(value: string): string | null {
 
 router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
   try {
+    const userId = req.user!.userId;
     const body = (req.body || {}) as AuditionOptions;
 
     // ── 1. dataset + queue ───────────────────────────────────────────────
-    const ds = repo.getDataset(req.params.id as string);
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -2238,7 +2267,7 @@ router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
 
       // ── 5. adapter path safety (C16) ───────────────────────────────────
       const lmAdapter = typeof raw?.lmAdapter === 'string' ? raw.lmAdapter.trim() : '';
-      const adapterFailure = auditionAdapterError(lmAdapter);
+      const adapterFailure = auditionAdapterError(lmAdapter, userId);
       if (adapterFailure) {
         res.status(400).json({ error: adapterFailure });
         return;
@@ -2254,7 +2283,7 @@ router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
 
     // ── 6. variantKey ────────────────────────────────────────────────────
     const requestedVariant = typeof body.variantKey === 'string' ? body.variantKey.trim() : '';
-    if (requestedVariant && !variantExists(ds.slug, requestedVariant)) {
+    if (requestedVariant && !variantExists(userId, ds.slug, requestedVariant)) {
       res.status(400).json({ error: `Unknown preprocess variant: ${requestedVariant}` });
       return;
     }
@@ -2281,7 +2310,8 @@ router.post('/datasets/:id/audition', async (req: Request, res: Response) => {
 
 router.get('/datasets/:id/audition', (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;
@@ -2310,7 +2340,8 @@ router.get('/datasets/:id/audition', (req: Request, res: Response) => {
  */
 router.post('/datasets/:id/samples/:sampleId/audition', async (req: Request, res: Response) => {
   try {
-    const ds = repo.getDataset(req.params.id as string);
+  const userId = req.user!.userId;
+    const ds = repo.getDataset(userId, req.params.id as string);
     if (!ds) {
       res.status(404).json({ error: 'Dataset not found' });
       return;

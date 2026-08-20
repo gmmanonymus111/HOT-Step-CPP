@@ -43,14 +43,14 @@ export function variantKeyFor(ditModel: string): string {
   return safe || 'default';
 }
 
-/** data/training/tensors/<slug> */
-export function tensorsRoot(slug: string): string {
-  return path.join(trainingBaseDir, 'tensors', slugify(slug));
+/** data/training/tensors/<userId>/<slug> */
+export function tensorsRoot(userId: string, slug: string): string {
+  return path.join(trainingBaseDir, 'tensors', userId, slugify(slug));
 }
 
-/** data/training/tensors/<slug>/<variantKey> */
-export function tensorsDir(slug: string, variantKey: string): string {
-  return path.join(tensorsRoot(slug), variantKeyFor(variantKey));
+/** data/training/tensors/<userId>/<slug>/<variantKey> */
+export function tensorsDir(userId: string, slug: string, variantKey: string): string {
+  return path.join(tensorsRoot(userId, slug), variantKeyFor(variantKey));
 }
 
 // ── Cached /props model snapshot (P28) ───────────────────────────────────

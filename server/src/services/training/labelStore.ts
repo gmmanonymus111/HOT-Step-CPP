@@ -1,6 +1,6 @@
 // training/labelStore.ts — studio-private per-sample state
 //
-// data/training/datasets/<slug>/labels/<sampleId>.json holds everything
+// data/training/datasets/<userId>/<slug>/labels/<sampleId>.json holds everything
 // Side-Step does not understand: audio_codes, the raw Essentia and /understand
 // results, provenance, exclude flags, per-file label status and the duration
 // cache (D6/D7).
@@ -15,7 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { labelsDir, datasetDir } from './paths.js';
+import { labelsDir } from './paths.js';
 import type { FieldSource, SampleLabelStatus } from './types.js';
 
 export interface SampleLabelRecord {
@@ -64,15 +64,14 @@ export function emptyLabel(sampleId: string, relPath: string): SampleLabelRecord
   };
 }
 
-function labelPath(slug: string, sampleId: string): string {
-  // sampleId is always a server-generated sha1 hex slice; guard anyway.
+function labelPath(userId: string, slug: string, sampleId: string): string {
   const safe = String(sampleId).replace(/[^a-f0-9]/gi, '').slice(0, 32);
-  return path.join(labelsDir(slug), `${safe}.json`);
+  return path.join(labelsDir(userId, slug), `${safe}.json`);
 }
 
-export function readLabel(slug: string, sampleId: string): SampleLabelRecord | null {
+export function readLabel(userId: string, slug: string, sampleId: string): SampleLabelRecord | null {
   try {
-    const p = labelPath(slug, sampleId);
+    const p = labelPath(userId, slug, sampleId);
     if (!fs.existsSync(p)) return null;
     const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as Partial<SampleLabelRecord>;
     if (!parsed || typeof parsed !== 'object') return null;
@@ -82,11 +81,10 @@ export function readLabel(slug: string, sampleId: string): SampleLabelRecord | n
   }
 }
 
-/** Atomic write (temp + rename) into the dataset's labels dir. */
-export function writeLabel(slug: string, rec: SampleLabelRecord): void {
-  const dir = labelsDir(slug);
+export function writeLabel(userId: string, slug: string, rec: SampleLabelRecord): void {
+  const dir = labelsDir(userId, slug);
   fs.mkdirSync(dir, { recursive: true });
-  const target = labelPath(slug, rec.sampleId);
+  const target = labelPath(userId, slug, rec.sampleId);
   const tmp = path.join(dir, `.label_${crypto.randomBytes(6).toString('hex')}.tmp`);
   try {
     fs.writeFileSync(tmp, JSON.stringify(rec, null, 2), 'utf-8');
@@ -98,25 +96,25 @@ export function writeLabel(slug: string, rec: SampleLabelRecord): void {
 }
 
 export function patchLabel(
+  userId: string,
   slug: string,
   sampleId: string,
   patch: Partial<SampleLabelRecord>,
 ): SampleLabelRecord {
-  const existing = readLabel(slug, sampleId) ?? emptyLabel(sampleId, patch.relPath || '');
+  const existing = readLabel(userId, slug, sampleId) ?? emptyLabel(sampleId, patch.relPath || '');
   const merged: SampleLabelRecord = {
     ...existing,
     ...patch,
     sampleId,
     sources: { ...existing.sources, ...(patch.sources || {}) },
   };
-  writeLabel(slug, merged);
+  writeLabel(userId, slug, merged);
   return merged;
 }
 
-/** One readdir pass over labels/ — used by every dataset read. */
-export function readAllLabels(slug: string): Map<string, SampleLabelRecord> {
+export function readAllLabels(userId: string, slug: string): Map<string, SampleLabelRecord> {
   const out = new Map<string, SampleLabelRecord>();
-  const dir = labelsDir(slug);
+  const dir = labelsDir(userId, slug);
   let entries: string[];
   try {
     if (!fs.existsSync(dir)) return out;
@@ -127,23 +125,17 @@ export function readAllLabels(slug: string): Map<string, SampleLabelRecord> {
   for (const name of entries) {
     if (!name.endsWith('.json')) continue;
     const sampleId = name.slice(0, -5);
-    const rec = readLabel(slug, sampleId);
+    const rec = readLabel(userId, slug, sampleId);
     if (rec) out.set(sampleId, rec);
   }
   return out;
 }
 
-export function deleteLabel(slug: string, sampleId: string): void {
-  try { fs.unlinkSync(labelPath(slug, sampleId)); } catch { /* already gone */ }
+export function deleteLabel(userId: string, slug: string, sampleId: string): void {
+  try { fs.unlinkSync(labelPath(userId, slug, sampleId)); } catch { /* already gone */ }
 }
 
 // ── Transient job status (in-memory ONLY) ────────────────────────────────
-//
-// §2.0 defines 'pending' as "queued in an active job" and 'processing' as
-// "currently being labeled" — both describe a LIVE job, so neither may ever be
-// persisted. Writing them into labels/<sampleId>.json would freeze the row
-// read-only forever after a cancel, a crash or a server restart, because
-// nothing on disk would clear it again.
 
 type TransientStatus = 'pending' | 'processing';
 
@@ -161,7 +153,6 @@ export function clearTransientStatus(datasetId: string, sampleId: string): void 
   transientStatus.delete(transientKey(datasetId, sampleId));
 }
 
-/** Drop every transient marker a job owns — called when it ends, however it ends. */
 export function clearTransientStatuses(datasetId: string, sampleIds: readonly string[]): void {
   for (const sampleId of sampleIds) transientStatus.delete(transientKey(datasetId, sampleId));
 }
@@ -170,19 +161,17 @@ export function getTransientStatus(datasetId: string, sampleId: string): Transie
   return transientStatus.get(transientKey(datasetId, sampleId)) ?? null;
 }
 
-/** Remove the whole studio-private directory for a dataset (D20). */
-export function deleteLabels(slug: string): void {
+export function deleteLabels(userId: string, slug: string): void {
   try {
-    fs.rmSync(datasetDir(slug), { recursive: true, force: true });
+    fs.rmSync(labelsDir(userId, slug), { recursive: true, force: true });
   } catch (err: any) {
-    console.warn(`[Training] Could not remove ${datasetDir(slug)}: ${err.message}`);
+    console.warn(`[Training] Could not remove ${labelsDir(userId, slug)}: ${err.message}`);
   }
 }
 
-/** Persist the dataset-level meta blob (D6). Best-effort, never throws. */
-export function writeDatasetMeta(slug: string, meta: unknown): void {
+export function writeDatasetMeta(userId: string, slug: string, meta: unknown): void {
   try {
-    const dir = datasetDir(slug);
+    const dir = labelsDir(userId, slug);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'dataset_meta.json'), JSON.stringify(meta, null, 2), 'utf-8');
   } catch (err: any) {

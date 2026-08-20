@@ -138,7 +138,7 @@ export function readPreprocessStatus(
   ds: TrainingDatasetRow,
   samples: TrainingSample[],
 ): PreprocessStatus {
-  const root = tensorsRoot(ds.slug);
+  const root = tensorsRoot(ds.userId, ds.slug);
   const variants: PreprocessVariantStatus[] = [];
 
   // dataset.json ids (8 hex) are what preprocess_meta.json records.
@@ -163,9 +163,9 @@ export function readPreprocessStatus(
 }
 
 /** Cheap counter for the dataset detail payload: subdirs holding a meta file. */
-export function countPreprocessedVariants(slug: string): number {
+export function countPreprocessedVariants(userId: string, slug: string): number {
   try {
-    const root = tensorsRoot(slug);
+    const root = tensorsRoot(userId, slug);
     let n = 0;
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;

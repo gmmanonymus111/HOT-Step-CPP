@@ -207,6 +207,7 @@ router.post('/scan', (req, res) => {
  * Response: { root: string, adapters: { name, path, kind, size, mtime }[] }
  */
 router.get('/lm', (req, res) => {
+  const userId = req.user!.userId;
   const folderParam = (req.query.folder as string) || '';
   type LmAdapterEntry = {
     name: string; path: string; kind: 'peft' | 'safetensors'; size: number; mtime: number;
@@ -266,7 +267,7 @@ router.get('/lm', (req, res) => {
       // scan those too so the override survives the layout change.
       root = path.resolve(folderParam);
       scanOne(root, '');
-      for (const r of lmAdapterRoots()) {
+      for (const r of lmAdapterRoots(userId)) {
         const sub = path.join(root, path.basename(r.dir));
         if (path.resolve(sub) !== root && fs.existsSync(sub)) scanOne(sub, r.size);
       }
@@ -274,7 +275,7 @@ router.get('/lm', (req, res) => {
       // Default: every planner-adapter root — the per-size lm-06b/lm-17b/lm-4b
       // dirs plus the legacy flat lm/ (adapterLayout.ts).
       root = config.aceServer.adapters;
-      for (const r of lmAdapterRoots()) scanOne(r.dir, r.size);
+      for (const r of lmAdapterRoots(userId)) scanOne(r.dir, r.size);
     }
     // Alphabetical by artist; within an artist, newest run first.
     adapters.sort((a, b) =>

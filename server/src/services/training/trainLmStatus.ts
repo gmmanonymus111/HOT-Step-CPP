@@ -29,11 +29,11 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-/** The LEGACY flat planner-adapter dir (`<adapters>/lm`, names suffixed
+/** The LEGACY flat planner-adapter dir (`<adapters>/<userId>/lm`, names suffixed
  *  `-<size>`). Still scanned/validated so pre-migration installs keep working;
  *  nothing new is written here — see adapterLayout.ts for the per-size dirs. */
-export function adapterLmRoot(): string {
-  return path.join(config.aceServer.adapters, 'lm');
+export function adapterLmRoot(userId: string): string {
+  return path.join(config.aceServer.adapters, userId, 'lm');
 }
 
 /** Strip anything outside the route's `/^[A-Za-z0-9._-]{1,64}$/` alphabet so a
@@ -43,16 +43,16 @@ export function safeAdapterName(name: string): string {
   return cleaned || 'adapter';
 }
 
-/** `<adapters>/lm-<sizeSlug>/<name>` — the ARTIST folder of the per-base
+/** `<adapters>/<userId>/lm-<sizeSlug>/<name>` — the ARTIST folder of the per-base
  *  layout (2026-07-28). Runs live in stamped subfolders beneath it. */
-export function lmArtistDirFor(name: string, size: LmSize): string {
-  return path.join(config.aceServer.adapters, lmSizeSlug(size), safeAdapterName(name));
+export function lmArtistDirFor(userId: string, name: string, size: LmSize): string {
+  return path.join(config.aceServer.adapters, userId, lmSizeSlug(size), safeAdapterName(name));
 }
 
 /** A fresh `<artist>/<YYYY-MM-DD_HH-MM-SS>` dir for a NEW training run to
  *  write into — retraining never overwrites an earlier adapter. */
-export function lmRunDirFor(name: string, size: LmSize): string {
-  return newRunDir(lmArtistDirFor(name, size));
+export function lmRunDirFor(userId: string, name: string, size: LmSize): string {
+  return newRunDir(lmArtistDirFor(userId, name, size));
 }
 
 /** The newest trained adapter for status/audition READS: latest stamped run,
@@ -60,13 +60,13 @@ export function lmRunDirFor(name: string, size: LmSize): string {
  *  flat `lm/<name>-<size>` dir — so pre-migration installs keep reporting as
  *  trained. '' only when nothing exists anywhere; callers wanting a display
  *  path for "not trained yet" use lmArtistDirFor(). */
-export function adapterDirFor(name: string, size: LmSize): string {
-  const latest = latestRunDir(lmArtistDirFor(name, size));
+export function adapterDirFor(userId: string, name: string, size: LmSize): string {
+  const latest = latestRunDir(lmArtistDirFor(userId, name, size));
   if (latest) return latest;
-  const legacy = path.join(adapterLmRoot(), `${safeAdapterName(name)}-${size}`);
+  const legacy = path.join(adapterLmRoot(userId), `${safeAdapterName(name)}-${size}`);
   if (fs.existsSync(path.join(legacy, 'adapter_model.safetensors'))
       || fs.existsSync(path.join(legacy, 'lokr_weights.safetensors'))) return legacy;
-  return lmArtistDirFor(name, size);  // nothing trained yet — where runs will go
+  return lmArtistDirFor(userId, name, size);  // nothing trained yet — where runs will go
 }
 
 /**
@@ -79,11 +79,11 @@ export function adapterDirFor(name: string, size: LmSize): string {
  * outside this phase's editable file set, so a slug-only reader cannot be added
  * there. The parse below reads one small field per variant and nothing else.
  */
-export function newestVariantKey(slug: string): string {
+export function newestVariantKey(userId: string, slug: string): string {
   let bestKey = '';
   let bestAt = '';
   try {
-    const root = tensorsRoot(slug);
+    const root = tensorsRoot(userId, slug);
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const metaPath = path.join(root, entry.name, 'preprocess_meta.json');
@@ -102,10 +102,10 @@ export function newestVariantKey(slug: string): string {
 
 /** The variant's own DiT file name, '' if unknown — the FSQ tokenizer must be
  *  the one the latents were made against (§4.5 step 6). */
-export function variantDitModel(slug: string, variantKey: string): string {
+export function variantDitModel(userId: string, slug: string, variantKey: string): string {
   if (!isSafeVariantKey(variantKey)) return '';
   try {
-    const metaPath = path.join(tensorsRoot(slug), variantKey, 'preprocess_meta.json');
+    const metaPath = path.join(tensorsRoot(userId, slug), variantKey, 'preprocess_meta.json');
     const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as { model_variant?: unknown };
     return str(meta.model_variant);
   } catch {
@@ -131,10 +131,10 @@ export function isSafeVariantKey(key: string): boolean {
 }
 
 /** Does `<tensorsRoot(slug)>/<variantKey>` hold a preprocess_meta.json? */
-export function variantExists(slug: string, variantKey: string): boolean {
+export function variantExists(userId: string, slug: string, variantKey: string): boolean {
   if (!isSafeVariantKey(variantKey)) return false;
   try {
-    return fs.existsSync(path.join(tensorsRoot(slug), variantKey, 'preprocess_meta.json'));
+    return fs.existsSync(path.join(tensorsRoot(userId, slug), variantKey, 'preprocess_meta.json'));
   } catch {
     return false;
   }
@@ -298,6 +298,7 @@ function applyTrainLog(dir: string, status: TrainLmStatus): void {
  * because that cache is what `extract` actually consumes (L13).
  */
 export function readTrainLmStatus(
+  userId: string,
   ds: TrainingDatasetRow,
   _samples: TrainingSample[],
   q: { variantKey?: string; adapterName?: string; lmSize?: LmSize },
@@ -308,15 +309,15 @@ export function readTrainLmStatus(
   // A requested key that does not exist falls back to nothing rather than
   // reporting the newest variant's codes under the wrong name.
   const variantKey = requested
-    ? (variantExists(ds.slug, requested) ? requested : '')
-    : newestVariantKey(ds.slug);
+    ? (variantExists(userId, ds.slug, requested) ? requested : '')
+    : newestVariantKey(userId, ds.slug);
 
-  const dir = variantKey ? path.join(tensorsRoot(ds.slug), variantKey) : '';
+  const dir = variantKey ? path.join(tensorsRoot(userId, ds.slug), variantKey) : '';
   const codesPath = dir ? path.join(dir, CODES_FILE) : '';
 
   const rawName = typeof q.adapterName === 'string' ? q.adapterName.trim() : '';
   const adapterName = rawName || ds.slug;
-  const adapterDir = adapterDirFor(adapterName, lmSize);
+  const adapterDir = adapterDirFor(userId, adapterName, lmSize);
 
   const status: TrainLmStatus = {
     variantKey,

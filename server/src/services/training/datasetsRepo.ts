@@ -24,6 +24,7 @@ interface DbRow {
   default_album: string;
   default_genre: string;
   default_language: string;
+  user_id: string;
   sample_count: number;
   labeled_count: number;
   excluded_count: number;
@@ -53,6 +54,7 @@ function toRow(r: DbRow): TrainingDatasetRow {
     defaultAlbum: r.default_album,
     defaultGenre: r.default_genre,
     defaultLanguage: r.default_language,
+    userId: r.user_id,
     sampleCount: r.sample_count,
     labeledCount: r.labeled_count,
     excludedCount: r.excluded_count,
@@ -85,45 +87,51 @@ const COLUMN_OF: Record<string, string> = {
   datasetJsonPath: 'dataset_json_path',
 };
 
-export function listDatasets(): TrainingDatasetRow[] {
+export function listDatasets(userId: string): TrainingDatasetRow[] {
   const rows = getDb()
-    .prepare('SELECT * FROM training_datasets ORDER BY created_at DESC, rowid DESC')
-    .all() as DbRow[];
+    .prepare('SELECT * FROM training_datasets WHERE user_id = ? ORDER BY created_at DESC, rowid DESC')
+    .all(userId) as DbRow[];
   return rows.map(toRow);
 }
 
-export function getDataset(id: string): TrainingDatasetRow | null {
+/** Internal: fetch by id without user scoping (used by job runners). */
+export function getDatasetById(id: string): TrainingDatasetRow | null {
   const row = getDb()
     .prepare('SELECT * FROM training_datasets WHERE id = ?')
     .get(id) as DbRow | undefined;
   return row ? toRow(row) : null;
 }
 
-export function getDatasetBySourceDir(dir: string): TrainingDatasetRow | null {
-  // §2.3's 409 must hold on Windows, where `D:\Music\Artist` and `d:\music\artist`
-  // are the same folder but different strings (path.resolve preserves casing and
-  // the UNIQUE index collates BINARY).
-  const sql = process.platform === 'win32'
-    ? 'SELECT * FROM training_datasets WHERE source_dir = ? COLLATE NOCASE'
-    : 'SELECT * FROM training_datasets WHERE source_dir = ?';
-  const row = getDb().prepare(sql).get(dir) as DbRow | undefined;
+export function getDataset(userId: string, id: string): TrainingDatasetRow | null {
+  const row = getDb()
+    .prepare('SELECT * FROM training_datasets WHERE id = ? AND user_id = ?')
+    .get(id, userId) as DbRow | undefined;
   return row ? toRow(row) : null;
 }
 
-export function listSlugs(): Set<string> {
-  const rows = getDb().prepare('SELECT slug FROM training_datasets').all() as Array<{ slug: string }>;
+export function getDatasetBySourceDir(userId: string, dir: string): TrainingDatasetRow | null {
+  const sql = process.platform === 'win32'
+    ? 'SELECT * FROM training_datasets WHERE source_dir = ? COLLATE NOCASE AND user_id = ?'
+    : 'SELECT * FROM training_datasets WHERE source_dir = ? AND user_id = ?';
+  const row = getDb().prepare(sql).get(dir, userId) as DbRow | undefined;
+  return row ? toRow(row) : null;
+}
+
+export function listSlugs(userId: string): Set<string> {
+  const rows = getDb().prepare('SELECT slug FROM training_datasets WHERE user_id = ?')
+    .all(userId) as Array<{ slug: string }>;
   return new Set(rows.map(r => r.slug));
 }
 
-export function insertDataset(row: TrainingDatasetRow): void {
+export function insertDataset(row: TrainingDatasetRow, userId: string): void {
   getDb().prepare(`
     INSERT INTO training_datasets (
       id, slug, name, source_dir, recursive, custom_tag, tag_position, genre_ratio,
-      default_artist, default_album, default_genre, default_language, sample_count, labeled_count,
+      default_artist, default_album, default_genre, default_language, user_id, sample_count, labeled_count,
       excluded_count, status, built_at, dataset_json_path, created_at, updated_at
     ) VALUES (
       @id, @slug, @name, @source_dir, @recursive, @custom_tag, @tag_position, @genre_ratio,
-      @default_artist, @default_album, @default_genre, @default_language, @sample_count, @labeled_count,
+      @default_artist, @default_album, @default_genre, @default_language, @user_id, @sample_count, @labeled_count,
       @excluded_count, @status, @built_at, @dataset_json_path, @created_at, @updated_at
     )
   `).run({
@@ -139,6 +147,7 @@ export function insertDataset(row: TrainingDatasetRow): void {
     default_album: row.defaultAlbum,
     default_genre: row.defaultGenre,
     default_language: row.defaultLanguage,
+    user_id: userId,
     sample_count: row.sampleCount,
     labeled_count: row.labeledCount,
     excluded_count: row.excludedCount,
@@ -150,9 +159,9 @@ export function insertDataset(row: TrainingDatasetRow): void {
   });
 }
 
-export function updateDataset(id: string, patch: Partial<TrainingDatasetRow>): void {
+export function updateDataset(userId: string, id: string, patch: Partial<TrainingDatasetRow>): void {
   const sets: string[] = [];
-  const params: Record<string, unknown> = { id };
+  const params: Record<string, unknown> = { id, user_id: userId };
 
   for (const [key, value] of Object.entries(patch)) {
     const column = COLUMN_OF[key];
@@ -165,10 +174,11 @@ export function updateDataset(id: string, patch: Partial<TrainingDatasetRow>): v
   sets.push(`updated_at = @updated_at`);
   params.updated_at = new Date().toISOString();
 
-  getDb().prepare(`UPDATE training_datasets SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  getDb().prepare(`UPDATE training_datasets SET ${sets.join(', ')} WHERE id = @id AND user_id = @user_id`).run(params);
 }
 
 export function updateCounters(
+  userId: string,
   id: string,
   c: { sampleCount: number; labeledCount: number; excludedCount: number; status: string },
 ): void {
@@ -176,8 +186,9 @@ export function updateCounters(
     UPDATE training_datasets
        SET sample_count = @sample_count, labeled_count = @labeled_count,
            excluded_count = @excluded_count, status = @status, updated_at = @updated_at
-     WHERE id = @id
+     WHERE id = @id AND user_id = @user_id
   `).run({
+    user_id: userId,
     id,
     sample_count: c.sampleCount,
     labeled_count: c.labeledCount,
@@ -187,6 +198,6 @@ export function updateCounters(
   });
 }
 
-export function deleteDataset(id: string): void {
-  getDb().prepare('DELETE FROM training_datasets WHERE id = ?').run(id);
+export function deleteDataset(userId: string, id: string): void {
+  getDb().prepare('DELETE FROM training_datasets WHERE id = ? AND user_id = ?').run(id, userId);
 }

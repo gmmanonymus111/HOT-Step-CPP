@@ -30,44 +30,30 @@ function str(value: unknown): string {
 }
 
 /**
- * `<config.aceServer.adapters>` — the DiT adapter root itself, NOT an `lm/`
- * style subdirectory.
- *
- * This is the folder the Create view's Adapter dropdown scans (POST
- * /api/adapters/scan), which is the whole reason a freshly trained DiT adapter
- * needs no engine restart (D17). The LM trainer's `lm/` subdir exists because
- * planner-LM adapters are a different consumer; DiT adapters belong at the top
- * level, beside every hand-installed one.
+ * `<config.aceServer.adapters>/<userId>` — the DiT adapter root for a user,
+ * NOT an `lm/` style subdirectory.
  */
-export function adapterDitRoot(): string {
-  return config.aceServer.adapters;
+export function adapterDitRoot(userId: string): string {
+  return path.join(config.aceServer.adapters, userId);
 }
 
-/** `<adapters>/dit-<shorthand>/<name>` — the ARTIST folder of the per-base
- *  layout (2026-07-28). `ditModel` is the base the variant was preprocessed
- *  against; adapters trained on different bases are not interchangeable, so
- *  each base gets its own folder (adapterLayout.ts). Runs live in stamped
- *  subfolders beneath it. */
-export function ditArtistDirFor(name: string, ditModel: string): string {
-  return path.join(adapterDitRoot(), ditShorthand(ditModel), safeAdapterName(name));
+/** `<adapters>/<userId>/dit-<shorthand>/<name>` — the ARTIST folder. */
+export function ditArtistDirFor(userId: string, name: string, ditModel: string): string {
+  return path.join(adapterDitRoot(userId), ditShorthand(ditModel), safeAdapterName(name));
 }
 
-/** A fresh `<artist>/<YYYY-MM-DD_HH-MM-SS>` dir for a NEW training run to
- *  write into — retraining never overwrites an earlier adapter. */
-export function ditRunDirFor(name: string, ditModel: string): string {
-  return newRunDir(ditArtistDirFor(name, ditModel));
+/** A fresh `<artist>/<YYYY-MM-DD_HH-MM-SS>` dir for a NEW training run. */
+export function ditRunDirFor(userId: string, name: string, ditModel: string): string {
+  return newRunDir(ditArtistDirFor(userId, name, ditModel));
 }
 
-/** The newest trained adapter for status READS: latest stamped run, else an
- *  unversioned adapter directly in the artist folder, else the legacy
- *  top-level `<adapters>/<name>` dir — so pre-migration adapters keep
- *  reporting as trained. */
-export function adapterDitDirFor(name: string, ditModel: string): string {
-  const latest = latestRunDir(ditArtistDirFor(name, ditModel));
+/** The newest trained adapter for status READS. */
+export function adapterDitDirFor(userId: string, name: string, ditModel: string): string {
+  const latest = latestRunDir(ditArtistDirFor(userId, name, ditModel));
   if (latest) return latest;
-  const legacy = path.join(adapterDitRoot(), safeAdapterName(name));
+  const legacy = path.join(adapterDitRoot(userId), safeAdapterName(name));
   if (fs.existsSync(path.join(legacy, 'adapter_config.json'))) return legacy;
-  return ditArtistDirFor(name, ditModel);  // nothing trained yet
+  return ditArtistDirFor(userId, name, ditModel);
 }
 
 /** `.safetensors` files in a variant dir. The sidecars (preprocess_meta.json,
@@ -171,25 +157,24 @@ function applyTrainLog(dir: string, status: TrainDitStatus): void {
  * the newest variant's numbers under the wrong name.
  */
 export function readTrainDitStatus(
+  userId: string,
   ds: TrainingDatasetRow,
   q: { variantKey?: string; adapterName?: string },
 ): TrainDitStatus {
   const requested = typeof q.variantKey === 'string' ? q.variantKey.trim() : '';
   const variantKey = requested
-    ? (variantExists(ds.slug, requested) ? requested : '')
-    : newestVariantKey(ds.slug);
+    ? (variantExists(userId, ds.slug, requested) ? requested : '')
+    : newestVariantKey(userId, ds.slug);
 
-  const dir = variantKey ? path.join(tensorsRoot(ds.slug), variantKey) : '';
+  const dir = variantKey ? path.join(tensorsRoot(userId, ds.slug), variantKey) : '';
 
   const rawName = typeof q.adapterName === 'string' ? q.adapterName.trim() : '';
   const adapterName = rawName || ds.slug;
-  // The base decides which dit-<shorthand> folder the adapter lives in, so it
-  // must be resolved before the dir (adapterLayout.ts).
   let ditModel = '';
   if (dir) {
-    try { ditModel = variantDitModel(ds.slug, variantKey); } catch { /* stays '' */ }
+    try { ditModel = variantDitModel(userId, ds.slug, variantKey); } catch { /* stays '' */ }
   }
-  const adapterDir = adapterDitDirFor(adapterName, ditModel);
+  const adapterDir = adapterDitDirFor(userId, adapterName, ditModel);
 
   const status: TrainDitStatus = {
     variantKey,

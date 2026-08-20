@@ -53,14 +53,14 @@ export function uniqueSlug(base: string, taken: Set<string>): string {
   return `${root.slice(0, 50)}-${Date.now().toString(36)}`;
 }
 
-/** <trainingBaseDir>/datasets/<slug> — slug re-sanitised before use (§7.8). */
-export function datasetDir(slug: string): string {
-  return path.join(trainingBaseDir, 'datasets', slugify(slug));
+/** <trainingBaseDir>/datasets/<userId>/<slug> — slug re-sanitised before use (§7.8). */
+export function datasetDir(userId: string, slug: string): string {
+  return path.join(trainingBaseDir, 'datasets', userId, slugify(slug));
 }
 
-/** <trainingBaseDir>/datasets/<slug>/labels */
-export function labelsDir(slug: string): string {
-  return path.join(datasetDir(slug), 'labels');
+/** <trainingBaseDir>/datasets/<userId>/<slug>/labels */
+export function labelsDir(userId: string, slug: string): string {
+  return path.join(datasetDir(userId, slug), 'labels');
 }
 
 /** <trainingBaseDir>/jobs */

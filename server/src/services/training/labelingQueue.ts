@@ -32,7 +32,7 @@ import { AbortError, runUnderstand } from './understandClient.js';
 import { enhanceCaption, enhanceGenius, resolveArtistTitle } from './enhanceService.js';
 import { buildDataset } from './datasetBuilder.js';
 import * as audioMeta from './audioMeta.js';
-import { getDataset, updateCounters, updateDataset } from './datasetsRepo.js';
+import * as repo from './datasetsRepo.js';
 import type { AceRequest } from '../aceClient.js';
 import type {
   BuildOptions, CaptionOptions, FieldSource, GeniusOptions, LabelOptions, MergePolicy,
@@ -404,7 +404,7 @@ function refreshSample(ds: TrainingDatasetRow, sample: TrainingSample): Training
     mtimeMs = st.mtimeMs;
   } catch { /* file vanished mid-job — the refreshed row keeps the old size */ }
 
-  const label = readLabel(ds.slug, sample.sampleId) ?? undefined;
+  const label = readLabel(ds.userId, ds.slug, sample.sampleId) ?? undefined;
   const meta = loadSidecarMetadata(sample.audioPath);
   const duration = label?.durationCache?.seconds ?? sample.duration;
   return sampleFromParts(
@@ -457,7 +457,7 @@ function refreshCounters(ds: TrainingDatasetRow, samples: TrainingSample[], stat
   const alreadyBuilt = !!ds.builtAt && !!ds.datasetJsonPath;
   const next = status ?? (alreadyBuilt ? 'built' : (labeled > 0 ? 'labeled' : 'draft'));
   try {
-    updateCounters(ds.id, {
+    repo.updateCounters(ds.userId, ds.id, {
       sampleCount: samples.length,
       labeledCount: labeled,
       excludedCount: excluded,
@@ -484,20 +484,20 @@ async function loadTargets(
 function markPending(job: TrainingJob, ds: TrainingDatasetRow, targets: TrainingSample[]): void {
   for (const s of targets) {
     setTransientStatus(job.datasetId, s.sampleId, 'pending');
-    patchLabel(ds.slug, s.sampleId, { relPath: s.relPath, error: null });
+    patchLabel(ds.userId, ds.slug, s.sampleId, { relPath: s.relPath, error: null });
     pushEvent(job, { type: 'sample', sampleId: s.sampleId, status: 'pending' });
   }
 }
 
 function markProcessing(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample): void {
   setTransientStatus(job.datasetId, sample.sampleId, 'processing');
-  patchLabel(ds.slug, sample.sampleId, { relPath: sample.relPath, error: null });
+  patchLabel(ds.userId, ds.slug, sample.sampleId, { relPath: sample.relPath, error: null });
   pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'processing' });
 }
 
 function markError(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample, message: string): void {
   clearTransientStatus(job.datasetId, sample.sampleId);
-  patchLabel(ds.slug, sample.sampleId, { relPath: sample.relPath, labelStatus: 'error', error: message });
+  patchLabel(ds.userId, ds.slug, sample.sampleId, { relPath: sample.relPath, labelStatus: 'error', error: message });
   job.failed++;
   pushEvent(job, { type: 'sample', sampleId: sample.sampleId, status: 'error', error: message });
   emitLog(job, 'error', `${sample.filename}: ${message}`);
@@ -505,7 +505,7 @@ function markError(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSam
 
 function markLabeled(job: TrainingJob, ds: TrainingDatasetRow, sample: TrainingSample, sources: Record<string, FieldSource>): void {
   clearTransientStatus(job.datasetId, sample.sampleId);
-  patchLabel(ds.slug, sample.sampleId, {
+  patchLabel(ds.userId, ds.slug, sample.sampleId, {
     relPath: sample.relPath,
     labelStatus: 'labeled',
     error: null,
@@ -553,7 +553,7 @@ async function runPassA(
   // Essentia is deterministic — if we already analyzed this exact file
   // (size+mtime unchanged since the cached run), reuse the raw result from the
   // label store instead of re-running ffmpeg + Essentia on a re-label.
-  const cached = readLabel(ds.slug, sample.sampleId);
+  const cached = readLabel(ds.userId, ds.slug, sample.sampleId);
   const cacheFresh = (() => {
     if (!cached?.durationCache) return false;
     try {
@@ -588,7 +588,7 @@ async function runPassA(
     mtimeMs = st.mtimeMs;
   } catch { /* stat failure just costs us the duration cache */ }
 
-  patchLabel(ds.slug, sample.sampleId, {
+  patchLabel(ds.userId, ds.slug, sample.sampleId, {
     relPath: sample.relPath,
     tags: result.tags,
     essentia: essentia ?? null,
@@ -620,7 +620,7 @@ async function runPassA(
     markLabeled(job, ds, sample, sources);
     job.done++;
   } else {
-    patchLabel(ds.slug, sample.sampleId, { sources });
+    patchLabel(ds.userId, ds.slug, sample.sampleId, { sources });
     // The cloud lane still owes this file — hand it back to the queue rather
     // than leaving every row showing "Working…" (and read-only) until then.
     setTransientStatus(job.datasetId, sample.sampleId, 'pending');
@@ -644,7 +644,7 @@ function understandParams(opts: LabelOptions): Partial<AceRequest> {
 
 async function runLabelJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
-  const ds = getDataset(job.datasetId);
+  const ds = repo.getDatasetById(job.datasetId);
   if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
   const opts = (job.opts || {}) as LabelOptions;
@@ -760,7 +760,7 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
               if (result.timesignature) { incoming.signature = result.timesignature; sources.signature = 'understand'; }
               if (!ds.defaultLanguage && result.vocalLanguage) { incoming.language = result.vocalLanguage; sources.language = 'understand'; }
               // audio_codes NEVER enters the sidecar — it goes here (D7).
-              patchLabel(ds.slug, sample.sampleId, {
+              patchLabel(ds.userId, ds.slug, sample.sampleId, {
                 relPath: sample.relPath,
                 audioCodes: result.audioCodes,
                 audioCodesModel: opts.understand?.lmModel || null,
@@ -885,7 +885,7 @@ async function runLabelJob(job: TrainingJob): Promise<void> {
 
 async function runGeniusJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
-  const ds = getDataset(job.datasetId);
+  const ds = repo.getDatasetById(job.datasetId);
   if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
   const opts = (job.opts || {}) as GeniusOptions;
@@ -944,7 +944,7 @@ async function runGeniusJob(job: TrainingJob): Promise<void> {
 
 async function runCaptionJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
-  const ds = getDataset(job.datasetId);
+  const ds = repo.getDatasetById(job.datasetId);
   if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
   const opts = (job.opts || {}) as CaptionOptions & { provider: string };
@@ -1006,7 +1006,7 @@ async function runCaptionJob(job: TrainingJob): Promise<void> {
 
 async function runBuildJob(job: TrainingJob): Promise<void> {
   if (isCancelled(job)) return;
-  const ds = getDataset(job.datasetId);
+  const ds = repo.getDatasetById(job.datasetId);
   if (!ds) { finishJob(job, 'failed', 'Dataset not found'); return; }
 
   const opts = (job.opts || {}) as BuildOptions & { outputPath: string };
@@ -1037,7 +1037,7 @@ async function runBuildJob(job: TrainingJob): Promise<void> {
     });
 
     const builtAt = new Date().toISOString();
-    updateDataset(ds.id, { builtAt, datasetJsonPath: result.path, status: 'built' });
+    repo.updateDataset(ds.userId, ds.id, { builtAt, datasetJsonPath: result.path, status: 'built' });
     refreshCounters(ds, samples, 'built');
 
     pushLog(`[Training] Built ${result.path} — ${result.total} samples`);

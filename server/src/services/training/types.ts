@@ -45,6 +45,7 @@ export interface TrainingDatasetSummary {
   defaultAlbum: string;
   defaultGenre: string;
   defaultLanguage: string;    // language the user KNOWS the corpus is in; overrides understand's guess
+  userId: string;             // owner of this dataset
   sampleCount: number;
   labeledCount: number;
   excludedCount: number;
