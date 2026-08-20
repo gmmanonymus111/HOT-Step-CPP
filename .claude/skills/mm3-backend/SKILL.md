@@ -317,7 +317,7 @@ sweeping violence_level 2.0 → 0.0 changes nothing. A plain monotonic DTW over
 the head-averaged matrix, grouped on newline tokens, is what works — see
 `mm3-align.h`. `lrc_align()` stays untouched for ACE.
 
-## Runtime LM adapters (SHIPPED 2026-08-20, engine + server; UI pending)
+## Runtime LM adapters (SHIPPED 2026-08-20 — engine + server + UI)
 
 `engine/src/minimax/mm3-lm-adapter.h` loads PEFT LM LoRAs (SimpleTuner
 `language_model.`-prefixed checkpoints, q/k/v/o + gate/up/down × 36 layers)
@@ -331,7 +331,18 @@ by g_mm3_mutex; dropped on /mm3/unload, transient release, and the staged
 after_ar handover (VRAM). Load failure FAILS THE JOB — never silently base.
 Server: `backends/minimax/lmAdapter.ts` (containment-checked refs under
 `<adapters root>/mm3-lm-adapters/`, sidecar metadata, `params.mm3LmAdapter*`),
-defaults = the ablation-validated attention 1.0 / MLP 0.5. r256 ≈ 1.4 GB
+defaults = the ablation-validated attention 1.0 / MLP 0.5. Catalogue route
+`GET /api/mm3/lm-adapters` (adapters + sidecars + default scales). UI:
+`ui/src/components/global-bar/Mm3LmAdapterDropdown.tsx` renders in the Adapters
+cluster whenever `capabilities().features.lmAdapters` is true and
+`features.adapters` is false — its own flag, because `adapters: true` gates
+ACE's whole DiT-stack UI (merge/runtime modes, per-section masking, trigger
+embedding). Picker prefills the scale dials from the picked adapter's sidecar
+`recommendedScales`; depth thirds sit behind an advanced disclosure. Values
+ride `backendParams` → `getGlobalParams()`, so a new dial needs no store field.
+**Writing a checkpoint + a JSON sidecar into `<adapters>/mm3-lm-adapters/<run>/`
+is the entire publish step** — that is the contract the future native trainer
+targets (docs/plans/2026-08-20-mm3-training-server-design.md §5). r256 ≈ 1.4 GB
 resident, ≈ +9 % AR cost (unmeasurable at short lengths). Smoke-validated:
 252 modules load, base + adapter renders complete same wall time.
 
