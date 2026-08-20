@@ -18,9 +18,46 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition' | 'lm-calibrate' | 'dit-calibrate';
+  | 'audition' | 'lm-calibrate' | 'dit-calibrate'
+  // MiniMax-Music3 (docs/plans/2026-08-20-mm3-training-server-design.md §2.1).
+  // Both are GPU-lane and both stop the engine: an MM3 training step peaks at
+  // 31.7 GB of a 32 GB card, so nothing else may be resident.
+  | 'mm3-codes' | 'mm3-train-lm';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+
+// ─── MiniMax-Music3 training ──────────────────────────────────────────────
+
+/** POST /api/training/datasets/:id/mm3-codes — audio -> RVQ codes. */
+export interface Mm3CodesRequest {
+  /** Cap each track before encoding (seconds). 0 = whole track. */
+  maxDuration?: number;
+}
+
+/** POST /api/training/datasets/:id/mm3-train-lm.
+ *  Every field is optional: omitted means the validated recipe
+ *  (MM3_LM_DEFAULTS in services/training/mm3Train.ts), which is the single
+ *  place those numbers live. */
+export interface Mm3TrainLmRequest {
+  rank?: number;
+  alpha?: number;
+  lr?: number;
+  steps?: number;
+  saveEvery?: number;
+  warmup?: number;
+  gradAccum?: number;
+  seed?: number;
+  /** Crop length in FRAMES at 25 fps. Note this is not the VRAM dial it looks
+   *  like: an MM3 prompt is ~1,100 tokens, so the sequence is prompt-dominated. */
+  maxFrames?: number;
+  /** `beginning` reproduces the intros-only failure on purpose; do not ship it. */
+  cropMode?: 'random' | 'beginning';
+  optimizer?: 'muon' | 'adamw';
+  muonLrScale?: number;
+  /** Recorded in the adapter sidecar so the picker can show it. Not prepended
+   *  to captions here — the dataset's own captions already carry it. */
+  trigger?: string;
+}
 
 export type SampleLabelStatus =
   | 'unlabeled'   // no sidecar caption

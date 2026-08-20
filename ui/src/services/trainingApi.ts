@@ -18,9 +18,49 @@ export type MergePolicy =
 export type TrainingJobKind =
   | 'label' | 'enhance-genius' | 'enhance-caption' | 'build'
   | 'preprocess' | 'train-lm' | 'train-dit'
-  | 'audition' | 'lm-calibrate' | 'dit-calibrate';
+  | 'audition' | 'lm-calibrate' | 'dit-calibrate'
+  // MiniMax-Music3. Both GPU-lane and engine-stopping — an MM3 training step
+  // peaks at 31.7 GB of a 32 GB card.
+  | 'mm3-codes' | 'mm3-train-lm';
 
 export type TrainingJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+
+// ─── MiniMax-Music3 training (mirrors server types.ts) ────────────────────
+
+/** GET /api/training/datasets/:id/mm3 */
+export interface Mm3Status {
+  codesDir: string;
+  /** How many .codes files the cache holds (0 = never exported). */
+  codes: number;
+  /** Which encoder produced them, from codes.json ('' = unknown). */
+  encoder: string;
+  /** Per-stage, because the two need different files. Non-empty = disable. */
+  missingForCodes: string[];
+  missingForTrain: string[];
+  defaults: Mm3TrainLmRequest & { maxFrames: number; cropMode: string };
+}
+
+export interface Mm3CodesRequest {
+  maxDuration?: number;
+}
+
+/** Every field optional: omitted means the validated recipe, which lives
+ *  server-side in services/training/mm3Train.ts and nowhere else. */
+export interface Mm3TrainLmRequest {
+  rank?: number;
+  alpha?: number;
+  lr?: number;
+  steps?: number;
+  saveEvery?: number;
+  warmup?: number;
+  gradAccum?: number;
+  seed?: number;
+  maxFrames?: number;
+  cropMode?: 'random' | 'beginning';
+  optimizer?: 'muon' | 'adamw';
+  muonLrScale?: number;
+  trigger?: string;
+}
 
 export type SampleLabelStatus =
   | 'unlabeled'   // no sidecar caption
@@ -972,6 +1012,30 @@ export async function deletePreprocessVariant(id: string, variantKey: string): P
   await request<{ ok: boolean }>(
     `/datasets/${encodeURIComponent(id)}/preprocess/${encodeURIComponent(variantKey)}`,
     { method: 'DELETE' },
+  );
+}
+
+// ── MiniMax-Music3 training ──────────────────────────────────────────────
+
+export async function getMm3Status(id: string): Promise<Mm3Status> {
+  return request<Mm3Status>(`/datasets/${encodeURIComponent(id)}/mm3`);
+}
+
+export async function startMm3Codes(id: string, opts: Mm3CodesRequest = {}): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>(
+    `/datasets/${encodeURIComponent(id)}/mm3-codes`,
+    { method: 'POST', ...jsonBody(opts) },
+  );
+}
+
+/** Checkpoints land in the MM3 adapter folder, so a finished run shows up in
+ *  the generation panel's adapter picker with no install step. */
+export async function startMm3TrainLm(
+  id: string, opts: Mm3TrainLmRequest = {},
+): Promise<{ jobId: string; runName: string; outDir: string }> {
+  return request<{ jobId: string; runName: string; outDir: string }>(
+    `/datasets/${encodeURIComponent(id)}/mm3-train-lm`,
+    { method: 'POST', ...jsonBody(opts) },
   );
 }
 

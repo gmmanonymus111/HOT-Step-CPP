@@ -48,6 +48,9 @@
 //   POST   /datasets/:id/preprocess                     — start a tensor-cache job
 //   GET    /datasets/:id/preprocess                     — tensor-cache status
 //   DELETE /datasets/:id/preprocess/:variantKey         — delete one cache variant
+//   GET    /datasets/:id/mm3                            — MM3 codes cache + model readiness
+//   POST   /datasets/:id/mm3-codes                      — audio -> RVQ codes (MM3)
+//   POST   /datasets/:id/mm3-train-lm                   — start an MM3 LM LoRA training job
 //   POST   /datasets/:id/train-lm                       — start an LM LoRA training job
 //   GET    /datasets/:id/train-lm                       — LM adapter / codes status
 //   POST   /datasets/:id/train-dit                      — start a DiT LoRA training job
@@ -80,6 +83,9 @@ import {
   resumePipeline, startPipeline,
 } from '../services/training/pipelineRunner.js';
 import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
+import {
+  MM3_LM_DEFAULTS, missingMm3TrainModels, mm3AdapterRunDir, mm3CodesDir, mm3RunName,
+} from '../services/training/mm3Train.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
 import { essentiaAvailable } from '../services/training/essentiaClient.js';
 import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services/training/understandClient.js';
@@ -1660,6 +1666,162 @@ function outOfRange(name: string, n: number, min: number, max: number): string |
   if (!Number.isFinite(n) || n < min || n > max) return `${name} must be between ${min} and ${max}`;
   return null;
 }
+
+// ─── MiniMax-Music3 training (S4) ───────────────────────────────────────────
+//
+// Two stages, both GPU-lane and both engine-stopping:
+//   POST /datasets/:id/mm3-codes     audio -> RVQ codes  (the LM's input)
+//   POST /datasets/:id/mm3-train-lm  codes + captions -> an LM LoRA
+//   GET  /datasets/:id/mm3           what exists and what is missing
+//
+// Spec: docs/plans/2026-08-20-mm3-training-server-design.md §2.4.
+
+/** Shared guards: dataset exists, nothing else is running on it, ace-train is
+ *  in the build, and the dataset has actually been built. Returns the dataset
+ *  or null after answering. */
+function mm3Preflight(req: Request, res: Response): TrainingDatasetRow | null {
+  let ds = repo.getDataset(req.params.id as string);
+  if (!ds) {
+    res.status(404).json({ error: 'Dataset not found' });
+    return null;
+  }
+  if (queue.activeJobForDataset(ds.id)) {
+    res.status(409).json({ error: 'A job is already running for this dataset' });
+    return null;
+  }
+  if (!aceTrainExe()) {
+    res.status(503).json({ error: 'ace-train was not found next to ace-server — rebuild the engine' });
+    return null;
+  }
+  ds = adoptExistingDatasetJson(ds, repo.updateDataset);
+  if (!ds.builtAt || !ds.datasetJsonPath || !fs.existsSync(ds.datasetJsonPath)) {
+    res.status(400).json({ error: 'Dataset must be built first — run Build before MiniMax-Music3 training' });
+    return null;
+  }
+  return ds;
+}
+
+/** GET /datasets/:id/mm3 — codes cache state + which model files are missing.
+ *  Cheap and never throws: the UI polls it to decide what to enable. */
+router.get('/datasets/:id/mm3', (req: Request, res: Response) => {
+  try {
+    const ds = repo.getDataset(req.params.id as string);
+    if (!ds) {
+      res.status(404).json({ error: 'Dataset not found' });
+      return;
+    }
+    const codesDir = mm3CodesDir(ds.slug);
+    let codes = 0;
+    let encoder = '';
+    try {
+      const inner = path.join(codesDir, 'codes');
+      codes = fs.readdirSync(inner).filter(f => f.endsWith('.codes')).length;
+      const meta = JSON.parse(fs.readFileSync(path.join(inner, 'codes.json'), 'utf-8'));
+      encoder = typeof meta?.encoder === 'string' ? path.basename(meta.encoder) : '';
+    } catch { /* no cache yet */ }
+    res.json({
+      codesDir,
+      codes,
+      encoder,
+      // Reported separately because the two stages need different files: the
+      // codes job wants the encoders, training wants the F16 LM + depth.
+      missingForCodes: missingMm3TrainModels('codes'),
+      missingForTrain: missingMm3TrainModels('train'),
+      defaults: MM3_LM_DEFAULTS,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+/** POST /datasets/:id/mm3-codes */
+router.post('/datasets/:id/mm3-codes', (req: Request, res: Response) => {
+  try {
+    const ds = mm3Preflight(req, res);
+    if (!ds) return;
+    const missing = missingMm3TrainModels('codes');
+    if (missing.length) {
+      res.status(400).json({ error: `MiniMax-Music3 encoder files are missing: ${missing.join(', ')}` });
+      return;
+    }
+    const body = (req.body || {}) as { maxDuration?: unknown };
+    const maxDuration = Number(body.maxDuration);
+    const job = queue.startMm3CodesJob(ds.id, {
+      datasetSlug: ds.slug,
+      datasetJson: ds.datasetJsonPath,
+      outDir: mm3CodesDir(ds.slug),
+      maxDuration: Number.isFinite(maxDuration) && maxDuration > 0 ? maxDuration : undefined,
+    });
+    res.json({ jobId: job.id, kind: job.kind });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+/** POST /datasets/:id/mm3-train-lm */
+router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
+  try {
+    const ds = mm3Preflight(req, res);
+    if (!ds) return;
+    const missing = missingMm3TrainModels('train');
+    if (missing.length) {
+      res.status(400).json({
+        error: `MiniMax-Music3 training models are missing: ${missing.join(', ')}. `
+             + 'Training needs the F16 files specifically — a quantized base cannot be trained.',
+      });
+      return;
+    }
+
+    const codesDir = mm3CodesDir(ds.slug);
+    const codesInner = path.join(codesDir, 'codes');
+    const nCodes = fs.existsSync(codesInner)
+      ? fs.readdirSync(codesInner).filter(f => f.endsWith('.codes')).length : 0;
+    if (nCodes === 0) {
+      res.status(400).json({ error: 'No RVQ codes for this dataset — run the codes export first' });
+      return;
+    }
+
+    // The captions the trainer reads are the MM3-native `<stem>.mm3.txt` files
+    // beside the audio, NOT the ACE caption in the sidecar. The trainer refuses
+    // to fall back (an ACE caption trains the wrong genre, measured), so point
+    // it at the source folder and let it skip what has none.
+    const captionsDir = ds.sourceDir;
+
+    const b = (req.body || {}) as Record<string, unknown>;
+    const num = (k: string, d: number, lo: number, hi: number): number => {
+      const v = Number(b[k]);
+      return Number.isFinite(v) && v >= lo && v <= hi ? v : d;
+    };
+    const D = MM3_LM_DEFAULTS;
+    const optimizer = b.optimizer === 'adamw' ? 'adamw' : D.optimizer;
+    const cropMode  = b.cropMode === 'beginning' ? 'beginning' : D.cropMode;
+    const runName   = mm3RunName(ds.slug);
+
+    const job = queue.startMm3TrainLmJob(ds.id, {
+      manifest:    ds.datasetJsonPath,
+      captionsDir,
+      codesDir:    codesInner,
+      outDir:      mm3AdapterRunDir(runName),
+      rank:        num('rank', D.rank, 1, 512),
+      alpha:       num('alpha', D.alpha, 1, 2048),
+      lr:          num('lr', D.lr, 1e-7, 1e-2),
+      steps:       num('steps', D.steps, 1, 100000),
+      saveEvery:   num('saveEvery', D.saveEvery, 0, 100000),
+      warmup:      num('warmup', D.warmup, 0, 100000),
+      gradAccum:   num('gradAccum', D.gradAccum, 1, 64),
+      seed:        num('seed', D.seed, 0, 2 ** 31 - 1),
+      maxFrames:   num('maxFrames', D.maxFrames, 64, 9000),
+      cropMode,
+      optimizer,
+      muonLrScale: num('muonLrScale', D.muonLrScale, 0.01, 4096),
+      trigger:     typeof b.trigger === 'string' ? b.trigger.trim() : (ds.customTag || ''),
+      datasetName: ds.name || ds.slug,
+    });
+    res.json({ jobId: job.id, kind: job.kind, runName, outDir: mm3AdapterRunDir(runName) });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
 
 router.post('/datasets/:id/train-lm', async (req: Request, res: Response) => {
   try {

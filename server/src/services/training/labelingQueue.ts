@@ -356,6 +356,8 @@ function laneFor(job: TrainingJob): 'gpu' | 'net' {
     case 'audition':
     case 'lm-calibrate':   // drives /lm generations — engine must be up, GPU-serial
     case 'dit-calibrate':  // drives /synth + /vae — same rule
+    case 'mm3-codes':      // DAV + RVQ encode, whole-card
+    case 'mm3-train-lm':   // peaks at 31.7 GB of 32 — nothing else may run
       return 'gpu';
     case 'label':
       return (job.opts as LabelOptions | undefined)?.useUnderstand === true ? 'gpu' : 'net';
@@ -1353,6 +1355,34 @@ export function startTrainLmJob(datasetId: string, opts: unknown): TrainingJob {
   enqueue(job, async (j) => {
     const { runTrainLmJob } = await import('./trainLmRunner.js');
     await runTrainLmJob(j);
+  });
+  return job;
+}
+
+/**
+ * MiniMax-Music3 code export (S4) — spawns `ace-train mm3-codes`, which owns
+ * the GPU for the run. Same lazy import as the other trainers: the runner
+ * imports emitProgress/finishJob/isCancelled from this module.
+ */
+export function startMm3CodesJob(datasetId: string, opts: unknown): TrainingJob {
+  const job = createJob('mm3-codes', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runMm3CodesJob } = await import('./mm3TrainRunner.js');
+    await runMm3CodesJob(j);
+  });
+  return job;
+}
+
+/**
+ * MiniMax-Music3 LM LoRA training (S4). `sampleIds` is empty: the inputs are
+ * the codes cache and the caption sidecars, not dataset rows, so there is no
+ * per-sample row state to mark.
+ */
+export function startMm3TrainLmJob(datasetId: string, opts: unknown): TrainingJob {
+  const job = createJob('mm3-train-lm', datasetId, [], opts);
+  enqueue(job, async (j) => {
+    const { runMm3TrainLmJob } = await import('./mm3TrainRunner.js');
+    await runMm3TrainLmJob(j);
   });
   return job;
 }
