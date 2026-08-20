@@ -32,22 +32,24 @@ export const HF_MODEL_REPOS: Record<MuscriptorModel, string> = {
 
 // ── Hugging Face access token ────────────────────────────────────────────
 
-const HF_TOKEN_PATH = path.join(MUSCRIPTOR_DIR, 'hf_token');
+const HF_TOKEN_DIR = path.join(MUSCRIPTOR_DIR, 'hf_tokens');
 
-export function getHfToken(): string | null {
+export function getHfToken(userId?: string): string | null {
   try {
-    const t = fs.readFileSync(HF_TOKEN_PATH, 'utf-8').trim();
+    const p = userId ? path.join(HF_TOKEN_DIR, `${userId}.token`) : path.join(HF_TOKEN_DIR, 'default.token');
+    const t = fs.readFileSync(p, 'utf-8').trim();
     return t || null;
   } catch { return null; }
 }
 
-export function setHfToken(token: string): void {
-  fs.mkdirSync(MUSCRIPTOR_DIR, { recursive: true });
+export function setHfToken(token: string, userId?: string): void {
+  fs.mkdirSync(HF_TOKEN_DIR, { recursive: true });
+  const p = userId ? path.join(HF_TOKEN_DIR, `${userId}.token`) : path.join(HF_TOKEN_DIR, 'default.token');
   const t = (token || '').trim();
   if (!t) {
-    fs.rmSync(HF_TOKEN_PATH, { force: true });
+    fs.rmSync(p, { force: true });
   } else {
-    fs.writeFileSync(HF_TOKEN_PATH, t, { encoding: 'utf-8' });
+    fs.writeFileSync(p, t, { encoding: 'utf-8' });
   }
 }
 
@@ -136,13 +138,13 @@ async function fetchToFile(url: string, token: string | null, dest: string,
  * Begin downloading a model's config.json + model.safetensors from its gated
  * HF repo. Fire-and-poll: progress via getModelStates(). Single-flight.
  */
-export function startModelDownload(m: MuscriptorModel): { started: boolean; error?: string } {
+export function startModelDownload(m: MuscriptorModel, userId?: string): { started: boolean; error?: string } {
   if (downloads.get(m)?.downloading) return { started: false, error: 'Download already in progress' };
   if (isModelDownloaded(m)) return { started: false, error: 'Already downloaded' };
 
   const state: ModelDownloadState = { downloading: true, receivedBytes: 0, totalBytes: 0 };
   downloads.set(m, state);
-  const token = getHfToken();
+  const token = getHfToken(userId);
   const base = `https://huggingface.co/${HF_MODEL_REPOS[m]}/resolve/main`;
 
   (async () => {

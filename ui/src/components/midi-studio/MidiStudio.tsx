@@ -69,6 +69,13 @@ export const MidiStudio: React.FC = () => {
 
   useEffect(() => { refreshStatus(); refreshJobs(); }, [refreshStatus, refreshJobs]);
 
+  // Refresh on login (auth-logged-in event) — ensures correct user's jobs appear
+  useEffect(() => {
+    const handler = () => { refreshStatus(); refreshJobs(); };
+    window.addEventListener('auth-logged-in', handler);
+    return () => window.removeEventListener('auth-logged-in', handler);
+  }, [refreshStatus, refreshJobs]);
+
   // Poll status while any model download is in flight
   const anyDownloading = !!status && Object.values(status.models).some(ms => ms.downloading);
   useEffect(() => {

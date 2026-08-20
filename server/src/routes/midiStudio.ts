@@ -5,7 +5,7 @@
 // ace-midi reads WAV/MP3 directly, streams note events as JSONL on stdout
 // (relayed live over SSE for the piano roll), and writes the .mid.
 // Weights are gated on Hugging Face; the download endpoints fetch them with
-// the user's stored read token. Results persist to data/midi/<jobId>/.
+// the user's stored read token. Results persist to data/midi/<userId>/<jobId>/.
 //
 // Mounts at: /api/midi-studio
 // Routes:
@@ -43,6 +43,7 @@ const TRANSCRIBE_TIMEOUT_MS = 60 * 60 * 1000;
 
 interface MidiJob {
   id: string;
+  userId: string;
   status: 'queued' | 'transcribing' | 'done' | 'failed' | 'cancelled';
   sourceAudioUrl: string;
   sourceFileName: string;
@@ -77,8 +78,37 @@ function resolveAudioPath(audioUrl: string): string {
   return path.join(config.data.dir, 'references', path.basename(audioUrl));
 }
 
-function jobDir(id: string): string { return path.join(midiBaseDir, id); }
-function midPath(id: string): string { return path.join(jobDir(id), 'out.mid'); }
+/** User-scoped job directory */
+function jobDir(userId: string, id: string): string { return path.join(midiBaseDir, userId, id); }
+function midPath(userId: string, id: string): string { return path.join(jobDir(userId, id), 'out.mid'); }
+
+/** Check if the caller is the job owner or admin */
+function isOwnerOrAdmin(req: Request, job: MidiJob): boolean {
+  const caller = req.user;
+  if (!caller) return false;
+  return caller.userId === job.userId || caller.role === 'admin';
+}
+
+/** Check ownership for a job looked up by ID */
+function checkJobAccess(req: Request, jobId: string, userId?: string): { job?: MidiJob; error?: string; status?: number } {
+  const job = jobs.get(jobId);
+  if (!job) return {};
+  if (!isOwnerOrAdmin(req, job)) {
+    return { error: 'Forbidden', status: 403 };
+  }
+  return { job };
+}
+
+/** Read job metadata from disk (for completed jobs) */
+function readJobMeta(userId: string, jobId: string): any | null {
+  try {
+    const metaPath = path.join(jobDir(userId, jobId), '_meta.json');
+    if (fs.existsSync(metaPath)) {
+      return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return null;
+}
 
 function broadcast(job: MidiJob, ev: any): void {
   const line = `data: ${JSON.stringify(ev)}\n\n`;
@@ -108,7 +138,7 @@ function endStream(job: MidiJob): void {
 
 async function runTranscription(job: MidiJob): Promise<void> {
   if ((job.status as string) === 'cancelled') return;
-  const dir = jobDir(job.id);
+  const dir = jobDir(job.userId, job.id);
   fs.mkdirSync(dir, { recursive: true });
 
   try {
@@ -124,7 +154,7 @@ async function runTranscription(job: MidiJob): Promise<void> {
     const child = spawn(exe, [
       '--model', modelDir(job.model),
       '--transcribe', srcPath,
-      '--out', midPath(job.id),
+      '--out', midPath(job.userId, job.id),
       '--jsonl',
     ], { windowsHide: true });
     job.child = child;
@@ -161,13 +191,13 @@ async function runTranscription(job: MidiJob): Promise<void> {
     if (code !== 0) {
       throw new Error(`ace-midi exited with code ${code}: ${stderrTail.slice(-5).join(' | ')}`);
     }
-    if (!fs.existsSync(midPath(job.id))) throw new Error('ace-midi finished but produced no MIDI file');
+    if (!fs.existsSync(midPath(job.userId, job.id))) throw new Error('ace-midi finished but produced no MIDI file');
 
     // Parse for the piano-roll preview (preview failure is non-fatal)
     let noteCount = job.noteCount;
     let durationSec = 0;
     try {
-      const parsed = parseMidiFile(fs.readFileSync(midPath(job.id)));
+      const parsed = parseMidiFile(fs.readFileSync(midPath(job.userId, job.id)));
       noteCount = parsed.noteCount;
       durationSec = parsed.durationSec;
       fs.writeFileSync(path.join(dir, 'notes.json'), JSON.stringify(parsed));
@@ -177,6 +207,7 @@ async function runTranscription(job: MidiJob): Promise<void> {
 
     fs.writeFileSync(path.join(dir, '_meta.json'), JSON.stringify({
       id: job.id,
+      userId: job.userId,
       sourceAudioUrl: job.sourceAudioUrl,
       sourceFileName: job.sourceFileName,
       songId: job.songId,
@@ -203,11 +234,12 @@ async function runTranscription(job: MidiJob): Promise<void> {
 // ── Routes ───────────────────────────────────────────────────────────────
 
 /** GET /status — engine, models, token */
-router.get('/status', (_req: Request, res: Response) => {
+router.get('/status', (req: Request, res: Response) => {
   try {
+    const userId = req.user?.userId;
     res.json({
       engineAvailable: aceMidiExe() !== null,
-      hfTokenSet: getHfToken() !== null,
+      hfTokenSet: userId ? getHfToken(userId) !== null : false,
       models: getModelStates(),
     });
   } catch (err: any) {
@@ -218,9 +250,14 @@ router.get('/status', (_req: Request, res: Response) => {
 /** POST /hf-token — store (or clear, with empty string) the HF read token */
 router.post('/hf-token', (req: Request, res: Response) => {
   try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const token = typeof req.body?.token === 'string' ? req.body.token : '';
-    setHfToken(token);
-    console.log(`[MidiStudio] HF token ${token.trim() ? 'saved' : 'cleared'}`);
+    setHfToken(token, userId);
+    console.log(`[MidiStudio] HF token ${token.trim() ? 'saved' : 'cleared'} for user ${userId}`);
     res.json({ ok: true, hfTokenSet: !!token.trim() });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -234,7 +271,8 @@ router.post('/models/:size/download', (req: Request, res: Response) => {
     res.status(400).json({ error: `Unknown model '${size}'` });
     return;
   }
-  const r = startModelDownload(size);
+  const userId = req.user?.userId;
+  const r = startModelDownload(size, userId);
   if (!r.started) {
     res.status(409).json({ error: r.error });
     return;
@@ -244,6 +282,11 @@ router.post('/models/:size/download', (req: Request, res: Response) => {
 
 /** POST /transcribe — queue a transcription job */
 router.post('/transcribe', (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
   const { sourceAudioUrl, sourceFileName, songId, model } = req.body || {};
   if (!sourceAudioUrl || typeof sourceAudioUrl !== 'string') {
     res.status(400).json({ error: 'sourceAudioUrl is required' });
@@ -261,6 +304,7 @@ router.post('/transcribe', (req: Request, res: Response) => {
 
   const job: MidiJob = {
     id: randomUUID(),
+    userId,
     status: 'queued',
     sourceAudioUrl,
     sourceFileName: sourceFileName || path.basename(sourceAudioUrl),
@@ -280,15 +324,24 @@ router.post('/transcribe', (req: Request, res: Response) => {
   res.json({ id: job.id });
 });
 
-/** GET /jobs — completed jobs from disk + in-flight jobs */
-router.get('/jobs', (_req: Request, res: Response) => {
+/** GET /jobs — completed jobs from disk + in-flight jobs (user-scoped) */
+router.get('/jobs', (req: Request, res: Response) => {
   try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const isAdmin = req.user?.role === 'admin';
     const summaries: any[] = [];
     const onDisk = new Set<string>();
-    if (fs.existsSync(midiBaseDir)) {
-      for (const entry of fs.readdirSync(midiBaseDir, { withFileTypes: true })) {
+
+    // Read from user's directory
+    const userMidiDir = path.join(midiBaseDir, userId);
+    if (fs.existsSync(userMidiDir)) {
+      for (const entry of fs.readdirSync(userMidiDir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
-        const metaPath = path.join(midiBaseDir, entry.name, '_meta.json');
+        const metaPath = path.join(userMidiDir, entry.name, '_meta.json');
         if (!fs.existsSync(metaPath)) continue;
         try {
           const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
@@ -307,8 +360,44 @@ router.get('/jobs', (_req: Request, res: Response) => {
         } catch { /* skip corrupted meta */ }
       }
     }
+
+    // If admin, also include jobs from other users
+    if (isAdmin) {
+      for (const entry of fs.readdirSync(midiBaseDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === userId) continue;
+        const otherUserDir = path.join(midiBaseDir, entry.name);
+        for (const jobEntry of fs.readdirSync(otherUserDir, { withFileTypes: true })) {
+          if (!jobEntry.isDirectory()) continue;
+          const metaPath = path.join(otherUserDir, jobEntry.name, '_meta.json');
+          if (!fs.existsSync(metaPath)) continue;
+          try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+            const jobId = meta.id || jobEntry.name;
+            if (onDisk.has(jobId)) continue;
+            onDisk.add(jobId);
+            summaries.push({
+              id: jobId,
+              status: 'done',
+              sourceFileName: meta.sourceFileName || 'unknown',
+              sourceAudioUrl: meta.sourceAudioUrl,
+              songId: meta.songId,
+              model: meta.model || 'small',
+              noteCount: meta.noteCount || 0,
+              durationSec: meta.durationSec || 0,
+              createdAt: meta.createdAt || '',
+              userId: entry.name,
+            });
+          } catch { /* skip corrupted meta */ }
+        }
+      }
+    }
+
+    // Add in-flight jobs
     for (const [, job] of jobs) {
+      // Skip done jobs already on disk
       if (job.status === 'done' || onDisk.has(job.id)) continue;
+      // Skip jobs from other users (unless admin)
+      if (job.userId !== userId && !isAdmin) continue;
       summaries.push({
         id: job.id,
         status: job.status,
@@ -323,8 +412,10 @@ router.get('/jobs', (_req: Request, res: Response) => {
         createdAt: new Date(job.createdAt).toISOString(),
         error: job.error,
         gated: job.gated,
+        userId: job.userId,
       });
     }
+
     summaries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     res.json(summaries);
   } catch (err: any) {
@@ -335,23 +426,38 @@ router.get('/jobs', (_req: Request, res: Response) => {
 /** GET /:jobId/progress — poll job progress */
 router.get('/:jobId/progress', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const job = jobs.get(jobId);
-  if (!job) {
-    if (fs.existsSync(path.join(jobDir(jobId), '_meta.json'))) {
-      res.json({ status: 'done' });
-      return;
-    }
-    res.status(404).json({ error: 'Job not found' });
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  res.json({
-    status: job.status,
-    chunksDone: job.chunksDone,
-    chunksTotal: job.chunksTotal,
-    noteCount: job.noteCount,
-    error: job.error,
-    gated: job.gated,
-  });
+
+  // Check in-memory job
+  const job = jobs.get(jobId);
+  if (job) {
+    if (!isOwnerOrAdmin(req, job)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    res.json({
+      status: job.status,
+      chunksDone: job.chunksDone,
+      chunksTotal: job.chunksTotal,
+      noteCount: job.noteCount,
+      error: job.error,
+      gated: job.gated,
+    });
+    return;
+  }
+
+  // Check disk for completed job
+  const meta = readJobMeta(userId, jobId);
+  if (meta && (meta.userId === userId || req.user?.role === 'admin')) {
+    res.json({ status: 'done' });
+    return;
+  }
+
+  res.status(404).json({ error: 'Job not found' });
 });
 
 /** GET /:jobId/stream — SSE: replay buffered events then tail live ones */
@@ -360,6 +466,10 @@ router.get('/:jobId/stream', (req: Request, res: Response) => {
   const job = jobs.get(jobId);
   if (!job) {
     res.status(404).json({ error: 'Job not found or already finished (use /notes)' });
+    return;
+  }
+  if (!isOwnerOrAdmin(req, job)) {
+    res.status(403).json({ error: 'Forbidden' });
     return;
   }
   res.setHeader('Content-Type', 'text/event-stream');
@@ -382,15 +492,22 @@ router.get('/:jobId/stream', (req: Request, res: Response) => {
 /** GET /:jobId/notes — parsed note data for the piano roll */
 router.get('/:jobId/notes', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const notesPath = path.join(jobDir(jobId), 'notes.json');
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const notesPath = path.join(jobDir(userId, jobId), 'notes.json');
   try {
     if (fs.existsSync(notesPath)) {
       res.setHeader('Content-Type', 'application/json');
       fs.createReadStream(notesPath).pipe(res);
       return;
     }
-    if (fs.existsSync(midPath(jobId))) {
-      const parsed = parseMidiFile(fs.readFileSync(midPath(jobId)));
+    const midFile = midPath(userId, jobId);
+    if (fs.existsSync(midFile)) {
+      const parsed = parseMidiFile(fs.readFileSync(midFile));
       fs.writeFileSync(notesPath, JSON.stringify(parsed));
       res.json(parsed);
       return;
@@ -404,15 +521,30 @@ router.get('/:jobId/notes', (req: Request, res: Response) => {
 /** GET /:jobId/file — download the .mid */
 router.get('/:jobId/file', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const p = midPath(jobId);
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const p = midPath(userId, jobId);
   if (!fs.existsSync(p)) {
     res.status(404).json({ error: 'MIDI file not found' });
     return;
   }
+
+  // Check ownership
+  const meta = readJobMeta(userId, jobId);
+  if (meta && meta.userId !== userId && req.user?.role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+
   let base = 'transcription';
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(jobDir(jobId), '_meta.json'), 'utf-8'));
-    base = (meta.sourceFileName || base).replace(/\.[^.]+$/, '').replace(/[^\w\s.-]/g, '_');
+    if (meta) {
+      base = (meta.sourceFileName || base).replace(/\.[^.]+$/, '').replace(/[^\w\s.-]/g, '_');
+    }
   } catch { /* keep default */ }
   res.download(p, `${base}.mid`);
 });
@@ -420,21 +552,48 @@ router.get('/:jobId/file', (req: Request, res: Response) => {
 /** DELETE /:jobId — cancel a running job and/or delete its files */
 router.delete('/:jobId', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const job = jobs.get(jobId);
-  if (job && (job.status === 'queued' || job.status === 'transcribing')) {
-    job.status = 'cancelled';
-    job.child?.kill();
-    endStream(job);
-    console.log(`[MidiStudio] Job ${jobId} cancelled`);
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
   }
-  jobs.delete(jobId);
 
-  const dir = jobDir(jobId);
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-    console.log(`[MidiStudio] Deleted job ${jobId}`);
+  const job = jobs.get(jobId);
+  if (job) {
+    if (!isOwnerOrAdmin(req, job)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    if (job.status === 'queued' || job.status === 'transcribing') {
+      job.status = 'cancelled';
+      job.child?.kill();
+      endStream(job);
+      console.log(`[MidiStudio] Job ${jobId} cancelled`);
+    }
+    jobs.delete(jobId);
+
+    const dir = jobDir(job.userId, jobId);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`[MidiStudio] Deleted job ${jobId}`);
+    }
+    res.json({ ok: true });
+    return;
   }
-  res.json({ ok: true });
+
+  // Check disk for completed job
+  const meta = readJobMeta(userId, jobId);
+  if (meta && (meta.userId === userId || req.user?.role === 'admin')) {
+    const dir = jobDir(meta.userId, jobId);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`[MidiStudio] Deleted job ${jobId} from disk`);
+    }
+    res.json({ ok: true });
+    return;
+  }
+
+  res.status(404).json({ error: 'Job not found' });
 });
 
 export default router;
