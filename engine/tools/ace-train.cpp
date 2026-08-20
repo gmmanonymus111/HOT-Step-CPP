@@ -16,6 +16,7 @@
 #include "minimax/mm3-ar-loop.h"
 #include "minimax/mm3-cond-graph.h"
 #include "minimax/mm3-rvq-encode.h"  // audio -> RVQ codes (open-RVQ 169M)
+#include "train/mm3-lm-load.h"          // MM3 LM -> the ACE LM trainer's struct
 #include "train/mm3-dit-train-run.h"   // MM3 flow-DiT LoRA trainer
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
@@ -118,6 +119,12 @@ static void print_usage(void) {
             "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-lm-probe  Wiring gate for the MM3 LM trainer: load the MM3 LM into the\n"
+            "                ACE LM trainer's struct and compare its cache-free forward\n"
+            "                against the engine's own prefill. --lm <mm3-lm-*.gguf>\n"
+            "                [--tokens a,b,c] [--layers N] [--depth <mm3-depth-*.gguf>].\n"
+            "                Runs the two sides\n"
+            "                SEQUENTIALLY: two 17 GB copies do not fit on one card.\n"
             "  mm3-codes     MiniMax-Music3 dataset -> RVQ codes (LM training input).\n"
             "                --dataset <dataset.json> --rvq <mm3-rvq-*.gguf>\n"
             "                --enc <mm3-enc-*.gguf> --out <dir>\n"
@@ -1208,6 +1215,249 @@ static int cmd_mm3_encode(int argc, char ** argv) {
 
     mm3_enc_free(&enc);
     return rc;
+}
+
+// ─── mm3-lm-probe ───────────────────────────────────────────────────────────
+//
+// S2 rung 1: does the MiniMax-Music3 LM load correctly into the ACE LM
+// TRAINER's model struct and produce the same forward as the engine's own
+// inference path?
+//
+//   ace-train mm3-lm-probe --lm <mm3-lm-*.gguf> [--tokens a,b,c,...] [--layers N]
+//
+// WHY THIS IS THE FIRST THING TO BUILD
+//
+// train/lm-graph.h is already a trainable, cache-free, unfused Qwen3 forward,
+// and MM3's LM is Qwen3-8B. So the trainer is a RETARGET, and the only part of
+// the retarget that can be silently wrong is the weight WIRING: names, the
+// untied head, q_norm/k_norm placement, RoPE theta, RMS eps. Shapes catch some
+// of that; only a numeric comparison catches the rest.
+//
+// Both sides run in ONE process, SEQUENTIALLY, with the reference fully freed
+// before the trainer side loads — two 17 GB copies of an 8.6B LM do not fit on
+// a 32 GB card, and discovering that as an allocation failure would say nothing
+// about the wiring.
+//
+// The reference is the engine's own mm3_lm_prefill (parity-proven against
+// diffusers module by module), fed the SAME ids on both CFG rows.
+static int cmd_mm3_lm_probe(int argc, char ** argv) {
+    std::string          lm_path, depth_path;
+    std::vector<int32_t> ids;
+    int                  layers = 0;   // 0 = all
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--lm"))     lm_path    = next("--lm");
+        else if (!strcmp(argv[i], "--depth"))  depth_path = next("--depth");
+        else if (!strcmp(argv[i], "--layers")) layers     = atoi(next("--layers"));
+        else if (!strcmp(argv[i], "--tokens")) {
+            std::string v = next("--tokens");
+            size_t      a = 0;
+            while (a < v.size()) {
+                size_t b = v.find(',', a);
+                if (b == std::string::npos) b = v.size();
+                ids.push_back((int32_t) atoi(v.substr(a, b - a).c_str()));
+                a = b + 1;
+            }
+        }
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (lm_path.empty()) {
+        fprintf(stderr, "ace-train mm3-lm-probe: --lm is required\n");
+        return 2;
+    }
+    // A deliberately boring default prompt: the MM3 chat/caption special tokens
+    // around a few ordinary ids, so the run exercises real embedding rows and a
+    // real position range without needing the tokenizer.
+    if (ids.empty()) {
+        ids = { 151644, 151671, 9707, 11, 1879, 0, 151672, 151673, 15191, 151674, 151669 };
+    }
+    const int64_t S = (int64_t) ids.size();
+
+    // The reference prefill guards on FULL AR residency because its sibling
+    // decode graph reads depth.audio_embd (the AR feedback embedding). Prefill
+    // itself never touches it, but the guard is unconditional and rightly so —
+    // so the depth file has to be resident even for a forward-only probe.
+    // Default to the sibling next to the LM; f16 keeps the probe's numerics
+    // uniform even though nothing here reads those weights.
+    if (depth_path.empty()) {
+        const size_t slash = lm_path.find_last_of("/\\");
+        depth_path = (slash == std::string::npos ? std::string() : lm_path.substr(0, slash + 1))
+                   + "mm3-depth-f16.gguf";
+    }
+
+    // TF32 off: this is a PARITY measurement, and TF32's ~1e-3 would sit right
+    // on top of the wiring error we are trying to see. Same lever as mm3-encode.
+#ifdef _WIN32
+    _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+    setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+
+    std::string        err;
+    std::vector<float> ref_logits;
+    int64_t            V = 0, H = 0;
+
+    // ── reference: the engine's own LM prefill ──
+    {
+        MM3Model  rm = {};
+        GGUFModel gf = {};
+        if (!gf_load(&gf, lm_path.c_str())) {
+            fprintf(stderr, "[mm3-lm-probe] cannot open %s\n", lm_path.c_str());
+            return 1;
+        }
+        mm3_parse_lm_config(gf, &rm.lm_cfg);
+        V = rm.lm_cfg.vocab_size;
+        H = rm.lm_cfg.embedding_length;
+
+        std::vector<std::string> errs;
+        bool                     ok = mm3_load_lm_tensors(&rm, gf, &errs);
+        if (ok) {
+            BackendPair bp = backend_init("MM3RefLM");
+            rm.backend     = bp.backend;
+            rm.cpu_backend = bp.cpu_backend;
+            rm.backend_ref = true;
+            ok             = wctx_alloc(&rm.wctx_lm, rm.backend);
+            if (!ok) errs.push_back("backend buffer allocation failed for the reference LM");
+        }
+        gf_close(&gf);
+
+        GGUFModel gfd = {};
+        if (ok) {
+            if (!gf_load(&gfd, depth_path.c_str())) {
+                fprintf(stderr, "[mm3-lm-probe] cannot open %s (pass --depth)\n", depth_path.c_str());
+                return 1;
+            }
+            mm3_parse_depth_config(gfd, &rm.synth_cfg);
+            ok = mm3_load_depth_tensors(&rm, gfd, &errs);
+            if (ok) {
+                ok = wctx_alloc(&rm.wctx_depth, rm.backend);
+                if (!ok) errs.push_back("backend buffer allocation failed for the depth decoder");
+            }
+            gf_close(&gfd);
+        }
+        if (!ok) {
+            fprintf(stderr, "[mm3-lm-probe] reference load failed: %s\n",
+                    errs.empty() ? "unknown" : errs[0].c_str());
+            return 1;
+        }
+        rm.lm_resident    = true;
+        rm.depth_resident = true;
+
+        MM3LmGraph g = {};
+        if (!mm3_lm_prepare(rm, &g, S + 16, &err)) {
+            fprintf(stderr, "[mm3-lm-probe] reference prepare failed: %s\n", err.c_str());
+            return 1;
+        }
+        std::vector<float> hidden((size_t) (H * MM3_LM_CFG_ROWS));
+        std::vector<float> logits((size_t) (V * MM3_LM_CFG_ROWS));
+        // Same ids on both CFG rows: we are measuring the trunk, not guidance.
+        if (!mm3_lm_prefill(rm, &g, ids.data(), ids.data(), S, hidden.data(), logits.data(), &err)) {
+            fprintf(stderr, "[mm3-lm-probe] reference prefill failed: %s\n", err.c_str());
+            return 1;
+        }
+        ref_logits.assign(logits.begin(), logits.begin() + (size_t) V);   // cond row
+
+        mm3_lm_free(&g);
+        if (rm.wctx_lm.buffer)    ggml_backend_buffer_free(rm.wctx_lm.buffer);
+        if (rm.wctx_lm.ctx)       ggml_free(rm.wctx_lm.ctx);
+        if (rm.wctx_depth.buffer) ggml_backend_buffer_free(rm.wctx_depth.buffer);
+        if (rm.wctx_depth.ctx)    ggml_free(rm.wctx_depth.ctx);
+        rm.wctx_lm    = {};
+        rm.wctx_depth = {};
+        backend_release(rm.backend, rm.cpu_backend);
+        fprintf(stderr, "[mm3-lm-probe] reference done, %lld tokens, released\n", (long long) S);
+    }
+
+    // ── trainer side: the shim + lm-graph.h's cache-free trunk ──
+    MM3TrainLm t = {};
+    if (!mm3_train_lm_load(&t, lm_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-lm-probe] trainer-side load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const int L = layers > 0 && layers < t.lm.cfg.n_layers ? layers : t.lm.cfg.n_layers;
+
+    std::vector<uint8_t> arena((size_t) 256 << 20);
+    ggml_init_params     ip  = { arena.size(), arena.data(), true };
+    ggml_context *       ctx = ggml_init(ip);
+    if (!ctx) { fprintf(stderr, "[mm3-lm-probe] ggml_init failed\n"); mm3_train_lm_free(&t); return 1; }
+
+    ggml_tensor * t_tok = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
+    ggml_tensor * t_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
+    ggml_tensor * t_msk = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, S * S);
+    ggml_set_input(t_tok);
+    ggml_set_input(t_pos);
+    ggml_set_input(t_msk);
+
+    ggml_tensor * hidden = lm_build_trunk(ctx, &t.lm, t_tok, t_pos, t_msk, (int) S, 0, L);
+    // The UNTIED head — the one wiring difference from ACE that a copy-paste of
+    // the trainer's `mul_mat(lm.embed_tokens, h)` would get silently wrong.
+    ggml_tensor * logits = ggml_mul_mat(ctx, t.lm_head, hidden);          // [V, S]
+    ggml_set_output(logits);
+
+    ggml_cgraph * gf2 = ggml_new_graph_custom(ctx, 65536, false);
+    ggml_build_forward_expand(gf2, logits);
+
+    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(t.lm.backend));
+    if (!alloc || !ggml_gallocr_alloc_graph(alloc, gf2)) {
+        fprintf(stderr, "[mm3-lm-probe] graph allocation failed (out of VRAM?)\n");
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    std::vector<int32_t> pos((size_t) S);
+    for (int64_t i = 0; i < S; i++) pos[(size_t) i] = (int32_t) i;
+    std::vector<float> msk;
+    lm_causal_mask((int) S, &msk);
+    ggml_backend_tensor_set(t_tok, ids.data(), 0, (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(t_pos, pos.data(), 0, (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(t_msk, msk.data(), 0, msk.size() * sizeof(float));
+
+    if (ggml_backend_graph_compute(t.lm.backend, gf2) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[mm3-lm-probe] forward compute failed\n");
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    std::vector<float> ours((size_t) (V * S));
+    ggml_backend_tensor_get(logits, ours.data(), 0, ours.size() * sizeof(float));
+    const float * last = ours.data() + (size_t) ((S - 1) * V);
+
+    // ── compare the last position's logits ──
+    double sd = 0, sr = 0, amax = 0, dot = 0, na = 0, nb = 0;
+    for (int64_t i = 0; i < V; i++) {
+        const double a = ref_logits[(size_t) i], b = last[i], d = b - a;
+        sd += d * d; sr += a * a; dot += a * b; na += a * a; nb += b * b;
+        if (std::abs(d) > amax) amax = std::abs(d);
+    }
+    const double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-30);
+    const double rel = std::sqrt(sd / (sr + 1e-30));
+
+    int64_t ta = 0, tb = 0;
+    for (int64_t i = 1; i < V; i++) {
+        if (ref_logits[(size_t) i] > ref_logits[(size_t) ta]) ta = i;
+        if (last[i] > last[tb]) tb = i;
+    }
+    fprintf(stderr, "[mm3-lm-probe] logits[%lld] cos=%.9f rel-RMSE=%.3e max-abs=%.4e\n", (long long) (S - 1),
+            cos, rel, amax);
+    fprintf(stderr, "[mm3-lm-probe] argmax  reference %lld (%.4f)   trainer %lld (%.4f)\n", (long long) ta,
+            ref_logits[(size_t) ta], (long long) tb, last[tb]);
+
+    // Full layer stack only: a --layers slice is a debugging aid and cannot
+    // match a full-depth reference, so it reports and never claims a pass.
+    const bool full = (L == t.lm.cfg.n_layers);
+    const bool pass = full && cos >= 0.9999 && rel <= 1e-3 && ta == tb;
+    if (!full) {
+        fprintf(stderr, "[mm3-lm-probe] (%d of %d layers — comparison is informational)\n", L, t.lm.cfg.n_layers);
+    }
+    fprintf(stderr, "[mm3-lm-probe] %s\n", pass ? "PROBE OK" : (full ? "PROBE FAIL" : "PROBE PARTIAL"));
+
+    ggml_gallocr_free(alloc);
+    ggml_free(ctx);
+    mm3_train_lm_free(&t);
+    return pass ? 0 : 1;
 }
 
 // ─── mm3-codes ──────────────────────────────────────────────────────────────
@@ -3094,6 +3344,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-encode")) {
         return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-lm-probe")) {
+        return cmd_mm3_lm_probe(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "mm3-codes")) {
         return cmd_mm3_codes(argc - 1, argv + 1);
