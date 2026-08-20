@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2, ChevronRight, Clock } from 'lucide-react';
 import { listJobs, deleteJob, type ExtractJobSummary } from '../../services/stemStudioApi';
+import { useAuth } from '../../context/AuthContext';
 
 interface RecentExtractionsProps {
   onSelectJob: (jobId: string) => void;
@@ -27,6 +28,7 @@ export const RecentExtractions: React.FC<RecentExtractionsProps> = ({ onSelectJo
   const [jobs, setJobs] = useState<ExtractJobSummary[]>([]);
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
+  const { user, isAuthenticated } = useAuth();
 
   const refresh = useCallback(async () => {
     try {
@@ -40,7 +42,15 @@ export const RecentExtractions: React.FC<RecentExtractionsProps> = ({ onSelectJo
     }
   }, []);
 
+  // Refresh on mount and when refreshTrigger changes
   useEffect(() => { refresh(); }, [refresh, refreshTrigger]);
+
+  // Refresh when auth state changes (login/logout/user switch)
+  useEffect(() => {
+    if (isAuthenticated && user) {
+      refresh();
+    }
+  }, [user?.id, isAuthenticated]);
 
   const handleDelete = async (e: React.MouseEvent, jobId: string) => {
     e.stopPropagation();

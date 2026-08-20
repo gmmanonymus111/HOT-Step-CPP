@@ -4,8 +4,8 @@
 //   1. Extract (DiT) — generative stem extraction via sequential /synth calls
 //   2. SuperSep (ONNX) — neural network separation via ace-server's supersep pipeline
 //
-// Both modes persist results to data/stems/<jobId>/ for a unified
-// mixer/download/history experience.
+// Both modes persist results to data/stems/<userId>/<jobId>/ for a unified
+// mixer/download/history experience with per-user scoping.
 
 import { Router, Request, Response } from 'express';
 import path from 'path';
@@ -15,6 +15,7 @@ import archiver from 'archiver';
 import { aceClient, type AceRequest } from '../services/aceClient.js';
 import { ensureEngineFormat } from '../services/audioConvert.js';
 import { config } from '../config.js';
+import { getUserId } from './auth.js';
 import { startGenerationLog, logGeneration, logGenerationParams, finishGenerationLog, failGenerationLog } from '../services/logger.js';
 
 const router = Router();
@@ -34,6 +35,7 @@ fs.mkdirSync(stemsBaseDir, { recursive: true });
 
 interface StemJob {
   id: string;
+  userId: string;
   type: 'extract' | 'supersep';
   status: 'pending' | 'extracting' | 'separating' | 'saving' | 'done' | 'failed' | 'cancelled';
   sourceAudioUrl: string;
@@ -58,6 +60,28 @@ interface StemJob {
 const jobs = new Map<string, StemJob>();
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/** Check if the caller is the job owner or admin */
+function isOwnerOrAdmin(req: Request, job: StemJob): boolean {
+  const caller = req.user;
+  if (!caller) return false;
+  return caller.userId === job.userId || caller.role === 'admin';
+}
+
+/** Check ownership for a job looked up by ID */
+function checkJobAccess(req: Request, jobId: string): { job?: StemJob; error?: string; status?: number } {
+  const job = jobs.get(jobId);
+  if (!job) return {};
+  if (!isOwnerOrAdmin(req, job)) {
+    return { error: 'Forbidden', status: 403 };
+  }
+  return { job };
+}
+
+/** Resolve user-scoped job directory */
+function userJobDir(userId: string, jobId: string): string {
+  return path.join(stemsBaseDir, userId, jobId);
+}
 
 /** Resolve a URL-style audio path to an absolute filesystem path */
 function resolveAudioPath(audioUrl: string): string {
@@ -99,7 +123,7 @@ function sanitizeStemName(name: string): string {
 
 /** Run the SuperSep pipeline: separate → save stems to disk */
 async function runSupersep(job: StemJob): Promise<void> {
-  const jobDir = path.join(stemsBaseDir, job.id);
+  const jobDir = userJobDir(job.userId, job.id);
   fs.mkdirSync(jobDir, { recursive: true });
 
   try {
@@ -210,6 +234,7 @@ async function runSupersep(job: StemJob): Promise<void> {
 
     fs.writeFileSync(path.join(jobDir, '_meta.json'), JSON.stringify({
       id: job.id,
+      userId: job.userId,
       type: 'supersep',
       sourceAudioUrl: job.sourceAudioUrl,
       sourceFileName: job.sourceFileName,
@@ -236,7 +261,7 @@ async function runSupersep(job: StemJob): Promise<void> {
 
 /** Run the full extraction pipeline (async — called after POST returns) */
 async function runExtraction(job: StemJob, ditSettings: any, style: string, lyrics: string): Promise<void> {
-  const jobDir = path.join(stemsBaseDir, job.id);
+  const jobDir = userJobDir(job.userId, job.id);
   fs.mkdirSync(jobDir, { recursive: true });
 
   try {
@@ -337,6 +362,7 @@ async function runExtraction(job: StemJob, ditSettings: any, style: string, lyri
     // Write metadata file
     fs.writeFileSync(path.join(jobDir, '_meta.json'), JSON.stringify({
       id: job.id,
+      userId: job.userId,
       type: 'extract',
       sourceAudioUrl: job.sourceAudioUrl,
       sourceFileName: job.sourceFileName,
@@ -363,6 +389,9 @@ async function runExtraction(job: StemJob, ditSettings: any, style: string, lyri
  * POST /extract — Start a new extraction job
  */
 router.post('/extract', (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
   const { sourceAudioUrl, sourceFileName, tracks, style, lyrics, ditSettings } = req.body;
 
   // Validate
@@ -383,6 +412,7 @@ router.post('/extract', (req: Request, res: Response) => {
   // Create job
   const job: StemJob = {
     id: randomUUID(),
+    userId,
     type: 'extract',
     status: 'pending',
     sourceAudioUrl,
@@ -406,6 +436,9 @@ router.post('/extract', (req: Request, res: Response) => {
  * POST /supersep — Start a new SuperSep separation job
  */
 router.post('/supersep', (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
   const { sourceAudioUrl, sourceFileName, level } = req.body;
 
   if (!sourceAudioUrl) {
@@ -417,6 +450,7 @@ router.post('/supersep', (req: Request, res: Response) => {
 
   const job: StemJob = {
     id: randomUUID(),
+    userId,
     type: 'supersep',
     status: 'pending',
     sourceAudioUrl,
@@ -442,21 +476,34 @@ router.post('/supersep', (req: Request, res: Response) => {
  */
 router.get('/:jobId/progress', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
   const job = jobs.get(jobId);
   if (!job) {
     // Check if this is a completed job on disk (server restarted)
-    const metaPath = path.join(stemsBaseDir, jobId, '_meta.json');
+    const metaPath = path.join(userJobDir(userId, jobId), '_meta.json');
     if (fs.existsSync(metaPath)) {
-      res.json({
-        status: 'done',
-        progress: 100,
-        currentTrack: '',
-        completedStems: JSON.parse(fs.readFileSync(metaPath, 'utf-8')).completedStems || [],
-        totalTracks: 0,
-      });
-      return;
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      // Admins can access any user's jobs; others only their own
+      if (meta.userId === userId || req.user?.role === 'admin') {
+        res.json({
+          status: 'done',
+          progress: 100,
+          currentTrack: '',
+          completedStems: meta.completedStems || [],
+          totalTracks: 0,
+        });
+        return;
+      }
     }
     res.status(404).json({ error: 'Job not found' });
+    return;
+  }
+
+  // Check ownership
+  if (!isOwnerOrAdmin(req, job)) {
+    res.status(403).json({ error: 'Forbidden' });
     return;
   }
 
@@ -501,7 +548,10 @@ router.get('/:jobId/progress', (req: Request, res: Response) => {
  */
 router.get('/:jobId/result', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const jobDir = path.join(stemsBaseDir, jobId);
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const jobDir = userJobDir(userId, jobId);
   const metaPath = path.join(jobDir, '_meta.json');
 
   if (!fs.existsSync(metaPath)) {
@@ -510,6 +560,12 @@ router.get('/:jobId/result', (req: Request, res: Response) => {
   }
 
   const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+
+  // Admins can access any user's jobs; others only their own
+  if (meta.userId !== userId && req.user?.role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
 
   // SuperSep jobs have stemMeta with original names + categories;
   // Extract jobs just have completedStems (track names == filenames)
@@ -542,11 +598,25 @@ router.get('/:jobId/result', (req: Request, res: Response) => {
 router.get('/:jobId/stem/:trackName', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
   const trackName = req.params.trackName as string;
-  const stemPath = path.join(stemsBaseDir, jobId, `${trackName}.wav`);
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const jobDir = userJobDir(userId, jobId);
+  const stemPath = path.join(jobDir, `${trackName}.wav`);
 
   if (!fs.existsSync(stemPath)) {
     res.status(404).json({ error: `Stem not found: ${trackName}` });
     return;
+  }
+
+  // Check ownership via meta
+  const metaPath = path.join(jobDir, '_meta.json');
+  if (fs.existsSync(metaPath)) {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    if (meta.userId !== userId && req.user?.role !== 'admin') {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
   }
 
   res.setHeader('Content-Type', 'audio/wav');
@@ -559,7 +629,10 @@ router.get('/:jobId/stem/:trackName', (req: Request, res: Response) => {
  */
 router.get('/:jobId/download-all', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const jobDir = path.join(stemsBaseDir, jobId);
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const jobDir = userJobDir(userId, jobId);
   const metaPath = path.join(jobDir, '_meta.json');
 
   if (!fs.existsSync(metaPath)) {
@@ -568,6 +641,13 @@ router.get('/:jobId/download-all', (req: Request, res: Response) => {
   }
 
   const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+
+  // Check ownership
+  if (meta.userId !== userId && req.user?.role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+
   const sourceBase = (meta.sourceFileName || 'stems').replace(/\.[^.]+$/, '');
 
   res.setHeader('Content-Type', 'application/zip');
@@ -587,21 +667,26 @@ router.get('/:jobId/download-all', (req: Request, res: Response) => {
 });
 
 /**
- * GET /jobs — List all past extraction jobs
+ * GET /jobs — List all past extraction jobs for the current user
  */
-router.get('/jobs', (_req: Request, res: Response) => {
+router.get('/jobs', (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
   try {
-    if (!fs.existsSync(stemsBaseDir)) {
+    // User-scoped directory
+    const userStemsDir = path.join(stemsBaseDir, userId);
+    if (!fs.existsSync(userStemsDir)) {
       res.json([]);
       return;
     }
 
-    const entries = fs.readdirSync(stemsBaseDir, { withFileTypes: true });
+    const entries = fs.readdirSync(userStemsDir, { withFileTypes: true });
     const jobSummaries = [];
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const metaPath = path.join(stemsBaseDir, entry.name, '_meta.json');
+      const metaPath = path.join(userStemsDir, entry.name, '_meta.json');
       if (!fs.existsSync(metaPath)) continue;
 
       try {
@@ -631,10 +716,21 @@ router.get('/jobs', (_req: Request, res: Response) => {
  */
 router.delete('/:jobId', (req: Request, res: Response) => {
   const jobId = req.params.jobId as string;
-  const jobDir = path.join(stemsBaseDir, jobId);
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  // Check in-memory job ownership
+  const job = jobs.get(jobId);
+  if (job) {
+    if (!isOwnerOrAdmin(req, job)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+  }
+
+  const jobDir = userJobDir(userId, jobId);
 
   // Cancel if still running
-  const job = jobs.get(jobId);
   if (job && (job.status === 'pending' || job.status === 'extracting')) {
     job.status = 'cancelled';
   }
@@ -650,31 +746,39 @@ router.delete('/:jobId', (req: Request, res: Response) => {
 });
 
 /**
- * DELETE /all — Delete ALL stem data (used by Settings page)
+ * DELETE /all — Delete ALL stem data for the current user
  */
-router.delete('/all', (_req: Request, res: Response) => {
-  // Cancel all running jobs
+router.delete('/all', (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const userStemsDir = path.join(stemsBaseDir, userId);
+
+  // Cancel all running jobs for this user
   for (const [, job] of jobs) {
-    if (job.status === 'pending' || job.status === 'extracting') {
+    if (job.userId === userId && (job.status === 'pending' || job.status === 'extracting')) {
       job.status = 'cancelled';
     }
   }
-  jobs.clear();
 
-  if (fs.existsSync(stemsBaseDir)) {
-    fs.rmSync(stemsBaseDir, { recursive: true, force: true });
-    fs.mkdirSync(stemsBaseDir, { recursive: true });
-    console.log('[StemStudio] All stems cleared');
+  if (fs.existsSync(userStemsDir)) {
+    fs.rmSync(userStemsDir, { recursive: true, force: true });
+    fs.mkdirSync(userStemsDir, { recursive: true });
+    console.log(`[StemStudio] All stems cleared for user ${userId}`);
   }
   res.json({ ok: true });
 });
 
 /**
- * GET /stats — Stem storage statistics (for Settings page)
+ * GET /stats — Stem storage statistics for the current user
  */
-router.get('/stats', (_req: Request, res: Response) => {
+router.get('/stats', (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
   try {
-    if (!fs.existsSync(stemsBaseDir)) {
+    const userStemsDir = path.join(stemsBaseDir, userId);
+    if (!fs.existsSync(userStemsDir)) {
       res.json({ totalBytes: 0, jobCount: 0, stemCount: 0 });
       return;
     }
@@ -683,11 +787,11 @@ router.get('/stats', (_req: Request, res: Response) => {
     let jobCount = 0;
     let stemCount = 0;
 
-    const entries = fs.readdirSync(stemsBaseDir, { withFileTypes: true });
+    const entries = fs.readdirSync(userStemsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       jobCount++;
-      const jobDir = path.join(stemsBaseDir, entry.name);
+      const jobDir = path.join(userStemsDir, entry.name);
       const files = fs.readdirSync(jobDir);
       for (const file of files) {
         if (file.endsWith('.wav')) {
