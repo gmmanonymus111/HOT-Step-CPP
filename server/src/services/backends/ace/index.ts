@@ -48,6 +48,10 @@ async function capabilities(): Promise<BackendCapabilities> {
       // ACE's dropdown (see the field docs in ../types.ts).
       samplerPlugins: true,
       adapters: true,
+      // ACE's planner-LM LoRAs live inside its own LM/Thinking cluster
+      // (lmAdapter/lmAdapterScale globals), not the generic picker this flag
+      // gates — so false here means "not that UI", not "no LM adapters".
+      lmAdapters: false,
       postProcess: true,
       stableStep: true,
       whisper: true,

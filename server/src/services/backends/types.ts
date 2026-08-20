@@ -69,6 +69,14 @@ export interface BackendFeatureCapabilities {
    *  MM3 analogue. */
   samplerPlugins: boolean;
   adapters: boolean;
+  /** The backend exposes RUNTIME LM LoRA adapters (a picker + strength dials
+   *  applied to its language/planner stage), independent of `adapters`, which
+   *  gates ACE's DiT adapter stack UI — merge/runtime modes, per-section
+   *  masking, trigger embedding, DiT group scales. MiniMax-Music3 has the
+   *  former and none of the latter, so one flag could not express it.
+   *  Required like the rest of the manifest: "we don't have this" is a
+   *  statement, not an omission. */
+  lmAdapters: boolean;
   /** The model-agnostic post-processing stages run for this backend: the VST
    *  chain and reference mastering, both of which read the sample rate from
    *  the WAV rather than assuming one. Separate from `plugins`, which gates

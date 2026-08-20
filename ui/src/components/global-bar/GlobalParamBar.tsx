@@ -16,6 +16,7 @@ import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
 import { BackendModelsDropdown, BackendModelsBadge } from './BackendModelsDropdown';
 import { BackendToggle } from './BackendToggle';
 import { AdaptersDropdown, AdaptersBadge } from './AdaptersDropdown';
+import { Mm3LmAdapterDropdown, Mm3LmAdapterBadge } from './Mm3LmAdapterDropdown';
 import { GenerationDropdown, GenerationBadge } from './GenerationDropdown';
 import { BackendGenerationDropdown, BackendGenerationBadge } from './BackendGenerationDropdown';
 import { LmThinkingDropdown, LmThinkingBadge } from './LmThinkingDropdown';
@@ -89,6 +90,11 @@ export const GlobalParamBar: React.FC = () => {
   const showAdapters = true;
   const showPostProcessing = true;
   const adaptersSupported = !capabilities || capabilities.features.adapters;
+  // A backend can have adapters without having ACE's adapter STACK: MM3's are
+  // runtime LM LoRAs with their own strength dials and nothing else from that
+  // UI (no merge/runtime modes, no per-section masking, no DiT group scales).
+  // So the cluster has a third state between "ACE's panel" and "not yet".
+  const lmAdaptersSupported = !!capabilities && capabilities.features.lmAdapters === true;
   // Post-processing is NOT all-or-nothing. The VST chain, reference mastering
   // and StableStep read the sample rate from the audio rather than assuming
   // ACE's 48 kHz, so they work for any backend; only PP-VAE re-encode and
@@ -254,7 +260,9 @@ export const GlobalParamBar: React.FC = () => {
             id="adapters"
             label={t('globalBar.adapters')}
             icon={<Plug size={14} />}
-            badge={adaptersSupported ? <AdaptersBadge /> : <UnsupportedBadge />}
+            badge={adaptersSupported ? <AdaptersBadge />
+                 : lmAdaptersSupported ? <Mm3LmAdapterBadge />
+                 : <UnsupportedBadge />}
             accentColor="emerald"
             isOpen={openSection === 'adapters'}
             onOpen={() => handleOpen('adapters')}
@@ -262,6 +270,8 @@ export const GlobalParamBar: React.FC = () => {
           >
             {adaptersSupported
               ? <AdaptersDropdown />
+              : lmAdaptersSupported
+              ? <Mm3LmAdapterDropdown />
               : <NotYetPanel feature="Adapters" />}
           </BarSection>
           </DiscoPulseWrapper>

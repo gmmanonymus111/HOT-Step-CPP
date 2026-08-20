@@ -48,6 +48,11 @@ export interface BackendFeatureCapabilities {
    *  registered by an older server won't send it. */
   samplerPlugins?: boolean;
   adapters: boolean;
+  /** The backend exposes runtime LM LoRA adapters (picker + strength dials on
+   *  its language/planner stage). Separate from `adapters`, which gates ACE's
+   *  DiT adapter stack UI. Optional here because a backend registered by an
+   *  older server won't send it. */
+  lmAdapters?: boolean;
   /** Model-agnostic post stages (VST chain, reference mastering) run for this
    *  backend. Separate from `plugins`, which also gates the ACE-VAE-coupled
    *  stages (PP-VAE re-encode, Spectral Lifter). */

@@ -14,6 +14,7 @@ import { engineReady } from '../../../engineState.js';
 import { isEngineSuspended } from '../../aceEngineProcess.js';
 import { getSetting, setSetting } from '../../../db/lireekDb.js';
 import { listMm3Planks } from './plank.js';
+import { listMm3LmAdapters } from './lmAdapter.js';
 import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
 import type { Mm3Props, Mm3RoleVariants } from './client.js';
 import type {
@@ -226,6 +227,14 @@ async function capabilities(): Promise<BackendCapabilities> {
       // off the parity-proven native flow loop without anyone asking.
       samplerPlugins: true,
       adapters: false,
+      // Runtime LM LoRAs (engine mm3-lm-adapter.h): a picker + strength dials
+      // for the ARTIST adapters, not ACE's DiT adapter stack. Deliberately a
+      // flag of its own rather than `adapters: true` — that one gates ACE's
+      // whole stack UI (merge/runtime modes, per-section masking, trigger
+      // embedding, group scales for a DiT), none of which exists here. The
+      // catalogue is GET /api/mm3/lm-adapters; the request fields are
+      // params.mm3LmAdapter + mm3LmAdapterScale* (backends/minimax/generate.ts).
+      lmAdapters: true,
       // Model-agnostic post stages: the VST chain reads the rate from the WAV,
       // mastering reads and writes it, and SA3 is natively 44.1 kHz — none of
       // the three assume ACE's 48 kHz output. PP-VAE and Spectral Lifter stay
@@ -374,10 +383,13 @@ async function models(): Promise<BackendModels> {
       cond:  bucketOf(v.cond, 'cond'),
       voc:   bucketOf(v.voc, 'voc'),
     },
-    // No adapter or planner-adapter subsystem for MM3 yet — the UI renders
-    // these clusters as empty placeholders (features.adapters is false).
+    // No DiT-adapter subsystem for MM3 yet (features.adapters is false), so
+    // that cluster stays an empty placeholder. LM LoRAs DO exist — the bare
+    // file list here keeps the generic catalogue honest; the picker reads
+    // GET /api/mm3/lm-adapters for the sidecar detail (trigger, rank,
+    // recommended scales) this shape has no room for.
     adapters: [],
-    lmAdapters: [],
+    lmAdapters: listMm3LmAdapters().map(a => a.file),
     // The quant actually in force, not what was requested: if a selected file
     // is deleted the engine falls back and the UI must show the truth.
     defaults: {

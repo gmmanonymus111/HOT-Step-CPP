@@ -23,6 +23,11 @@ import {
   setActiveBackendId,
 } from '../services/backends/registry.js';
 import { listMm3Planks, readMm3PlankMeta } from '../services/backends/minimax/plank.js';
+import {
+  listMm3LmAdapters,
+  mm3LmAdapterDir,
+  MM3_LM_ADAPTER_DEFAULT_SCALES,
+} from '../services/backends/minimax/lmAdapter.js';
 import type { BackendCapabilities } from '../services/backends/types.js';
 
 const router = Router();
@@ -166,7 +171,8 @@ router.get('/capabilities', async (req, res) => {
       up: false,
       core: { duration: { max: 0 }, bpm: false, keyscale: false, negativePrompt: false, batch: { max: 1 }, seed: false },
       features: {
-        models: false, lm: false, plugins: false, samplerPlugins: false, adapters: false, postProcess: false,
+        models: false, lm: false, plugins: false, samplerPlugins: false, adapters: false,
+        lmAdapters: false, postProcess: false,
         stableStep: false, whisper: false, lyricTimestamps: false, cover: false, repaint: false,
         lego: false, extract: false, streaming: false, training: false, midi: false,
         stems: false, understand: false, conceptSteering: false,
@@ -203,6 +209,30 @@ router.get('/mm3/plank-meta', (req, res) => {
     return;
   }
   res.json(meta);
+});
+
+// ── MM3 runtime LM adapters ──────────────────────────────────────────────────
+//
+// The picker's catalogue. Adapters are applied ENGINE-side per generation
+// (mm3-lm-adapter.h) from the path `params.mm3LmAdapter` resolves to, so this
+// route is read-only metadata: what is installed, what each one was trained
+// with, and the scale dials the UI should prefill.
+//
+// MM3-namespaced like the plank routes above rather than living on
+// /api/backends/*: the generic catalogue (`models().lmAdapters`) carries the
+// bare file list for any backend, and this adds the sidecar detail that only
+// this backend has a shape for. `features.lmAdapters` in the manifest — not a
+// backend id — is what gates the UI that calls it.
+
+/** GET /api/mm3/lm-adapters — installed MM3 LM LoRAs + their sidecar metadata. */
+router.get('/mm3/lm-adapters', (_req, res) => {
+  // listMm3LmAdapters never throws (a missing adapters directory is an empty
+  // list, which renders as "None" — the honest degrade).
+  res.json({
+    adapters: listMm3LmAdapters(),
+    defaultScales: MM3_LM_ADAPTER_DEFAULT_SCALES,
+    dir: mm3LmAdapterDir(),
+  });
 });
 
 export default router;
