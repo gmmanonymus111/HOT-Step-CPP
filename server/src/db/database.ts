@@ -407,6 +407,18 @@ export function initDb(): void {
     try { db.exec(sql); } catch { /* index already exists */ }
   }
 
+  // ── Songs user-isolation migration ────────────────────────────────────────
+  // Migrate existing songs rows to first admin user (or first user).
+  if (targetUserId) {
+    const needsMigration = db.prepare(
+      `SELECT COUNT(*) as c FROM songs WHERE user_id = '' OR user_id IS NULL`
+    ).get() as any;
+    if (needsMigration.c > 0) {
+      db.prepare(`UPDATE songs SET user_id = ? WHERE user_id = '' OR user_id IS NULL`).run(targetUserId);
+      console.log(`[DB] Migration: assigned ${needsMigration.c} songs to user ${targetUserId}`);
+    }
+  }
+
   // ── Training Studio user-isolation migration ─────────────────────────────
   // Migrate existing training_datasets rows to first admin user (or first user).
   if (targetUserId) {
