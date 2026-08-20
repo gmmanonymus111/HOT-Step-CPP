@@ -257,6 +257,10 @@ interface TrainingState {
   deletePreprocessVariant(variantKey: string): Promise<void>;
   loadTrainLmStatus(q?: { variantKey?: string; adapterName?: string; lmSize?: LmSize }): Promise<void>;
   startTrainLm(opts: TrainLmOptions): Promise<void>;
+  /** MiniMax-Music3: audio -> RVQ codes. */
+  startMm3Codes(): Promise<void>;
+  /** MiniMax-Music3: codes + captions -> an LM LoRA. */
+  startMm3TrainLm(opts: trainingApi.Mm3TrainLmRequest): Promise<void>;
   loadTrainDitStatus(q?: { variantKey?: string; adapterName?: string }): Promise<void>;
   startTrainDit(opts: TrainDitOptions): Promise<void>;
   loadAuditions(): Promise<void>;
@@ -726,6 +730,33 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     }
   },
 
+  startMm3Codes: async () => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      const { jobId } = await trainingApi.startMm3Codes(id, {});
+      set({ jobLog: [], error: null });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
+  startMm3TrainLm: async (opts) => {
+    const id = get().selectedDatasetId;
+    if (!id) return;
+    try {
+      const { jobId } = await trainingApi.startMm3TrainLm(id, opts);
+      // MM3 reports STEPS, not epochs, so the epoch series stays empty and the
+      // chart draws the step layer alone. blankTrainSeries() clears whatever a
+      // previous ACE run left behind.
+      set({ jobLog: [], error: null, ...blankTrainSeries(), trainTargetLoss: 0, trainMaxEpochs: 0 });
+      await adoptJob(set, get, jobId);
+    } catch (err) {
+      set({ error: errMessage(err) });
+    }
+  },
+
   startTrainLm: async (opts) => {
     const id = get().selectedDatasetId;
     if (!id) return;
@@ -973,7 +1004,10 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
         // and neither kind needs its own copy. Everything below is idempotent:
         // the SSE buffer is replayed on every reconnect.
         const chartKind = get().activeJob?.kind;
-        if (chartKind === 'train-lm' || chartKind === 'train-dit') {
+        // mm3-train-lm emits the SAME step/milestone metrics (the binary speaks
+        // train-lm's JSONL vocabulary), so it draws on the same chart with no
+        // other change.
+        if (chartKind === 'train-lm' || chartKind === 'train-dit' || chartKind === 'mm3-train-lm') {
           if (ev.metric === 'data' && typeof ev.stepsPerEpoch === 'number' && ev.stepsPerEpoch > 0) {
             set({ trainStepsPerEpoch: ev.stepsPerEpoch });
           }

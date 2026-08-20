@@ -254,7 +254,11 @@ async function capabilities(): Promise<BackendCapabilities> {
       lego: false,
       extract: false,
       streaming: false,
-      training: false,
+      // Native MM3 LM LoRA training shipped 2026-08-20 (ace-train mm3-codes +
+      // mm3-lm-train, wired as Training Studio job kinds). Nothing reads this
+      // flag today, but a manifest that says `false` about a feature the
+      // backend has is a lie waiting to mislead someone.
+      training: true,
       midi: false,
       stems: false,
       understand: false,

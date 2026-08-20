@@ -16,12 +16,14 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TrainDitOptions, TrainLmOptions } from '../../services/trainingApi';
+import { useBackendStore } from '../../stores/backendStore';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { formatDurationMs, totalEpochMs } from '../../utils/trainingEta';
 import { AuditionCard, type MilestoneAuditionRequest } from './AuditionCard';
 import { JobProgress } from './JobProgress';
 import { TrainingChart } from './TrainingChart';
 import { TrainingRunStats } from './TrainingRunStats';
+import { Mm3TrainCard } from './Mm3TrainCard';
 import { TRAIN_DIT_LOKR_DEFAULTS, TrainDitForm, type TrainDitFormState } from './TrainDitForm';
 import { TRAIN_LM_DEFAULTS, TrainLmForm, type TrainLmFormState } from './TrainLmForm';
 import { useTrainingStream } from './useTrainingStream';
@@ -40,6 +42,14 @@ function formatBytes(bytes: number): string {
 
 export const TrainPanel: React.FC = () => {
   const { t } = useTranslation();
+  // WHICH TRAINING, not which flag. ACE trains a DiT and a planner LM from a
+  // preprocessed tensor cache; MiniMax-Music3 trains an LM from RVQ codes and
+  // has no DiT path and no preprocess variant. Those are two different
+  // features that happen to share a phase, not one feature with a capability
+  // toggle — so this branches on the active backend, in this one place, rather
+  // than inventing a flag that would have to mean "which of two unrelated UIs".
+  const backendId = useBackendStore(s => s.activeBackendId);
+  const mm3Mode = backendId === 'minimax-m3';
   const capabilities = useTrainingStore(s => s.capabilities);
   const datasets = useTrainingStore(s => s.datasets);
   const detail = useTrainingStore(s => s.detail);
@@ -420,6 +430,20 @@ export const TrainPanel: React.FC = () => {
             {t('trainingStudio.preprocess.goToDataset')}
           </button>
         </div>
+      </div>
+    );
+  }
+
+  // ── MiniMax-Music3 branch ───────────────────────────────────────────────
+  // Placed AFTER the built gate (MM3 reads dataset.json too) and BEFORE the
+  // preprocess-variant gate below, which is an ACE concept: MM3 trains from
+  // RVQ codes and has no tensor cache, so falling through would block it on a
+  // prerequisite it does not have.
+  if (mm3Mode) {
+    return (
+      <div className="flex flex-col gap-4">
+        {header}
+        <Mm3TrainCard datasetId={detail.id} trigger={detail.customTag || ''} />
       </div>
     );
   }
