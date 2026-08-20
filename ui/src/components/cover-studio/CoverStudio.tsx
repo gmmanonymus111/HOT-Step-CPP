@@ -60,7 +60,7 @@ interface CoverStudioProps {
 
 export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
   const { t } = useTranslation();
-  const { token } = useAuth();
+  const { user, token } = useAuth();
   const gp = useGlobalParamsStore();
   const [settings] = usePersistedState<AppSettings>('ace-settings', DEFAULT_SETTINGS);
 
@@ -251,8 +251,8 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
     setBpmCorrection(1);
     setKeyOverride(null);
 
-    // Check track cache
-    const cached = getTrackCache()[file.name];
+    // Check track cache (user-scoped)
+    const cached = getTrackCache(user?.id || null)[file.name];
     if (cached) {
       showToast(t('cover.loadedFromCache'));
       if (cached.artist) setSongArtist(cached.artist);
@@ -308,8 +308,8 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
         bpm = d.bpm || 120; key = `${d.key || 'C'} ${d.scale || 'major'}`; scale = d.scale;
         setAnalysis({ bpm, key, scale });
       }
-      // 4. Cache
-      saveTrackCacheEntry(file.name, { artist: extractedArtist, title: extractedTitle, album: extractedAlbum, duration: extractedDuration, bpm, key, scale });
+      // 4. Cache (user-scoped)
+      saveTrackCacheEntry(user?.id || null, file.name, { artist: extractedArtist, title: extractedTitle, album: extractedAlbum, duration: extractedDuration, bpm, key, scale });
     } catch (err: any) {
       showToast(`Error: ${err.message}`);
     } finally { setIsUploading(false); setIsAnalyzing(false); }
@@ -324,7 +324,7 @@ export const CoverStudio: React.FC<CoverStudioProps> = ({ coverSource }) => {
       setLyrics(result.lyrics);
       if (result.title) setSongTitle(result.title);
       showToast(t('cover.lyricsFound'));
-      if (sourceFileName) saveTrackCacheEntry(sourceFileName, { lyrics: result.lyrics, artist: songArtist.trim(), title: result.title || songTitle.trim() });
+      if (sourceFileName) saveTrackCacheEntry(user?.id || null, sourceFileName, { lyrics: result.lyrics, artist: songArtist.trim(), title: result.title || songTitle.trim() });
     } catch (err: any) { showToast(err.message || t('cover.noLyricsFound')); }
     finally { setIsSearchingLyrics(false); }
   };

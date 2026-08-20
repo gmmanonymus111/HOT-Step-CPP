@@ -2,7 +2,15 @@
 
 // ── Persistence ─────────────────────────────────────────────────────────
 export const STORAGE_PREFIX = 'cover-studio-';
-export const TRACK_CACHE_KEY = 'cover-studio-trackCache';
+export const TRACK_CACHE_KEY_BASE = 'cover-studio-trackCache';
+
+/**
+ * Get the user-scoped track cache key.
+ * Prevents cache leakage between users sharing the same browser.
+ */
+export function getTrackCacheKey(userId: string | null): string {
+  return userId ? `${TRACK_CACHE_KEY_BASE}-${userId}` : TRACK_CACHE_KEY_BASE;
+}
 
 export function persist(key: string, value: any) {
   try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); } catch {}
@@ -27,15 +35,16 @@ export interface TrackCacheEntry {
   album?: string;
 }
 
-export function getTrackCache(): Record<string, TrackCacheEntry> {
-  try { return JSON.parse(localStorage.getItem(TRACK_CACHE_KEY) || '{}'); } catch { return {}; }
+export function getTrackCache(userId: string | null): Record<string, TrackCacheEntry> {
+  try { return JSON.parse(localStorage.getItem(getTrackCacheKey(userId)) || '{}'); } catch { return {}; }
 }
 
-export function saveTrackCacheEntry(filename: string, entry: Partial<TrackCacheEntry>) {
+export function saveTrackCacheEntry(userId: string | null, filename: string, entry: Partial<TrackCacheEntry>) {
   try {
-    const cache = getTrackCache();
+    const cacheKey = getTrackCacheKey(userId);
+    const cache = JSON.parse(localStorage.getItem(cacheKey) || '{}');
     cache[filename] = { ...(cache[filename] || {}), ...entry } as TrackCacheEntry;
-    localStorage.setItem(TRACK_CACHE_KEY, JSON.stringify(cache));
+    localStorage.setItem(cacheKey, JSON.stringify(cache));
   } catch {}
 }
 
