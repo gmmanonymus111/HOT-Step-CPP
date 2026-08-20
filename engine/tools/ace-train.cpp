@@ -15,6 +15,7 @@
 #include "minimax/mm3-request.h"
 #include "minimax/mm3-ar-loop.h"
 #include "minimax/mm3-cond-graph.h"
+#include "minimax/mm3-rvq-encode.h"  // audio -> RVQ codes (open-RVQ 169M)
 #include "train/mm3-dit-train-run.h"   // MM3 flow-DiT LoRA trainer
 #include "model-registry.h"
 #include "train/dit-train-run.h"   // pulls in every dit-*.h (DiT LoRA trainer)
@@ -117,6 +118,14 @@ static void print_usage(void) {
             "                --enc <mm3-enc-*.gguf> --audio <in.f32> [--channels 2]\n"
             "                [--out <out.f32>] [--ref <latents.f32> : parity-gate against it]\n"
             "                [--tf32 on|off]  default off — TF32 costs ~5e-3 on the targets\n"
+            "  mm3-codes     MiniMax-Music3 dataset -> RVQ codes (LM training input).\n"
+            "                --dataset <dataset.json> --rvq <mm3-rvq-*.gguf>\n"
+            "                --enc <mm3-enc-*.gguf> --out <dir>\n"
+            "                [--ffmpeg <path>] [--max-duration <sec>] [--tf32 on|off]\n"
+            "                --fixture <f.fix> instead: check the encoder graph against a\n"
+            "                golden window from engine/tools/rvq-encoder-fixture.py.\n"
+            "                Writes <out>/codes/<id>.codes, int32 [frames+1, 8], row 0 the\n"
+            "                duplicated warm-up row. Replaces the WSL python exporter.\n"
             "  mm3-preprocess  MiniMax-Music3 dataset -> flow-DiT target latents.\n"
             "                --dataset <dataset.json> --enc <mm3-enc-*.gguf> --out <dir>\n"
             "                [--ffmpeg <path>] [--max-duration <sec>] [--tf32 on|off]\n"
@@ -1199,6 +1208,463 @@ static int cmd_mm3_encode(int argc, char ** argv) {
 
     mm3_enc_free(&enc);
     return rc;
+}
+
+// ─── mm3-codes ──────────────────────────────────────────────────────────────
+//
+// Audio -> RVQ codes, the input side of MM3 LM training. Replaces the WSL
+// python exporter (docs/plans/mm3-rvq-support/export_codes_purpleorc.py) whose
+// code path this reproduces verbatim; see minimax/mm3-rvq-encode.h for the
+// contract and the traps.
+//
+//   ace-train mm3-codes --dataset <dataset.json> --rvq <mm3-rvq-*.gguf>
+//                       --enc <mm3-enc-*.gguf> --out <dir>
+//   ace-train mm3-codes --rvq <mm3-rvq-*.gguf> --fixture <file.fix>
+//
+// Output per song: `<out>/codes/<id>.codes`, int32 [n_frames+1, 8], row 0 the
+// DUPLICATED warm-up row the cache format carries and the LM path expects.
+static int cmd_mm3_codes(int argc, char ** argv) {
+    std::string ds_path, rvq_path, enc_path, out_dir, fixture, ffmpeg = "ffmpeg";
+    int         max_duration = 0;
+    bool        tf32 = false;
+
+    for (int i = 1; i < argc; i++) {
+        auto next = [&](const char * what) -> const char * {
+            if (i + 1 >= argc) { fprintf(stderr, "ace-train: %s needs a value\n", what); exit(2); }
+            return argv[++i];
+        };
+        if      (!strcmp(argv[i], "--dataset"))      ds_path      = next("--dataset");
+        else if (!strcmp(argv[i], "--rvq"))          rvq_path     = next("--rvq");
+        else if (!strcmp(argv[i], "--enc"))          enc_path     = next("--enc");
+        else if (!strcmp(argv[i], "--out"))          out_dir      = next("--out");
+        else if (!strcmp(argv[i], "--fixture"))      fixture      = next("--fixture");
+        else if (!strcmp(argv[i], "--ffmpeg"))       ffmpeg       = next("--ffmpeg");
+        else if (!strcmp(argv[i], "--max-duration")) max_duration = atoi(next("--max-duration"));
+        else if (!strcmp(argv[i], "--tf32"))         tf32         = !strcmp(next("--tf32"), "on");
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(); return 0; }
+        else { fprintf(stderr, "ace-train: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (rvq_path.empty()) {
+        fprintf(stderr, "ace-train mm3-codes: --rvq is required\n");
+        return 2;
+    }
+    // Same reasoning as mm3-encode/mm3-preprocess, and stronger here: these
+    // codes are the training corpus itself, computed once and re-read for the
+    // life of the dataset. TF32's ~1e-3 is enough to flip a near-tie argmax.
+    if (!tf32) {
+#ifdef _WIN32
+        _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
+#else
+        setenv("NVIDIA_TF32_OVERRIDE", "0", 1);
+#endif
+    }
+
+    MM3Rvq      rvq = {};
+    std::string err;
+    if (!mm3_rvq_load(&rvq, rvq_path.c_str(), &err)) {
+        fprintf(stderr, "[mm3-codes] RVQ encoder load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const MM3RvqConfig & rc  = rvq.cfg;
+    const int64_t        F   = (int64_t) rc.frames;
+    const int64_t        D   = (int64_t) rc.d_model;
+    const int64_t        CH  = (int64_t) rc.latent_channels;
+    const int64_t        LMX = (int64_t) rc.latent_window_max;
+    const int64_t        NAC = (int64_t) rc.n_ac;
+    const int64_t        SV  = (int64_t) rc.sem_vocab;
+
+    std::vector<float> wlat((size_t) (LMX * CH));
+    std::vector<float> wpool((size_t) (F * LMX));
+    std::vector<float> wfeats((size_t) (F * D));
+    std::vector<float> wlogits((size_t) (F * SV));
+
+    // Semantic argmax over one window's logits, laid out [F][sem_vocab].
+    auto argmax_sem = [&](const float * lg, int64_t f) -> int32_t {
+        const float * row = lg + (size_t) (f * SV);
+        int64_t       best = 0;
+        float         bv = row[0];
+        for (int64_t j = 1; j < SV; j++) {
+            if (row[j] > bv) { bv = row[j]; best = j; }
+        }
+        return (int32_t) best;
+    };
+
+    // ── fixture mode: the unit rung, no audio and no DAV encoder ──
+    if (!fixture.empty()) {
+        FILE * ff = hs_fopen(fixture, "rb");
+        if (!ff) { fprintf(stderr, "cannot open %s\n", fixture.c_str()); mm3_rvq_free(&rvq); return 1; }
+        char     magic[8] = {};
+        uint32_t hdr[6]   = {};
+        if (fread(magic, 1, 8, ff) != 8 || memcmp(magic, "RVQFIX01", 8) != 0 ||
+            fread(hdr, sizeof(uint32_t), 6, ff) != 6) {
+            fclose(ff);
+            fprintf(stderr, "[mm3-codes] %s is not an RVQFIX01 fixture\n", fixture.c_str());
+            mm3_rvq_free(&rvq);
+            return 1;
+        }
+        const int64_t f_lat = hdr[0], f_ch = hdr[1], f_fr = hdr[2], f_d = hdr[3], f_sv = hdr[4], f_nac = hdr[5];
+        if (f_lat != LMX || f_ch != CH || f_fr != F || f_d != D || f_sv != SV || f_nac != NAC) {
+            fclose(ff);
+            fprintf(stderr, "[mm3-codes] fixture shape does not match this checkpoint\n");
+            mm3_rvq_free(&rvq);
+            return 1;
+        }
+        std::vector<float>   in_lat((size_t) (f_lat * f_ch)), in_pool((size_t) (f_fr * f_lat));
+        std::vector<float>   ref_feats((size_t) (f_fr * f_d)), ref_logits((size_t) (f_fr * f_sv));
+        std::vector<int32_t> ref_codes((size_t) (f_fr * (1 + f_nac)));
+        const bool okr = fread(in_lat.data(), sizeof(float), in_lat.size(), ff) == in_lat.size()
+                      && fread(in_pool.data(), sizeof(float), in_pool.size(), ff) == in_pool.size()
+                      && fread(ref_feats.data(), sizeof(float), ref_feats.size(), ff) == ref_feats.size()
+                      && fread(ref_logits.data(), sizeof(float), ref_logits.size(), ff) == ref_logits.size()
+                      && fread(ref_codes.data(), sizeof(int32_t), ref_codes.size(), ff) == ref_codes.size();
+        fclose(ff);
+        if (!okr) { fprintf(stderr, "[mm3-codes] short read on fixture\n"); mm3_rvq_free(&rvq); return 1; }
+
+        // The fixture stores latents as [n_lat, 128] (torch order); the graph
+        // wants [128][n_lat] channel-major, which is also the DAV output order.
+        std::vector<float> lat_cm((size_t) (LMX * CH));
+        for (int64_t t = 0; t < LMX; t++) {
+            for (int64_t c = 0; c < CH; c++) {
+                lat_cm[(size_t) (c * LMX + t)] = in_lat[(size_t) (t * CH + c)];
+            }
+        }
+        if (!mm3_rvq_encode_window(&rvq, lat_cm.data(), in_pool.data(), wfeats.data(), wlogits.data(), &err)) {
+            fprintf(stderr, "[mm3-codes] fixture encode failed: %s\n", err.c_str());
+            mm3_rvq_free(&rvq);
+            return 1;
+        }
+
+        auto stats = [](const float * a, const float * b, size_t n, const char * what) -> double {
+            double sd = 0, sr = 0, amax = 0, dot = 0, na = 0, nb = 0;
+            for (size_t i = 0; i < n; i++) {
+                const double x = a[i], y = b[i], d = y - x;
+                sd += d * d; sr += x * x; dot += x * y; na += x * x; nb += y * y;
+                if (std::abs(d) > amax) amax = std::abs(d);
+            }
+            const double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-30);
+            fprintf(stderr, "[mm3-codes] %-11s cos=%.9f rel-RMSE=%.3e max-abs=%.4e\n", what, cos,
+                    std::sqrt(sd / (sr + 1e-30)), amax);
+            return cos;
+        };
+        const double cos_f = stats(ref_feats.data(), wfeats.data(), ref_feats.size(), "feats");
+        const double cos_l = stats(ref_logits.data(), wlogits.data(), ref_logits.size(), "sem_logits");
+
+        std::vector<int32_t> sem((size_t) F);
+        for (int64_t i = 0; i < F; i++) {
+            sem[(size_t) i] = argmax_sem(wlogits.data(), i);
+        }
+        std::vector<int32_t> ac((size_t) (F * NAC), 0);
+        if (!mm3_rvq_depth_greedy(&rvq, wfeats.data(), sem.data(), F, ac.data(), &err)) {
+            fprintf(stderr, "[mm3-codes] fixture depth failed: %s\n", err.c_str());
+            mm3_rvq_free(&rvq);
+            return 1;
+        }
+
+        // Semantic mismatches are split by ARGMAX MARGIN: a flip where the top
+        // two reference logits are within noise is arithmetic order, not a port
+        // bug, and reporting them together would hide the one that matters.
+        // 0.05 is the fixture's own reported p05.
+        int64_t sem_bad = 0, sem_bad_tight = 0, ac_bad = 0;
+        for (int64_t i = 0; i < F; i++) {
+            const float * row = ref_logits.data() + (size_t) (i * f_sv);
+            if (sem[(size_t) i] != ref_codes[(size_t) (i * (1 + NAC))]) {
+                float b0 = -1e30f, b1 = -1e30f;
+                for (int64_t j = 0; j < f_sv; j++) {
+                    if (row[j] > b0) { b1 = b0; b0 = row[j]; }
+                    else if (row[j] > b1) { b1 = row[j]; }
+                }
+                sem_bad++;
+                if (b0 - b1 < 0.05f) sem_bad_tight++;
+            }
+            for (int64_t k = 0; k < NAC; k++) {
+                if (ac[(size_t) (i * NAC + k)] != ref_codes[(size_t) (i * (1 + NAC) + 1 + k)]) {
+                    ac_bad++;
+                }
+            }
+        }
+        fprintf(stderr, "[mm3-codes] semantic codes: %lld/%lld differ (%lld of them at margin < 0.05)\n",
+                (long long) sem_bad, (long long) F, (long long) sem_bad_tight);
+        fprintf(stderr, "[mm3-codes] acoustic codes: %lld/%lld differ\n", (long long) ac_bad,
+                (long long) (F * NAC));
+
+        // The bar: the graph must be right, which shows up in the CONTINUOUS
+        // outputs. Code flips at tiny margins are tolerated; anything else is
+        // not. Acoustic codes cascade, so one early flip shows up here as many
+        // — they are reported but not gated on, for exactly that reason.
+        const bool pass = cos_f >= 0.9999 && cos_l >= 0.9999 && (sem_bad - sem_bad_tight) == 0;
+        fprintf(stderr, "[mm3-codes] FIXTURE %s\n", pass ? "OK" : "FAIL");
+        mm3_rvq_free(&rvq);
+        return pass ? 0 : 1;
+    }
+
+    // ── dataset mode ──
+    if (ds_path.empty() || enc_path.empty() || out_dir.empty()) {
+        fprintf(stderr, "ace-train mm3-codes: --dataset, --enc and --out are required (or use --fixture)\n");
+        mm3_rvq_free(&rvq);
+        return 2;
+    }
+
+    FILE * df = hs_fopen(ds_path, "rb");
+    if (!df) { fprintf(stderr, "cannot open %s\n", ds_path.c_str()); mm3_rvq_free(&rvq); return 1; }
+    fseek(df, 0, SEEK_END);
+    const long dsz = ftell(df);
+    fseek(df, 0, SEEK_SET);
+    std::string dbuf((size_t) dsz, '\0');
+    const bool  dread = fread(&dbuf[0], 1, (size_t) dsz, df) == (size_t) dsz;
+    fclose(df);
+    if (!dread) { fprintf(stderr, "short read on %s\n", ds_path.c_str()); mm3_rvq_free(&rvq); return 1; }
+
+    yyjson_doc * doc = yyjson_read(dbuf.c_str(), dbuf.size(), 0);
+    if (!doc) { fprintf(stderr, "%s is not valid JSON\n", ds_path.c_str()); mm3_rvq_free(&rvq); return 1; }
+    yyjson_val * root    = yyjson_doc_get_root(doc);
+    yyjson_val * samples = yyjson_obj_get(root, "samples");
+    if (!samples || !yyjson_is_arr(samples)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "%s has no `samples` array\n", ds_path.c_str());
+        mm3_rvq_free(&rvq);
+        return 1;
+    }
+    auto jstr = [](yyjson_val * o, const char * k) -> std::string {
+        yyjson_val * v = yyjson_obj_get(o, k);
+        return (v && yyjson_is_str(v)) ? std::string(yyjson_get_str(v)) : std::string();
+    };
+
+    if (!pm_mkdir_p(out_dir) || !pm_mkdir_p(out_dir + "/codes")) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "cannot create %s\n", out_dir.c_str());
+        mm3_rvq_free(&rvq);
+        return 1;
+    }
+
+    MM3Enc enc = {};
+    if (!mm3_enc_load(&enc, enc_path.c_str(), &err)) {
+        yyjson_doc_free(doc);
+        fprintf(stderr, "[mm3-codes] DAV encoder load failed: %s\n", err.c_str());
+        mm3_rvq_free(&rvq);
+        return 1;
+    }
+    const int64_t SR = (int64_t) enc.cfg.sampling_rate;
+    if ((int64_t) enc.cfg.latent_channels != CH) {
+        fprintf(stderr, "[mm3-codes] DAV latent_channels %u != RVQ latent_channels %lld\n",
+                enc.cfg.latent_channels, (long long) CH);
+        yyjson_doc_free(doc);
+        mm3_enc_free(&enc);
+        mm3_rvq_free(&rvq);
+        return 1;
+    }
+
+    const std::string tmp_wav = out_dir + "/_mm3_codes_tmp.wav";
+    size_t            idx = 0, ok_n = 0, fail_n = 0;
+    const size_t      n_samples = yyjson_arr_size(samples);
+
+    yyjson_val *    s2;
+    yyjson_arr_iter it = yyjson_arr_iter_with(samples);
+    while ((s2 = yyjson_arr_iter_next(&it))) {
+        idx++;
+        const std::string id       = jstr(s2, "id");
+        const std::string filename = jstr(s2, "filename");
+        const std::string audio    = jstr(s2, "audio_path");
+        if (audio.empty()) {
+            fprintf(stderr, "[mm3-codes] %zu/%zu SKIP %s: no audio_path\n", idx, n_samples, filename.c_str());
+            fail_n++;
+            continue;
+        }
+
+        char cmd[4096];
+        if (max_duration > 0) {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -t %d -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, max_duration, tmp_wav.c_str());
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -y -v error -i \"%s\" -ac 2 -ar %lld -c:a pcm_f32le -f wav \"%s\"",
+                     ffmpeg.c_str(), audio.c_str(), (long long) SR, tmp_wav.c_str());
+        }
+#ifdef _WIN32
+        const std::string wrapped = "\"" + std::string(cmd) + "\"";
+        const int         rcode   = hs_system(wrapped);
+#else
+        const int rcode = hs_system(cmd);
+#endif
+        if (rcode != 0 || !pm_file_exists(tmp_wav)) {
+            fprintf(stderr, "[mm3-codes] %zu/%zu FAIL %s: ffmpeg exit %d\n", idx, n_samples,
+                    filename.c_str(), rcode);
+            fail_n++;
+            continue;
+        }
+
+        // PLANAR reader — see the long note in cmd_mm3_preprocess about what
+        // the interleaved one silently did to five LoRA runs.
+        FILE * wf = hs_fopen(tmp_wav, "rb");
+        if (!wf) { fprintf(stderr, "[mm3-codes] cannot reopen temp wav\n"); fail_n++; continue; }
+        fseek(wf, 0, SEEK_END);
+        const long wsz = ftell(wf);
+        fseek(wf, 0, SEEK_SET);
+        std::vector<uint8_t> wbuf((size_t) wsz);
+        const bool           wread = fread(wbuf.data(), 1, (size_t) wsz, wf) == (size_t) wsz;
+        fclose(wf);
+        int     T = 0, got_sr = 0;
+        float * planar = wread ? audio_io_read_wav_buf(wbuf.data(), wbuf.size(), &T, &got_sr) : nullptr;
+        if (!planar || T <= 0 || got_sr != (int) SR) {
+            fprintf(stderr, "[mm3-codes] %zu/%zu FAIL %s: cannot decode transcode\n", idx, n_samples,
+                    filename.c_str());
+            free(planar);
+            fail_n++;
+            continue;
+        }
+
+        const float *      chans[2] = { planar, planar + T };
+        std::vector<float> lat;
+        int64_t            L = 0;
+        const bool         encoded = mm3_enc_encode(&enc, chans, (int64_t) T, &lat, &L, &err);
+        free(planar);
+        if (!encoded) {
+            fprintf(stderr, "[mm3-codes] %zu/%zu FAIL %s: %s\n", idx, n_samples, filename.c_str(), err.c_str());
+            fail_n++;
+            continue;
+        }
+
+        // n_frames comes from SAMPLES, not from L: the reference derives the
+        // frame count from the waveform (samples * 25 // 44100) and then shrinks
+        // it until the windowing fits the latents it actually got.
+        int64_t n_frames = (int64_t) T * 25 / SR;
+        // `starts` is computed ONCE at the original n_frames and then indexed as
+        // n_frames shrinks — the reference does exactly this, and recomputing it
+        // inside the loop would move the boundaries.
+        std::vector<int64_t> starts = mm3_rvq_frame_starts(rc, n_frames);
+        while (n_frames > 0 && starts[(size_t) n_frames] > L) {
+            n_frames--;
+        }
+        if (n_frames < F) {
+            fprintf(stderr, "[mm3-codes] %zu/%zu SKIP %s: %lld frames < one %lld-frame window\n", idx,
+                    n_samples, filename.c_str(), (long long) n_frames, (long long) F);
+            fail_n++;
+            continue;
+        }
+        starts.resize((size_t) n_frames + 1);
+
+        std::vector<int64_t> win;
+        for (int64_t t0 = 0; t0 <= n_frames - F; t0 += F) {
+            win.push_back(t0);
+        }
+        if (win.back() != n_frames - F) {
+            win.push_back(n_frames - F);   // flush against the end
+        }
+
+        std::vector<float>   feats((size_t) (n_frames * D));
+        std::vector<int32_t> sem((size_t) n_frames, 0);
+        std::vector<char>    done((size_t) n_frames, 0);
+        bool                 song_ok = true;
+
+        for (size_t wi = 0; wi < win.size() && song_ok; wi++) {
+            const int64_t        t0   = win[wi];
+            const int64_t        base = starts[(size_t) t0];
+            std::vector<int64_t> bounds((size_t) F + 1);
+            for (int64_t j = 0; j <= F; j++) {
+                bounds[(size_t) j] = starts[(size_t) (t0 + j)] - base;
+            }
+            const int64_t n_lat = bounds[(size_t) F];
+            if (n_lat > LMX || base + n_lat > L) {
+                fprintf(stderr, "[mm3-codes] %s: window at %lld spans %lld latents (max %lld, have %lld)\n",
+                        filename.c_str(), (long long) t0, (long long) n_lat, (long long) LMX,
+                        (long long) (L - base));
+                song_ok = false;
+                break;
+            }
+            // Zero-padded [CH][LMX], copied straight out of the DAV output's own
+            // [CH][L] channel-major layout.
+            std::fill(wlat.begin(), wlat.end(), 0.0f);
+            for (int64_t c = 0; c < CH; c++) {
+                memcpy(&wlat[(size_t) (c * LMX)], &lat[(size_t) (c * L + base)],
+                       (size_t) n_lat * sizeof(float));
+            }
+            mm3_rvq_pool_matrix(rc, bounds.data(), wpool.data());
+
+            if (!mm3_rvq_encode_window(&rvq, wlat.data(), wpool.data(), wfeats.data(), wlogits.data(), &err)) {
+                fprintf(stderr, "[mm3-codes] %s: %s\n", filename.c_str(), err.c_str());
+                song_ok = false;
+                break;
+            }
+            // FIRST WINS (design note 5): only the tail window overlaps, and the
+            // earlier window's codes stand.
+            for (int64_t j = 0; j < F; j++) {
+                const int64_t t = t0 + j;
+                if (done[(size_t) t]) {
+                    continue;
+                }
+                memcpy(&feats[(size_t) (t * D)], &wfeats[(size_t) (j * D)], (size_t) D * sizeof(float));
+                sem[(size_t) t]  = argmax_sem(wlogits.data(), j);
+                done[(size_t) t] = 1;
+            }
+        }
+        if (!song_ok) { fail_n++; continue; }
+
+        // Depth decode every frame at once (batched, not per window): the
+        // acoustic chain depends only on (feats, sem) per frame, so batching
+        // turns 7 x n_windows tiny computes into 7 x n_batches.
+        std::vector<int32_t> ac((size_t) (n_frames * NAC), 0);
+        const int64_t        BATCH = 1024;
+        for (int64_t b0 = 0; b0 < n_frames && song_ok; b0 += BATCH) {
+            const int64_t nb = std::min<int64_t>(BATCH, n_frames - b0);
+            if (!mm3_rvq_depth_greedy(&rvq, &feats[(size_t) (b0 * D)], &sem[(size_t) b0], nb,
+                                      &ac[(size_t) (b0 * NAC)], &err)) {
+                fprintf(stderr, "[mm3-codes] %s: depth %s\n", filename.c_str(), err.c_str());
+                song_ok = false;
+            }
+        }
+        if (!song_ok) { fail_n++; continue; }
+
+        // int32 [n_frames+1, 8], row 0 duplicating frame 0 — the cache format's
+        // un-emitted warm-up row.
+        std::vector<int32_t> rows((size_t) ((n_frames + 1) * 8));
+        for (int64_t t = 0; t < n_frames; t++) {
+            int32_t * dst = &rows[(size_t) ((t + 1) * 8)];
+            dst[0] = sem[(size_t) t];
+            for (int64_t k = 0; k < NAC; k++) {
+                dst[1 + k] = ac[(size_t) (t * NAC + k)];
+            }
+        }
+        memcpy(&rows[0], &rows[8], 8 * sizeof(int32_t));
+
+        const std::string stem = id.empty() ? std::to_string(idx) : id;
+        const std::string cp   = out_dir + "/codes/" + stem + ".codes";
+        FILE *            cf   = hs_fopen(cp, "wb");
+        if (!cf) { fprintf(stderr, "[mm3-codes] cannot write %s\n", cp.c_str()); fail_n++; continue; }
+        fwrite(rows.data(), sizeof(int32_t), rows.size(), cf);
+        fclose(cf);
+        ok_n++;
+        fprintf(stderr, "[mm3-codes] %zu/%zu %s  %lld frames -> %s\n", idx, n_samples, stem.c_str(),
+                (long long) n_frames, cp.c_str());
+    }
+
+    yyjson_doc_free(doc);
+    remove(tmp_wav.c_str());
+
+    // codes.json — the same informational sidecar the python exporter writes,
+    // so a cache produced here is indistinguishable downstream. Nothing reads
+    // it to decode (mm3-condition --codes takes the .codes files directly); it
+    // exists so a cache can say which encoder made it.
+    {
+        yyjson_mut_doc * cdoc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val * croot = yyjson_mut_obj(cdoc);
+        yyjson_mut_doc_set_root(cdoc, croot);
+        yyjson_mut_obj_add_str(cdoc, croot, "kind", "mm3_forced_codes");
+        yyjson_mut_obj_add_strcpy(cdoc, croot, "encoder", rvq_path.c_str());
+        yyjson_mut_obj_add_strcpy(cdoc, croot, "dav", enc_path.c_str());
+        yyjson_mut_obj_add_str(cdoc, croot, "producer", "ace-train mm3-codes");
+        yyjson_mut_obj_add_uint(cdoc, croot, "tracks", (uint64_t) ok_n);
+        yyjson_mut_obj_add_bool(cdoc, croot, "warmup_row", true);
+        yyjson_mut_obj_add_str(cdoc, croot, "columns", "semantic,acoustic1..7");
+        yyjson_mut_obj_add_str(cdoc, croot, "windowing", "their stitched frame_latent_starts");
+        const std::string cjp = out_dir + "/codes/codes.json";
+        yyjson_mut_write_file(cjp.c_str(), cdoc, YYJSON_WRITE_PRETTY, NULL, NULL);
+        yyjson_mut_doc_free(cdoc);
+    }
+
+    mm3_enc_free(&enc);
+    mm3_rvq_free(&rvq);
+    fprintf(stderr, "[mm3-codes] done: %zu ok, %zu failed\n", ok_n, fail_n);
+    return (ok_n == 0 && fail_n > 0) ? 1 : 0;
 }
 
 // ─── mm3-preprocess ─────────────────────────────────────────────────────────
@@ -2628,6 +3094,9 @@ int main(int argc, char ** argv) {
     }
     if (!strcmp(argv[1], "mm3-encode")) {
         return cmd_mm3_encode(argc - 1, argv + 1);
+    }
+    if (!strcmp(argv[1], "mm3-codes")) {
+        return cmd_mm3_codes(argc - 1, argv + 1);
     }
     if (!strcmp(argv[1], "mm3-preprocess")) {
         return cmd_mm3_preprocess(argc - 1, argv + 1);
