@@ -346,6 +346,47 @@ targets (docs/plans/2026-08-20-mm3-training-server-design.md §5). r256 ≈ 1.4 
 resident, ≈ +9 % AR cost (unmeasurable at short lengths). Smoke-validated:
 252 modules load, base + adapter renders complete same wall time.
 
+## Native LM LoRA training: `ace-train mm3-lm-train` (SHIPPED 2026-08-20)
+
+MM3's LM is Qwen3-8B, and `train/lm-graph.h` was already a trainable
+cache-free unfused Qwen3 forward — so the trainer is a RETARGET, not a build.
+`train/mm3-lm-load.h` does the load side (llama.cpp tensor names, `qwen3.*` KV,
+UNTIED head); `train/mm3-lm-train-run.h` does the data path, the frame
+embedding, the output slice and the loop. AdamW, **Muon**, PEFT export,
+checkpoint/resume all come from the existing ACE machinery.
+
+Validation ladder, all runnable:
+- `ace-train mm3-lm-probe` — the trainer's forward vs the engine's own prefill
+  (cos 0.999999951, argmax identical).
+- `ace-train mm3-lm-loss` — teacher-forced CE with falsification diagnostics
+  (`--target-shift`, `--no-prompt`).
+- `ace-train mm3-lm-train --fd-check N` — finite-difference gradient gate,
+  which also cross-checks checkpointed gradients against naive ones.
+
+### Four things that cost real time here
+
+1. **THE PROMPT DOMINATES THE SEQUENCE.** An MM3 prompt is ~1,125 tokens, so
+   `--max-frames 128` still gives S=1253. Shrinking the crop is NOT the VRAM
+   dial you expect, and per-layer gradient checkpointing is load-bearing rather
+   than an optimisation. Naive fwd+bwd retains ~18 GB of activations on top of
+   a 16 GB f16 base and spills into WDDM shared memory: 38 s/step where the
+   same forward alone takes 644 ms.
+2. **AT r256 ON A 32 GB CARD, MUON FITS AND ADAMW DOES NOT.** AdamW keeps two
+   momentum buffers where Muon keeps one — +2.66 GB at rank 256 on a config
+   already peaking at 31.7 GB. Lowering `--max-frames` does NOT rescue it (the
+   crop only moves the ~0.6 GB of checkpoint buffers). Muon here is the
+   optimizer that runs, not just the one that might train better.
+3. **Grad clipping is nearly a no-op for Muon params.** Newton-Schulz
+   Frobenius-normalises its input, so clipping only rescales a direction that
+   is renormalised anyway. Do not read the clip figures as a tuning signal;
+   `--muon-lr-scale` is the knob, and Muon's LR does not mean what AdamW's
+   means.
+4. **lm-ckpt.h was EXTENDED, not forked**, with two hooks that are inert by
+   default (`LmCkptCfg::{head_w,head_row0,head_v}` for an untied scored head;
+   `LmCkptRun::embed_build` for the frame-embedding entry). An ACE run emits
+   byte-identical graphs. Keep it that way — that file is what makes ACE 4B
+   training fit.
+
 ## Native codes export: `ace-train mm3-codes` (SHIPPED 2026-08-20)
 
 Audio -> RVQ codes, natively. `engine/src/minimax/mm3-rvq-encode.h` ports
