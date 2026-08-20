@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { config } from '../config.js';
+import { migrateStems } from '../services/migrateStems.js';
 
 let db: Database.Database;
 
@@ -420,6 +421,9 @@ export function initDb(): void {
 
   // ── One-time migration: import data from lireek.db if it exists ───────────
   migrateLireekData();
+
+  // ── One-time migration: migrate stale stems to user-scoped directories ───
+  migrateStems(getDb());
 
   console.log(`[DB] Initialized: ${config.data.dbPath}`);
 }
