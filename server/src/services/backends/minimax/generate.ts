@@ -46,6 +46,7 @@ import { getDb } from '../../../db/database.js';
 import { aceClient } from '../../aceClient.js';
 import { wavDurationSec } from '../../audioCrop.js';
 import { MM3_PLANK_EXT, mm3PlankDir, readMm3Plank } from './plank.js';
+import { MM3_LM_ADAPTER_DEFAULT_SCALES, resolveMm3LmAdapterPath } from './lmAdapter.js';
 import { runPostProcessingChain } from '../../generation/postProcessing.js';
 import type { PostProcessParams } from '../../generation/postProcessing.js';
 import {
@@ -179,6 +180,33 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
         };
       })() : {}),
       ...samplerPlugins,
+      // Runtime LM LoRA (engine mm3-lm-adapter.h). A reference that fails
+      // containment is a NOTE + base-model render, never a silent partial —
+      // but once the path is sent, a load failure fails the JOB engine-side
+      // (an adapter that silently didn't load is indistinguishable from "the
+      // adapter does nothing").
+      ...(params.mm3LmAdapter ? (() => {
+        const resolved = resolveMm3LmAdapterPath(String(params.mm3LmAdapter));
+        if (!resolved || !fs.existsSync(resolved)) {
+          notes.push(`LM adapter not found (${params.mm3LmAdapter}) — rendering with the base model`);
+          return {};
+        }
+        const dial = (key: string, fallback: number): number => {
+          const v = Number((params as Record<string, unknown>)[key]);
+          return Number.isFinite(v) && v >= -4 && v <= 4 ? v : fallback;
+        };
+        const d = MM3_LM_ADAPTER_DEFAULT_SCALES;
+        notes.push(`LM adapter: ${path.basename(resolved)}`);
+        return {
+          lm_adapter: resolved,
+          lm_adapter_scale: dial('mm3LmAdapterScale', d.scale),
+          lm_adapter_scale_attn: dial('mm3LmAdapterScaleAttn', d.scaleAttn),
+          lm_adapter_scale_mlp: dial('mm3LmAdapterScaleMlp', d.scaleMlp),
+          lm_adapter_scale_early: dial('mm3LmAdapterScaleEarly', d.scaleEarly),
+          lm_adapter_scale_mid: dial('mm3LmAdapterScaleMid', d.scaleMid),
+          lm_adapter_scale_late: dial('mm3LmAdapterScaleLate', d.scaleLate),
+        };
+      })() : {}),
     },
     notes,
   };

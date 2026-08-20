@@ -425,7 +425,10 @@ static void mm3_handle_unload(const httplib::Request &, httplib::Response & res)
     // be gigabytes on its own — count it, or /mm3/unload under-reports badly.
     const size_t freed      = mm3_vram_bytes(g_mm3) + g_mm3_lm.kv_bytes;
     // Graph state holds derived weights + schedulers that point into the model's
-    // buffers and hold backend references — tear them down first.
+    // buffers and hold backend references — tear them down first. The runtime
+    // LM adapter goes before the graph frees so its borrowed pointer is cleared
+    // while the graph still exists.
+    mm3_lm_adapter_drop();
     mm3_vocoder_free(&g_mm3_voc);
     mm3_dit_free(&g_mm3_dit);
     mm3_depth_free(&g_mm3_depth);

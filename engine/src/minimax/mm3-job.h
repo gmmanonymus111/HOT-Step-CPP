@@ -279,6 +279,7 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
             return;
         }
         const size_t freed = mm3_vram_bytes(g_mm3) + g_mm3_lm.kv_bytes;
+        mm3_lm_adapter_drop();  // borrowed pointer cleared while the graph still exists
         mm3_vocoder_free(&g_mm3_voc);
         mm3_dit_free(&g_mm3_dit);
         mm3_depth_free(&g_mm3_depth);
@@ -398,13 +399,43 @@ static void mm3_synth_worker(std::shared_ptr<Job> job, std::shared_ptr<MM3JobSta
     req.gen.want_lrc      = req.want_lrc && !req.instrumental;
     req.gen.should_cancel = [&job]() { return job->cancel.load(); };
 
+    // ── Runtime LM adapter (worker thread, g_mm3_mutex held) ───────────────
+    // Load fails the JOB, never falls back silently — an adapter the user
+    // asked for that quietly didn't load would be indistinguishable from "the
+    // adapter does nothing" (the exact failure mode the ablation work exists
+    // to study). A cached adapter for a DIFFERENT path is dropped first; one
+    // for the same path is revalidated by mtime so a retrained checkpoint
+    // under the same name is picked up.
+    if (!req.lm_adapter.empty()) {
+        struct stat asb {};
+
+        const bool stat_ok = stat(req.lm_adapter.c_str(), &asb) == 0;
+        const bool cached  = g_mm3_lm_adapter && g_mm3_lm_adapter->path == req.lm_adapter && stat_ok &&
+                            (int64_t) asb.st_mtime == g_mm3_lm_adapter->mtime;
+        if (!cached) {
+            mm3_lm_adapter_drop();
+            std::string aerr;
+            g_mm3_lm_adapter = mm3_lm_adapter_load(req.lm_adapter.c_str(), &aerr);
+            if (!g_mm3_lm_adapter) {
+                fail(2, "lm_adapter", aerr);  // fail() handles transient release
+                return;
+            }
+        }
+        req.gen.lm_adapter = g_mm3_lm_adapter;
+    } else {
+        req.gen.lm_adapter = nullptr;  // cached adapter stays resident but inert
+    }
+
     // The stage-1 -> stage-2 handover (see mm3-pipeline.h). Runs on the worker
     // thread with g_mm3_mutex still held.
     if (staged) {
         req.gen.after_ar = [&](std::string * e) {
             // The LM graph state holds the KV cache and pointers into the LM
-            // weight buffer, so it has to go before the buffer does.
+            // weight buffer, so it has to go before the buffer does. The LM
+            // adapter goes too: staged mode exists because VRAM is tight, and
+            // the adapter is dead weight once the AR stage is done.
             const size_t kv = g_mm3_lm.kv_bytes;
+            mm3_lm_adapter_drop();
             mm3_lm_free(&g_mm3_lm);
             const size_t freed = mm3_free_lm(&g_mm3) + kv;
             set_stage("swapping", -1, 0, 0, 0);

@@ -127,6 +127,7 @@
 // bound, as design note A assumed, which is exactly why the second CFG row is
 // nearly free.
 
+#include "mm3-lm-adapter.h"
 #include "mm3-model.h"
 
 #include "backend.h"
@@ -185,6 +186,11 @@ struct MM3LmGraph {
     ggml_backend_t cpu_backend    = nullptr;
     bool           backend_ref    = false;
     bool           use_flash_attn = false;
+    // Runtime LM LoRA (mm3-lm-adapter.h). Scales are baked into cached graphs
+    // as constants, so changing (adapter, scales) must invalidate the slots —
+    // callers go through mm3_lm_set_adapter, never assign these directly.
+    const MM3LmAdapter * adapter        = nullptr;
+    MM3LmAdapterScales   adapter_scales = {};
     // MM3_ALIGN_DUMP=1 — capture EVERY layer's attention for lyric alignment
     // discovery. Forces the manual F32 attention path on all 36 layers (flash
     // fuses the softmax and never produces a score tensor to read).
@@ -271,6 +277,22 @@ static void mm3_lm_free(MM3LmGraph * g) {
     }
 }
 
+// Set (or clear) the runtime LM adapter + scales for subsequent graphs. The
+// scales are baked into the cached prefill/decode graphs as constants, so any
+// change frees the slots — they rebuild lazily on the next step (graph
+// construction only; weights and the KV cache are untouched). Only call
+// BETWEEN generations: an adapter swap mid-sequence would splice two different
+// models' hidden-state streams through one KV cache.
+static void mm3_lm_set_adapter(MM3LmGraph * g, const MM3LmAdapter * ad, const MM3LmAdapterScales & sc) {
+    if (g->adapter == ad && g->adapter_scales == sc) {
+        return;
+    }
+    g->adapter        = ad;
+    g->adapter_scales = sc;
+    mm3_lm_free_slot_all(&g->prefill);
+    mm3_lm_free_slot_all(&g->decode);
+}
+
 // ── Graph pieces ────────────────────────────────────────────────────────────
 
 static ggml_tensor * mm3_lm_rms(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, float eps) {
@@ -291,6 +313,25 @@ static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_t
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));                 // [D, Nh, T, B]
 }
 
+// Base matmul + optional runtime LoRA delta: y = W x + s * B (A x). A/B are
+// f16, x is f32 — ggml's mixed mul_mat handles both. The scale is baked as a
+// graph constant; MM3LmGraph invalidates cached slots when it changes.
+static ggml_tensor * mm3_lm_mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x, const MM3LmAdapter * ad,
+                               const MM3LmAdapterScales & sc, int layer, int module) {
+    ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    if (ad) {
+        const MM3LmAdapterPair & p = ad->mods[layer][module];
+        if (p.a && p.b) {
+            const float s = ad->effective(layer, module, sc);
+            if (s != 0.0f) {
+                ggml_tensor * d = ggml_mul_mat(ctx, p.b, ggml_mul_mat(ctx, p.a, x));
+                y               = ggml_add(ctx, y, ggml_scale(ctx, d, s));
+            }
+        }
+    }
+    return y;
+}
+
 // One transformer block. h [H, T, B] -> [H, T, B]. The KV writes are expanded
 // into `gf` eagerly so they are ordered before this layer's cache read (and,
 // transitively, before every later layer's) — ggml executes nodes in list order,
@@ -298,7 +339,8 @@ static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_t
 static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM3LmConfig & c, const MM3LmLayer & w,
                                   ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
                                   ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
-                                  ggml_tensor ** out_scores = nullptr) {
+                                  ggml_tensor ** out_scores = nullptr, const MM3LmAdapter * ad = nullptr,
+                                  const MM3LmAdapterScales * ad_sc = nullptr, int layer_idx = 0) {
     const int64_t H   = (int64_t) c.embedding_length;
     const int64_t D   = (int64_t) c.key_length;
     const int64_t Nh  = (int64_t) c.head_count;
@@ -306,11 +348,13 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     const int64_t T   = h->ne[1];
     const int64_t B   = h->ne[2];
 
+    const MM3LmAdapterScales sc_local = ad_sc ? *ad_sc : MM3LmAdapterScales{};
+
     ggml_tensor * n = mm3_lm_rms(ctx, h, w.attn_norm, c.rms_eps);
 
-    ggml_tensor * q = ggml_mul_mat(ctx, w.attn_q, n);  // [Nh*D, T, B]
-    ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);  // [Nkv*D, T, B]
-    ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
+    ggml_tensor * q = mm3_lm_mm(ctx, w.attn_q, n, ad, sc_local, layer_idx, MM3_LM_ADAPTER_Q);  // [Nh*D, T, B]
+    ggml_tensor * k = mm3_lm_mm(ctx, w.attn_k, n, ad, sc_local, layer_idx, MM3_LM_ADAPTER_K);  // [Nkv*D, T, B]
+    ggml_tensor * v = mm3_lm_mm(ctx, w.attn_v, n, ad, sc_local, layer_idx, MM3_LM_ADAPTER_V);
 
     q = ggml_reshape_4d(ctx, q, D, Nh, T, B);
     k = ggml_reshape_4d(ctx, k, D, Nkv, T, B);
@@ -349,13 +393,14 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     }
     attn = ggml_reshape_3d(ctx, attn, H, T, B);  // [D, Nh, T, B] -> [H, T, B]
 
-    h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
+    h = ggml_add(ctx, h, mm3_lm_mm(ctx, w.attn_output, attn, ad, sc_local, layer_idx, MM3_LM_ADAPTER_O));
 
     // SwiGLU: down(silu(gate) * up).
     ggml_tensor * n2   = mm3_lm_rms(ctx, h, w.ffn_norm, c.rms_eps);
-    ggml_tensor * gate = ggml_silu(ctx, ggml_mul_mat(ctx, w.ffn_gate, n2));
-    ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
-    return ggml_add(ctx, h, ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up)));
+    ggml_tensor * gate = ggml_silu(ctx, mm3_lm_mm(ctx, w.ffn_gate, n2, ad, sc_local, layer_idx, MM3_LM_ADAPTER_GATE));
+    ggml_tensor * up   = mm3_lm_mm(ctx, w.ffn_up, n2, ad, sc_local, layer_idx, MM3_LM_ADAPTER_UP);
+    return ggml_add(ctx, h,
+                    mm3_lm_mm(ctx, w.ffn_down, ggml_mul(ctx, gate, up), ad, sc_local, layer_idx, MM3_LM_ADAPTER_DOWN));
 }
 
 // Build one slot. `decode` selects the input mode: false = token ids for T
@@ -455,7 +500,8 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
         // signal, so the other 33 keep flash attention and its speed.
         const bool want = g->dump_attn || (g->align_capture && mm3_align_layer_needed((int) i));
         h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn && !want, want ? &sc : nullptr);
+                         n_kv_pad, g->use_flash_attn && !want, want ? &sc : nullptr, g->adapter, &g->adapter_scales,
+                         (int) i);
         if (want && sc) {
             ggml_set_name(sc, ("mm3_lm_attn_" + std::to_string(i)).c_str());
             ggml_set_output(sc);

@@ -195,6 +195,12 @@ struct MM3ArOptions {
     // abort mm3_ar_plan() returns false with *err == MM3_ERR_CANCELLED so the
     // caller can tell a user cancel from a real failure.
     std::function<bool()> should_cancel;
+
+    // Runtime LM LoRA (mm3-lm-adapter.h). nullptr = base model. Applied to the
+    // graph before prefill; the graph invalidates its cached slots only when
+    // (adapter, scales) actually changed.
+    const MM3LmAdapter * lm_adapter = nullptr;
+    MM3LmAdapterScales   lm_adapter_scales = {};
 };
 
 // The sentinel a cancelled run reports. Compared by value, not by prefix, so a
@@ -202,6 +208,24 @@ struct MM3ArOptions {
 #define MM3_ERR_CANCELLED "cancelled"
 
 static MM3LmGraph g_mm3_lm;
+
+// ── Runtime LM adapter cache ────────────────────────────────────────────────
+//
+// One adapter resident at a time, keyed by (path, mtime) — the working set is
+// "the adapter being auditioned", not a zoo. Guarded by g_mm3_mutex like every
+// other MM3 global (loaded/dropped on the GPU worker; unload paths hold the
+// same mutex). The graph's borrowed pointer is cleared BEFORE the buffer is
+// freed — mm3_lm_set_adapter also invalidates the cached graphs that bake the
+// old tensors' addresses as constants.
+static MM3LmAdapter * g_mm3_lm_adapter = nullptr;
+
+static void mm3_lm_adapter_drop() {
+    if (g_mm3_lm_adapter) {
+        mm3_lm_set_adapter(&g_mm3_lm, nullptr, MM3LmAdapterScales{});
+        mm3_lm_adapter_free(g_mm3_lm_adapter);
+        g_mm3_lm_adapter = nullptr;
+    }
+}
 
 // Plan one song. `cond_ids` / `uncond_ids` are the two prefill rows.
 //
@@ -361,6 +385,7 @@ static bool mm3_ar_plan(const MM3Model & m, const int32_t * cond_ids, const int3
     const auto t_start = std::chrono::steady_clock::now();
     {
         const auto t0 = std::chrono::steady_clock::now();
+        mm3_lm_set_adapter(&g_mm3_lm, opt.lm_adapter, opt.lm_adapter_scales);
         if (!mm3_lm_prefill(m, &g_mm3_lm, cond_ids, uncond_ids, n_prompt, hidden.data(), logits.data(), err)) {
             return false;
         }

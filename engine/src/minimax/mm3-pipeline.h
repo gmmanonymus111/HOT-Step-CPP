@@ -477,6 +477,11 @@ struct MM3GenRequest {
     std::vector<int32_t> forced_semantic;  // [I]
     std::vector<int32_t> forced_acoustic;  // [I * 7], flat, iteration-major
 
+    // Runtime LM LoRA. The pointer is BORROWED (the job layer owns the loaded
+    // adapter and outlives the generation); nullptr = base model.
+    const MM3LmAdapter * lm_adapter = nullptr;
+    MM3LmAdapterScales   lm_adapter_scales = {};
+
     // Parity mode: per-window initial noise, 128*L floats channel-major. Entry
     // k applies to window k; an empty entry (or a short vector) falls back to
     // the seeded derivation for that window, so supplying window 0 alone is
@@ -594,9 +599,11 @@ static bool mm3_generate(const MM3Model & m, const MM3GenRequest & req, MM3Token
 
     // ── stage 1: AR plan ──
     MM3ArOptions aopt;
-    aopt.max_frames      = req.max_frames;
-    aopt.seed            = req.seed;
-    aopt.collect_hiddens = true;  // the whole point: the condition encoder eats these
+    aopt.max_frames        = req.max_frames;
+    aopt.seed              = req.seed;
+    aopt.collect_hiddens   = true;  // the whole point: the condition encoder eats these
+    aopt.lm_adapter        = req.lm_adapter;
+    aopt.lm_adapter_scales = req.lm_adapter_scales;
     if (!req.forced_semantic.empty()) {
         if ((int64_t) req.forced_acoustic.size() != (int64_t) req.forced_semantic.size() * NCB) {
             if (err) {

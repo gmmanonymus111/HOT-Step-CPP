@@ -317,7 +317,25 @@ sweeping violence_level 2.0 → 0.0 changes nothing. A plain monotonic DTW over
 the head-averaged matrix, grouped on newline tokens, is what works — see
 `mm3-align.h`. `lrc_align()` stays untouched for ACE.
 
-## Training: DiT yes, LM never (assessed 2026-08-14)
+## Runtime LM adapters (SHIPPED 2026-08-20, engine + server; UI pending)
+
+`engine/src/minimax/mm3-lm-adapter.h` loads PEFT LM LoRAs (SimpleTuner
+`language_model.`-prefixed checkpoints, q/k/v/o + gate/up/down × 36 layers)
+and applies them as RUNTIME low-rank deltas in the AR stage — base weights
+untouched, so per-group scales are live per generation. Wire fields on
+`POST /mm3/synth`: `lm_adapter` (abs path), `lm_adapter_scale{,_attn,_mlp,
+_early,_mid,_late}` (all default 1.0; range ±4). Scales bake into cached
+graphs as constants — `mm3_lm_set_adapter` invalidates the slots on change
+(once per generation, cheap). Single-slot cache keyed (path, mtime), guarded
+by g_mm3_mutex; dropped on /mm3/unload, transient release, and the staged
+after_ar handover (VRAM). Load failure FAILS THE JOB — never silently base.
+Server: `backends/minimax/lmAdapter.ts` (containment-checked refs under
+`<adapters root>/mm3-lm-adapters/`, sidecar metadata, `params.mm3LmAdapter*`),
+defaults = the ablation-validated attention 1.0 / MLP 0.5. r256 ≈ 1.4 GB
+resident, ≈ +9 % AR cost (unmeasurable at short lengths). Smoke-validated:
+252 modules load, base + adapter renders complete same wall time.
+
+## Training: DiT yes, LM ~~never~~ — SUPERSEDED (see below), assessed 2026-08-14
 
 Full teardown + staged plan: `docs/plans/2026-08-14-mm3-training-feasibility.md` (local).
 
@@ -328,8 +346,11 @@ RVQ depth decoder in MiniMax's original `AbabForCausalLM` format** (`model.layer
 `language_model/` + `rvq_depth_decoder/` to ~5 MB. It is **NOT a music tokenizer** — an earlier
 note here said it was, which wrongly made LM training look possible. Consequences:
 
-1. **LM / planner adapters are BLOCKED.** Code-SFT needs ground-truth codes per song; none
-   exist and none can be derived. (ACE's LM training works only because FSQ encodes audio→codes.)
+1. **LM / planner adapters are BLOCKED.** ← **SUPERSEDED 2026-08-17+**: the community
+   audio→codes encoders (SimpleTuner v4 lineage → PurpleOrc 53k → Mothersuperior
+   53k-pooled, best-by-ear 2026-08-20) provide the codes; LM code-SFT WORKS (our lm_sft
+   line + SimpleTuner LM mode; Skiba timbre reached 2026-08-20 with r256 attn+MLP).
+   The native-GGML LM trainer is the open build (docs/plans/2026-08-20-mm3-training-studio.md).
 2. **DiT conditioning cannot be teacher-forced.** The only way to get `frame_hiddens` for a
    training clip is to AR-sample the LM from its caption/lyrics — so condition and target come
    from *different music*, matching only in caption/lyrics/duration. A timbre/production adapter

@@ -72,6 +72,7 @@
 // reference behaviour. The caption is expected to say the piece is instrumental
 // too (see .claude/skills/mm3-captioning/SKILL.md).
 
+#include "mm3-lm-adapter.h"
 #include "mm3-model.h"
 #include "mm3-pipeline.h"
 #include "mm3-tokenizer.h"
@@ -569,6 +570,15 @@ struct MM3SynthRequest {
     std::vector<int32_t> forced_semantic;  // [I]
     std::vector<int32_t> forced_acoustic;  // [I * 7], flat, iteration-major
 
+    // ── Runtime LM LoRA (mm3-lm-adapter.h) ─────────────────────────────────
+    // Path to a PEFT LM adapter (SimpleTuner language_model checkpoints).
+    // Empty = base model. The group scales mirror the 2026-08-20 ablation
+    // dials: attention carries plan/genre, MLP carries vocal identity (the
+    // ear-validated production setting is attn 1.0 / mlp 0.5); the depth
+    // thirds are advanced dials (halving `late` destabilised termination).
+    std::string        lm_adapter;
+    MM3LmAdapterScales lm_adapter_scales = {};
+
     std::string prompt;  // the assembled template
     int64_t     n_tokens = 0;
 
@@ -777,6 +787,50 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
         }
     }
 
+    // ── Runtime LM LoRA ──
+    {
+        yyjson_val * v = yyjson_obj_get(root, "lm_adapter");
+        if (v && !yyjson_is_null(v)) {
+            if (!yyjson_is_str(v)) {
+                if (err) {
+                    *err = "\"lm_adapter\" must be a string path";
+                }
+                return false;
+            }
+            out->lm_adapter = yyjson_get_str(v);
+        }
+        struct {
+            const char * key;
+            float *      dst;
+        } dials[] = {
+            { "lm_adapter_scale",       &out->lm_adapter_scales.global },
+            { "lm_adapter_scale_attn",  &out->lm_adapter_scales.attn   },
+            { "lm_adapter_scale_mlp",   &out->lm_adapter_scales.mlp    },
+            { "lm_adapter_scale_early", &out->lm_adapter_scales.early  },
+            { "lm_adapter_scale_mid",   &out->lm_adapter_scales.mid    },
+            { "lm_adapter_scale_late",  &out->lm_adapter_scales.late   },
+        };
+        for (auto & d : dials) {
+            yyjson_val * sv = yyjson_obj_get(root, d.key);
+            if (sv && !yyjson_is_null(sv)) {
+                if (!yyjson_is_num(sv)) {
+                    if (err) {
+                        *err = std::string("\"") + d.key + "\" must be a number";
+                    }
+                    return false;
+                }
+                float f = (float) yyjson_get_num(sv);
+                if (!(f >= -4.0f && f <= 4.0f)) {  // NaN fails this too
+                    if (err) {
+                        *err = std::string("\"") + d.key + "\" out of range [-4, 4]";
+                    }
+                    return false;
+                }
+                *d.dst = f;
+            }
+        }
+    }
+
     // ── MM3 Plank: AR replay ──
     // Both arrays or neither. A half-specified replay is a caller bug worth a
     // 400, not a silent fall back to sampling — the whole point of asking for
@@ -939,6 +993,11 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
         out->gen.forced_semantic = out->forced_semantic;
         out->gen.forced_acoustic = out->forced_acoustic;
     }
+    // LM adapter scales travel by value; the adapter POINTER is resolved and
+    // attached by the job layer (mm3-job.h), which owns the loaded adapter's
+    // lifetime — a path string must never be dereferenced this early because
+    // parse runs on the HTTP thread and load must run on the GPU worker.
+    out->gen.lm_adapter_scales = out->lm_adapter_scales;
     return true;
 }
 
