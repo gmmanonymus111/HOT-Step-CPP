@@ -151,3 +151,19 @@ docker-compose.override.yml
 
 # Inter-agent coordination scratchpad — local working notes, not a project doc
 agentcoordination.md
+
+# Hand-made .env backups taken before a config experiment (.env.docker and
+# .env.example are tracked, so match only the -bak suffix, never .env*)
+.env.bak-*
+
+# Concept Studio artifacts — concept GGUFs plus blind-test clips, alpha sweeps
+# and their answer keys. The audio and weights are already ignored by
+# extension; the sidecar JSON is what keeps the folder showing up.
+/concepts/
+
+# Root-level scratch: an ad-hoc API dump, a VST state blob, an empty debug
+# sink, a machine shortcut. All transient, all local.
+/pr.json
+/x
+/debug.log
+/*.lnk
