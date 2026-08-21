@@ -10,6 +10,23 @@ import * as llmService from '../../services/lireek/llmService.js';
 import * as profilerService from '../../services/lireek/profilerService.js';
 import { computeAlbumEnrichment } from '../../services/lireek/prompts.js';
 
+/**
+ * Build CallOptions for a generation request.
+ *
+ * no_think is the hard off-switch (providers layer every known mechanism).
+ * reasoning_effort is the graded control for runtimes that expose real
+ * reasoning budgets rather than a boolean - NInfer accepts none|low|medium|xhigh
+ * as a chat-template change. no_think wins if both are sent.
+ */
+function buildCallOptions(noThink?: boolean, reasoningEffort?: string) {
+  if (noThink) return { noThink: true };
+  const allowed = ['none', 'low', 'medium', 'xhigh'];
+  if (reasoningEffort && allowed.includes(reasoningEffort)) {
+    return { reasoning_effort: reasoningEffort };
+  }
+  return undefined;
+}
+
 /** Safely extract a route param as string (Express 5 types params as string | string[]) */
 function param(req: Request, name: string): string {
   const v = req.params[name];
@@ -171,7 +188,7 @@ export function registerLlmRoutes(router: Router): void {
       const profile = db.getProfile(id);
       if (!profile) return res.status(404).json({ error: 'Profile not found' });
       
-      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
+      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think, reasoning_effort } = req.body;
 
       const lyricsSet = db.getLyricsSet(profile.lyrics_set_id);
       const artistId = lyricsSet?.artist_id;
@@ -192,7 +209,7 @@ export function registerLlmRoutes(router: Router): void {
         profile.profile_data, provider_name, model, extra_instructions,
         usedSubjects, usedBpms, usedKeys, usedTitles, usedDurations,
         undefined, undefined, user_subject || undefined,
-        no_think ? { noThink: true } : undefined
+        buildCallOptions(no_think, reasoning_effort)
       );
       
       if (auto_save) {
@@ -226,7 +243,7 @@ export function registerLlmRoutes(router: Router): void {
       const profile = db.getProfile(id);
       if (!profile) throw new Error('Profile not found');
       
-      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think } = req.body;
+      const { provider_name, model, extra_instructions, auto_save = true, user_subject, no_think, reasoning_effort } = req.body;
 
       const sendSse = initSse(res);
       llmService.resetSkipThinking();
@@ -252,7 +269,7 @@ export function registerLlmRoutes(router: Router): void {
         (chunk) => sendSse('chunk', { text: chunk }),
         (phase) => sendSse('phase', { phase }),
         user_subject || undefined,
-        no_think ? { noThink: true } : undefined
+        buildCallOptions(no_think, reasoning_effort)
       );
 
       if (auto_save) {

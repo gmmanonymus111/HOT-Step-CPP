@@ -235,6 +235,11 @@ export const config = {
     openaiCompatApiKey: process.env.OPENAI_COMPAT_API_KEY || '',
     openaiCompatModel: process.env.OPENAI_COMPAT_MODEL || '',
     openaiCompatName: process.env.OPENAI_COMPAT_NAME || 'OpenAI Compatible',
+    // Default reasoning budget for runtimes that expose graded effort rather
+    // than a boolean (NInfer: none|low|medium|xhigh). Empty means "send nothing
+    // and let the server pick", which is the safe default for endpoints that
+    // reject the field. Per-request reasoning_effort and no_think both win.
+    openaiCompatReasoningEffort: process.env.OPENAI_COMPAT_REASONING_EFFORT || '',
     get dbPath() {
       return path.join(config.data.dir, 'lireek.db');
     },
@@ -304,6 +309,7 @@ export const EXPOSED_ENV_KEYS = [
   'UNSLOTH_BASE_URL', 'UNSLOTH_USERNAME', 'UNSLOTH_PASSWORD',
   'LLAMACPP_BASE_URL', 'LLAMACPP_MODEL',
   'OPENAI_COMPAT_BASE_URL', 'OPENAI_COMPAT_API_KEY', 'OPENAI_COMPAT_MODEL', 'OPENAI_COMPAT_NAME',
+  'OPENAI_COMPAT_REASONING_EFFORT',
   // Dataset Studio labeling throughput
   'LABEL_ESSENTIA_CONCURRENCY',
   'LABEL_GENIUS_CONCURRENCY', 'LABEL_GENIUS_MIN_INTERVAL_MS',
@@ -420,6 +426,8 @@ export function reloadEnvConfig(): string[] {
     () => config.lireek.openaiCompatModel);
   apply('OPENAI_COMPAT_NAME', v => { config.lireek.openaiCompatName = v || 'OpenAI Compatible'; },
     () => config.lireek.openaiCompatName);
+  apply('OPENAI_COMPAT_REASONING_EFFORT', v => { config.lireek.openaiCompatReasoningEffort = v; },
+    () => config.lireek.openaiCompatReasoningEffort);
   apply('LYRICS_EXPORT_DIR', v => {
     config.lireek.exportDir = v || path.join(config.data.dir, 'lyrics');
   }, () => config.lireek.exportDir);
