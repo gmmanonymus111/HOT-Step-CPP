@@ -75,6 +75,10 @@ tools/*
 !tools/onnx-export/
 !tools/mcp-lyricstudio/
 tools/mcp-lyricstudio/node_modules/
+!tools/discord-claude/
+tools/discord-claude/node_modules/
+tools/discord-claude/.env
+tools/discord-claude/sessions.json
 
 # Test output logs
 engine/tests/*.log
@@ -167,7 +171,3 @@ agentcoordination.md
 /x
 /debug.log
 /*.lnk
-
-tools/discord-claude/.env
-tools/discord-claude/sessions.json
-tools/discord-claude/node_modules/
