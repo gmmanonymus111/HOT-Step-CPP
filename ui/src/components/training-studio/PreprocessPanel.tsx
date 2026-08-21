@@ -10,8 +10,10 @@ import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Database, Layers, Loader2, PauseCircle, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { PreprocessOptions } from '../../services/trainingApi';
+import { useBackendStore } from '../../stores/backendStore';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
+import { Mm3CodesCard } from './Mm3CodesCard';
 import {
   BF16_RE,
   PREPROCESS_DEFAULTS,
@@ -25,6 +27,12 @@ const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dar
 
 export const PreprocessPanel: React.FC = () => {
   const { t } = useTranslation();
+  // ACE's preprocess produces a tensor cache keyed by the DiT model that made
+  // it; MiniMax-Music3 has neither. Showing ACE's variant list while MM3 is
+  // active offers caches an MM3 run can never consume — so the phase switches
+  // wholesale, it does not merge.
+  const backendId = useBackendStore(s => s.activeBackendId);
+  const mm3Mode = backendId === 'minimax-m3';
   const capabilities = useTrainingStore(s => s.capabilities);
   const datasets = useTrainingStore(s => s.datasets);
   const detail = useTrainingStore(s => s.detail);
@@ -108,8 +116,14 @@ export const PreprocessPanel: React.FC = () => {
     <div className="flex items-start gap-3">
       <Layers size={18} className="text-amber-500 mt-0.5 flex-shrink-0" />
       <div className="min-w-0">
-        <h2 className="text-sm font-bold text-zinc-900 dark:text-white">{t('trainingStudio.preprocess.title')}</h2>
-        <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t('trainingStudio.preprocess.subtitle')}</p>
+        <h2 className="text-sm font-bold text-zinc-900 dark:text-white">
+          {mm3Mode ? t('trainingStudio.mm3.phaseCodes', 'Codes') : t('trainingStudio.preprocess.title')}
+        </h2>
+        <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
+          {mm3Mode
+            ? t('trainingStudio.mm3.phaseCodesSub', 'Audio → RVQ codes, the MiniMax-Music3 equivalent of preprocessing')
+            : t('trainingStudio.preprocess.subtitle')}
+        </p>
       </div>
     </div>
   );
@@ -149,6 +163,17 @@ export const PreprocessPanel: React.FC = () => {
     return (
       <div className="flex items-center justify-center py-20 text-zinc-500 text-sm">
         <Loader2 size={18} className="animate-spin mr-2" /> …
+      </div>
+    );
+  }
+
+  // MM3: codes ARE the preprocess step. Placed before the ACE gates below,
+  // which are about a tensor cache and a base model MM3 does not have.
+  if (mm3Mode && detail.builtAt && detail.datasetJsonPath) {
+    return (
+      <div className="flex flex-col gap-4">
+        {header}
+        <Mm3CodesCard datasetId={detail.id} />
       </div>
     );
   }

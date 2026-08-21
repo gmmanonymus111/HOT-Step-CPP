@@ -984,6 +984,7 @@
     "player.variantUnmasteredHint": "Raw generation output (no post-processing)",
     "player.variantMastered": "Mastered",
     "player.variantMasteredHint": "Post-processed output",
+    "player.variantDownloadHint": "Download the {{version}} version",
     "player.exitTrimMode": "Exit Trim Mode",
     "player.trimCrop": "Trim / Crop Audio",
     "player.hidePlaylist": "Hide Playlist",
@@ -1576,6 +1577,12 @@
     "trainingStudio.mm3.muonLrScaleHint": "64 is the best of the values measured so far, not a tuned optimum.",
     "trainingStudio.mm3.cropMode": "Crop mode",
     "trainingStudio.mm3.cropModeHint": "`beginning` trains on song intros only — it exists to reproduce a known failure, not to be used. Leave this on random.",
-    "trainingStudio.mm3.start": "Start training"
+    "trainingStudio.mm3.start": "Start training",
+    "trainingStudio.mm3.phaseCodes": "Codes",
+    "trainingStudio.mm3.phaseCodesSub": "Audio → RVQ codes, the MiniMax-Music3 equivalent of preprocessing",
+    "trainingStudio.mm3.notTensors": "This replaces the ACE-Step tensor cache: the two pipelines share nothing, and an ACE variant can never be used by a MiniMax-Music3 run.",
+    "trainingStudio.mm3.enginePaused": "The engine is paused while this runs and restarted afterwards.",
+    "trainingStudio.mm3.goToCodes": "Go to Codes",
+    "trainingStudio.backendHint": "Training follows the active generation backend. Switch it with the backend pill in the bar at the top of the window."
   }
 }

@@ -6,6 +6,7 @@
 import React from 'react';
 import { Database, Layers, Cpu, Activity, Lock } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useBackendStore } from '../../stores/backendStore';
 import { useTrainingStore } from '../../stores/trainingStore';
 
 type Phase = 'dataset' | 'preprocess' | 'train' | 'monitor';
@@ -21,6 +22,10 @@ export const PhaseStepper: React.FC = () => {
   const { t } = useTranslation();
   const phase = useTrainingStore(s => s.phase);
   const setPhase = useTrainingStore(s => s.setPhase);
+  // Phase 2 is a different thing per backend: ACE encodes a tensor cache,
+  // MiniMax-Music3 exports RVQ codes. Same slot in the pipeline, so the chip is
+  // relabelled rather than a fifth phase being invented.
+  const mm3Mode = useBackendStore(s => s.activeBackendId) === 'minimax-m3';
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
@@ -43,7 +48,9 @@ export const PhaseStepper: React.FC = () => {
               }`}
             >
               {p.enabled ? p.icon : <Lock size={12} />}
-              {t(p.labelKey)}
+              {mm3Mode && p.id === 'preprocess'
+                ? t('trainingStudio.mm3.phaseCodes', 'Codes')
+                : t(p.labelKey)}
             </button>
           </React.Fragment>
         );

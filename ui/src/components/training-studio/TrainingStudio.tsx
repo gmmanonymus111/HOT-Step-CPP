@@ -7,8 +7,9 @@
 // chip only.
 
 import React, { useEffect } from 'react';
-import { AlertTriangle, GraduationCap } from 'lucide-react';
+import { AlertTriangle, GraduationCap, Layers } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useBackendStore } from '../../stores/backendStore';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { CapabilityBanner } from './CapabilityBanner';
 import { DatasetDetail } from './DatasetDetail';
@@ -26,11 +27,21 @@ export const TrainingStudio: React.FC = () => {
   const detail = useTrainingStore(s => s.detail);
   const loadCapabilities = useTrainingStore(s => s.loadCapabilities);
   const loadDatasets = useTrainingStore(s => s.loadDatasets);
+  // WHICH BACKEND THIS STUDIO IS TRAINING FOR. It was invisible, and the phases
+  // change shape with it (ACE preprocesses a tensor cache, MM3 exports RVQ
+  // codes), so a user could reasonably read ACE variants as MM3's and wonder
+  // why nothing matched. The chip below is not decoration.
+  const backends = useBackendStore(s => s.backends);
+  const activeBackendId = useBackendStore(s => s.activeBackendId);
+  const fetchBackends = useBackendStore(s => s.fetchBackends);
+  const activeBackend = backends.find(b => b.id === activeBackendId);
+  const multiBackend = backends.length > 1;
 
   useEffect(() => {
     void loadCapabilities();
     void loadDatasets();
-  }, [loadCapabilities, loadDatasets]);
+    void fetchBackends();
+  }, [loadCapabilities, loadDatasets, fetchBackends]);
 
   const fatalError = error && !detail;
 
@@ -41,7 +52,19 @@ export const TrainingStudio: React.FC = () => {
         <div className="flex items-start gap-3">
           <GraduationCap size={26} className="text-amber-500 mt-0.5 flex-shrink-0" />
           <div>
-            <h1 className="text-xl font-bold text-zinc-900 dark:text-white">{t('trainingStudio.title')}</h1>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl font-bold text-zinc-900 dark:text-white">{t('trainingStudio.title')}</h1>
+              {multiBackend && activeBackend && (
+                <span
+                  title={t('trainingStudio.backendHint',
+                    'Training follows the active generation backend. Switch it with the backend pill in the bar at the top of the window.') as string}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                >
+                  <Layers size={11} />
+                  {activeBackend.displayName}
+                </span>
+              )}
+            </div>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t('trainingStudio.subtitle')}</p>
             {/* Side-Step is a deeper training suite than this one and the LoKR /
                 LoRA formats are interchangeable — worth pointing users at. */}

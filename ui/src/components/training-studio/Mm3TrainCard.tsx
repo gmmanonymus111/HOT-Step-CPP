@@ -1,33 +1,31 @@
 // Mm3TrainCard.tsx — Training Studio phase 3, MiniMax-Music3 branch.
 //
 // Rendered instead of the ACE LM/DiT cards when the active backend is
-// MiniMax-Music3. Two stages, in order, because the second cannot run without
-// the first:
+// MiniMax-Music3: codes + the MM3-native captions -> an LM LoRA.
 //
-//   1. CODES   audio -> RVQ codes (`ace-train mm3-codes`). MM3 ships decode-side
-//              only, so the codes an LM trains on come from a community encoder;
-//              this is that export, run natively.
-//   2. TRAIN   codes + the MM3-native captions -> an LM LoRA.
+// The CODES export is phase 2, not here (Mm3CodesCard) — for MM3, codes are
+// what preprocessing means. This card only GATES on them, exactly as the ACE
+// train panel gates on a preprocess variant, so there is one place to run the
+// export and one place to run training.
 //
-// Everything below the buttons is the SHARED job machinery: the same SSE
-// stream, the same JobProgress, the same loss chart. That is why this file is
-// a form and two status cards rather than a studio.
+// Everything below the form is the SHARED job machinery: the same SSE stream,
+// the same JobProgress, the same loss chart.
 //
 // THE DEFAULTS ARE NOT DUPLICATED HERE. They arrive in the `mm3` status
 // payload from services/training/mm3Train.ts, which is the single place the
 // validated recipe lives. This form seeds itself from that response, so a
 // change on the server reaches the UI without an edit here.
 
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
-  AlertTriangle, ChevronDown, ChevronRight, Cpu, FileCode2, Loader2, Play, XCircle,
+  AlertTriangle, ChevronDown, ChevronRight, Cpu, Loader2, Play, XCircle,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import * as trainingApi from '../../services/trainingApi';
-import type { Mm3Status, Mm3TrainLmRequest } from '../../services/trainingApi';
+import type { Mm3TrainLmRequest } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
+import { useMm3Status } from './useMm3Status';
 import { TrainingChart } from './TrainingChart';
 
 const CARD = 'rounded-xl border border-zinc-200 dark:border-white/5 bg-white dark:bg-suno-card p-4';
@@ -66,65 +64,41 @@ const NumField: React.FC<{
 export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = ({ datasetId, trigger }) => {
   const { t } = useTranslation();
   const activeJob = useTrainingStore(s => s.activeJob);
-  const startMm3Codes = useTrainingStore(s => s.startMm3Codes);
   const startMm3TrainLm = useTrainingStore(s => s.startMm3TrainLm);
+  const storeError = useTrainingStore(s => s.error);
+  const setPhase = useTrainingStore(s => s.setPhase);
   const trainStepSeries = useTrainingStore(s => s.trainStepSeries);
   const trainMilestones = useTrainingStore(s => s.trainMilestones);
 
-  const [status, setStatus] = useState<Mm3Status | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { status, error: statusError } = useMm3Status(datasetId);
   const [busy, setBusy] = useState(false);
   const [advanced, setAdvanced] = useState(false);
-  const [form, setForm] = useState<FormState | null>(null);
+  // The form is DERIVED, not seeded: server defaults underneath, the user's
+  // edits on top. No effect copies one into the other, so there is no window
+  // where the form holds stale numbers and no cascading render — and the
+  // validated recipe still has exactly one home (mm3Train.ts).
+  const [edits, setEdits] = useState<Partial<FormState>>({});
 
   const jobKind = activeJob?.kind;
   const jobStatus = activeJob?.status;
   const jobRunning = jobStatus === 'queued' || jobStatus === 'running';
-  const mine = jobKind === 'mm3-codes' || jobKind === 'mm3-train-lm';
+  const mine = jobKind === 'mm3-train-lm';
 
-  // ONE fetch effect, re-keyed rather than re-called. `finishedKey` changes when
-  // one of OUR jobs reaches a terminal state, which is exactly when the codes
-  // cache on disk may have changed — so a finished export refreshes the counts
-  // without a second effect calling setState synchronously to trigger it.
-  const finishedKey = mine && !jobRunning ? `${activeJob?.id ?? ''}:${jobStatus ?? ''}` : '';
-  useEffect(() => {
-    let cancelled = false;
-    trainingApi.getMm3Status(datasetId)
-      .then(s => {
-        if (cancelled) return;
-        setStatus(s);
-        setError(null);
-        // Seed ONCE, from the server's own defaults — never from constants
-        // here, so the recipe has exactly one home.
-        setForm(prev => prev ?? {
-          steps: s.defaults.steps ?? 800,
-          saveEvery: s.defaults.saveEvery ?? 100,
-          rank: s.defaults.rank ?? 256,
-          alpha: s.defaults.alpha ?? 256,
-          lr: s.defaults.lr ?? 8e-5,
-          maxFrames: s.defaults.maxFrames ?? 1500,
-          cropMode: (s.defaults.cropMode as 'random' | 'beginning') ?? 'random',
-          optimizer: s.defaults.optimizer ?? 'muon',
-          muonLrScale: s.defaults.muonLrScale ?? 64,
-          gradAccum: s.defaults.gradAccum ?? 1,
-          seed: s.defaults.seed ?? 42,
-          trigger: trigger ?? '',
-        });
-      })
-      .catch(err => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => { cancelled = true; };
-  }, [datasetId, trigger, finishedKey]);
-
-  const startCodes = async () => {
-    setBusy(true);
-    try {
-      await startMm3Codes();
-    } finally {
-      setBusy(false);
-    }
-  };
+  const form: FormState | null = status ? {
+    steps: status.defaults.steps ?? 800,
+    saveEvery: status.defaults.saveEvery ?? 100,
+    rank: status.defaults.rank ?? 256,
+    alpha: status.defaults.alpha ?? 256,
+    lr: status.defaults.lr ?? 8e-5,
+    maxFrames: status.defaults.maxFrames ?? 1500,
+    cropMode: (status.defaults.cropMode as 'random' | 'beginning') ?? 'random',
+    optimizer: status.defaults.optimizer ?? 'muon',
+    muonLrScale: status.defaults.muonLrScale ?? 64,
+    gradAccum: status.defaults.gradAccum ?? 1,
+    seed: status.defaults.seed ?? 42,
+    trigger: trigger ?? '',
+    ...edits,
+  } : null;
 
   const startTrain = async () => {
     if (!form) return;
@@ -143,7 +117,7 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
     }
   };
 
-  if (!status && !error) {
+  if (!status && !statusError) {
     return (
       <div className="flex items-center justify-center py-20 text-zinc-500 text-sm">
         <Loader2 size={18} className="animate-spin mr-2" /> …
@@ -152,64 +126,21 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   }
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
-    setForm(f => (f ? { ...f, [k]: v } : f));
+    setEdits(e => ({ ...e, [k]: v }));
 
   const hasCodes = (status?.codes ?? 0) > 0;
-  const codesBlocked = (status?.missingForCodes.length ?? 0) > 0;
   const trainBlocked = (status?.missingForTrain.length ?? 0) > 0;
 
   return (
     <div className="flex flex-col gap-4">
-      {error && (
+      {(statusError || storeError) && (
         <div className="rounded-xl border border-red-500/25 bg-red-500/10 p-3 flex items-start gap-2 text-sm text-red-500">
           <XCircle size={16} className="mt-0.5 flex-shrink-0" />
-          <span className="min-w-0 break-words">{error}</span>
+          <span className="min-w-0 break-words">{statusError || storeError}</span>
         </div>
       )}
 
-      {/* ── Stage 1: codes ── */}
-      <div className={CARD}>
-        <div className="flex items-center gap-2 mb-2">
-          <FileCode2 size={15} className="text-amber-500" />
-          <h3 className="text-sm font-semibold text-zinc-900 dark:text-white">
-            {t('trainingStudio.mm3.codesTitle', 'RVQ codes')}
-          </h3>
-        </div>
-        <p className="text-[11px] text-zinc-500 leading-relaxed mb-3">
-          {t('trainingStudio.mm3.codesBlurb',
-            'MiniMax-Music3 ships no audio-to-code encoder, so the tokens the LM learns from are produced '
-            + 'here, natively, by the adopted community encoder. Run this once per dataset; re-running '
-            + 'overwrites with whichever encoder is installed now.')}
-        </p>
-        {codesBlocked ? (
-          <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
-            <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
-            <span>
-              {t('trainingStudio.mm3.missing', 'Missing model files')}: {status?.missingForCodes.join(', ')}
-            </span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={() => void startCodes()}
-              disabled={busy || jobRunning}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/15 border border-amber-500/25 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 disabled:opacity-40 transition-colors"
-            >
-              {hasCodes
-                ? t('trainingStudio.mm3.reexport', 'Re-export codes')
-                : t('trainingStudio.mm3.export', 'Export codes')}
-            </button>
-            <span className="text-xs text-zinc-500">
-              {hasCodes
-                ? `${status?.codes} ${t('trainingStudio.mm3.codesReady', 'tracks encoded')}`
-                  + (status?.encoder ? ` · ${status.encoder}` : '')
-                : t('trainingStudio.mm3.noCodes', 'no codes yet')}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* ── Stage 2: train ── */}
+      {/* ── LM LoRA ── */}
       <div className={CARD}>
         <div className="flex items-center gap-2 mb-2">
           <Cpu size={15} className="text-amber-500" />
@@ -232,9 +163,18 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
             </span>
           </div>
         ) : !hasCodes ? (
-          <div className="flex items-start gap-2 text-xs text-zinc-500">
-            <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
-            {t('trainingStudio.mm3.needsCodes', 'Export the RVQ codes first — training reads them, not the audio.')}
+          <div className="flex flex-col items-start gap-3">
+            <div className="flex items-start gap-2 text-xs text-zinc-500">
+              <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+              {t('trainingStudio.mm3.needsCodes',
+                'Export the RVQ codes first — training reads them, not the audio.')}
+            </div>
+            <button
+              onClick={() => setPhase('preprocess')}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/15 border border-amber-500/25 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors"
+            >
+              {t('trainingStudio.mm3.goToCodes', 'Go to Codes')}
+            </button>
           </div>
         ) : form && (
           <>
