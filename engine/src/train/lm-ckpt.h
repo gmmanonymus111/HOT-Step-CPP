@@ -255,7 +255,21 @@ static void lm_ckpt_free(LmCkptState * st) {
 // The low-VRAM path never mirrors, so the "is this base trainable?" check that
 // lm_build_f32_mirror() performs on the way past has to be done explicitly.
 // Same wording as the mirror's, so the server sees the same fatal message.
-static bool lm_ckpt_check_base(Qwen3LM * lm, std::string * err) {
+// `allow_quantized` is OFF by default so every existing caller keeps today's
+// behaviour verbatim.
+//
+// When it is on, the claim being made is narrow and worth stating: the DEFAULT
+// lm_linear path emits `mul_mat(qwen3_f32(w), x)`, i.e. an in-graph cast to F32
+// that gallocr frees with the segment. So the backward never sees the quantized
+// tensor at all — it sees the cast's F32 output, and out_prod is satisfied.
+// That is QLoRA's dequantize-per-matmul, using machinery this trainer already
+// had for its BF16/F16 bases.
+//
+// It does NOT hold under Lever A (`--weights bf16`), which deliberately feeds
+// the RAW weight to mul_mat to reach the BF16 tensor cores. A quantized weight
+// there would hit the transpose path that block-quantized types cannot take, so
+// the caller must not combine the two.
+static bool lm_ckpt_check_base(Qwen3LM * lm, std::string * err, bool allow_quantized = false) {
     const int L = lm->cfg.n_layers;
     for (int i = 0; i < L; i++) {
         const Qwen3Layer & ly = lm->layers[i];
@@ -283,11 +297,18 @@ static bool lm_ckpt_check_base(Qwen3LM * lm, std::string * err) {
         if (!s) {
             continue;
         }
-        if (s->type != GGML_TYPE_F32 && s->type != GGML_TYPE_BF16 && s->type != GGML_TYPE_F16) {
+        const bool plain = s->type == GGML_TYPE_F32 || s->type == GGML_TYPE_BF16
+                        || s->type == GGML_TYPE_F16;
+        // A quantized weight is acceptable only if it can be dequantized by the
+        // in-graph cast, which needs a type with a defined to_float and a real
+        // block size (i.e. an ordinary k-quant or Q8_0, not something exotic).
+        const ggml_type_traits * tr = ggml_get_type_traits(s->type);
+        const bool castable = allow_quantized && tr && tr->to_float != nullptr;
+        if (!plain && !castable) {
             char b[256];
             snprintf(b, sizeof(b),
-                     "base weight '%s' is %s — LM training needs a BF16/F16/F32 base "
-                     "(quantized bases cannot be trained: ggml_out_prod is F32-only)",
+                     "base weight '%s' is %s — LM training needs a BF16/F16/F32 base, or a quantized one "
+                     "with the dequantizing cast enabled (ggml_out_prod is F32-only)",
                      s->name, ggml_type_name(s->type));
             *err = b;
             return false;
@@ -369,7 +390,16 @@ static bool lm_ckpt_alloc(LmCkptState * st, Qwen3LM * lm, const LmCkptCfg & cfg,
 
     // Dtype stays the base's own (D4): the chunked head never runs out_prod on
     // it, so no F32 copy is needed — 1,060 MiB instead of 2,120 MiB at 4B.
-    st->t_embT = ggml_new_tensor_2d(st->ctx_embt, lm_ckpt_head_src(lm, cfg)->type, V, H);
+    // A quantized head cannot BE t_embT: the transpose below is a host-side
+    // element move, and block-quantized rows do not survive one. Dequantize to
+    // F16 instead — half the bytes of F32, and this tensor feeds exactly one
+    // mul_mat (the chunked head's dL/dh), never a backward.
+    {
+        ggml_tensor *      hsrc = lm_ckpt_head_src(lm, cfg);
+        const ggml_type_traits * htr = ggml_get_type_traits(hsrc->type);
+        const bool         hq   = htr && htr->is_quantized;
+        st->t_embT = ggml_new_tensor_2d(st->ctx_embt, hq ? GGML_TYPE_F16 : hsrc->type, V, H);
+    }
     ggml_set_name(st->t_embT, "ckpt.embT");
     ggml_set_input(st->t_embT);
 
@@ -414,19 +444,48 @@ static bool lm_ckpt_build_embed_t(LmCkptState * st, std::string * err) {
     const int     H   = lm->cfg.hidden_size;
     const int     V   = lm_ckpt_head_width(lm, st->cfg);
     const int64_t row0 = st->cfg.head_w ? st->cfg.head_row0 : 0;
+    if (row0 + (int64_t) V > src_t->ne[1]) {
+        *err = "the scored head slice runs past the head tensor";
+        return false;
+    }
+
+    const ggml_type_traits * tr = ggml_get_type_traits(src_t->type);
+    const bool               quantized = tr && tr->is_quantized;
+
+    if (quantized) {
+        // Dequantize row by row, then transpose into F16. Rows are contiguous
+        // and H is a multiple of every block size in use, so a row is a whole
+        // number of blocks and can be converted on its own — which keeps the
+        // scratch at one row instead of the whole 16k x 4096 slice.
+        if (!tr->to_float) {
+            *err = std::string("the output head is ") + ggml_type_name(src_t->type)
+                 + ", which has no dequantizer";
+            return false;
+        }
+        if (st->t_embT->type != GGML_TYPE_F16) {
+            *err = "embedT must be F16 for a quantized head";
+            return false;
+        }
+        const size_t row_bytes = (size_t) (H / ggml_blck_size(src_t->type)) * ggml_type_size(src_t->type);
+        std::vector<uint8_t> qrow(row_bytes);
+        std::vector<float>   frow((size_t) H);
+        std::vector<ggml_fp16_t> dst((size_t) V * (size_t) H);
+        for (int64_t v = 0; v < V; v++) {
+            ggml_backend_tensor_get(src_t, qrow.data(), (size_t) (row0 + v) * row_bytes, row_bytes);
+            tr->to_float(qrow.data(), frow.data(), H);
+            for (int64_t h = 0; h < H; h++) {
+                dst[(size_t) (h * (int64_t) V + v)] = ggml_fp32_to_fp16(frow[(size_t) h]);
+            }
+        }
+        ggml_backend_tensor_set(st->t_embT, dst.data(), 0, dst.size() * sizeof(ggml_fp16_t));
+        return true;
+    }
+
     if (st->t_embT->type != src_t->type) {
         *err = "embedT dtype mismatch";
         return false;
     }
     const size_t ts = ggml_type_size(src_t->type);
-    if (ggml_blck_size(src_t->type) != 1) {
-        *err = "the output head is block-quantized — cannot transpose";
-        return false;
-    }
-    if (row0 + (int64_t) V > src_t->ne[1]) {
-        *err = "the scored head slice runs past the head tensor";
-        return false;
-    }
     // Read only the scored rows. In the tied case row0 == 0 and V == vocab, so
     // this is the whole tensor and the behaviour is unchanged.
     std::vector<uint8_t> src((size_t) V * (size_t) H * ts), dst(ggml_nbytes(st->t_embT));

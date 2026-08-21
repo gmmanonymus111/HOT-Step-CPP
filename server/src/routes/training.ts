@@ -84,7 +84,8 @@ import {
 } from '../services/training/pipelineRunner.js';
 import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
 import {
-  MM3_LM_DEFAULTS, missingMm3TrainModels, mm3AdapterRunDir, mm3CodesDir, mm3RunName,
+  availableMm3Bases, MM3_LM_DEFAULTS, missingMm3TrainModels, mm3AdapterRunDir, mm3CodesDir, mm3RunName,
+  type Mm3BasePrecision,
 } from '../services/training/mm3Train.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
 import { essentiaAvailable } from '../services/training/essentiaClient.js';
@@ -1727,6 +1728,9 @@ router.get('/datasets/:id/mm3', (req: Request, res: Response) => {
       // codes job wants the encoders, training wants the F16 LM + depth.
       missingForCodes: missingMm3TrainModels('codes'),
       missingForTrain: missingMm3TrainModels('train'),
+      // Only offer bases that are installed — a picker listing a file that is
+      // not there just moves the failure to spawn time.
+      bases: availableMm3Bases(),
       defaults: MM3_LM_DEFAULTS,
     });
   } catch (err: any) {
@@ -1763,7 +1767,8 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
   try {
     const ds = mm3Preflight(req, res);
     if (!ds) return;
-    const missing = missingMm3TrainModels('train');
+    const missing = missingMm3TrainModels('train',
+      (req.body || {}).basePrecision === 'q8_0' ? 'q8_0' : 'f16');
     if (missing.length) {
       res.status(400).json({
         error: `MiniMax-Music3 training models are missing: ${missing.join(', ')}. `
@@ -1794,6 +1799,7 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
     };
     const D = MM3_LM_DEFAULTS;
     const optimizer = b.optimizer === 'adamw' ? 'adamw' : D.optimizer;
+    const basePrecision: Mm3BasePrecision = b.basePrecision === 'q8_0' ? 'q8_0' : D.basePrecision;
     const cropMode  = b.cropMode === 'beginning' ? 'beginning' : D.cropMode;
     const runName   = mm3RunName(ds.slug);
 
@@ -1814,6 +1820,9 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
       cropMode,
       optimizer,
       muonLrScale: num('muonLrScale', D.muonLrScale, 0.01, 4096),
+      basePrecision,
+      holdout:     num('holdout', D.holdout, 0, 0.5),
+      evalEvery:   num('evalEvery', D.evalEvery, 0, 100000),
       trigger:     typeof b.trigger === 'string' ? b.trigger.trim() : (ds.customTag || ''),
       datasetName: ds.name || ds.slug,
     });

@@ -16,10 +16,22 @@ import { datasetDir } from './paths.js';
 
 /** The MM3 model files training needs, resolved under <models>/mm3/.
  *
- *  F16 IS NOT A PREFERENCE. The trainer runs `ggml_out_prod` on the frozen
- *  base's gradients path, which is F32-only, so a quantized base is rejected
- *  outright (lm-ckpt.h: "quantized bases cannot be trained"). The engine's
- *  quant ladder is for INFERENCE; training takes f16 and nothing else. */
+ *  CORRECTION (2026-08-21): this comment used to say a quantized base "cannot
+ *  be trained" because out_prod is F32-only. That was true of the code, not of
+ *  the maths. The default lm_linear path emits `mul_mat(qwen3_f32(w), x)` — an
+ *  in-graph cast that gallocr frees with the segment — so the backward never
+ *  sees the quantized tensor, only the cast's F32 output. That is QLoRA's
+ *  dequantize-per-matmul, and it now works.
+ *
+ *  So the base is a CHOICE, and a real trade rather than a free win (measured
+ *  on a 5090 at the production recipe):
+ *
+ *      f16    16.0 GB base   31.0/32.6 GB used, 1.5 GB free    3.7 s/step
+ *      q8_0    8.5 GB base   22.5/32.6 GB used, 10.1 GB free  11.1 s/step
+ *
+ *  f16 is ~3x faster and leaves almost no headroom, so anything else on the
+ *  GPU tips it into WDDM paging where a step takes ~40 s. q8_0 pays 3x in
+ *  compute for ~9.5 GB of room and cannot realistically spill. */
 export interface Mm3TrainModels {
   lm: string;
   depth: string;
@@ -47,10 +59,12 @@ function newestMatching(dir: string, prefix: string): string {
   }
 }
 
-export function resolveMm3TrainModels(): Mm3TrainModels {
+export type Mm3BasePrecision = 'f16' | 'q8_0';
+
+export function resolveMm3TrainModels(base: Mm3BasePrecision = 'f16'): Mm3TrainModels {
   const dir = mm3ModelDir();
   return {
-    lm:    path.join(dir, 'mm3-lm-f16.gguf'),
+    lm:    path.join(dir, base === 'q8_0' ? 'mm3-lm-q8_0.gguf' : 'mm3-lm-f16.gguf'),
     depth: path.join(dir, 'mm3-depth-f16.gguf'),
     rvq:   newestMatching(dir, 'mm3-rvq-'),
     enc:   newestMatching(dir, 'mm3-enc-'),
@@ -59,12 +73,20 @@ export function resolveMm3TrainModels(): Mm3TrainModels {
 
 /** Which of the required files are missing, as user-facing names. Empty = ready.
  *  `need` narrows the check: the codes job does not need the LM. */
-export function missingMm3TrainModels(need: 'codes' | 'train'): string[] {
-  const m = resolveMm3TrainModels();
+export function missingMm3TrainModels(need: 'codes' | 'train',
+                                      base: Mm3BasePrecision = 'f16'): string[] {
+  const m = resolveMm3TrainModels(base);
   const wanted: Array<[string, string]> = need === 'codes'
     ? [[m.rvq, 'an RVQ encoder (mm3-rvq-*.gguf)'], [m.enc, 'the DAV encoder (mm3-enc-*.gguf)']]
-    : [[m.lm, 'mm3-lm-f16.gguf'], [m.depth, 'mm3-depth-f16.gguf']];
+    : [[m.lm, path.basename(m.lm)], [m.depth, 'mm3-depth-f16.gguf']];
   return wanted.filter(([p]) => !p || !fs.existsSync(p)).map(([, label]) => label);
+}
+
+/** Which base precisions are actually installed, so the picker only offers
+ *  what exists rather than failing at spawn time. */
+export function availableMm3Bases(): Mm3BasePrecision[] {
+  return (['f16', 'q8_0'] as Mm3BasePrecision[])
+    .filter(b => fs.existsSync(resolveMm3TrainModels(b).lm));
 }
 
 // ── Layout ──────────────────────────────────────────────────────────────────
@@ -122,6 +144,12 @@ export const MM3_LM_DEFAULTS = {
    *  measured over 50 steps — not a tuned optimum. */
   optimizer: 'muon' as 'muon' | 'adamw',
   muonLrScale: 64,
+  /** f16: ~3x faster, ~1.5 GB of headroom. q8_0: ~9.5 GB of headroom, ~3x
+   *  slower. f16 is the default because it is what the recipe was validated
+   *  on; switch to q8_0 when the GPU is not exclusively this run's. */
+  basePrecision: 'f16' as Mm3BasePrecision,
+  holdout: 0.15,
+  evalEvery: 50,
 } as const;
 
 // ── Arg building ────────────────────────────────────────────────────────────
@@ -162,12 +190,15 @@ export interface ResolvedMm3TrainLmOptions {
   cropMode: 'random' | 'beginning';
   optimizer: 'muon' | 'adamw';
   muonLrScale: number;
+  holdout: number;
+  evalEvery: number;
   trigger: string;
   datasetName: string;
+  basePrecision: Mm3BasePrecision;
 }
 
 export function buildMm3TrainLmArgs(o: ResolvedMm3TrainLmOptions): string[] {
-  const m = resolveMm3TrainModels();
+  const m = resolveMm3TrainModels(o.basePrecision);
   const args = [
     'mm3-lm-train', '--jsonl',
     '--lm', m.lm,
@@ -189,6 +220,8 @@ export function buildMm3TrainLmArgs(o: ResolvedMm3TrainLmOptions): string[] {
     '--optimizer', o.optimizer,
   ];
   if (o.optimizer === 'muon') args.push('--muon-lr-scale', String(o.muonLrScale));
+  args.push('--holdout', String(o.holdout));
+  args.push('--eval-every', String(o.evalEvery));
   if (o.trigger) args.push('--trigger', o.trigger);
   if (o.datasetName) args.push('--dataset-name', o.datasetName);
   return args;

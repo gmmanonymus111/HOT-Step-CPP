@@ -46,6 +46,9 @@ interface FormState {
   gradAccum: number;
   seed: number;
   trigger: string;
+  basePrecision: 'f16' | 'q8_0';
+  holdout: number;
+  evalEvery: number;
 }
 
 const NumField: React.FC<{
@@ -105,6 +108,9 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
     gradAccum: status.defaults.gradAccum ?? 1,
     seed: status.defaults.seed ?? 42,
     trigger: trigger ?? '',
+    basePrecision: (status.defaults.basePrecision as 'f16' | 'q8_0') ?? 'f16',
+    holdout: status.defaults.holdout ?? 0.15,
+    evalEvery: status.defaults.evalEvery ?? 50,
     ...edits,
   } : null;
 
@@ -117,6 +123,7 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
         lr: form.lr, maxFrames: form.maxFrames, cropMode: form.cropMode,
         optimizer: form.optimizer, muonLrScale: form.muonLrScale,
         gradAccum: form.gradAccum, seed: form.seed,
+        basePrecision: form.basePrecision, holdout: form.holdout, evalEvery: form.evalEvery,
         ...(form.trigger.trim() ? { trigger: form.trigger.trim() } : {}),
       };
       await startMm3TrainLm(body);
@@ -251,6 +258,30 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
                       hint={t('trainingStudio.mm3.muonLrScaleHint',
                         '64 is the best of the values measured so far, not a tuned optimum.') as string} />
                   )}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
+                      {t('trainingStudio.mm3.base', 'Base precision')}
+                    </span>
+                    <select className={INPUT} value={form.basePrecision}
+                      onChange={e => set('basePrecision', e.target.value as 'f16' | 'q8_0')}>
+                      {(status?.bases ?? ['f16']).map(b => (
+                        <option key={b} value={b}>{b === 'q8_0' ? 'q8_0 (low VRAM)' : 'f16 (fast)'}</option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-zinc-500 leading-snug">
+                      {t('trainingStudio.mm3.baseHint',
+                        'f16 is ~3x faster but leaves ~1.5 GB free, so anything else using the GPU can '
+                        + 'push it into shared memory. q8_0 frees ~9.5 GB and cannot realistically spill, '
+                        + 'at ~3x the step time. Both train the same way.')}
+                    </span>
+                  </label>
+                  <NumField label={t('trainingStudio.mm3.holdout', 'Hold-out fraction')}
+                    value={form.holdout} onChange={v => set('holdout', v)} step={0.05}
+                    hint={t('trainingStudio.mm3.holdoutHint',
+                      '0 disables evaluation — the training loss then cannot tell learning from '
+                      + 'memorising. Ignored below 6 songs.') as string} />
                 </div>
                 <label className="flex flex-col gap-1">
                   <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">

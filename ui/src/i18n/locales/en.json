@@ -1589,6 +1589,10 @@
     "trainingStudio.mm3.stat.gradNorm": "grad norm",
     "trainingStudio.mm3.stat.lr": "lr",
     "trainingStudio.mm3.stat.stepTime": "step time",
-    "trainingStudio.mm3.stat.vram": "VRAM"
+    "trainingStudio.mm3.stat.vram": "VRAM",
+    "trainingStudio.mm3.base": "Base precision",
+    "trainingStudio.mm3.baseHint": "f16 is ~3x faster but leaves ~1.5 GB free, so anything else using the GPU can push it into shared memory. q8_0 frees ~9.5 GB and cannot realistically spill, at ~3x the step time. Both train the same way.",
+    "trainingStudio.mm3.holdout": "Hold-out fraction",
+    "trainingStudio.mm3.holdoutHint": "0 disables evaluation — the training loss then cannot tell learning from memorising. Ignored below 6 songs."
   }
 }

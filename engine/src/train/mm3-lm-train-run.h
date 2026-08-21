@@ -923,7 +923,11 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     LmCkptRun   ckpt_run;
     MM3EmbedCtx embed_ctx;
     if (a.ckpt) {
-        if (!lm_ckpt_check_base(&t.lm, &err)) {
+        // Quantized bases allowed: the default lm_linear path casts every
+        // weight to F32 in-graph, so the backward never touches the quantized
+        // tensor. Lever A is not used here, which is the case where it would
+        // not hold.
+        if (!lm_ckpt_check_base(&t.lm, &err, /*allow_quantized=*/true)) {
             fprintf(stderr, "[mm3-lm-train] %s\n", err.c_str());
             lm_lora_detach(&lora, &t.lm);
             lm_lora_free(&lora);

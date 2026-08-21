@@ -37,6 +37,8 @@ export interface Mm3Status {
   /** Per-stage, because the two need different files. Non-empty = disable. */
   missingForCodes: string[];
   missingForTrain: string[];
+  /** Base precisions actually installed — the picker offers only these. */
+  bases: Array<'f16' | 'q8_0'>;
   defaults: Mm3TrainLmRequest & { maxFrames: number; cropMode: string };
 }
 
@@ -59,6 +61,14 @@ export interface Mm3TrainLmRequest {
   cropMode?: 'random' | 'beginning';
   optimizer?: 'muon' | 'adamw';
   muonLrScale?: number;
+  /** f16 is ~3x faster with ~1.5 GB of headroom; q8_0 frees ~9.5 GB and costs
+   *  ~3x in step time. Both train — the base is dequantized in-graph. */
+  basePrecision?: 'f16' | 'q8_0';
+  /** Fraction of songs withheld for evaluation. 0 disables it, and then the
+   *  training loss is the only signal — which cannot tell learning from
+   *  memorising. */
+  holdout?: number;
+  evalEvery?: number;
   trigger?: string;
 }
 
