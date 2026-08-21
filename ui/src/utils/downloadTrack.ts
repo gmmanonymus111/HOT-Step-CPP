@@ -57,6 +57,60 @@ function triggerBrowserDownload(url: string): void {
 /** Small delay helper — used between multiple downloads so the browser doesn't block them. */
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+/** A specific rendered variant of a track, matching the playbar's variant switch. */
+export type TrackVersion = 'original' | 'mastered' | 'noadapter';
+
+/**
+ * Build the /api/download query string for one version of a track.
+ * Shared by the settings-driven download and the per-variant playbar buttons so
+ * both produce identical filenames (prepend - artist - title[ - suffix]).
+ */
+function buildDownloadParams(
+  song: Song,
+  version: TrackVersion,
+  settings: DownloadSettings,
+  options?: { artistName?: string; prepend?: string },
+): URLSearchParams {
+  const format = settings.downloadFormat;
+  const isLossy = format === 'mp3' || format === 'opus';
+  const bitrate = format === 'opus' ? settings.downloadOpusBitrate : settings.downloadMp3Bitrate;
+
+  const finalArtist = options?.artistName || song.artistName
+    || (song.generationParams as any)?.artist || (song.generation_params as any)?.artist || '';
+  const finalPrepend = options?.prepend || readFilenamePrepend();
+
+  // The no-adapter render may live only on a queue item, not in the songs row —
+  // pass it explicitly so the server can serve it either way.
+  const noAdapterUrl = version === 'noadapter'
+    ? ((song as any).noAdapterAudioUrl || (song as any).noadapter_audio_url || '')
+    : '';
+
+  return new URLSearchParams({
+    format,
+    version,
+    ...(isLossy ? { bitrate: String(bitrate) } : {}),
+    ...(song.audioUrl ? { audioUrl: song.audioUrl } : {}),
+    ...(noAdapterUrl ? { srcUrl: noAdapterUrl } : {}),
+    ...(finalArtist ? { artist: finalArtist } : {}),
+    ...(finalPrepend ? { prepend: finalPrepend } : {}),
+  });
+}
+
+/**
+ * Download one specific version of a track, bypassing the settings-page
+ * "which version" preference. Format, bitrate, artist and filename prepend
+ * still come from settings — this only pins which render is fetched.
+ * Used by the playbar's per-variant download buttons.
+ */
+export async function downloadTrackVersion(
+  song: Song,
+  version: TrackVersion,
+  options?: { artistName?: string; prepend?: string },
+): Promise<void> {
+  const params = buildDownloadParams(song, version, readSettings(), options);
+  triggerBrowserDownload(`/api/download/${song.id}?${params}`);
+}
+
 /**
  * Download a track instantly using settings-page preferences.
  *
@@ -68,27 +122,9 @@ export async function downloadTrack(
   options?: { artistName?: string; prepend?: string },
 ): Promise<void> {
   const settings = readSettings();
-  const format = settings.downloadFormat;
-  const isLossy = format === 'mp3' || format === 'opus';
-  const bitrate = format === 'opus' ? settings.downloadOpusBitrate : settings.downloadMp3Bitrate;
   const hasMastered = !!(song.masteredAudioUrl || song.mastered_audio_url);
 
-  const finalArtist = options?.artistName || song.artistName
-    || (song.generationParams as any)?.artist || (song.generation_params as any)?.artist || '';
-  const finalPrepend = options?.prepend || readFilenamePrepend();
-
-  // Build common query params
-  const buildParams = (version: 'original' | 'mastered') => {
-    const params = new URLSearchParams({
-      format,
-      version,
-      ...(isLossy ? { bitrate: String(bitrate) } : {}),
-      ...(song.audioUrl ? { audioUrl: song.audioUrl } : {}),
-      ...(finalArtist ? { artist: finalArtist } : {}),
-      ...(finalPrepend ? { prepend: finalPrepend } : {}),
-    });
-    return params;
-  };
+  const buildParams = (version: TrackVersion) => buildDownloadParams(song, version, settings, options);
 
   // Determine which audio version(s) to download
   const versionPref = settings.downloadVersion;

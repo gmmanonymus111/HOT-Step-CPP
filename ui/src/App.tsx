@@ -30,7 +30,7 @@ import { MetadataEditorModal } from './components/details/MetadataEditorModal';
 import { CoverArtPromptModal } from './components/library/CoverArtPromptModal';
 import { Toast, type ToastType } from './components/shared/Toast';
 import { ConfirmDialog } from './components/shared/ConfirmDialog';
-import { downloadTrack } from './utils/downloadTrack';
+import { downloadTrack, downloadTrackVersion } from './utils/downloadTrack';
 import { SettingsPanel, type AppSettings, DEFAULT_SETTINGS } from './components/settings/SettingsPanel';
 import { TerminalPanel } from './components/terminal/TerminalPanel';
 import { AssistantPanel } from './components/assistant/AssistantPanel';
@@ -1448,6 +1448,7 @@ const AppContent: React.FC = () => {
           playMastered={playMastered}
           playNoAdapter={playNoAdapter}
           onSetPlaybackVariant={pbSetPlaybackVariant}
+          onDownloadVariant={(v) => currentSong && downloadTrackVersion(currentSong as Song, v)}
           spectrumEnabled={spectrumEnabled}
           onToggleSpectrum={() => pbSetSpectrumEnabled(!spectrumEnabled)}
           showPlaylist={showPlaylist}

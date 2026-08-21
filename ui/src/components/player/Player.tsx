@@ -39,6 +39,7 @@ interface PlayerProps {
   playMastered: boolean;
   playNoAdapter: boolean;
   onSetPlaybackVariant: (v: 'noadapter' | 'original' | 'mastered') => void;
+  onDownloadVariant?: (v: 'noadapter' | 'original' | 'mastered') => void;
   spectrumEnabled: boolean;
   onToggleSpectrum: () => void;
   showPlaylist: boolean;
@@ -60,6 +61,43 @@ const formatTime = (s: number) => {
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
 };
+
+/** One segment of the playbar's variant switch: a label that selects the
+ *  variant, plus an inline download icon that grabs that exact render.
+ *  Two sibling buttons rather than a nested one — a button inside a button
+ *  is invalid HTML and swallows the inner click in some browsers. */
+const VariantSegment: React.FC<{
+  active: boolean;
+  label: string;
+  hint: string;
+  downloadHint: string;
+  activeClass: string;
+  idleClass: string;
+  onSelect: () => void;
+  onDownload?: () => void;
+}> = ({ active, label, hint, downloadHint, activeClass, idleClass, onSelect, onDownload }) => (
+  <div className={`flex items-center transition-colors ${active ? activeClass : idleClass}`}>
+    <button
+      onClick={onSelect}
+      className="pl-2 py-1 text-[10px] font-medium"
+      title={hint}
+    >
+      {label}
+    </button>
+    {onDownload ? (
+      <button
+        onClick={(e) => { e.stopPropagation(); onDownload(); }}
+        className="pl-1 pr-2 py-1 opacity-50 hover:opacity-100 transition-opacity"
+        title={downloadHint}
+        aria-label={downloadHint}
+      >
+        <Download size={10} />
+      </button>
+    ) : (
+      <span className="pr-2" />
+    )}
+  </div>
+);
 
 export const Player: React.FC<PlayerProps> = ({
   currentSong,
@@ -85,6 +123,7 @@ export const Player: React.FC<PlayerProps> = ({
   playMastered,
   playNoAdapter,
   onSetPlaybackVariant,
+  onDownloadVariant,
   spectrumEnabled,
   onToggleSpectrum,
   showPlaylist,
@@ -208,41 +247,47 @@ export const Player: React.FC<PlayerProps> = ({
         {!abMode && (currentSong.masteredAudioUrl || currentSong.noAdapterAudioUrl) && (
           <div className="flex rounded-lg overflow-hidden border border-zinc-300 dark:border-white/10 flex-shrink-0">
             {currentSong.noAdapterAudioUrl && (
-              <button
-                onClick={() => onSetPlaybackVariant('noadapter')}
-                className={`px-2 py-1 text-[10px] font-medium transition-colors ${
-                  playNoAdapter
-                    ? 'bg-purple-500/15 text-purple-400 shadow-[0_0_8px_rgba(168,85,247,0.15)]'
-                    : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-purple-400'
-                }`}
-                title={t('player.variantNoAdapterHint')}
-              >
-                {t('player.variantNoAdapter')}
-              </button>
+              <VariantSegment
+                active={playNoAdapter}
+                label={t('player.variantNoAdapter')}
+                hint={t('player.variantNoAdapterHint')}
+                downloadHint={t('player.variantDownloadHint', {
+                  version: t('player.variantNoAdapter'),
+                  defaultValue: `Download the ${t('player.variantNoAdapter')} version`,
+                })}
+                activeClass="bg-purple-500/15 text-purple-400 shadow-[0_0_8px_rgba(168,85,247,0.15)]"
+                idleClass="bg-white dark:bg-zinc-900 text-zinc-500 hover:text-purple-400"
+                onSelect={() => onSetPlaybackVariant('noadapter')}
+                onDownload={onDownloadVariant && (() => onDownloadVariant('noadapter'))}
+              />
             )}
-            <button
-              onClick={() => onSetPlaybackVariant('original')}
-              className={`px-2 py-1 text-[10px] font-medium transition-colors ${
-                !playMastered && !playNoAdapter
-                  ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-white'
-                  : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
-              }`}
-              title={t('player.variantUnmasteredHint')}
-            >
-              {t('player.variantUnmastered')}
-            </button>
+            <VariantSegment
+              active={!playMastered && !playNoAdapter}
+              label={t('player.variantUnmastered')}
+              hint={t('player.variantUnmasteredHint')}
+              downloadHint={t('player.variantDownloadHint', {
+                version: t('player.variantUnmastered'),
+                defaultValue: `Download the ${t('player.variantUnmastered')} version`,
+              })}
+              activeClass="bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-white"
+              idleClass="bg-white dark:bg-zinc-900 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+              onSelect={() => onSetPlaybackVariant('original')}
+              onDownload={onDownloadVariant && (() => onDownloadVariant('original'))}
+            />
             {currentSong.masteredAudioUrl && (
-              <button
-                onClick={() => onSetPlaybackVariant('mastered')}
-                className={`px-2 py-1 text-[10px] font-medium transition-colors ${
-                  playMastered
-                    ? 'bg-amber-500/15 text-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.15)]'
-                    : 'bg-white dark:bg-zinc-900 text-zinc-500 hover:text-amber-400'
-                }`}
-                title={t('player.variantMasteredHint')}
-              >
-                {t('player.variantMastered')}
-              </button>
+              <VariantSegment
+                active={playMastered}
+                label={t('player.variantMastered')}
+                hint={t('player.variantMasteredHint')}
+                downloadHint={t('player.variantDownloadHint', {
+                  version: t('player.variantMastered'),
+                  defaultValue: `Download the ${t('player.variantMastered')} version`,
+                })}
+                activeClass="bg-amber-500/15 text-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.15)]"
+                idleClass="bg-white dark:bg-zinc-900 text-zinc-500 hover:text-amber-400"
+                onSelect={() => onSetPlaybackVariant('mastered')}
+                onDownload={onDownloadVariant && (() => onDownloadVariant('mastered'))}
+              />
             )}
           </div>
         )}

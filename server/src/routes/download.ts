@@ -1,6 +1,6 @@
 // download.ts — Audio download route with format conversion + metadata embedding
 //
-// GET /api/songs/:id/download?format=wav|flac|opus|mp3&bitrate=192&version=original|mastered
+// GET /api/songs/:id/download?format=wav|flac|opus|mp3&bitrate=192&version=original|mastered|noadapter
 //
 // Converts the source WAV to the requested format, embeds metadata tags
 // and cover art (when available), and streams it back with a
@@ -118,6 +118,13 @@ async function convertAudio(
   }
 }
 
+/** Filename suffix marking which variant of the track this is. */
+function versionSuffix(version: string): string {
+  if (version === 'original') return ' - Unmastered';
+  if (version === 'noadapter') return ' - No Adapter';
+  return '';
+}
+
 /** MIME types for audio formats */
 const mimeTypes: Record<string, string> = {
   wav: 'audio/wav',
@@ -127,6 +134,9 @@ const mimeTypes: Record<string, string> = {
 };
 
 // GET /api/download/:id?format=wav&bitrate=192&version=original&artist=Name&prepend=Prefix
+// version: original | mastered | noadapter | latent.  srcUrl is an optional explicit
+// source override (used by the playbar's per-variant download buttons for tracks whose
+// songs row is missing) — resolved by basename inside the audio dir, same as audioUrl.
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   const format = (req.query.format as string || 'wav').toLowerCase();
@@ -134,6 +144,7 @@ router.get('/:id', async (req, res) => {
   const version = (req.query.version as string || 'original').toLowerCase();
   const artistName = (req.query.artist as string || '').trim();
   const prepend = (req.query.prepend as string || '').trim();
+  const srcUrlParam = (req.query.srcUrl as string || '').trim();
 
   // Validate format
   if (!['wav', 'mp3', 'flac', 'opus'].includes(format)) {
@@ -152,9 +163,9 @@ router.get('/:id', async (req, res) => {
   }
   if (!song) {
     // Last resort: serve the audio file directly without DB metadata
-    const audioUrlParam = req.query.audioUrl as string;
+    const audioUrlParam = (req.query.audioUrl as string) || srcUrlParam;
     if (audioUrlParam) {
-      const filename = path.basename(audioUrlParam);
+      const filename = path.basename(srcUrlParam || audioUrlParam);
       const sourcePath = path.join(config.data.audioDir, filename);
       if (fs.existsSync(sourcePath)) {
         // Same marking as the main path — this branch serves Lyric Studio queue
@@ -165,7 +176,7 @@ router.get('/:id', async (req, res) => {
         const badPrefixes = /^_?(XL|STD)(\s*\(CPP\))?_?\s*-?\s*/i;
         const cleanPrepend = prepend.trim();
         const cleanArtist = artistName.replace(badPrefixes, '').trim();
-        const titleSuffix = version === 'original' ? ' - Unmastered' : '';
+        const titleSuffix = versionSuffix(version);
         const titleParts = [cleanPrepend, cleanArtist, 'Untitled'].filter(Boolean);
         const downloadFilename = `${titleParts.join(' - ')}${titleSuffix}.${format}`;
         if (format === 'wav' && sourcePath.endsWith('.wav')) {
@@ -225,6 +236,9 @@ router.get('/:id', async (req, res) => {
   let audioUrl: string;
   if (version === 'mastered' && song.mastered_audio_url) {
     audioUrl = song.mastered_audio_url;
+  } else if (version === 'noadapter') {
+    // srcUrl covers queue-backed tracks whose no-adapter render never landed in the row
+    audioUrl = song.noadapter_audio_url || srcUrlParam || song.audio_url;
   } else {
     audioUrl = song.audio_url;
   }
@@ -262,7 +276,7 @@ router.get('/:id', async (req, res) => {
   rawTitle = rawTitle.replace(/_mastered/g, ''); // User wants mastered as default, so explicitly strip it out just in case
   const songTitle = rawTitle.replace(/[^a-zA-Z0-9 _()-]/g, '').trim();
 
-  const suffix = version === 'original' ? ' - Unmastered' : '';
+  const suffix = versionSuffix(version);
   const resolvedArtist = artistName || (song.artist || '').replace(badPrefixes, '').replace(/[^a-zA-Z0-9 _()-]/g, '').trim();
 
   // Strip leading "Artist - " prefix from title if it duplicates the resolved artist.
