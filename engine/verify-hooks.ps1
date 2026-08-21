@@ -187,6 +187,26 @@ if (Test-Path $cpyCu) {
     Write-Host "  [WARN] $cpyCu not found - ggml submodule not checked out?" -ForegroundColor Yellow
 }
 
+# -- Hook 10: ggml-cuda's CPY must reach the generic quant->F32 converter -----
+#             Also a SUBMODULE file. Without it, K-quant / MXFP4 / IQ bases are
+#             rejected by supports_op and LM training on anything below q8_0 is
+#             impossible - which puts the VRAM floor back above 22 GB.
+$cpyH = "$ggml\src\ggml-cuda\cpy.cuh"
+if (Test-Path $cpyH) {
+    $content = Get-Content $cpyH -Raw
+    if ($content -match 'HOT-Step patch: quant-cpy-generic') {
+        Write-Host "  [OK] ggml-cuda/cpy.cuh has the generic quant->F32 copy patch" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] ggml-cuda/cpy.cuh is missing the quant-cpy-generic patch" -ForegroundColor Red
+        Write-Host "         Without it, only Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 bases can be trained -" -ForegroundColor Yellow
+        Write-Host "         every K-quant, MXFP4 and IQ base fails at graph build." -ForegroundColor Yellow
+        Write-Host "         Fix (from the repo root): git apply engine\patches\quant-cpy-kquant.patch" -ForegroundColor Yellow
+        $errors++
+    }
+} else {
+    Write-Host "  [WARN] $cpyH not found - ggml submodule not checked out?" -ForegroundColor Yellow
+}
+
 # ── Summary ───────────────────────────────────────────────────────────
 Write-Host ""
 if ($errors -gt 0) {
