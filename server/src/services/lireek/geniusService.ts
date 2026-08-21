@@ -459,15 +459,57 @@ function normalizeTitle(s: string): string {
  * kcsunshineband 9/9 in the bulk run (verified against the live API 2026-08-05).
  *
  * '&' becomes 'and' BEFORE punctuation is stripped, so both spellings converge.
+ *
+ * Diacritics are folded too (NFD + combining-mark strip), because rippers write
+ * the ASCII spelling and Genius carries the real one. Same failure, same cost:
+ *
+ *   tag "Motorhead"    vs Genius "Motörhead"
+ *   tag "Touche Amore" vs Genius "Touché Amoré"
+ *
+ * Both albums lost every track in the bulk run (motorhead_aceofspades 12/12,
+ * toucheamore_stagefour 12/12) with the correct song sitting at hit #1 and its
+ * title already agreeing — verified against the live API 2026-08-19.
  */
 function normalizeArtist(s: string): string {
   return s.toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')   // ö -> o, é -> e — rip tags are ASCII, Genius is not
     .replace(/[‘’ʼ′]/g, "'")   // curly/modifier apostrophes
     .replace(/[“”]/g, '"')
     .replace(/\s*&\s*/g, ' and ')
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Relaxed artist agreement: every word of the shorter name appears in the longer.
+ *
+ * `includes()` is a SUBSTRING test, so it only forgives text bolted onto an end.
+ * Genius routinely expands a credited duo into both full names, which interleaves
+ * new words instead:
+ *
+ *   tag "Hall & Oates" -> "hall and oates"
+ *   Genius            -> "daryl hall and john oates"
+ *
+ * "hall and oates" is not a substring of that (a "john" sits in the middle), so
+ * the relaxed gate rejected it and hallandoates_privateeyes lost 11/11 with the
+ * right song at hit #1. A token-subset test accepts it and still refuses the
+ * covers that share a title — "royal blood" has no word in common with
+ * "motorhead" — and the caller only reaches relaxed mode after three exact
+ * attempts have failed, with title agreement still required alongside it.
+ *
+ * Both names must carry at least two tokens: a one-word name is a subset of far
+ * too much ("Yes", "Bush", "Cream", "Live"), and the title gate alone is not
+ * enough to hold that back.
+ */
+function artistTokensAgree(a: string, b: string): boolean {
+  const at = a.split(' ').filter(Boolean);
+  const bt = b.split(' ').filter(Boolean);
+  if (at.length < 2 || bt.length < 2) return false;
+  const [short, long] = at.length <= bt.length ? [at, bt] : [bt, at];
+  const set = new Set(long);
+  return short.every(t => set.has(t));
 }
 
 export async function searchSongLyrics(
@@ -486,7 +528,8 @@ export async function searchSongLyrics(
       // "Artist feat. X") — accept containment either way, but then require the
       // titles to agree so a popular unrelated song can't slip in.
       const artistOk = !!primaryNorm
-        && (primaryNorm.includes(artistNorm) || artistNorm.includes(primaryNorm));
+        && (primaryNorm.includes(artistNorm) || artistNorm.includes(primaryNorm)
+          || artistTokensAgree(primaryNorm, artistNorm));
       if (!artistOk) continue;
       const resultNorm = normalizeTitle(result.title ?? '');
       const titleOk = !!titleNorm && !!resultNorm
