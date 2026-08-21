@@ -172,6 +172,8 @@ interface TrainingState {
     step: number; totalSteps: number; loss: number; lr: number; gradNorm: number;
     stepMs: number; usedMb: number; totalMb: number;
   } | null;
+  /** Held-out loss, in the same fractional-epoch x domain as the other series. */
+  trainEvalSeries: Array<{ step: number; loss: number; ep: number }>;
   /** From the one `data` metric — songs skipped for exceeding max sequence
    *  length. Surfaced in the panel; without it the only trace is a warn line
    *  in the scrolling log tail (§5.6 mandates the string). */
@@ -319,6 +321,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainLmEpochs: [],
   trainLmLast: null,
   mm3Live: null,
+  trainEvalSeries: [],
   trainLmSkippedLong: 0,
   trainLmVram: null,
 
@@ -373,6 +376,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainLmEpochs: [],
     trainLmLast: null,
     mm3Live: null,
+    trainEvalSeries: [],
     trainLmSkippedLong: 0,
     trainLmVram: null,
     trainDitStatus: null,
@@ -452,6 +456,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainLmEpochs: [],
               trainLmLast: null,
               mm3Live: null,
+              trainEvalSeries: [],
               trainLmSkippedLong: 0,
               trainLmVram: null,
               trainDitStatus: null,
@@ -1022,15 +1027,22 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
           if (ev.metric === 'data' && typeof ev.stepsPerEpoch === 'number' && ev.stepsPerEpoch > 0) {
             set({ trainStepsPerEpoch: ev.stepsPerEpoch });
           }
-          // MM3 trains in STEPS and emits no epochs. With stepsPerEpoch unset,
-          // every step point's x fell back to `ev.epoch ?? 0` — so all of them
-          // landed at x = 0, the line had zero width, and the chart looked
-          // broken while its y-range was perfectly correct. Pinning 1 makes the
-          // x domain the step number itself; totalSteps gives the axis its cap.
+          // MM3 needs no x-axis special case any more: it trains in shuffled
+          // passes, so it publishes a real stepsPerEpoch and real epoch events,
+          // and the generic handling above puts the step layer and the epoch
+          // line on one fractional-epoch axis exactly as ACE does. What remains
+          // here is MM3-only DATA — the live tiles and the held-out series.
           if (chartKind === 'mm3-train-lm') {
-            if (get().trainStepsPerEpoch !== 1) set({ trainStepsPerEpoch: 1 });
             const total = typeof ev.totalSteps === 'number' ? ev.totalSteps : 0;
-            if (total > 0 && total !== get().trainMaxEpochs) set({ trainMaxEpochs: total });
+            if (ev.metric === 'eval' && typeof ev.loss === 'number' && typeof ev.step === 'number') {
+              const perEpoch = get().trainStepsPerEpoch;
+              const ep = perEpoch > 0 ? ev.step / perEpoch : ev.step;
+              // Replace by step, never append: the SSE buffer replays on
+              // reconnect and the curve has to be idempotent.
+              const next = [...get().trainEvalSeries.filter(e => e.step !== ev.step),
+                { step: ev.step, loss: ev.loss, ep }].sort((x, y) => x.step - y.step);
+              set({ trainEvalSeries: next });
+            }
             const prev = get().mm3Live;
             const base = {
               step: prev?.step ?? 0, totalSteps: prev?.totalSteps ?? 0, loss: prev?.loss ?? 0,

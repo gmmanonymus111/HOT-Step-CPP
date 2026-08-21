@@ -240,7 +240,9 @@ export interface TrainingCapabilities {
  *  Consumers MUST ignore unknown `metric` values rather than throwing. */
 export interface TrainingMetricEvent {
   type: 'metric';
-  metric: 'vram' | 'data' | 'step' | 'epoch' | 'milestone';
+  /** `eval` is held-out loss — the only series that can distinguish learning
+   *  from memorising, and therefore the one worth watching. */
+  metric: 'vram' | 'data' | 'step' | 'epoch' | 'milestone' | 'eval';
   ts: number;
   // epoch / step
   epoch?: number;
@@ -253,6 +255,8 @@ export interface TrainingMetricEvent {
   clipScale?: number;
   /** Wall time of THIS step, not elapsed. The direct spill signal. */
   stepMs?: number;
+  /** eval: how many fixed held-out crops the number averages. */
+  crops?: number;
   etaMs?: number;
   ms?: number;
   best?: boolean;

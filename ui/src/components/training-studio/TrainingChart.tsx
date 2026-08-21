@@ -69,16 +69,18 @@ interface Props {
   milestones?: ChartMilestone[];
   /** Target loss; <= 0 hides the target line. */
   target: number;
-  /** What the x axis counts. ACE trains in epochs; MiniMax-Music3 trains in
-   *  STEPS and has no epoch series at all, so the caption has to be able to say
-   *  so — labelling a step axis "epoch" is worse than not labelling it. */
-  xUnit?: 'epoch' | 'step';
-  /** Epoch (or step) cap, for the x-axis caption. 0 = unknown. */
+  /** Held-out loss, in the SAME fractional-epoch x domain as the other series.
+   *  Sparse by nature (one point per eval), and the only line here that can
+   *  distinguish learning from memorising — a training loss on a random crop
+   *  cannot. Drawn in emerald with dots, because six points are a series the
+   *  eye has to be able to follow. */
+  evals?: Array<{ ep: number; loss: number }>;
+  /** Epoch cap, for the x-axis caption. 0 = unknown. */
   maxEpochs?: number;
 }
 
 export const TrainingChart: React.FC<Props> = ({
-  epochs, steps = [], milestones = [], target, maxEpochs = 0, xUnit = 'epoch',
+  epochs, steps = [], milestones = [], target, maxEpochs = 0, evals = [],
 }) => {
   const { t } = useTranslation();
 
@@ -96,7 +98,12 @@ export const TrainingChart: React.FC<Props> = ({
   // clamped into the plot band instead, which is honest for a texture layer.
   // Before two epochs exist there is nothing else to scale by, so the steps
   // take over.
-  const rangeSrc = epochLosses.length >= 2 ? epochLosses : stepPts.map(s => s.loss);
+  const evalPts = evals.filter(e => Number.isFinite(e.loss));
+  const rangeSrc = (epochLosses.length >= 2 ? epochLosses : stepPts.map(s => s.loss))
+    // Include the held-out points: they routinely sit ABOVE the training band,
+    // and clipping them to the top edge would draw a flat line that looks like
+    // "no signal" when it is the most important signal here.
+    .concat(evalPts.map(e => e.loss));
   let lo = Math.min(...rangeSrc, hasTarget ? target : Infinity);
   let hi = Math.max(...rangeSrc, hasTarget ? target : -Infinity);
   const span = hi - lo;
@@ -121,6 +128,8 @@ export const TrainingChart: React.FC<Props> = ({
   const stepLine = line(stepPts.map(s => ({ x: xFor(s.ep), y: yFor(s.loss) })));
   const epochLine = line(epochPts.map(e => ({ x: xFor(e.epoch), y: yFor(e.loss) })));
   const maLine = line(epochPts.map((e, i) => ({ x: xFor(e.epoch), y: yFor(ma[i]) })));
+
+  const evalLine = line(evalPts.map(e => ({ x: xFor(e.ep), y: yFor(e.loss) })));
 
   const targetY = hasTarget ? yFor(target) : 0;
   const currentLoss = epochPts.length
@@ -184,6 +193,12 @@ export const TrainingChart: React.FC<Props> = ({
             </line>
           ))}
 
+          {/* (b0) held-out loss — drawn UNDER the epoch line so the training
+              curve stays readable where they cross */}
+          {evalPts.length >= 2 && (
+            <polyline points={evalLine} fill="none" stroke="rgb(16 185 129)" strokeWidth="1.6"
+              strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          )}
           {/* (b) epoch loss */}
           {epochPts.length >= 2 && (
             <polyline
@@ -245,15 +260,9 @@ export const TrainingChart: React.FC<Props> = ({
           {t('trainingStudio.chart.current', { loss: currentLoss.toFixed(4) })}
         </span>
         <span className={`${LABEL} left-1/2 -translate-x-1/2 bottom-1 text-zinc-500`}>
-          {xUnit === 'step'
-            // In step mode the x domain IS the step number, so the last STEP
-            // point is the position to report — lastEpoch is 0 by construction.
-            ? (maxEpochs > 0
-              ? t('trainingStudio.chart.stepAxis', { step: Math.round(lastStepEp), total: maxEpochs })
-              : t('trainingStudio.chart.stepAxisOpen', { step: Math.round(lastStepEp) }))
-            : (maxEpochs > 0
-              ? t('trainingStudio.chart.epochAxis', { epoch: lastEpoch, total: maxEpochs })
-              : t('trainingStudio.chart.epochAxisOpen', { epoch: lastEpoch }))}
+          {maxEpochs > 0
+            ? t('trainingStudio.chart.epochAxis', { epoch: lastEpoch, total: maxEpochs })
+            : t('trainingStudio.chart.epochAxisOpen', { epoch: lastEpoch })}
         </span>
         {hasTarget && (
           <span
@@ -286,6 +295,12 @@ export const TrainingChart: React.FC<Props> = ({
           <span className="flex items-center gap-1">
             <span className="w-3 h-0.5 bg-violet-500" />
             {t('trainingStudio.chart.legendMa5')}
+          </span>
+        )}
+        {evalPts.length >= 2 && (
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 bg-emerald-500" />
+            {t('trainingStudio.chart.legendEval', 'held-out')}
           </span>
         )}
         {hasTarget && (

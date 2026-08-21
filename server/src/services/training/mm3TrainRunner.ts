@@ -58,16 +58,51 @@ interface RelayState { fatalMessage: string; doneSeen: boolean }
  *  — one per optimizer step would flood the pane, and the chart reads metrics. */
 function relay(job: TrainingJob, ev: Record<string, unknown>, st: RelayState): void {
   switch (text(ev.type)) {
-    case 'init':
-      job.total = int(ev.stepsPerEpoch) || job.total;
-      // The chart's x axis is STEPS for MM3, so it needs the cap up front.
+    case 'init': {
+      // MM3 trains in shuffled passes, so it has REAL epochs: stepsPerEpoch is
+      // the training-song count. Publishing it is what puts the step layer and
+      // the epoch line on one x axis (fractional epochs), exactly as ACE does —
+      // no MM3 special case in the chart at all.
+      const perEpoch = int(ev.stepsPerEpoch);
+      const totalSteps = int(ev.totalSteps);
       pushEvent(job, {
         type: 'metric', metric: 'data', ts: Date.now(),
-        totalSteps: optNum(ev, 'stepsPerEpoch'), samples: optNum(ev, 'samples'),
+        stepsPerEpoch: perEpoch || undefined,
+        epochs: perEpoch > 0 && totalSteps > 0 ? Math.ceil(totalSteps / perEpoch) : undefined,
+        samples: optNum(ev, 'samples'),
+        totalSteps: totalSteps || undefined,
       });
+      const hold = int(ev.holdout);
       log(job, 'info',
-        `${int(ev.samples)} songs, prompt up to ${int(ev.maxPrompt)} tok, crops to ${int(ev.maxFrames)} frames `
+        `${int(ev.samples)} training songs${hold ? ` (+${hold} held out)` : ''}, prompt up to `
+        + `${int(ev.maxPrompt)} tok, crops to ${int(ev.maxFrames)} frames `
         + `(sequence up to ${int(ev.seqMax)}), rank ${int(ev.rank)}`);
+      if (!hold) {
+        log(job, 'warn',
+          'No held-out songs, so there is no evaluation — the training loss is the only signal, and it '
+          + 'cannot tell learning from memorising.');
+      }
+      break;
+    }
+    case 'epoch':
+      pushEvent(job, {
+        type: 'metric', metric: 'epoch', ts: Date.now(),
+        epoch: optNum(ev, 'epoch'), loss: optNum(ev, 'loss'), lr: optNum(ev, 'lr'),
+        ms: optNum(ev, 'ms'), step: optNum(ev, 'step'),
+      });
+      break;
+    case 'eval':
+      // The line that actually answers "is it still learning?".
+      pushEvent(job, {
+        type: 'metric', metric: 'eval', ts: Date.now(),
+        step: optNum(ev, 'step'), loss: optNum(ev, 'loss'), crops: optNum(ev, 'crops'),
+      });
+      log(job, 'info', `Held-out loss ${(optNum(ev, 'loss') ?? 0).toFixed(4)} at step ${int(ev.step)}`);
+      break;
+    case 'best':
+      log(job, 'info',
+        `Best held-out loss ${(optNum(ev, 'loss') ?? 0).toFixed(4)} at step ${int(ev.step)} — `
+        + 'start the ear test at that checkpoint.');
       break;
     case 'vram': {
       const usedMb = int(ev.usedMb), totalMb = int(ev.totalMb);

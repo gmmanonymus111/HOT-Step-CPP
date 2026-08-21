@@ -135,6 +135,22 @@ struct MM3LmTrainArgs {
     // step takes 38 s that should take under one.
     bool        ckpt       = true;
     int         ckpt_chunk = 128;
+
+    // ── Held-out evaluation ────────────────────────────────────────────────
+    //
+    // The reason this exists: a training loss measured on a RANDOM CROP cannot
+    // tell learning from memorising. lm2 bottomed at 0.0003 and was pure
+    // sequence memorisation; lm3 ended at 0.031 and was the good run. Nothing
+    // in the training curve distinguishes those two — only a fixed, held-out
+    // set does, which is also what makes "which checkpoint is best" a decision
+    // instead of a retrospective guess.
+    float       holdout    = 0.15f;  // fraction of songs withheld; 0 disables
+    int         eval_every = 50;     // steps between evaluations; 0 disables
+    int64_t     eval_crop  = 400;    // frames per eval crop — SHORTER than a
+                                     // training crop on purpose: eval only has
+                                     // to be COMPARABLE with itself, and a
+                                     // short crop keeps the cost off the run.
+    int         eval_crops = 3;      // deterministic crops per held-out song
 };
 
 struct MM3LmSample {
@@ -758,20 +774,49 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         return 1;
     }
 
+    // ── train / held-out split ─────────────────────────────────────────────
+    //
+    // Deterministic: the LAST ceil(holdout * n) songs by manifest order. Not
+    // random, because a holdout that moves between runs makes two runs'
+    // evaluation numbers incomparable, which is the entire point of having one.
+    // Refused below 6 songs — withholding 1 of 5 costs 20 % of an already tiny
+    // corpus, and an identity adapter needs every track more than it needs a
+    // measurement.
+    size_t n_hold = 0;
+    if (a.holdout > 0.0f && samples.size() >= 6) {
+        n_hold = (size_t) std::ceil((double) a.holdout * (double) samples.size());
+        n_hold = std::min(n_hold, samples.size() / 4);   // never more than a quarter
+        n_hold = std::max<size_t>(n_hold, 1);
+    }
+    std::vector<MM3LmSample> holdout;
+    if (n_hold > 0) {
+        holdout.assign(samples.end() - (long) n_hold, samples.end());
+        samples.resize(samples.size() - n_hold);
+    }
+    if (n_hold == 0 && a.eval_every > 0) {
+        fprintf(stderr, "[mm3-lm-train] no held-out songs (%zu total) — evaluation disabled, the training "
+                        "loss is the only signal and it cannot distinguish learning from memorising\n",
+                samples.size());
+    }
+
     int64_t max_prompt = 0;
     for (const auto & s : samples) max_prompt = std::max(max_prompt, (int64_t) s.prompt.size());
+    for (const auto & s : holdout) max_prompt = std::max(max_prompt, (int64_t) s.prompt.size());
     const int64_t K_max = a.max_frames > 0 ? a.max_frames : 4096;
     const int64_t S_max = max_prompt + K_max;
-    fprintf(stderr, "[mm3-lm-train] %zu songs, longest prompt %lld tok, crop <= %lld frames, seq <= %lld\n",
-            samples.size(), (long long) max_prompt, (long long) K_max, (long long) S_max);
+    fprintf(stderr, "[mm3-lm-train] %zu training songs (+%zu held out), longest prompt %lld tok, "
+                    "crop <= %lld frames, seq <= %lld\n",
+            samples.size(), holdout.size(), (long long) max_prompt, (long long) K_max, (long long) S_max);
     // ── JSONL (--jsonl), the contract the server runner relays ──
     // Same vocabulary as `train-lm` so mm3TrainLmRunner is a relay clone and the
     // Monitor's loss chart works with no new event types:
     // init / step / milestone / progress / export / fatal / done.
-    jl("{\"type\":\"init\",\"samples\":%zu,\"stepsPerEpoch\":%d,\"maxPrompt\":%lld,\"maxFrames\":%lld,"
-       "\"seqMax\":%lld,\"rank\":%d,\"alpha\":%d,\"optimizer\":\"%s\"}",
-       samples.size(), a.steps, (long long) max_prompt, (long long) K_max, (long long) S_max, a.rank, a.alpha,
-       a.optimizer.c_str());
+    jl("{\"type\":\"init\",\"samples\":%zu,\"holdout\":%zu,\"stepsPerEpoch\":%d,\"totalSteps\":%d,"
+       "\"maxPrompt\":%lld,\"maxFrames\":%lld,\"seqMax\":%lld,\"rank\":%d,\"alpha\":%d,"
+       "\"optimizer\":\"%s\",\"lrScale\":%.4f}",
+       samples.size(), holdout.size(), (int) samples.size(), a.steps, (long long) max_prompt,
+       (long long) K_max, (long long) S_max, a.rank, a.alpha, a.optimizer.c_str(),
+       a.optimizer == "muon" ? (double) a.muon_lr_scale : 1.0);
 
     // ── LoRA (attaches to the model) + optimizer ──
     LmLora lora;
@@ -992,6 +1037,8 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     LmStepStats          stats;
     const int64_t        t_start = ggml_time_ms();
     int64_t              t_step0 = t_start;
+    double               best_eval = -1.0;
+    int                  best_eval_step = 0;
 
     auto save_ckpt = [&](int step, double loss) {
         char sub[64];
@@ -1035,14 +1082,129 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
            json_escape(dir).c_str());
     };
 
+    // ── held-out evaluation ────────────────────────────────────────────────
+    //
+    // A FIXED set of crops, chosen once, evaluated identically every time. The
+    // point is comparability: across steps within a run, and across runs. Crops
+    // are evenly spaced through each held-out song (never random), so the same
+    // eval number always measures the same audio.
+    struct EvalCrop { const MM3LmSample * s; int64_t c0; int64_t K; };
+    std::vector<EvalCrop> eval_plan;
+    if (!holdout.empty() && a.eval_every > 0) {
+        for (const auto & hs : holdout) {
+            const int64_t K = std::min<int64_t>(a.eval_crop, hs.n_frames);
+            if (K < 8) continue;
+            const int n = std::max(1, a.eval_crops);
+            for (int i = 0; i < n; i++) {
+                // Evenly spaced starts, with the last crop flush to the end so
+                // the set always includes a real ending (where EOS lives).
+                const int64_t span = hs.n_frames - K;
+                const int64_t c0   = n == 1 ? span / 2 : (span * i) / (n - 1);
+                eval_plan.push_back(EvalCrop{ &hs, std::max<int64_t>(0, c0), K });
+            }
+        }
+        fprintf(stderr, "[mm3-lm-train] evaluation: %zu fixed crops from %zu held-out song(s), every %d steps\n",
+                eval_plan.size(), holdout.size(), a.eval_every);
+    }
+
+    // One held-out pass. Runs through the SAME checkpointed machinery with
+    // forward_only set, so it allocates nothing new — which matters when the
+    // run already sits at ~30 GB of a 32 GB card.
+    auto run_eval = [&]() -> double {
+        if (eval_plan.empty() || !a.ckpt) {
+            return -1.0;
+        }
+        ckpt_run.forward_only = true;
+        double sum = 0.0;
+        int    n   = 0;
+        for (const EvalCrop & ec : eval_plan) {
+            const MM3LmSample & es = *ec.s;
+            const int64_t P = (int64_t) es.prompt.size();
+            const bool    at_end = (ec.c0 + ec.K) >= es.n_frames;
+            const int64_t Fin    = at_end ? ec.K : ec.K - 1;
+            const int64_t n_sup  = at_end ? ec.K + 1 : ec.K;
+            const int64_t S      = P + Fin;
+            if (S > S_max || Fin < 1) continue;
+
+            sem_in.resize((size_t) Fin);
+            ac_in.resize((size_t) (Fin * NC));
+            for (int64_t i = 0; i < Fin; i++) {
+                const int32_t * f = &es.codes[(size_t) ((ec.c0 + i) * 8)];
+                sem_in[(size_t) i] = f[0] + (int32_t) t.semantic_vocab_offset;
+                for (int64_t k = 0; k < NC; k++) {
+                    ac_in[(size_t) (k * Fin + i)] = f[1 + k] + (int32_t) (k * AV);
+                }
+            }
+            tgt.resize((size_t) n_sup);
+            for (int64_t j = 0; j < n_sup; j++) {
+                tgt[(size_t) j] = (at_end && j == n_sup - 1)
+                                    ? mm3_lm_train_slice_eos(t)
+                                    : mm3_lm_train_slice_index(t, es.codes[(size_t) ((ec.c0 + j) * 8)]);
+            }
+            if ((int) S != last_mask_S) {
+                lm_causal_mask((int) S, &msk);
+                ggml_backend_tensor_set(t_msk, msk.data(), 0, msk.size() * sizeof(float));
+                last_mask_S = (int) S;
+            }
+            pos.resize((size_t) S);
+            for (int64_t i = 0; i < S; i++) pos[(size_t) i] = (int32_t) i;
+            ggml_backend_tensor_set(t_prompt, es.prompt.data(), 0, (size_t) P * sizeof(int32_t));
+            ggml_backend_tensor_set(t_sem, sem_in.data(), 0, sem_in.size() * sizeof(int32_t));
+            ggml_backend_tensor_set(t_ac, ac_in.data(), 0, ac_in.size() * sizeof(int32_t));
+            ggml_backend_tensor_set(t_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+
+            embed_ctx.P   = P;
+            embed_ctx.Fin = Fin;
+            LmSample smp;
+            smp.tokens.assign((size_t) S, 0);
+            smp.targets  = tgt;
+            smp.n_masked = (int) P;
+            smp.s_tr     = (int) n_sup;
+            double ce = 0.0;
+            if (lm_ckpt_micro_step(ckpt_run, smp, true, &ce)) {
+                sum += ce;
+                n++;
+            }
+        }
+        ckpt_run.forward_only = false;
+        return n > 0 ? sum / (double) n : -1.0;
+    };
+
+    // ── epoch order ────────────────────────────────────────────────────────
+    //
+    // A SHUFFLED PASS, not sampling with replacement. The old sampler drew
+    // `samples[rng % n]` every step, which over 800 steps and 13 songs gives a
+    // typical least-seen/most-seen of 49/74 and a tail as wide as 30/98 — one
+    // track carrying triple the weight of another by luck alone. For an
+    // identity adapter over one album, uniform exposure is the point. A pass
+    // also gives an honest EPOCH BOUNDARY for free, which is what the epoch
+    // curve and the 5-epoch average are computed over.
+    //
+    // The crop is still fresh every time a song comes up, which is what the
+    // reference's random-crop patch does per epoch.
+    std::vector<int> order;
+    size_t           order_pos = 0;
+    int              epoch     = 0;
+    double           epoch_loss_sum = 0.0;
+    int              epoch_n = 0;
+    int64_t          epoch_t0 = ggml_time_ms();
+
+    auto next_sample = [&]() -> const MM3LmSample & {
+        if (order_pos >= order.size()) {
+            lm_epoch_order(&order, (int) samples.size(), true, (uint64_t) a.seed, epoch);
+            order_pos = 0;
+        }
+        return samples[(size_t) order[order_pos++]];
+    };
+
     for (int step = 1; step <= a.steps && rc == 0; step++) {
         double acc_loss = 0.0;
         for (int micro = 0; micro < std::max(1, a.grad_accum) && rc == 0; micro++) {
-            const MM3LmSample & s = samples[(size_t) (lm_rng_next(&rng) % samples.size())];
+            const MM3LmSample & s = next_sample();
             const int64_t       P = (int64_t) s.prompt.size();
 
-            // Random crop, fresh every time. `beginning` exists only to
-            // reproduce the intros-only failure lm2 hit.
+            // Fresh crop every time this song comes up. `beginning` exists only
+            // to reproduce the intros-only failure lm2 hit.
             int64_t K = std::min<int64_t>(K_max, s.n_frames);
             int64_t c0 = 0;
             if (a.crop_mode != "beginning" && s.n_frames > K) {
@@ -1170,6 +1332,37 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
                 }
             }
         }
+        // ── epoch boundary ────────────────────────────────────────────────
+        // One pass over the training songs. With 13 songs that is 13 steps, so
+        // the epoch mean is a 13-crop average — the smooth line the per-step
+        // noise is drawn against, and what the 5-epoch average is taken over.
+        epoch_loss_sum += win;
+        epoch_n++;
+        if (order_pos >= order.size() && !order.empty()) {
+            epoch++;
+            const double emean = epoch_loss_sum / std::max(1, epoch_n);
+            jl("{\"type\":\"epoch\",\"epoch\":%d,\"loss\":%.6f,\"step\":%d,\"lr\":%.9g,\"ms\":%lld}",
+               epoch, emean, step, (double) stats.lr, (long long) (ggml_time_ms() - epoch_t0));
+            epoch_loss_sum = 0.0;
+            epoch_n        = 0;
+            epoch_t0       = ggml_time_ms();
+        }
+
+        // ── held-out evaluation ───────────────────────────────────────────
+        if (a.eval_every > 0 && !eval_plan.empty()
+            && (step % a.eval_every == 0 || step == a.steps)) {
+            const double ev = run_eval();
+            if (ev >= 0.0) {
+                jl("{\"type\":\"eval\",\"step\":%d,\"loss\":%.6f,\"crops\":%zu}", step, ev,
+                   eval_plan.size());
+                fprintf(stderr, "[mm3-lm-train] step %d: held-out loss %.4f (train %.4f)\n", step, ev, win);
+                if (ev < best_eval || best_eval < 0.0) {
+                    best_eval      = ev;
+                    best_eval_step = step;
+                }
+            }
+        }
+
         if (a.save_every > 0 && (step % a.save_every == 0 || step == a.steps)) {
             save_ckpt(step, win);
         }
@@ -1178,6 +1371,15 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     fprintf(stderr, "[mm3-lm-train] %s after %d micro-steps, mean loss %.4f, %lld s\n",
             rc ? "STOPPED" : "done", n_micro, n_micro ? running / n_micro : 0.0,
             (long long) ((ggml_time_ms() - t_start) / 1000));
+    if (best_eval >= 0.0) {
+        // The point of the holdout: which checkpoint to reach for FIRST, decided
+        // by a number rather than in hindsight by ear. Not a claim that the
+        // others are useless — the alk3 ladder taught us the ear can prefer a
+        // more-degraded checkpoint that carries more identity.
+        jl("{\"type\":\"best\",\"step\":%d,\"loss\":%.6f}", best_eval_step, best_eval);
+        fprintf(stderr, "[mm3-lm-train] best held-out loss %.4f at step %d — start the ear test there\n",
+                best_eval, best_eval_step);
+    }
     if (rc) {
         jl("{\"type\":\"fatal\",\"message\":\"training stopped early — see the engine log\"}");
     } else {

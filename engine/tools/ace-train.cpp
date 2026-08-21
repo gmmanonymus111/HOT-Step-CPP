@@ -1292,6 +1292,10 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--fd-frames"))     fd_frames      = atoll(next("--fd-frames"));
         else if (!strcmp(argv[i], "--fd-prompt"))     fd_prompt      = atoll(next("--fd-prompt"));
         else if (!strcmp(argv[i], "--ckpt-chunk"))    a.ckpt_chunk   = atoi(next("--ckpt-chunk"));
+        else if (!strcmp(argv[i], "--holdout"))       a.holdout      = (float) atof(next("--holdout"));
+        else if (!strcmp(argv[i], "--eval-every"))    a.eval_every   = atoi(next("--eval-every"));
+        else if (!strcmp(argv[i], "--eval-crop"))     a.eval_crop    = atoll(next("--eval-crop"));
+        else if (!strcmp(argv[i], "--eval-crops"))    a.eval_crops   = atoi(next("--eval-crops"));
         else if (!strcmp(argv[i], "--grad-accum"))    a.grad_accum   = atoi(next("--grad-accum"));
         else if (!strcmp(argv[i], "--seed"))          a.seed         = atoi(next("--seed"));
         else if (!strcmp(argv[i], "--trigger"))       a.trigger      = next("--trigger");

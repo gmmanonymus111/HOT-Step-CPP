@@ -507,6 +507,18 @@ struct LmCkptRun {
     // exactly as it was; `user` carries whatever the builder needs.
     ggml_tensor * (*embed_build)(ggml_context * ctx, LmCkptRun & r, int S) = nullptr;
     void *          embed_user = nullptr;
+
+    /** Stop after the CE head — no backward segments, no gradient accumulation.
+     *
+     *  This is how held-out EVALUATION runs without a second graph: the forward
+     *  phases and the buffers they use are the ones training already allocated,
+     *  so an eval costs compute and NOT VRAM. That matters here more than it
+     *  sounds — an MM3 run sits at ~30 GB of a 32 GB card, so a separate
+     *  forward-only graph could be the allocation that tips it into paging.
+     *
+     *  The head still writes dL/dh into Gh[0] as a side effect; nothing reads
+     *  it, and P4 clears that buffer at the start of every micro-step. */
+    bool forward_only = false;
 };
 
 static inline void lm_ckpt_upload_mask(LmCkptRun & r, int S) {
@@ -807,6 +819,11 @@ static bool lm_ckpt_micro_step(LmCkptRun & r, const LmSample & s, bool count_los
         if (!lm_ckpt_head_chunked(r, s, count_loss, ce_out)) {
             return false;
         }
+    }
+
+    // Evaluation stops here: the loss is what it came for.
+    if (r.forward_only) {
+        return true;
     }
 
     // ── P6/P7: backward segments, l = Hi-1 .. Lo ─────────────────────────

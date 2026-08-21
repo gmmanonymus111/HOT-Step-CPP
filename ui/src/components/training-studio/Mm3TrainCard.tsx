@@ -70,6 +70,9 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   const setPhase = useTrainingStore(s => s.setPhase);
   const trainStepSeries = useTrainingStore(s => s.trainStepSeries);
   const trainMilestones = useTrainingStore(s => s.trainMilestones);
+  const trainLmEpochs = useTrainingStore(s => s.trainLmEpochs);
+  const trainEvalSeries = useTrainingStore(s => s.trainEvalSeries);
+  const trainMaxEpochs = useTrainingStore(s => s.trainMaxEpochs);
 
   const { status, error: statusError } = useMm3Status(datasetId);
   const [busy, setBusy] = useState(false);
@@ -84,6 +87,10 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   const jobStatus = activeJob?.status;
   const jobRunning = jobStatus === 'queued' || jobStatus === 'running';
   const mine = jobKind === 'mm3-train-lm';
+
+  // Muon normalises its update, so the schedule LR alone understates what the
+  // optimizer applied by the scale factor.
+  const lrScale = status?.defaults.optimizer === 'muon' ? (status.defaults.muonLrScale ?? 1) : 1;
 
   const form: FormState | null = status ? {
     steps: status.defaults.steps ?? 800,
@@ -288,7 +295,18 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
               {[
                 { k: 'loss', v: mm3Live.loss ? mm3Live.loss.toFixed(4) : '—' },
                 { k: 'gradNorm', v: mm3Live.gradNorm ? mm3Live.gradNorm.toFixed(3) : '—' },
-                { k: 'lr', v: mm3Live.lr ? mm3Live.lr.toExponential(2) : '—' },
+                // The SCHEDULE value is not what Muon applies: its update is
+                // normalised, so the effective rate is lr x muon-lr-scale.
+                // Showing 3.4e-5 while the optimizer used 2.2e-3 was a quietly
+                // misleading tile.
+                {
+                  k: 'lr',
+                  v: mm3Live.lr
+                    ? (lrScale > 1
+                      ? `${(mm3Live.lr * lrScale).toExponential(2)}`
+                      : mm3Live.lr.toExponential(2))
+                    : '—',
+                },
                 { k: 'stepTime', v: mm3Live.stepMs ? `${(mm3Live.stepMs / 1000).toFixed(1)}s` : '—' },
                 {
                   k: 'vram',
@@ -312,16 +330,17 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
           )}
           {jobKind === 'mm3-train-lm' && trainStepSeries.length > 1 && (
             <div className="mt-3">
-              {/* No epoch series: MM3 trains in STEPS, so the step layer is the
-                  whole chart, the x axis counts steps, and there is no target
-                  line to draw. */}
+              {/* Four series now, on one fractional-epoch axis: per-step noise,
+                  the epoch mean, its 5-epoch average, and — the one that
+                  matters — held-out loss. No target line: MM3 has no
+                  target-loss auto-stop. */}
               <TrainingChart
-                epochs={[]}
+                epochs={trainLmEpochs}
                 steps={trainStepSeries}
                 milestones={trainMilestones}
+                evals={trainEvalSeries}
                 target={0}
-                maxEpochs={mm3Live?.totalSteps ?? 0}
-                xUnit="step"
+                maxEpochs={trainMaxEpochs}
               />
             </div>
           )}
