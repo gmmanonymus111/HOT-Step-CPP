@@ -65,6 +65,7 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   const { t } = useTranslation();
   const activeJob = useTrainingStore(s => s.activeJob);
   const startMm3TrainLm = useTrainingStore(s => s.startMm3TrainLm);
+  const mm3Live = useTrainingStore(s => s.mm3Live);
   const storeError = useTrainingStore(s => s.error);
   const setPhase = useTrainingStore(s => s.setPhase);
   const trainStepSeries = useTrainingStore(s => s.trainStepSeries);
@@ -278,16 +279,49 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
       {mine && activeJob && (
         <div className={CARD}>
           <JobProgress />
+          {jobKind === 'mm3-train-lm' && mm3Live && (
+            // The run-stats row. MM3 has no epochs, so none of the ACE tiles
+            // apply — these are the numbers that actually say what the run is
+            // doing, and STEP TIME is the one that exposes a VRAM spill (about
+            // 4 s when it fits, ~10x that when it pages to host memory).
+            <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2">
+              {[
+                { k: 'loss', v: mm3Live.loss ? mm3Live.loss.toFixed(4) : '—' },
+                { k: 'gradNorm', v: mm3Live.gradNorm ? mm3Live.gradNorm.toFixed(3) : '—' },
+                { k: 'lr', v: mm3Live.lr ? mm3Live.lr.toExponential(2) : '—' },
+                { k: 'stepTime', v: mm3Live.stepMs ? `${(mm3Live.stepMs / 1000).toFixed(1)}s` : '—' },
+                {
+                  k: 'vram',
+                  v: mm3Live.totalMb
+                    ? `${Math.round(mm3Live.usedMb / 1024)}/${Math.round(mm3Live.totalMb / 1024)} GB`
+                    : '—',
+                  warn: mm3Live.totalMb > 0 && mm3Live.usedMb > mm3Live.totalMb - 512,
+                },
+              ].map(tile => (
+                <div key={tile.k}
+                  className="rounded-lg border border-zinc-200 dark:border-white/5 px-2.5 py-1.5">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+                    {t(`trainingStudio.mm3.stat.${tile.k}`, tile.k)}
+                  </div>
+                  <div className={`text-sm font-semibold tabular-nums ${
+                    (tile as { warn?: boolean }).warn ? 'text-amber-500' : 'text-zinc-800 dark:text-zinc-200'
+                  }`}>{tile.v}</div>
+                </div>
+              ))}
+            </div>
+          )}
           {jobKind === 'mm3-train-lm' && trainStepSeries.length > 1 && (
             <div className="mt-3">
               {/* No epoch series: MM3 trains in STEPS, so the step layer is the
-                  whole chart and there is no target line to draw. */}
+                  whole chart, the x axis counts steps, and there is no target
+                  line to draw. */}
               <TrainingChart
                 epochs={[]}
                 steps={trainStepSeries}
                 milestones={trainMilestones}
                 target={0}
-                maxEpochs={0}
+                maxEpochs={mm3Live?.totalSteps ?? 0}
+                xUnit="step"
               />
             </div>
           )}

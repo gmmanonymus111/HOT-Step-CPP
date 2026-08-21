@@ -589,12 +589,19 @@ export interface TrainingMetricEvent {
   lr?: number;
   gradNorm?: number;
   clipScale?: number;
+  /** Wall time of THIS step, not elapsed. The direct spill signal. */
+  stepMs?: number;
   etaMs?: number;
   ms?: number;
   best?: boolean;
   // vram
   freeMb?: number;
   totalMb?: number;
+  /** VRAM in USE. The ACE path reports free/total; MM3 reports used directly,
+   *  because "how close to the ceiling is this run" is the number that decides
+   *  whether a step takes 4 s or spills to host memory and takes ten times
+   *  that. */
+  usedMb?: number;
   estMb?: number;
   vramMb?: number;
   maxLen?: number;

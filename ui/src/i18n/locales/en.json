@@ -1583,6 +1583,13 @@
     "trainingStudio.mm3.notTensors": "This replaces the ACE-Step tensor cache: the two pipelines share nothing, and an ACE variant can never be used by a MiniMax-Music3 run.",
     "trainingStudio.mm3.enginePaused": "The engine is paused while this runs and restarted afterwards.",
     "trainingStudio.mm3.goToCodes": "Go to Codes",
-    "trainingStudio.backendHint": "Training follows the active generation backend. Switch it with the backend pill in the bar at the top of the window."
+    "trainingStudio.backendHint": "Training follows the active generation backend. Switch it with the backend pill in the bar at the top of the window.",
+    "trainingStudio.chart.stepAxis": "step {{step}} / {{total}}",
+    "trainingStudio.chart.stepAxisOpen": "step {{step}}",
+    "trainingStudio.mm3.stat.loss": "loss",
+    "trainingStudio.mm3.stat.gradNorm": "grad norm",
+    "trainingStudio.mm3.stat.lr": "lr",
+    "trainingStudio.mm3.stat.stepTime": "step time",
+    "trainingStudio.mm3.stat.vram": "VRAM"
   }
 }

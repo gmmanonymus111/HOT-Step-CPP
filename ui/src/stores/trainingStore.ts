@@ -164,6 +164,14 @@ interface TrainingState {
   trainLmLoading: boolean;
   trainLmEpochs: TrainLmEpoch[];          // live, from `metric` events
   trainLmLast: { loss: number; lr: number; gradNorm: number; etaMs: number } | null;
+  /** MiniMax-Music3 live run stats. Its own field rather than reusing
+   *  trainLmLast: MM3 reports STEPS (with a per-step wall time) and no epochs,
+   *  so the two shapes genuinely differ, and sharing one would leave a field
+   *  that means different things depending on which backend ran. */
+  mm3Live: {
+    step: number; totalSteps: number; loss: number; lr: number; gradNorm: number;
+    stepMs: number; usedMb: number; totalMb: number;
+  } | null;
   /** From the one `data` metric — songs skipped for exceeding max sequence
    *  length. Surfaced in the panel; without it the only trace is a warn line
    *  in the scrolling log tail (§5.6 mandates the string). */
@@ -310,6 +318,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   trainLmLoading: false,
   trainLmEpochs: [],
   trainLmLast: null,
+  mm3Live: null,
   trainLmSkippedLong: 0,
   trainLmVram: null,
 
@@ -363,6 +372,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
     trainLmLoading: false,
     trainLmEpochs: [],
     trainLmLast: null,
+    mm3Live: null,
     trainLmSkippedLong: 0,
     trainLmVram: null,
     trainDitStatus: null,
@@ -441,6 +451,7 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
               trainLmLoading: false,
               trainLmEpochs: [],
               trainLmLast: null,
+              mm3Live: null,
               trainLmSkippedLong: 0,
               trainLmVram: null,
               trainDitStatus: null,
@@ -1010,6 +1021,38 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
         if (chartKind === 'train-lm' || chartKind === 'train-dit' || chartKind === 'mm3-train-lm') {
           if (ev.metric === 'data' && typeof ev.stepsPerEpoch === 'number' && ev.stepsPerEpoch > 0) {
             set({ trainStepsPerEpoch: ev.stepsPerEpoch });
+          }
+          // MM3 trains in STEPS and emits no epochs. With stepsPerEpoch unset,
+          // every step point's x fell back to `ev.epoch ?? 0` — so all of them
+          // landed at x = 0, the line had zero width, and the chart looked
+          // broken while its y-range was perfectly correct. Pinning 1 makes the
+          // x domain the step number itself; totalSteps gives the axis its cap.
+          if (chartKind === 'mm3-train-lm') {
+            if (get().trainStepsPerEpoch !== 1) set({ trainStepsPerEpoch: 1 });
+            const total = typeof ev.totalSteps === 'number' ? ev.totalSteps : 0;
+            if (total > 0 && total !== get().trainMaxEpochs) set({ trainMaxEpochs: total });
+            const prev = get().mm3Live;
+            const base = {
+              step: prev?.step ?? 0, totalSteps: prev?.totalSteps ?? 0, loss: prev?.loss ?? 0,
+              lr: prev?.lr ?? 0, gradNorm: prev?.gradNorm ?? 0, stepMs: prev?.stepMs ?? 0,
+              usedMb: prev?.usedMb ?? 0, totalMb: prev?.totalMb ?? 0,
+            };
+            if (ev.metric === 'step') {
+              set({ mm3Live: { ...base,
+                step: typeof ev.step === 'number' ? ev.step : base.step,
+                totalSteps: total || base.totalSteps,
+                loss: typeof ev.loss === 'number' ? ev.loss : base.loss,
+                lr: typeof ev.lr === 'number' ? ev.lr : base.lr,
+                gradNorm: typeof ev.gradNorm === 'number' ? ev.gradNorm : base.gradNorm,
+                stepMs: typeof ev.stepMs === 'number' ? ev.stepMs : base.stepMs,
+              } });
+            }
+            if (ev.metric === 'vram' && typeof ev.usedMb === 'number') {
+              set({ mm3Live: { ...base,
+                usedMb: ev.usedMb,
+                totalMb: typeof ev.totalMb === 'number' ? ev.totalMb : base.totalMb,
+              } });
+            }
           }
           if ((ev.metric === 'epoch' || ev.metric === 'step')
             && typeof ev.epochs === 'number' && ev.epochs > 0

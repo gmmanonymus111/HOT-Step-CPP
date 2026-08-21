@@ -722,6 +722,29 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     const int64_t         AV  = t.acoustic_vocab_size;
     const int64_t         SL  = mm3_lm_train_slice_size(t);
 
+    // VRAM once the frozen base is resident, before the LoRA, the optimizer
+    // state and the checkpoint buffers. NOT a pre-flight baseline — the query
+    // needs the backend, which only exists after the load — so it is labelled
+    // for what it is.
+    //
+    // It is still the early-warning number: the base is ~16 GB and everything
+    // after it is ~13 GB more, so a `free` here below about 14 GB means this
+    // run will end up over the card and spill into shared memory, where a 4 s
+    // step becomes ~40. Reported before step 1 so the answer arrives before
+    // the wait does.
+    {
+        size_t bfree = 0, btotal = 0;
+        lm_vram_query(t.lm.backend, &bfree, &btotal);
+        if (btotal > 0) {
+            const long long used0 = (long long) ((btotal - bfree) / (1024 * 1024));
+            jl("{\"type\":\"vram\",\"step\":0,\"usedMb\":%lld,\"freeMb\":%lld,\"totalMb\":%lld,"
+               "\"phase\":\"after-model-load\"}",
+               used0, (long long) (bfree / (1024 * 1024)), (long long) (btotal / (1024 * 1024)));
+            fprintf(stderr, "[mm3-lm-train] VRAM after model load: %lld/%lld MB used\n",
+                    used0, (long long) (btotal / (1024 * 1024)));
+        }
+    }
+
     // ── samples ──
     std::vector<MM3LmSample> samples;
     if (!mm3_lm_load_samples(a, t, &samples, &err)) {
@@ -968,6 +991,7 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
     int                  n_micro = 0, rc = 0;
     LmStepStats          stats;
     const int64_t        t_start = ggml_time_ms();
+    int64_t              t_step0 = t_start;
 
     auto save_ckpt = [&](int step, double loss) {
         char sub[64];
@@ -1113,15 +1137,38 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         const double win = acc_loss / std::max(1, a.grad_accum);
         // Every step, unlike the human log: the chart wants them all, and one
         // JSON line per step is nothing next to a 3.9 s step.
+        // stepMs is the PER-STEP time, not elapsed: it is the number that makes a
+        // spill visible (3.9 s fitting vs ~40 s paging), so the UI gets it
+        // directly rather than having to difference timestamps.
+        const int64_t now_ms  = ggml_time_ms();
+        const int64_t step_ms = now_ms - t_step0;
+        t_step0 = now_ms;
         jl("{\"type\":\"step\",\"step\":%d,\"totalSteps\":%d,\"loss\":%.6f,\"lr\":%.9g,"
-           "\"gradNorm\":%.6f,\"clipScale\":%.6f,\"ms\":%lld}",
+           "\"gradNorm\":%.6f,\"clipScale\":%.6f,\"ms\":%lld,\"stepMs\":%lld}",
            step, a.steps, win, (double) stats.lr, (double) stats.grad_norm, (double) stats.clip,
-           (long long) (ggml_time_ms() - t_start));
+           (long long) (now_ms - t_start), (long long) step_ms);
         jl("{\"type\":\"progress\",\"completed\":%d,\"total\":%d,\"phase\":\"train\"}", step, a.steps);
         if (step == 1 || step % 10 == 0 || step == a.steps) {
             fprintf(stderr, "[mm3-lm-train] step %d/%d loss %.4f lr %.3g |g| %.3f clip %.3f %lld s\n", step,
                     a.steps, win, (double) stats.lr, (double) stats.grad_norm, (double) stats.clip,
                     (long long) ((ggml_time_ms() - t_start) / 1000));
+        }
+        // VRAM after step 1 (everything is allocated by then) and periodically.
+        // Peak occupancy is the single thing that decides whether this run takes
+        // 4 s or 40 s a step, and it is invisible from inside the app otherwise.
+        if (step == 1 || step % 25 == 0) {
+            size_t vfree = 0, vtotal = 0;
+            lm_vram_query(t.lm.backend, &vfree, &vtotal);
+            if (vtotal > 0) {
+                const long long used_mb = (long long) ((vtotal - vfree) / (1024 * 1024));
+                const long long tot_mb  = (long long) (vtotal / (1024 * 1024));
+                jl("{\"type\":\"vram\",\"step\":%d,\"usedMb\":%lld,\"freeMb\":%lld,\"totalMb\":%lld}",
+                   step, used_mb, (long long) (vfree / (1024 * 1024)), tot_mb);
+                if (step == 1) {
+                    fprintf(stderr, "[mm3-lm-train] VRAM after step 1: %lld/%lld MB used (%lld free)\n",
+                            used_mb, tot_mb, (long long) (vfree / (1024 * 1024)));
+                }
+            }
         }
         if (a.save_every > 0 && (step % a.save_every == 0 || step == a.steps)) {
             save_ckpt(step, win);

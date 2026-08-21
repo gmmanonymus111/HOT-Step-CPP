@@ -69,12 +69,16 @@ interface Props {
   milestones?: ChartMilestone[];
   /** Target loss; <= 0 hides the target line. */
   target: number;
-  /** Epoch cap, for the x-axis caption. 0 = unknown. */
+  /** What the x axis counts. ACE trains in epochs; MiniMax-Music3 trains in
+   *  STEPS and has no epoch series at all, so the caption has to be able to say
+   *  so — labelling a step axis "epoch" is worse than not labelling it. */
+  xUnit?: 'epoch' | 'step';
+  /** Epoch (or step) cap, for the x-axis caption. 0 = unknown. */
   maxEpochs?: number;
 }
 
 export const TrainingChart: React.FC<Props> = ({
-  epochs, steps = [], milestones = [], target, maxEpochs = 0,
+  epochs, steps = [], milestones = [], target, maxEpochs = 0, xUnit = 'epoch',
 }) => {
   const { t } = useTranslation();
 
@@ -241,9 +245,15 @@ export const TrainingChart: React.FC<Props> = ({
           {t('trainingStudio.chart.current', { loss: currentLoss.toFixed(4) })}
         </span>
         <span className={`${LABEL} left-1/2 -translate-x-1/2 bottom-1 text-zinc-500`}>
-          {maxEpochs > 0
-            ? t('trainingStudio.chart.epochAxis', { epoch: lastEpoch, total: maxEpochs })
-            : t('trainingStudio.chart.epochAxisOpen', { epoch: lastEpoch })}
+          {xUnit === 'step'
+            // In step mode the x domain IS the step number, so the last STEP
+            // point is the position to report — lastEpoch is 0 by construction.
+            ? (maxEpochs > 0
+              ? t('trainingStudio.chart.stepAxis', { step: Math.round(lastStepEp), total: maxEpochs })
+              : t('trainingStudio.chart.stepAxisOpen', { step: Math.round(lastStepEp) }))
+            : (maxEpochs > 0
+              ? t('trainingStudio.chart.epochAxis', { epoch: lastEpoch, total: maxEpochs })
+              : t('trainingStudio.chart.epochAxisOpen', { epoch: lastEpoch }))}
         </span>
         {hasTarget && (
           <span
@@ -263,14 +273,21 @@ export const TrainingChart: React.FC<Props> = ({
             {t('trainingStudio.chart.legendStep')}
           </span>
         )}
-        <span className="flex items-center gap-1">
-          <span className="w-3 h-px bg-amber-500" />
-          {t('trainingStudio.chart.legendEpoch')}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-3 h-0.5 bg-violet-500" />
-          {t('trainingStudio.chart.legendMa5')}
-        </span>
+        {/* Only advertise a series that is actually drawn. These two were
+            unconditional, which on a step-only run promised an epoch line and a
+            5-epoch average that can never appear. */}
+        {epochPts.length >= 2 && (
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-px bg-amber-500" />
+            {t('trainingStudio.chart.legendEpoch')}
+          </span>
+        )}
+        {epochPts.length >= 2 && (
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 bg-violet-500" />
+            {t('trainingStudio.chart.legendMa5')}
+          </span>
+        )}
         {hasTarget && (
           <span className="flex items-center gap-1">
             <span className="w-3 border-t border-dashed border-emerald-500" />

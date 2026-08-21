@@ -28,7 +28,7 @@ import {
   type Mm3CodesArgs, type ResolvedMm3TrainLmOptions,
 } from './mm3Train.js';
 import {
-  emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
+  emitJob, emitProgress, finishJob, isCancelled, killJobChild, pushEvent, type TrainingJob,
 } from './labelingQueue.js';
 
 function log(job: TrainingJob, level: 'info' | 'warn' | 'error', message: string): void {
@@ -60,10 +60,32 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, st: RelayState): v
   switch (text(ev.type)) {
     case 'init':
       job.total = int(ev.stepsPerEpoch) || job.total;
+      // The chart's x axis is STEPS for MM3, so it needs the cap up front.
+      pushEvent(job, {
+        type: 'metric', metric: 'data', ts: Date.now(),
+        totalSteps: optNum(ev, 'stepsPerEpoch'), samples: optNum(ev, 'samples'),
+      });
       log(job, 'info',
         `${int(ev.samples)} songs, prompt up to ${int(ev.maxPrompt)} tok, crops to ${int(ev.maxFrames)} frames `
         + `(sequence up to ${int(ev.seqMax)}), rank ${int(ev.rank)}`);
       break;
+    case 'vram': {
+      const usedMb = int(ev.usedMb), totalMb = int(ev.totalMb);
+      pushEvent(job, {
+        type: 'metric', metric: 'vram', ts: Date.now(),
+        usedMb: optNum(ev, 'usedMb'), totalMb: optNum(ev, 'totalMb'), freeMb: optNum(ev, 'freeMb'),
+      });
+      // The one failure this run can suffer that looks like "it works, slowly":
+      // over the card, WDDM pages to host memory and a 4 s step becomes 40.
+      // Say it plainly rather than leaving the user to wonder.
+      if (totalMb > 0 && usedMb > totalMb - 512) {
+        log(job, 'warn',
+          `VRAM is at ${usedMb}/${totalMb} MB — this run is on the edge of the card. If steps are far `
+          + 'slower than expected, it is spilling into shared memory: lower Crop (frames) or close other '
+          + 'GPU users.');
+      }
+      break;
+    }
     case 'optimizer': {
       const muon = int(ev.muon), tensors = int(ev.tensors);
       log(job, 'info',
@@ -83,6 +105,7 @@ function relay(job: TrainingJob, ev: Record<string, unknown>, st: RelayState): v
         type: 'metric', metric: 'step', ts: Date.now(),
         step: optNum(ev, 'step'), loss: optNum(ev, 'loss'), lr: optNum(ev, 'lr'),
         gradNorm: optNum(ev, 'gradNorm'), clipScale: optNum(ev, 'clipScale'),
+        totalSteps: optNum(ev, 'totalSteps'), stepMs: optNum(ev, 'stepMs'),
       });
       break;
     case 'milestone':
@@ -131,7 +154,14 @@ async function runMm3AceTrain(
     return;
   }
 
+  // `enqueue()` does NOT mark a job running — every runner does it itself
+  // (trainLmRunner:301, preprocessRunner:171). Without this the UI shows
+  // "Queued…" for the whole run and, because startedAt stays unset, elapsed
+  // time and every ETA derived from it never start.
+  job.status = 'running';
+  job.startedAt = Date.now();
   job.phase = 'engine-stop';
+  emitJob(job);
   emitProgress(job);
   log(job, 'info', 'Stopping the engine to free VRAM…');
   // Not gated on a live child: a crashed engine leaves a respawn scheduled, and
@@ -272,6 +302,10 @@ export async function runMm3TrainLmJob(job: TrainingJob): Promise<void> {
 
   try {
     await runMm3AceTrain(job, 'mm3-lm-train', args, timeoutMs, () => {
+      // saveEvery 0 means "never checkpoint" — a legitimate ask for a probe
+      // run, and demanding one anyway failed a run that did exactly what it
+      // was told. Only a run that was SUPPOSED to write one is judged on it.
+      if (opts.saveEvery <= 0) return null;
       // A checkpoint is a directory holding the PEFT pair. Finding none means
       // the run produced nothing usable however cleanly it exited.
       const found = fs.existsSync(opts.outDir)
