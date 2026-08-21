@@ -84,6 +84,7 @@
 #include "train/lm-data.h"
 #include "train/lm-export.h"
 #include "train/lm-ckpt.h"
+#include "train/mm3-f32-isolate.h"
 #include "train/mm3-lm-load.h"
 #include "minimax/mm3-request.h"
 #include "minimax/mm3-tokenizer.h"
@@ -333,14 +334,51 @@ static bool mm3_lm_load_samples(const MM3LmTrainArgs & a, const MM3TrainLm & t,
 // Only the probe with the largest ||g|| clears the bar (0.2 %), and the error
 // tracks 1/||g|| exactly as a fixed absolute floor predicts.
 //
-// So the number to read here is the CHECKPOINTED-vs-NAIVE gradient agreement,
-// which needs no perturbation at all and is what actually exercises this
-// program's additions to lm-ckpt.h. For reference, the ACE self-test holds the
-// same comparison to 2e-3 max relative — but under F32 ISOLATION (it trains
-// against an F32 weight mirror), whereas both MM3 routes here run the f16 base.
-// A gate that can genuinely PASS or FAIL needs that same isolation: an F32
-// mirror, or lm-selftest.h's 2-layer F32 slice. That is the follow-up; until
-// it exists this command reports and does not certify.
+// ── --f32-layers 2: THE VERDICT ────────────────────────────────────────────
+//
+// Both problems above are the SAME problem — f16 rounding is larger than the
+// defect being looked for — and one switch removes it. `--f32-layers N`
+// (mm3-f32-isolate.h) truncates the trunk to N layers and mirrors those layers
+// plus the scored head slice to F32, for ~1.7 GB instead of the ~34 GB a full
+// 8.6B F32 mirror would need. Measured at N=2, both checks change character:
+//
+//                          f16, 36 layers        F32-isolated, 2 layers
+//   ckpt vs naive          1.35e-02  (report)    3.78e-07  PASS (bar 2e-3)
+//   finite differences     1 of 6 within 15%     6 of 6, worst 0.002 (bar 2e-2)
+//
+// The route comparison lands 5,300x inside ACE's own bar, and the FD arm goes
+// from noise to three-decimal agreement. So the f16 numbers were arithmetic all
+// along, not wiring — but that could only be ASSERTED before and is MEASURED
+// now, which is the whole point.
+//
+// ── PROVEN BY NEGATIVE CONTROL, not by passing ──────────────────────────────
+//
+// A gate that has only ever passed is a green light, not a gate. Two faults
+// were injected, built and measured, and the gate is kept honest by them:
+//
+//   1. CKPT ARM ONLY — the checkpointed supervised window shifted one position
+//      (s2.n_masked = P-1). Route comparison 3.78e-07 -> 3.14e-01, GATE FAIL,
+//      exit 1. The FD gate stayed PASS, correctly: the fault was not in the arm
+//      FD probes. Under f16 the same fault moved the number (7.70e-02 ->
+//      2.14e+00) but there was no bar, so it still exited 0 — which is exactly
+//      the blind spot isolation removes.
+//
+//   2. WRONG dL/dloss — the loss-gradient seed set to 2.0. FD 0/6 probes, worst
+//      0.5005, GATE FAIL: the signature of an analytic gradient exactly twice
+//      the true one, |1-2|/2. (The route comparison flagged it too, so this
+//      control does NOT demonstrate the both-arms-share-it case; it
+//      demonstrates that FD detects a scale error, with the factor readable
+//      straight off the number.)
+//
+// So the checks are complementary by CONSTRUCTION: the route comparison tests
+// one backward against the other, FD tests a backward against the FORWARD.
+// Control 1 shows the first catching what the second cannot. A defect shared by
+// both backward routes is the case only FD could catch, and that remains
+// reasoning rather than a measured result.
+//
+// Run the gate on the f16 base even when training on q8_0: isolating a
+// quantized base would measure the quantizer rather than the wiring, so
+// mm3_f32_isolate() refuses it outright.
 //
 // IT PERTURBS A DIRECTION, NOT A SINGLE WEIGHT, and that is not a detail.
 // A per-entry difference was tried first and measured nothing but noise: with
@@ -357,7 +395,7 @@ static bool mm3_lm_load_samples(const MM3LmTrainArgs & a, const MM3TrainLm & t,
 // negative, a wrong scale shows up directly in the ratio, and a structurally
 // zero gradient gives ||g|| = 0 with a non-zero measured change.
 static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps, int64_t frames,
-                               int64_t prompt_cap) {
+                               int64_t prompt_cap, int f32_layers) {
 #ifdef _WIN32
     _putenv_s("NVIDIA_TF32_OVERRIDE", "0");
 #else
@@ -371,6 +409,18 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
         mm3_train_lm_free(&t);
         return 1;
     }
+    // F32 ISOLATION, and the reason this command can return a verdict at all.
+    // Must happen before ANYTHING reads the layer count or the head: it
+    // truncates the trunk and swaps lm_head for a pre-sliced F32 copy.
+    MM3F32Slice iso;
+    if (f32_layers > 0 && !mm3_f32_isolate(&t, f32_layers, &iso, &err)) {
+        fprintf(stderr, "[mm3-fd] %s\n", err.c_str());
+        mm3_f32_isolate_free(&iso);
+        mm3_train_lm_free(&t);
+        return 1;
+    }
+    const bool isolated = f32_layers > 0;
+
     const Qwen3LMConfig & c  = t.lm.cfg;
     const int64_t         H  = c.hidden_size;
     const int64_t         NC = (int64_t) t.num_codebooks - 1;
@@ -606,7 +656,7 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
         cc.layer_lo  = 0;
         cc.layer_hi  = c.n_layers;
         cc.head_w    = t.lm_head;
-        cc.head_row0 = (int64_t) t.eos_audio;
+        cc.head_row0 = t.head_slice_row0;
         cc.head_v    = (int) SL;
         if (!lm_ckpt_alloc(&ckpt_st, &t.lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt_st, &err)) {
             fprintf(stderr, "[mm3-fd] checkpoint setup failed: %s\n", err.c_str());
@@ -629,8 +679,10 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
     // ── numeric: directional derivative along v = g/||g|| ──
     fprintf(stderr, "\n[mm3-fd] %-26s %10s %13s %13s %8s\n", "probe (whole tensor)", "n", "||g||",
             "numeric", "rel");
-    int    n_bad = 0;
-    double worst = 0.0;
+    int                 n_bad = 0;
+    double              worst = 0.0;
+    std::vector<double> fd_rel;
+    bool                gate_fd_ran = false, gate_fd_pass = false;
     for (size_t i = 0; i < probes.size(); i++) {
         const Probe &      pr  = probes[i];
         const QwLoraPair & q   = lora.layers[pr.layer].p[pr.slot];
@@ -660,18 +712,54 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
         char         nm[64];
         snprintf(nm, sizeof(nm), "L%d.%s.%s", pr.layer, lm_slot_peft_name(pr.slot), pr.is_a ? "A" : "B");
         fprintf(stderr, "[mm3-fd] %-26s %10zu %13.6e %13.6e %8.3f\n", nm, g.size(), gnorm, num, rel);
+        fd_rel.push_back(rel);
         if (!(rel < 0.15)) n_bad++;
         worst = std::max(worst, rel);
     }
 
-    // NOT a pass/fail. See the header: against an f16 base the difference is
-    // below the forward's own resolution for every probe but the
-    // largest-gradient one, so a verdict here would be theatre. Report, and let
-    // the gradient-route agreement below carry the weight.
-    fprintf(stderr, "\n[mm3-fd] %d/%zu probes within 15%% (worst %.3f) — INDICATIVE ONLY\n",
-            (int) probes.size() - n_bad, probes.size(), worst);
-    fprintf(stderr, "[mm3-fd]   (FD cannot certify an f16 base: error tracks 1/||g||, and shrinking eps\n"
-                    "[mm3-fd]    makes it WORSE. A certifying gate needs F32 isolation — see the header.)\n");
+    // Whether this is a VERDICT or a note depends entirely on isolation.
+    //
+    // Against the f16 base it is a note: the difference is below the forward own
+    // resolution for every probe but the largest-gradient one, so a pass/fail
+    // would be theatre. Under F32 isolation it is a verdict, and a valuable one
+    // — it is the ONLY check here that tests the backward against the FORWARD
+    // rather than against another backward, so it catches a defect that both
+    // gradient routes could share.
+    //
+    // The bar is 2e-2, not tighter. This is a central difference with eps 1e-2,
+    // so it carries a genuine O(eps^2 * third-derivative) truncation error that
+    // no amount of precision removes; 2e-2 is ~10x the worst observed (2e-3 at
+    // 2 layers), which leaves room for probe-to-probe variation without
+    // admitting a real scale error — a wrong gradient scale misses by a FACTOR,
+    // not by a percent.
+    const double fd_bar = isolated ? 2e-2 : 0.15;
+    n_bad = 0;
+    for (double r : fd_rel) {
+        if (!(r < fd_bar)) n_bad++;
+    }
+    if (isolated) {
+        const bool fd_ok = n_bad == 0;
+        gate_fd_ran  = true;
+        gate_fd_pass = fd_ok;
+        fprintf(stderr,
+                "\n[mm3-fd] GATE %s: finite differences, F32-isolated, bar %.0e, %d/%zu probes, worst %.4f\n",
+                fd_ok ? "PASS" : "FAIL", fd_bar, (int) probes.size() - n_bad, probes.size(), worst);
+        if (!fd_ok) {
+            fprintf(stderr,
+                    "[mm3-fd]   The analytic gradient disagrees with the measured loss change. Unlike the\n"
+                    "[mm3-fd]   route comparison below, this catches a defect BOTH backward routes share\n"
+                    "[mm3-fd]   — a wrong scale on the chunked CE, or a missing term.\n");
+        }
+        jl("{\"type\":\"gate\",\"check\":\"finite-difference-f32\",\"pass\":%s,\"worst\":%.6e,"
+           "\"bar\":%.6e,\"probes\":%d}",
+           fd_ok ? "true" : "false", worst, fd_bar, (int) probes.size());
+    } else {
+        fprintf(stderr, "\n[mm3-fd] %d/%zu probes within 15%% (worst %.3f) — INDICATIVE ONLY\n",
+                (int) probes.size() - n_bad, probes.size(), worst);
+        fprintf(stderr, "[mm3-fd]   (FD cannot certify an f16 base: error tracks 1/||g||, and shrinking eps\n"
+                        "[mm3-fd]    makes it WORSE. Add --f32-layers 2 to turn this into a verdict.)\n");
+    }
+    bool gate_ran = false, gate_pass = false;
     if (g_ckpt.size() == g_naive.size()) {
         // Two exact routes to the same gradient, so this compares whole vectors
         // by relative L2 rather than by a single entry (where 1e-6 values make
@@ -692,8 +780,36 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
         // here and nowhere else. Both run the f16 base, so the floor is f16
         // accumulation over 36 layers, not a design difference.
         fprintf(stderr, "[mm3-fd] checkpointed vs naive gradients: worst relative L2 %.2e\n", wc);
-        fprintf(stderr, "[mm3-fd]   (ACE's own bar for this comparison is 2e-3, but measured under F32\n"
-                        "[mm3-fd]    isolation; both routes here run the f16 base.)\n");
+        if (!isolated) {
+            fprintf(stderr, "[mm3-fd]   (ACE's own bar for this comparison is 2e-3, but measured under F32\n"
+                            "[mm3-fd]    isolation; both routes here run the f16 base, so this REPORTS and\n"
+                            "[mm3-fd]    does not certify. Add --f32-layers 2 for a verdict.)\n");
+        } else {
+            // THE GATE. Under isolation the only remaining difference between
+            // the two routes is F32 reassociation, so anything above ACE's 2e-3
+            // is a wiring defect rather than arithmetic - which is exactly the
+            // distinction the f16 run could not make.
+            gate_ran  = true;
+            gate_pass = wc < 2e-3;
+            fprintf(stderr, "[mm3-fd] GATE %s: F32-isolated (%d layers), bar 2e-3, worst %.2e\n",
+                    gate_pass ? "PASS" : "FAIL", f32_layers, wc);
+            if (!gate_pass) {
+                fprintf(stderr,
+                        "[mm3-fd]   The checkpointed path disagrees with whole-graph autodiff by more than\n"
+                        "[mm3-fd]   F32 reassociation explains. Suspect the two hooks this trainer added to\n"
+                        "[mm3-fd]   lm-ckpt.h: the untied scored head (head_w/head_row0/head_v) and the\n"
+                        "[mm3-fd]   frame-embedding entry (embed_build/embed_user), or the chunked-CE scale.\n");
+            }
+            jl("{\"type\":\"gate\",\"check\":\"ckpt-vs-naive-f32\",\"pass\":%s,\"worst\":%.6e,"
+               "\"bar\":2.0e-03,\"layers\":%d}",
+               gate_pass ? "true" : "false", wc, f32_layers);
+        }
+    } else if (isolated) {
+        // A verdict was asked for and one arm never produced gradients: that is
+        // a failure, not a missing measurement.
+        gate_ran  = true;
+        gate_pass = false;
+        fprintf(stderr, "[mm3-fd] GATE FAIL: one of the two gradient routes did not run\n");
     }
 
     ggml_backend_sched_free(sched);
@@ -703,8 +819,14 @@ static int mm3_lm_fdcheck_main(const MM3LmTrainArgs & a, int n_probe, double eps
     lm_optim_free(&opt);
     lm_lora_detach(&lora, &t.lm);
     lm_lora_free(&lora);
+    // The isolated tensors are what lm_lora_detach just restored the base
+    // pointers around, so this has to come after it and before the model free.
+    mm3_f32_isolate_free(&iso);
     mm3_train_lm_free(&t);
-    return 0;
+    // Non-zero ONLY when a verdict was asked for and lost — either gate.
+    // Without --f32-layers this command reports and always succeeds, as before.
+    const bool failed = (gate_ran && !gate_pass) || (gate_fd_ran && !gate_fd_pass);
+    return failed ? 1 : 0;
 }
 
 // ── the run ─────────────────────────────────────────────────────────────────
@@ -940,7 +1062,7 @@ static int mm3_lm_train_main(const MM3LmTrainArgs & a) {
         cc.layer_lo  = 0;
         cc.layer_hi  = c.n_layers;
         cc.head_w    = t.lm_head;                       // UNTIED
-        cc.head_row0 = (int64_t) t.eos_audio;           // slice starts at EOS
+        cc.head_row0 = t.head_slice_row0;              // normally EOS; 0 once F32-isolated
         cc.head_v    = (int) SL;
         if (!lm_ckpt_alloc(&ckpt_st, &t.lm, cc, &err) || !lm_ckpt_build_embed_t(&ckpt_st, &err)) {
             fprintf(stderr, "[mm3-lm-train] checkpoint setup failed: %s\n", err.c_str());

@@ -58,6 +58,13 @@
 struct MM3TrainLm {
     Qwen3LM       lm = {};            // the trainer's model struct
     ggml_tensor * lm_head = nullptr;  // [H, V] — UNTIED, not lm.embed_tokens
+    /** First SCORED row of `lm_head`, i.e. where the training slice starts.
+     *
+     *  Normally `eos_audio`, set at load. It is a FIELD rather than a constant
+     *  so the F32-isolated gate (mm3-f32-isolate.h) can swap `lm_head` for a
+     *  pre-sliced [H, 16389] F32 copy and set this to 0: every reader below
+     *  then addresses the same rows without knowing which of the two it has. */
+    int64_t       head_slice_row0 = 0;
     // From the mm3.* KV: what the training loss needs and the ACE config has
     // no room for.
     uint32_t      semantic_vocab_offset = 0;
@@ -191,6 +198,7 @@ static bool mm3_train_lm_load(MM3TrainLm * t, const char * path, std::string * e
 
     t->lm.embed_tokens = ld.req("token_embd.weight", H, V);
     t->lm_head         = ld.req("output.weight", H, V);
+    t->head_slice_row0 = (int64_t) t->eos_audio;
     t->lm.final_norm   = ld.req("output_norm.weight", H);
 
     for (int i = 0; i < c.n_layers; i++) {
@@ -320,9 +328,9 @@ static inline int64_t mm3_lm_train_slice_size(const MM3TrainLm & t) {
 }
 
 static ggml_tensor * mm3_lm_train_out_slice(ggml_context * ctx, const MM3TrainLm & t) {
-    ggml_tensor * W = t.lm_head;                        // [H, V]
+    ggml_tensor * W = t.lm_head;                        // [H, V], or [H, SL] once isolated
     return ggml_view_2d(ctx, W, W->ne[0], mm3_lm_train_slice_size(t), W->nb[1],
-                        (size_t) t.eos_audio * W->nb[1]);
+                        (size_t) t.head_slice_row0 * W->nb[1]);
 }
 
 /** Row of a semantic CODE (0..semantic_vocab_size) within the training slice. */

@@ -360,8 +360,19 @@ Validation ladder, all runnable:
   (cos 0.999999951, argmax identical).
 - `ace-train mm3-lm-loss` — teacher-forced CE with falsification diagnostics
   (`--target-shift`, `--no-prompt`).
-- `ace-train mm3-lm-train --fd-check N` — finite-difference gradient gate,
-  which also cross-checks checkpointed gradients against naive ones.
+- `ace-train mm3-lm-train --fd-check N --f32-layers 2` — **the gradient gate,
+  and the one to run after touching anything in the backward.** Exit code 0/1,
+  two independent bars: checkpointed-vs-naive gradients < 2e-3 (measures
+  3.78e-07) and finite differences < 2e-2 (measures 0.0023). Both verified by
+  injected faults, not just by passing — see the header of
+  `engine/src/train/mm3-lm-train-run.h`.
+  **`--f32-layers` is not optional if you want an answer.** Without it, f16
+  rounding across 36 layers is larger than the defect being looked for: an
+  injected off-by-one moved the number from 7.70e-02 to 2.14e+00 and the
+  command still exited 0. It truncates to 2 layers and mirrors them plus the
+  scored head slice to F32 (~1.7 GB; a full 8.6B F32 mirror would be ~34 GB).
+  Run it against **f16 even when training on q8_0** — isolating a quantized
+  base would measure the quantizer, and `mm3_f32_isolate()` refuses it.
 
 ### Four things that cost real time here
 

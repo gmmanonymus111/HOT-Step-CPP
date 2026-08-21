@@ -125,6 +125,12 @@ static void print_usage(void) {
             "                probes (a falling loss is NOT evidence the backward is right\n"
             "                — see the DiT-trainer delta fiasco). Also cross-checks the\n"
             "                checkpointed gradients against the naive ones.\n"
+            "                --f32-layers 2 makes that cross-check a real PASS/FAIL: it\n"
+            "                truncates the trunk to 2 layers and mirrors them (and the\n"
+            "                scored head slice) to F32, leaving only F32 reassociation\n"
+            "                between the two routes, so ACE\' 2e-3 bar applies and a\n"
+            "                failure means a wiring bug. Without it the check REPORTS\n"
+            "                only: f16 rounding is larger than the defect it seeks.\n"
             "                --captions --codes --out, defaults = the validated recipe\n"
             "                (r256/a256, lr 8e-5, 800 steps, ckpt every 100, max-frames\n"
             "                1500, random crops). MUON IS THE DEFAULT at --muon-lr-scale\n"
@@ -1263,6 +1269,11 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
     double  fd_eps    = 1e-2;
     int64_t fd_frames = 48;
     int64_t fd_prompt = 64;   // see the truncation note in mm3_lm_fdcheck_main
+    // --f32-layers N turns the gate from a REPORT into a VERDICT: it truncates
+    // the trunk to N layers and mirrors their weights (and the scored head
+    // slice) to F32, so the checkpointed-vs-naive gradient comparison is left
+    // with only F32 reassociation to explain. 0 = the old reporting behaviour.
+    int     fd_f32    = 0;
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char * what) -> const char * {
@@ -1291,6 +1302,7 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--fd-eps"))        fd_eps         = atof(next("--fd-eps"));
         else if (!strcmp(argv[i], "--fd-frames"))     fd_frames      = atoll(next("--fd-frames"));
         else if (!strcmp(argv[i], "--fd-prompt"))     fd_prompt      = atoll(next("--fd-prompt"));
+        else if (!strcmp(argv[i], "--f32-layers"))    fd_f32         = atoi(next("--f32-layers"));
         else if (!strcmp(argv[i], "--ckpt-chunk"))    a.ckpt_chunk   = atoi(next("--ckpt-chunk"));
         else if (!strcmp(argv[i], "--holdout"))       a.holdout      = (float) atof(next("--holdout"));
         else if (!strcmp(argv[i], "--eval-every"))    a.eval_every   = atoi(next("--eval-every"));
@@ -1321,7 +1333,7 @@ static int cmd_mm3_lm_train(int argc, char ** argv) {
         // the checkpointed one; --rank still overrides if asked.
         if (a.rank > 8) { a.rank = 4; a.alpha = 4; }
         ggml_time_init();
-        return mm3_lm_fdcheck_main(a, fd_probes, fd_eps, fd_frames, fd_prompt);
+        return mm3_lm_fdcheck_main(a, fd_probes, fd_eps, fd_frames, fd_prompt, fd_f32);
     }
     if (a.optimizer != "adamw" && a.optimizer != "muon") {
         fprintf(stderr, "ace-train mm3-lm-train: --optimizer must be adamw or muon\n");
