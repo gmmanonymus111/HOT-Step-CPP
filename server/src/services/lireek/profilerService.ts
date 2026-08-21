@@ -79,8 +79,14 @@ import {
   type AlbumEnrichment,
 } from './prompts.js';
 
-// The imported dict is a default export depending on interop.
-const CMU_DICT: Record<string, string> = (cmuDictRaw as any).default || cmuDictRaw;
+// The cmu-pronouncing-dictionary package nests the flat word->phones map under
+// `.dictionary` (no `.default`). Older interop assumptions here silently fell
+// back to the whole module object, so CMU_DICT[word] returned undefined for
+// virtually every real word — and threw ("entry.split is not a function")
+// for the rare word that collides with the module's own top-level key
+// ('dictionary' itself, e.g. a lyric containing the word "dictionary").
+const CMU_DICT: Record<string, string> =
+  (cmuDictRaw as any).dictionary || (cmuDictRaw as any).default || cmuDictRaw;
 
 // ── Robust JSON extraction ────────────────────────────────────────────────────
 
