@@ -70,6 +70,10 @@ function runClaude(prompt, channelId) {
       '--model', currentModel,
       '--output-format', 'json',
       '--allowedTools', 'Read,Grep,Glob',
+      // Read-only is the capability CEILING; this narrows disclosure within
+      // it. Secrets are unreadable even by name — an injected "print the
+      // .env" gets a permission denial, not the bot token.
+      '--disallowedTools', 'Read(**/.env),Read(**/.env.*),Read(**/*.pem),Read(**/*token*),Read(**/sessions.json)',
       '--max-turns', '15',
     ];
     if (sessions[channelId]) args.push('--resume', sessions[channelId]);
