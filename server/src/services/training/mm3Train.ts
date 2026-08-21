@@ -23,15 +23,22 @@ import { datasetDir } from './paths.js';
  *  sees the quantized tensor, only the cast's F32 output. That is QLoRA's
  *  dequantize-per-matmul, and it now works.
  *
- *  So the base is a CHOICE, and a real trade rather than a free win (measured
- *  on a 5090 at the production recipe):
+ *  The base is a CHOICE. It used to be a real trade; since the
+ *  cpy-q-occupancy patch (engine/patches/) it is not (5090, production recipe):
  *
- *      f16    16.0 GB base   31.0/32.6 GB used, 1.5 GB free    3.7 s/step
- *      q8_0    8.5 GB base   22.5/32.6 GB used, 10.1 GB free  11.1 s/step
+ *                     base    VRAM used        free      s/step
+ *      f16       16.0 GB   31.0/32.6 GB    1.5 GB    3.7   (idle card)
+ *      q8_0       8.5 GB   22.6/32.6 GB   10.0 GB    3.75
  *
- *  f16 is ~3x faster and leaves almost no headroom, so anything else on the
- *  GPU tips it into WDDM paging where a step takes ~40 s. q8_0 pays 3x in
- *  compute for ~9.5 GB of room and cannot realistically spill. */
+ *  q8_0 was 11.1 s/step before that patch, which is the ONLY reason f16 used to
+ *  be the default. Now they are the same speed, so the headroom decides it:
+ *  f16's 1.5 GB does not survive a desktop with a browser open. Measured on a
+ *  card holding ~3.2 GB of other work, the SAME 12 steps ran 3.75 s/step on
+ *  q8_0 and 12-14 s/step on f16, because f16 was paging over WDDM.
+ *
+ *  Accuracy is not the trade-off it sounds like: the trained thing is the F32
+ *  LoRA, the base is frozen, and a same-seed 12-step A/B agreed to ~4 s.f. at
+ *  every step (max relative loss deviation 5.7e-4). */
 export interface Mm3TrainModels {
   lm: string;
   depth: string;
@@ -144,10 +151,11 @@ export const MM3_LM_DEFAULTS = {
    *  measured over 50 steps — not a tuned optimum. */
   optimizer: 'muon' as 'muon' | 'adamw',
   muonLrScale: 64,
-  /** f16: ~3x faster, ~1.5 GB of headroom. q8_0: ~9.5 GB of headroom, ~3x
-   *  slower. f16 is the default because it is what the recipe was validated
-   *  on; switch to q8_0 when the GPU is not exclusively this run's. */
-  basePrecision: 'f16' as Mm3BasePrecision,
+  /** q8_0, not f16 — see the note on Mm3TrainModels. Same step time since the
+   *  cpy-q-occupancy patch, ~8.5 GB less resident, and therefore the only one
+   *  of the two that survives a GPU shared with a desktop session. Pick f16
+   *  only to reproduce a pre-patch run exactly. */
+  basePrecision: 'q8_0' as Mm3BasePrecision,
   holdout: 0.15,
   evalEvery: 50,
 } as const;

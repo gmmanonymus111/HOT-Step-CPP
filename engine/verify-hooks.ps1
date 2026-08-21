@@ -1,4 +1,4 @@
-# verify-hooks.ps1 — Post-sync verification of HOT-Step integration hooks
+﻿# verify-hooks.ps1 — Post-sync verification of HOT-Step integration hooks
 #
 # Run after any upstream sync to verify all HOT-Step hooks are intact.
 # Exit code 0 = all good, 1 = broken hooks detected.
@@ -165,6 +165,26 @@ if (Test-Path $ggmlC) {
     }
 } else {
     Write-Host "  [WARN] $ggmlC not found - ggml submodule not checked out?" -ForegroundColor Yellow
+}
+
+# -- Hook 9: ggml-cuda's quant->F32 copies must carry the occupancy patch -----
+#            Also a SUBMODULE file. This one fails SILENTLY: without it every
+#            quantized-base training run still produces correct numbers, just
+#            ~3x slower, so nothing crashes to tell you it is gone.
+$cpyCu = "$ggml\src\ggml-cuda\cpy.cu"
+if (Test-Path $cpyCu) {
+    $content = Get-Content $cpyCu -Raw
+    if ($content -match 'HOT-Step patch: cpy-q-occupancy') {
+        Write-Host "  [OK] ggml-cuda/cpy.cu has the quant-copy occupancy patch" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] ggml-cuda/cpy.cu is missing the cpy-q-occupancy patch" -ForegroundColor Red
+        Write-Host "         SILENT: quantized-base LM training stays correct but runs ~3x slower" -ForegroundColor Yellow
+        Write-Host "         (every quant->F32 dequant launches 1 thread per CUDA block)." -ForegroundColor Yellow
+        Write-Host "         Fix (from the repo root): git apply engine\patches\cpy-q-occupancy.patch" -ForegroundColor Yellow
+        $errors++
+    }
+} else {
+    Write-Host "  [WARN] $cpyCu not found - ggml submodule not checked out?" -ForegroundColor Yellow
 }
 
 # ── Summary ───────────────────────────────────────────────────────────

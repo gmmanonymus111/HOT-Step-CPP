@@ -1799,7 +1799,7 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
     };
     const D = MM3_LM_DEFAULTS;
     const optimizer = b.optimizer === 'adamw' ? 'adamw' : D.optimizer;
-    const basePrecision: Mm3BasePrecision = b.basePrecision === 'q8_0' ? 'q8_0' : D.basePrecision;
+    const basePrecision: Mm3BasePrecision = b.basePrecision === 'f16' ? 'f16' : D.basePrecision;
     const cropMode  = b.cropMode === 'beginning' ? 'beginning' : D.cropMode;
     const runName   = mm3RunName(ds.slug);
 
