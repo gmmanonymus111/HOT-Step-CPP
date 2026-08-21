@@ -84,7 +84,8 @@ import {
 } from '../services/training/pipelineRunner.js';
 import { getTrainingDefaults, setTrainingDefaults } from '../services/training/trainingDefaults.js';
 import {
-  availableMm3Bases, MM3_LM_DEFAULTS, missingMm3TrainModels, mm3AdapterRunDir, mm3CodesDir, mm3RunName,
+  availableMm3Bases, MM3_VRAM_MODEL, recommendMm3Config,
+  MM3_LM_DEFAULTS, missingMm3TrainModels, mm3AdapterRunDir, mm3CodesDir, mm3RunName,
   type Mm3BasePrecision,
 } from '../services/training/mm3Train.js';
 import { writeSidecar } from '../services/training/sidecarIO.js';
@@ -1704,7 +1705,7 @@ function mm3Preflight(req: Request, res: Response): TrainingDatasetRow | null {
 
 /** GET /datasets/:id/mm3 — codes cache state + which model files are missing.
  *  Cheap and never throws: the UI polls it to decide what to enable. */
-router.get('/datasets/:id/mm3', (req: Request, res: Response) => {
+router.get('/datasets/:id/mm3', async (req: Request, res: Response) => {
   try {
     const ds = repo.getDataset(req.params.id as string);
     if (!ds) {
@@ -1720,6 +1721,19 @@ router.get('/datasets/:id/mm3', (req: Request, res: Response) => {
       const meta = JSON.parse(fs.readFileSync(path.join(inner, 'codes.json'), 'utf-8'));
       encoder = typeof meta?.encoder === 'string' ? path.basename(meta.encoder) : '';
     } catch { /* no cache yet */ }
+    // The card, from the engine's own reading rather than a guess. Short
+    // timeout and a 0 fallback: this endpoint is polled, and a picker that
+    // stalls because ace-server is restarting is worse than one without a fit
+    // estimate for a second.
+    let gpuTotalMb = 0;
+    try {
+      const r = await fetch(`${config.aceServer.url}/vram`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) {
+        const v: any = await r.json();
+        gpuTotalMb = Number(v?.total_mb) || 0;
+      }
+    } catch { /* engine down or CPU-only — leave it unknown */ }
+
     res.json({
       codesDir,
       codes,
@@ -1729,8 +1743,20 @@ router.get('/datasets/:id/mm3', (req: Request, res: Response) => {
       missingForCodes: missingMm3TrainModels('codes'),
       missingForTrain: missingMm3TrainModels('train'),
       // Only offer bases that are installed — a picker listing a file that is
-      // not there just moves the failure to spawn time.
+      // not there just moves the failure to spawn time. Sized at the DEFAULT
+      // recipe; the UI re-estimates locally as the user moves rank/frames.
       bases: availableMm3Bases(),
+      // What the card can actually hold. 0 when ace-server is not up, which the
+      // UI must treat as "unknown" rather than "no VRAM" — the difference is a
+      // greyed-out estimate versus a false "will not fit" on a 5090.
+      gpuTotalMb,
+      // Base AND rank: on a 16 GB card nothing fits at the default rank 256,
+      // so recommending only a base would hand the user a red warning and no
+      // way out of it.
+      recommended: recommendMm3Config(gpuTotalMb),
+      // The coefficients, not just the answer — the form re-estimates locally
+      // as rank and crop length move, and must not carry its own copy.
+      vramModel: MM3_VRAM_MODEL,
       defaults: MM3_LM_DEFAULTS,
     });
   } catch (err: any) {
@@ -1767,12 +1793,18 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
   try {
     const ds = mm3Preflight(req, res);
     if (!ds) return;
-    const missing = missingMm3TrainModels('train',
-      (req.body || {}).basePrecision === 'q8_0' ? 'q8_0' : 'f16');
+    // Any installed base is trainable since the quant-cpy-kquant patch, so the
+    // check is "is this file here", not "is this file f16". Anything unknown
+    // falls back to the default rather than being passed to spawn.
+    const installed = availableMm3Bases();
+    const askedBase = String((req.body || {}).basePrecision || '');
+    const chosenBase: Mm3BasePrecision =
+      installed.some(b => b.id === askedBase) ? askedBase : MM3_LM_DEFAULTS.basePrecision;
+    const missing = missingMm3TrainModels('train', chosenBase);
     if (missing.length) {
       res.status(400).json({
         error: `MiniMax-Music3 training models are missing: ${missing.join(', ')}. `
-             + 'Training needs the F16 files specifically — a quantized base cannot be trained.',
+             + 'Install one from the Model Manager, or pick a base that is already present.',
       });
       return;
     }
@@ -1799,7 +1831,7 @@ router.post('/datasets/:id/mm3-train-lm', (req: Request, res: Response) => {
     };
     const D = MM3_LM_DEFAULTS;
     const optimizer = b.optimizer === 'adamw' ? 'adamw' : D.optimizer;
-    const basePrecision: Mm3BasePrecision = b.basePrecision === 'f16' ? 'f16' : D.basePrecision;
+    const basePrecision: Mm3BasePrecision = chosenBase;
     const cropMode  = b.cropMode === 'beginning' ? 'beginning' : D.cropMode;
     const runName   = mm3RunName(ds.slug);
 

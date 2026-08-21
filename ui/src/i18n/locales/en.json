@@ -1591,7 +1591,13 @@
     "trainingStudio.mm3.stat.stepTime": "step time",
     "trainingStudio.mm3.stat.vram": "VRAM",
     "trainingStudio.mm3.base": "Base precision",
-    "trainingStudio.mm3.baseHint": "Both train the same way and now take the same time per step. q8_0 is the default because it leaves ~10 GB of VRAM free, so a browser or another app cannot push training into shared memory; f16 leaves ~1.5 GB and slows to a crawl when it does. Pick f16 only to reproduce an older run exactly.",
+    "trainingStudio.mm3.peakFits": "Estimated peak {{gb}} GB of {{totalGb}} GB — fits with room to spare.",
+    "trainingStudio.mm3.peakTight": "Estimated peak {{gb}} GB of {{totalGb}} GB — fits, but with almost nothing spare. Anything else using the GPU will push this into shared memory and steps will take 3–4x longer. Close other GPU apps, or drop the rank.",
+    "trainingStudio.mm3.peakOver": "Estimated peak {{gb}} GB exceeds your {{totalGb}} GB card. Pick a smaller base, or lower the LoRA rank — rank is the largest term after the base itself.",
+    "trainingStudio.mm3.peakNoFit": "Estimated peak {{gb}} GB against a {{totalGb}} GB card, and no combination of base and rank in this catalogue fits it. MiniMax-Music3 LM training needs roughly 11 GB at the smallest usable settings. You can still train ACE-Step 1.5 adapters, which are far smaller.",
+    "trainingStudio.mm3.peakUnknown": "Estimated peak {{gb}} GB. Card size unknown (the engine is not running), so this is not checked against your GPU.",
+    "trainingStudio.mm3.baseHint": "Every base trains the same way — the frozen weights are dequantized in-graph, so only VRAM and fidelity change, and step time barely moves (within ~5% across the whole range). Pick the smallest one that comfortably fits your card, then spend what is left on LoRA rank.",
+    "trainingStudio.mm3.basePoor": "This base is too lossy to train against: measured +14% on the first-step loss and roughly double the gradient norm, i.e. the quantizer injects more error than the adapter is being asked to learn. Prefer the smallest base marked good or better that fits.",
     "trainingStudio.mm3.holdout": "Hold-out fraction",
     "trainingStudio.mm3.holdoutHint": "0 disables evaluation — the training loss then cannot tell learning from memorising. Ignored below 6 songs."
   }

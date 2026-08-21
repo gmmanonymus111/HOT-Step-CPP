@@ -37,9 +37,61 @@ export interface Mm3Status {
   /** Per-stage, because the two need different files. Non-empty = disable. */
   missingForCodes: string[];
   missingForTrain: string[];
-  /** Base precisions actually installed — the picker offers only these. */
-  bases: Array<'f16' | 'q8_0'>;
+  /** Bases actually installed, best fidelity first. The picker offers only
+   *  these — listing a file that is not there moves the failure to spawn time. */
+  bases: Mm3BaseInfo[];
+  /** The card, from the engine's own reading. 0 = UNKNOWN (engine down or
+   *  CPU-only), which must render as a greyed-out estimate rather than as a
+   *  "will not fit" warning on a machine that would fit it fine. */
+  gpuTotalMb: number;
+  /** Base AND rank that fit this card, best fidelity first. Rank is included
+   *  because on a 16 GB card nothing fits at the default rank 256, so a base
+   *  alone would be advice the user cannot act on. */
+  recommended: Mm3Recommendation;
+  /** Coefficients for estimateMm3PeakMb below, so the form can re-estimate as
+   *  rank and crop length move without carrying its own copy of measurements
+   *  taken server-side. */
+  vramModel: Mm3VramModel;
   defaults: Mm3TrainLmRequest & { maxFrames: number; cropMode: string };
+}
+
+/** One installed base. `quality` and `lossDelta` are MEASURED against f16 on an
+ *  identical seed and crop — see MM3_BASE_FACTS in services/training/mm3Train.ts.
+ *  `lossDelta` null means "not measured", not "no difference". */
+export interface Mm3BaseInfo {
+  id: string;
+  file: string;
+  bytes: number;
+  lossDelta: number | null;
+  quality: 'reference' | 'excellent' | 'good' | 'fair' | 'poor';
+  /** Measured excess over the fitted model — add it to any local estimate. */
+  extraMb: number;
+  peakMb: number;
+}
+
+export interface Mm3Recommendation {
+  base: string;
+  rank: number;
+  /** Nothing in the catalogue fits this card at any rank on the ladder, so the
+   *  values above are a best effort rather than a promise. */
+  overBudget: boolean;
+}
+
+export interface Mm3VramModel {
+  loadedOverheadMb: number;
+  perRankMb: number;
+  perTokenMb: number;
+  promptTokens: number;
+  constMb: number;
+}
+
+/** Peak VRAM in MB. The coefficients come from the server, which fitted them to
+ *  six measured configurations; this is only the arithmetic. */
+export function estimateMm3PeakMb(baseBytes: number, rank: number, maxFrames: number,
+                                  m: Mm3VramModel): number {
+  const loaded = baseBytes / 1048576 + m.loadedOverheadMb;
+  const S      = m.promptTokens + Math.max(0, maxFrames);
+  return Math.round(loaded + m.perRankMb * rank + m.perTokenMb * S + m.constMb);
 }
 
 export interface Mm3CodesRequest {
@@ -61,9 +113,11 @@ export interface Mm3TrainLmRequest {
   cropMode?: 'random' | 'beginning';
   optimizer?: 'muon' | 'adamw';
   muonLrScale?: number;
-  /** f16 is ~3x faster with ~1.5 GB of headroom; q8_0 frees ~9.5 GB and costs
-   *  ~3x in step time. Both train — the base is dequantized in-graph. */
-  basePrecision?: 'f16' | 'q8_0';
+  /** Any installed base id ('f16', 'q8_0', 'Q4_K_M', ...). All of them train:
+   *  the frozen base is dequantized in-graph per matmul, so only its VRAM and
+   *  its fidelity differ, not the mechanism. Validated server-side against what
+   *  is on disk. */
+  basePrecision?: string;
   /** Fraction of songs withheld for evaluation. 0 disables it, and then the
    *  training loss is the only signal — which cannot tell learning from
    *  memorising. */

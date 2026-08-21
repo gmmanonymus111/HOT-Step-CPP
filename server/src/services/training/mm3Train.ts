@@ -66,12 +66,20 @@ function newestMatching(dir: string, prefix: string): string {
   }
 }
 
-export type Mm3BasePrecision = 'f16' | 'q8_0';
+/** The quant token from `mm3-lm-<token>.gguf` — 'f16', 'q8_0', 'Q4_K_M', ...
+ *
+ *  Deliberately an open string rather than a union. The set of trainable bases
+ *  is now "whatever the user has installed that CUDA can dequantize", which the
+ *  quant-cpy-kquant patch made large (every K-quant, IQ type, MXFP4, NVFP4) and
+ *  which the Model Manager can grow at any time. A union here would need
+ *  editing every time someone downloads a new quant. Validation happens against
+ *  what is ON DISK instead — see availableMm3Bases(). */
+export type Mm3BasePrecision = string;
 
 export function resolveMm3TrainModels(base: Mm3BasePrecision = 'f16'): Mm3TrainModels {
   const dir = mm3ModelDir();
   return {
-    lm:    path.join(dir, base === 'q8_0' ? 'mm3-lm-q8_0.gguf' : 'mm3-lm-f16.gguf'),
+    lm:    path.join(dir, 'mm3-lm-' + base + '.gguf'),
     depth: path.join(dir, 'mm3-depth-f16.gguf'),
     rvq:   newestMatching(dir, 'mm3-rvq-'),
     enc:   newestMatching(dir, 'mm3-enc-'),
@@ -89,11 +97,237 @@ export function missingMm3TrainModels(need: 'codes' | 'train',
   return wanted.filter(([p]) => !p || !fs.existsSync(p)).map(([, label]) => label);
 }
 
-/** Which base precisions are actually installed, so the picker only offers
- *  what exists rather than failing at spawn time. */
-export function availableMm3Bases(): Mm3BasePrecision[] {
-  return (['f16', 'q8_0'] as Mm3BasePrecision[])
-    .filter(b => fs.existsSync(resolveMm3TrainModels(b).lm));
+// ── Base catalogue ──────────────────────────────────────────────────────────
+//
+// FIDELITY IS MEASURED, NOT ASSUMED. Each `lossDelta` is the first-step
+// training loss against the f16 reference on an identical seed and crop, which
+// is the only comparison that isolates the base: same data, same LoRA init,
+// same everything else. Numbers from a 12-step A/B on a 5090.
+//
+// The point of publishing them is Q2_K. It is the smallest base, it looks like
+// the obvious choice on a small card, and it is the one base here that should
+// not be used: +14.3% on the loss and a gradient norm twice everything else's,
+// i.e. the quantizer injects more error than the LoRA is being asked to learn.
+// A picker that offered it without saying so would be a trap.
+interface Mm3BaseFacts {
+  /** Relative first-step loss vs the f16 base. Null = not measured here. */
+  lossDelta: number | null;
+  quality: 'reference' | 'excellent' | 'good' | 'fair' | 'poor';
+  /** Measured MB this base costs ABOVE the fitted model. Only f16 needs one:
+   *  the fit is over the quantized bases, where the in-graph cast is freed with
+   *  its segment, and f16 holds its weights resident instead. Without this the
+   *  recommender offers f16 on a 32 GB card — which is precisely the
+   *  configuration measured at 1250 MB free and 12-14 s/step. */
+  extraMb?: number;
+}
+
+const MM3_BASE_FACTS: Record<string, Mm3BaseFacts> = {
+  'f16':    { lossDelta: 0,      quality: 'reference', extraMb: 1047 },
+  'q8_0':   { lossDelta: 0.0002, quality: 'excellent' },
+  'Q6_K':   { lossDelta: 0.003,  quality: 'excellent' },
+  'Q5_K_M': { lossDelta: null,   quality: 'good' },
+  'Q5_K_S': { lossDelta: null,   quality: 'good' },
+  'Q4_K_M': { lossDelta: 0.008,  quality: 'good' },
+  'Q4_K_S': { lossDelta: null,   quality: 'good' },
+  'MXFP4':  { lossDelta: 0.027,  quality: 'fair' },
+  'NVFP4':  { lossDelta: null,   quality: 'fair' },
+  'Q3_K_L': { lossDelta: null,   quality: 'fair' },
+  'Q3_K_M': { lossDelta: null,   quality: 'fair' },
+  'Q3_K_S': { lossDelta: null,   quality: 'poor' },
+  'Q2_K':   { lossDelta: 0.143,  quality: 'poor' },
+};
+
+export interface Mm3BaseInfo {
+  id: string;
+  file: string;
+  bytes: number;
+  lossDelta: number | null;
+  quality: Mm3BaseFacts['quality'];
+  /** Measured excess over the fitted model; the UI adds it to its own estimate. */
+  extraMb: number;
+  /** Estimated peak VRAM in MB at the rank/max-frames it was asked about. */
+  peakMb: number;
+}
+
+/** Peak VRAM for a configuration, in MB.
+ *
+ *  Fitted to six measured points on a 5090 and accurate to <0.5% across the
+ *  whole range it covers (10.2 GB to 22.6 GB), which is why the UI can show a
+ *  number instead of a shrug:
+ *
+ *      peak = loaded + 31.2*rank + 1.4515*S + 441          S = 1142 + frames
+ *
+ *  `loaded` is the LM file plus ~1672 MB of fixed company (depth model, audio
+ *  embeddings, tokenizer). 31.2 MB per rank is 12 bytes per LoRA parameter —
+ *  weights, gradients and Muon momentum, one F32 copy each. The S terms are the
+ *  36 per-layer checkpoints plus the graph arena, both linear in sequence
+ *  length. 1142 is the typical MM3 prompt: it dominates short crops, which is
+ *  why shrinking maxFrames is a weaker lever than it looks.
+ *
+ *  MEASURED f16 comes out ~1 GB ABOVE this (31.4 vs 30.3 predicted). The fit is
+ *  over the quantized bases, where the in-graph cast is freed per segment; f16
+ *  holds its weights differently. Treat an f16 estimate as a floor. */
+export const MM3_VRAM_MODEL = {
+  /** Depth model + audio embeddings + tokenizer, on top of the LM file. */
+  loadedOverheadMb: 1672,
+  /** 12 bytes per LoRA parameter (weights + grads + Muon momentum, F32 each),
+   *  times 2.728 M parameters per unit of rank. */
+  perRankMb: 31.2,
+  /** 36 per-layer checkpoints plus the graph arena, both linear in sequence. */
+  perTokenMb: 1.4515,
+  /** Typical MM3 prompt. Added to maxFrames to get the sequence length, and the
+   *  reason a short crop saves less than it looks like it should. */
+  promptTokens: 1142,
+  constMb: 441,
+} as const;
+
+/** Peak VRAM for a configuration, in MB.
+ *
+ *  SHIPPED TO THE UI AS COEFFICIENTS, not just as an answer: the form re-runs
+ *  this as the user drags rank and crop length, and a second copy of these
+ *  numbers over there would drift from the measurements that produced them. */
+export function estimateMm3PeakMb(baseBytes: number, rank: number, maxFrames: number,
+                                  extraMb = 0): number {
+  const M      = MM3_VRAM_MODEL;
+  const loaded = baseBytes / 1048576 + M.loadedOverheadMb;
+  const S      = M.promptTokens + Math.max(0, maxFrames);
+  return Math.round(loaded + M.perRankMb * rank + M.perTokenMb * S + M.constMb + extraMb);
+}
+
+/** Every installed base, best quality first.
+ *
+ *  Scans rather than enumerates: the trainable set is whatever CUDA can
+ *  dequantize, and the Model Manager can add to it without a code change. A
+ *  base with no catalogue entry still appears — unknown quality beats
+ *  invisible, since hiding a file the user deliberately downloaded is the more
+ *  confusing failure. */
+export function availableMm3Bases(rank: number = MM3_LM_DEFAULTS.rank,
+                                  maxFrames: number = MM3_LM_DEFAULTS.maxFrames): Mm3BaseInfo[] {
+  const dir = mm3ModelDir();
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(dir).filter(f => f.startsWith('mm3-lm-') && f.endsWith('.gguf'));
+  } catch {
+    return [];
+  }
+  const QORDER = { reference: 0, excellent: 1, good: 2, fair: 3, poor: 4 } as const;
+  // A base whose MEASURED loss delta is negligible is not meaningfully worse
+  // than f16, whatever band its name suggests, so it collapses into the top
+  // tier and the tie-break on size decides. This is what stops the recommender
+  // offering f16 on a 32 GB card: q8_0 measures +0.02% — 1/40th of the gap to
+  // the next base — for HALF the VRAM, so trading rank 256 down to 128 to buy
+  // that 0.02% back is a straight loss. Threshold is 0.1%, comfortably above
+  // the two negligible measurements and comfortably below Q6_K's 0.30%.
+  const NEGLIGIBLE = 0.001;
+  const tier = (b: { lossDelta: number | null; quality: keyof typeof QORDER }) =>
+    (b.lossDelta !== null && b.lossDelta <= NEGLIGIBLE) ? 0 : QORDER[b.quality];
+  return files
+    .map(f => {
+      const id = f.slice('mm3-lm-'.length, -'.gguf'.length);
+      let bytes = 0;
+      try { bytes = fs.statSync(path.join(dir, f)).size; } catch { /* raced */ }
+      const facts = MM3_BASE_FACTS[id] ?? { lossDelta: null, quality: 'fair' as const };
+      const extraMb = facts.extraMb ?? 0;
+      return {
+        id, file: f, bytes,
+        lossDelta: facts.lossDelta,
+        quality:   facts.quality,
+        extraMb,
+        peakMb:    estimateMm3PeakMb(bytes, rank, maxFrames, extraMb),
+      };
+    })
+    .filter(b => b.bytes > 0)
+    // Quality band first, then MEASURED loss, then size. The middle term is not
+    // decoration: q8_0 and Q6_K are both 'excellent', but q8_0 measures +0.02%
+    // against f16 and Q6_K +0.30% — 15x apart. Sorting the band by size instead
+    // put the bigger-error base first on any card with room for both, which is
+    // the opposite of what a fidelity-ordered list is for. An unmeasured base
+    // sorts after every measured one in its band rather than being assumed
+    // good.
+    .sort((a, b) => {
+      const ta = tier(a), tb = tier(b);
+      if (ta !== tb) return ta - tb;
+      // Inside the collapsed top tier the measured deltas ARE noise, so size is
+      // the real decider. Everywhere else, measured fidelity leads and an
+      // unmeasured base sorts behind every measured one in its band.
+      if (ta === 0) return a.bytes - b.bytes;
+      return ((a.lossDelta ?? Infinity) - (b.lossDelta ?? Infinity)) || (a.bytes - b.bytes);
+    });
+}
+
+/** RANK LADDER for the recommender. The defaults were validated at 256 on a
+ *  32 GB card; below that, rank is the term that has to give. 31.2 MB per unit
+ *  of rank means 256 -> 64 frees 6.0 GB, which is more than any base swap. */
+const MM3_RANK_LADDER = [256, 128, 64, 32, 16];
+
+export interface Mm3Recommendation {
+  base: string;
+  rank: number;
+  /** True when nothing in the catalogue fits this card at any ladder rank, so
+   *  the values below are a best effort rather than a promise. */
+  overBudget: boolean;
+}
+
+/** The best CONFIGURATION that fits the card, not just the best base.
+ *
+ *  A base picker alone is not enough for a small card: at the default rank 256
+ *  nothing in the catalogue fits in 16 GB, so a recommender that only chose a
+ *  base would hand a 16 GB user a red warning and no way out. Rank is the
+ *  bigger lever anyway.
+ *
+ *  ORDER OF SACRIFICE: fidelity first, rank second. The search walks the bases
+ *  in fidelity order and gives each one the highest ladder rank it can afford,
+ *  taking the first that fits at all. Ranking it the other way round — highest
+ *  rank first, best base that fits at that rank — was tried and produced
+ *  visibly worse advice: on a 20 GB card it offered Q3_K_M ('fair', unmeasured)
+ *  at rank 256 in preference to q8_0 (+0.02% against f16) at rank 128, and on
+ *  16 GB it reached for Q4_K_S over Q6_K. A base error floors what the adapter
+ *  can learn no matter how much rank sits on top of it, whereas a smaller rank
+ *  simply fits less detail. `quality: 'poor'` is never recommended at any rank.
+ *
+ *  `headroomMb` is not padding for the estimate (good to <0.3%) but for the
+ *  desktop session sharing the GPU, which is what pushed f16 from 3.7 to
+ *  12-14 s/step in the A/B that set the default. */
+export function recommendMm3Config(gpuTotalMb: number,
+                                   maxFrames: number = MM3_LM_DEFAULTS.maxFrames,
+                                   headroomMb?: number): Mm3Recommendation {
+  const fallback: Mm3Recommendation = {
+    base: MM3_LM_DEFAULTS.basePrecision, rank: MM3_LM_DEFAULTS.rank, overBudget: false,
+  };
+  if (!availableMm3Bases().length) {
+    return fallback;
+  }
+  if (gpuTotalMb <= 0) {
+    // Card unknown: do not guess downward. The defaults are what the recipe was
+    // validated on, and a wrong small guess is worse than no guess.
+    return fallback;
+  }
+  // Headroom scales with the card. A flat 1.5 GB is right on a 24 GB card and
+  // absurd on a 12 GB one, where it is an eighth of the whole budget and pushes
+  // configurations that genuinely run into "over budget".
+  const headroom = headroomMb ?? Math.min(1536, Math.round(gpuTotalMb * 0.08));
+  // availableMm3Bases() returns fidelity order, so the OUTER loop is the one
+  // that must be over bases.
+  for (const base of availableMm3Bases(MM3_LM_DEFAULTS.rank, maxFrames)) {
+    if (base.quality === 'poor') {
+      continue;
+    }
+    for (const rank of MM3_RANK_LADDER) {
+      const peak = estimateMm3PeakMb(base.bytes, rank, maxFrames, base.extraMb);
+      if (peak + headroom <= gpuTotalMb) {
+        return { base: base.id, rank, overBudget: false };
+      }
+    }
+  }
+  // Nothing fits at any rank. Offer the SMALLEST usable base at the LOWEST rank
+  // — the configuration with the best chance — and say so, rather than silently
+  // landing on something that cannot run.
+  const lowest = MM3_RANK_LADDER[MM3_RANK_LADDER.length - 1];
+  const usable = availableMm3Bases(lowest, maxFrames).filter(b => b.quality !== 'poor');
+  const smallest = usable.reduce<Mm3BaseInfo | null>(
+    (best, b) => (!best || b.peakMb < best.peakMb ? b : best), null);
+  return { base: smallest ? smallest.id : MM3_LM_DEFAULTS.basePrecision,
+           rank: lowest, overBudget: true };
 }
 
 // ── Layout ──────────────────────────────────────────────────────────────────

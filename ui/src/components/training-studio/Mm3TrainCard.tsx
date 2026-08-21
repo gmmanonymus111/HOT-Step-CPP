@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { estimateMm3PeakMb } from '../../services/trainingApi';
 import type { Mm3TrainLmRequest } from '../../services/trainingApi';
 import { useTrainingStore } from '../../stores/trainingStore';
 import { JobProgress } from './JobProgress';
@@ -46,7 +47,7 @@ interface FormState {
   gradAccum: number;
   seed: number;
   trigger: string;
-  basePrecision: 'f16' | 'q8_0';
+  basePrecision: string;
   holdout: number;
   evalEvery: number;
 }
@@ -98,7 +99,10 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   const form: FormState | null = status ? {
     steps: status.defaults.steps ?? 800,
     saveEvery: status.defaults.saveEvery ?? 100,
-    rank: status.defaults.rank ?? 256,
+    // Rank follows the recommendation for the same reason as the base: at the
+    // default 256 nothing fits below ~24 GB, so a 16 GB card would open on a
+    // red 'will not fit' form with the fix two fields away and unstated.
+    rank: status.recommended?.rank ?? status.defaults.rank ?? 256,
     alpha: status.defaults.alpha ?? 256,
     lr: status.defaults.lr ?? 8e-5,
     maxFrames: status.defaults.maxFrames ?? 1500,
@@ -108,11 +112,48 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
     gradAccum: status.defaults.gradAccum ?? 1,
     seed: status.defaults.seed ?? 42,
     trigger: trigger ?? '',
-    basePrecision: (status.defaults.basePrecision as 'f16' | 'q8_0') ?? 'f16',
+    // The RECOMMENDED base, not the global default: the default was chosen on a
+    // 32 GB card and on a 12 GB one it is simply wrong. The server picks the
+    // highest-fidelity base that fits THIS GPU, and falls back to the default
+    // when it cannot read the card.
+    basePrecision: status.recommended?.base || status.defaults.basePrecision || 'q8_0',
     holdout: status.defaults.holdout ?? 0.15,
     evalEvery: status.defaults.evalEvery ?? 50,
     ...edits,
   } : null;
+
+  // Peak VRAM for the CURRENT form, not for the defaults — rank is the biggest
+  // single term after the base itself, so an estimate pinned to the defaults
+  // would be wrong for exactly the users who need it most.
+  const chosen = status?.bases?.find(b => b.id === form?.basePrecision);
+  const peak = (() => {
+    if (!form || !status?.vramModel || !chosen) return null;
+    const mb    = estimateMm3PeakMb(chosen.bytes, form.rank, form.maxFrames, status.vramModel)
+                + (chosen.extraMb || 0);
+    const total = status.gpuTotalMb || 0;
+    const gb    = (mb / 1024).toFixed(1);
+    // 0 means the engine could not be read, NOT a card with no memory. Show the
+    // estimate without a verdict rather than inventing a scary one.
+    if (total <= 0) {
+      return { text: t('trainingStudio.mm3.peakUnknown', { gb }), tone: 'text-zinc-500' };
+    }
+    const totalGb = (total / 1024).toFixed(1);
+    if (mb + 1536 <= total) {
+      return { text: t('trainingStudio.mm3.peakFits', { gb, totalGb }), tone: 'text-emerald-500' };
+    }
+    if (mb <= total) {
+      // Fits on paper, with nothing left for the desktop. This is the state that
+      // produced 12-14 s/step instead of 3.7 in the f16 A/B, so it is a warning
+      // rather than an error.
+      return { text: t('trainingStudio.mm3.peakTight', { gb, totalGb }), tone: 'text-amber-500' };
+    }
+    // "Pick a smaller base" is bad advice when the server already established
+    // that nothing in the catalogue fits at any rank on the ladder.
+    if (status.recommended?.overBudget) {
+      return { text: t('trainingStudio.mm3.peakNoFit', { gb, totalGb }), tone: 'text-rose-500' };
+    }
+    return { text: t('trainingStudio.mm3.peakOver', { gb, totalGb }), tone: 'text-rose-500' };
+  })();
 
   const startTrain = async () => {
     if (!form) return;
@@ -265,16 +306,30 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
                       {t('trainingStudio.mm3.base', 'Base precision')}
                     </span>
                     <select className={INPUT} value={form.basePrecision}
-                      onChange={e => set('basePrecision', e.target.value as 'f16' | 'q8_0')}>
-                      {(status?.bases ?? ['f16']).map(b => (
-                        <option key={b} value={b}>{b === 'q8_0' ? 'q8_0 (low VRAM)' : 'f16 (fast)'}</option>
+                      onChange={e => set('basePrecision', e.target.value)}>
+                      {(status?.bases ?? []).map(b => (
+                        <option key={b.id} value={b.id}>
+                          {b.id} — {(b.bytes / 1073741824).toFixed(1)} GB
+                          {b.quality === 'poor' ? ' (not recommended)' : ''}
+                          {b.id === status?.recommended?.base ? ' \u2713' : ''}
+                        </option>
                       ))}
                     </select>
+                    {peak && (
+                      <span className={`text-[10px] leading-snug ${peak.tone}`}>{peak.text}</span>
+                    )}
                     <span className="text-[10px] text-zinc-500 leading-snug">
-                      {t('trainingStudio.mm3.baseHint',
-                        'f16 is ~3x faster but leaves ~1.5 GB free, so anything else using the GPU can '
-                        + 'push it into shared memory. q8_0 frees ~9.5 GB and cannot realistically spill, '
-                        + 'at ~3x the step time. Both train the same way.')}
+                      {chosen?.quality === 'poor'
+                        ? t('trainingStudio.mm3.basePoor',
+                            'This base is too lossy to train against: measured +14% on the first-step loss '
+                            + 'and roughly double the gradient norm, i.e. the quantizer injects more error '
+                            + 'than the adapter is being asked to learn. Prefer the smallest base marked '
+                            + 'good or better that fits.')
+                        : t('trainingStudio.mm3.baseHint',
+                            'Every base trains the same way — the frozen weights are dequantized in-graph, '
+                            + 'so only VRAM and fidelity change, and step time barely moves (within ~5% '
+                            + 'across the whole range). Pick the smallest one that comfortably fits your '
+                            + 'card, then spend what is left on LoRA rank.')}
                     </span>
                   </label>
                   <NumField label={t('trainingStudio.mm3.holdout', 'Hold-out fraction')}

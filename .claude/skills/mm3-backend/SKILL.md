@@ -374,6 +374,35 @@ Validation ladder, all runnable:
   Run it against **f16 even when training on q8_0** — isolating a quantized
   base would measure the quantizer, and `mm3_f32_isolate()` refuses it.
 
+### Training bases: any installed quant, and the VRAM ladder
+
+Since `quant-cpy-kquant.patch` the trainable base is **whatever is installed**,
+not just f16/q8_0 — every K-quant, MXFP4, NVFP4 and IQ type. The mechanism is
+QLoRA-style dequantize-per-matmul: `qwen3_f32()` emits `ggml_cast` on the frozen
+weight, so the backward only ever sees the cast's F32 output.
+
+Peak VRAM, MM3 8.6B, rank 256 / 1500 frames, **all within ~5 % of the same step
+time** (~3.8 s/step on a 5090):
+
+| base | size | peak | 1st-step loss vs f16 |
+|---|---|---|---|
+| f16 | 16.0 GB | 31.4 GB | reference |
+| q8_0 | 8.5 GB | 22.6 GB | +0.02 % |
+| Q6_K | 6.6 GB | 20.7 GB | +0.3 % |
+| Q4_K_M | 5.1 GB | 19.2 GB | +0.8 % |
+| MXFP4 | 5.1 GB | 19.1 GB | +2.7 % |
+| Q2_K | 3.4 GB | 17.5 GB | **+14.3 % — do not train against this** |
+
+**Rank is the bigger lever below 20 GB**, at 31.2 MB per unit: Q4_K_M peaks
+19.2 GB at r256/1500, 13.2 at r64/1500, 11.1 at r32/750, 10.2 at r16/500.
+~10 GB is the practical floor for MM3 LM training.
+
+`estimateMm3PeakMb()` in `services/training/mm3Train.ts` predicts all of this to
+<0.3 %, and `recommendMm3Config()` picks base + rank for the detected card
+(read from the engine's `/vram`). **f16 is never recommended**: it measures
+fidelity-equivalent to q8_0 at twice the VRAM, and at 1.5 GB free it pages over
+WDDM — measured at 12–14 s/step against q8_0's 3.75 on the same 12 steps.
+
 ### Four things that cost real time here
 
 1. **THE PROMPT DOMINATES THE SEQUENCE.** An MM3 prompt is ~1,125 tokens, so
