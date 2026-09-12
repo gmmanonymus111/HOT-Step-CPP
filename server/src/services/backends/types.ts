@@ -214,7 +214,13 @@ export interface GenerationAttempt {
   attempt: number;
   startedAt: number;
   endedAt?: number;
-  effective: { seed?: number; models: BackendModelSelection; [key: string]: unknown };
+  effective: {
+    seed?: number | string;
+    /** ACE's planner seed, when the backend writes it back; MM3 may omit it. */
+    lmSeed?: number | string;
+    models: BackendModelSelection;
+    [key: string]: unknown;
+  };
   reseeded: boolean;
   engineJobIds: string[];
   endReason?: GenerationEndReason;
@@ -246,10 +252,10 @@ export type PollUntilDone = (
   timeoutMinutes?: number,
 ) => Promise<void>;
 
-/** Transitional step 4 context. `envelope`, `attempt`, and `lease` are added
- * only when steps 5, 7, and 8 respectively make those values real. */
+/** Step 7 context. `lease` is added when step 8 makes lane ownership real. */
 export interface GenerationContext {
   envelope: Readonly<GenerationEnvelope>;
+  attempt: GenerationAttempt;
   signal: AbortSignal;
   pollUntilDone: PollUntilDone;
   stageProfile: (stage: string | undefined) => StageProfile;

@@ -62,12 +62,14 @@ import {
   type Mm3SynthRequest, type Mm3JobDetail,
 } from './client.js';
 import type { GenerationJob, StageTiming } from '../../generation/jobTypes.js';
+import type { GenerationAttempt } from '../types.js';
 
 /** Injected so this module never imports back into routes/generate.ts at
  *  runtime (type-only import above is erased). pollUntilDone owns the stall
  *  watchdog, the wall-clock timeout and cancel checks — MM3 jobs use the same
  *  engine /job endpoints, so it applies unchanged. */
 export interface MinimaxGenerationDeps {
+  attempt: GenerationAttempt;
   signal: AbortSignal;
   pollUntilDone(
     aceJobId: string, job: GenerationJob, signal: AbortSignal, timeoutMinutes?: number,
@@ -897,6 +899,8 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
     job.progress = 2;
     const submitStart = performance.now();
     const sub = await mm3Synth(req);
+    // Preserve the exact seed even for a single take or a later engine failure.
+    deps.attempt.effective.seed = sub.seed_str ?? sub.seed;
     job.aceJobId = sub.job_id;   // standard /job id — /cancel/:id reaches it unchanged
     // Published on the job so GET /api/generate/status/:id can tell the browser
     // whether there is anything to listen to. The ENGINE's answer, not the

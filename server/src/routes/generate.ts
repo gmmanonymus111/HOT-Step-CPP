@@ -26,6 +26,11 @@ import { pollUntilDone } from '../services/generation/pollUntilDone.js';
 import { translateParams } from '../services/generation/translateParams.js';
 import { buildEnvelope, GenerationEnvelopeError } from '../services/generation/envelope.js';
 import { noteEnqueued, noteFinished } from '../services/generation/residency.js';
+import type {
+  GenerationAttempt,
+  GenerationEndReason,
+  GenerationOutcome,
+} from '../services/backends/types.js';
 
 export type { GenerationJob, StageTiming } from '../services/generation/jobTypes.js';
 
@@ -50,14 +55,59 @@ setInterval(() => {
 
 // translateParams is now imported from ../services/generation/translateParams.ts
 
+function emptyOutcome(job: GenerationJob, endReason: GenerationEndReason): GenerationOutcome {
+  return {
+    endReason,
+    stages: [],
+    artifacts: [],
+    songIds: [],
+    result: job.result,
+    error: job.error,
+  };
+}
+
+function effectiveSeed(job: GenerationJob, attempt: GenerationAttempt): number | string | undefined {
+  // MM3's exact uint64 seed string is authoritative when it is available;
+  // never round it through Number. ACE and ordinary MM3 renders retain the
+  // existing numeric job.params value.
+  const exactMm3Seed = job.mm3TakeSeeds?.[0]
+    ?? (typeof attempt.effective.seed === 'string' ? attempt.effective.seed : undefined);
+  if (typeof exactMm3Seed === 'string' && exactMm3Seed.length > 0) return exactMm3Seed;
+  const seed = job.params?.seed;
+  return typeof seed === 'number' || typeof seed === 'string' ? seed : undefined;
+}
+
+function finalizeAttempt(
+  attempt: GenerationAttempt,
+  job: GenerationJob,
+  outcome?: GenerationOutcome,
+  thrownError?: string,
+): void {
+  const seed = effectiveSeed(job, attempt);
+  if (seed !== undefined) attempt.effective.seed = seed;
+  const lmSeed = job.params?.lmSeed;
+  if (typeof lmSeed === 'number' || typeof lmSeed === 'string') {
+    attempt.effective.lmSeed = lmSeed;
+  }
+  attempt.endedAt = Date.now();
+  attempt.error = thrownError ?? outcome?.error ?? job.error;
+  attempt.endReason = outcome?.endReason
+    ?? (job.status === 'cancelled' || thrownError?.includes('Cancelled') ? 'cancelled' : 'failed');
+}
+
 /** Run the full generation pipeline */
-async function runGeneration(job: GenerationJob, signal: AbortSignal): Promise<void> {
-  if (job.status === 'cancelled') return;
+async function runGeneration(
+  job: GenerationJob,
+  signal: AbortSignal,
+  attempt: GenerationAttempt,
+): Promise<GenerationOutcome> {
+  if (job.status === 'cancelled') return emptyOutcome(job, 'cancelled');
   const backendId = job.envelope?.backendId;
   const backend = backendId ? getBackend(backendId) : undefined;
   if (!backend) throw new Error(`Captured generation backend '${backendId ?? '(missing)'}' is not registered`);
-  await backend.generate(job, {
+  return backend.generate(job, {
     envelope: job.envelope,
+    attempt,
     signal,
     pollUntilDone,
     stageProfile: backend.stageProfile ?? (() => ({ stallMs: 900_000 })),
@@ -70,8 +120,6 @@ async function runGeneration(job: GenerationJob, signal: AbortSignal): Promise<v
 // calls also leak progress between jobs because subscribeLines() is a global
 // pub/sub with no job tagging. The lane is shared rather than private because
 // post-processing re-runs are just as GPU-hungry and must not race a render.
-const MAX_RETRIES = 1; // retry once on transient failures
-
 function enqueueGeneration(job: GenerationJob): void {
   const family = job.envelope.backendId;
   noteEnqueued(family);
@@ -80,35 +128,55 @@ function enqueueGeneration(job: GenerationJob): void {
   }
 
   void runOnGpuLane(async () => {
-    let attempts = 0;
+    const retryPolicy = job.envelope.policy.retry;
+    let attemptNumber = 0;
+    let reseededForAttempt = false;
 
-    while (attempts <= MAX_RETRIES) {
+    while (attemptNumber < retryPolicy.maxAttempts) {
+      attemptNumber++;
+      const attempt: GenerationAttempt = {
+        attempt: attemptNumber,
+        startedAt: Date.now(),
+        effective: { models: structuredClone(job.envelope.models) },
+        reseeded: reseededForAttempt,
+        engineJobIds: [],
+        ...(job.envelope.submittedBackendMismatch === undefined ? {} : {
+          submittedBackendMismatch: job.envelope.submittedBackendMismatch,
+        }),
+      };
+      job.attempts.push(attempt);
       const abortController = new AbortController();
       (job as any)._abort = abortController;
       try {
-        await runGeneration(job, abortController.signal);
-        break; // success — exit retry loop
+        const outcome = await runGeneration(job, abortController.signal, attempt);
+        finalizeAttempt(attempt, job, outcome);
+        break; // A returned outcome, including a consumed failure, ends this retry scope.
       } catch (err: any) {
         const msg = err.message || '';
         const isRetryable = !msg.includes('Cancelled')
           && !msg.includes('Unauthorized')
           && job.status !== 'cancelled';
+        finalizeAttempt(attempt, job, undefined, msg);
 
-        if (isRetryable && attempts < MAX_RETRIES) {
-          attempts++;
-          console.log(`[Generate] Job ${job.id} failed (attempt ${attempts}), retrying: ${msg}`);
-          logGeneration(job.id, 'WARNING', `[Retry] Attempt ${attempts} failed: ${msg} — retrying with new seed...`);
+        if (isRetryable && attemptNumber < retryPolicy.maxAttempts) {
+          console.log(`[Generate] Job ${job.id} failed (attempt ${attemptNumber}), retrying: ${msg}`);
+          logGeneration(job.id, 'WARNING', `[Retry] Attempt ${attemptNumber} failed: ${msg} — retrying with new seed...`);
 
           // Reset job state for retry
           job.status = 'pending';
-          job.stage = `Retrying (attempt ${attempts + 1})...`;
+          job.stage = `Retrying (attempt ${attemptNumber + 1})...`;
           job.progress = 0;
           job.error = undefined;
           job.aceJobId = undefined;
 
           // Randomize seed on retry — bad LM output (same seed) may have caused the stall
-          job.params.seed = Math.floor(Math.random() * 2_147_483_647);
-          job.params.randomSeed = true;
+          if (retryPolicy.reseedOnRetry) {
+            job.params.seed = Math.floor(Math.random() * 2_147_483_647);
+            job.params.randomSeed = true;
+            // Finalize the current attempt before changing job.params. The
+            // next attempt owns the reseeded flag and captures this new seed.
+            reseededForAttempt = true;
+          }
 
           // Brief pause before retry
           await new Promise(r => setTimeout(r, 2000));
@@ -117,7 +185,7 @@ function enqueueGeneration(job: GenerationJob): void {
           job.status = 'failed';
           job.error = msg;
           job.stage = 'Failed';
-          console.error(`[Generate] Job ${job.id} failed permanently${attempts > 0 ? ` after ${attempts + 1} attempt(s)` : ''}: ${msg}`);
+          console.error(`[Generate] Job ${job.id} failed permanently${attemptNumber > 1 ? ` after ${attemptNumber} attempt(s)` : ''}: ${msg}`);
           failGenerationLog(job.id, msg, 'unknown');
           break;
         }
@@ -172,6 +240,7 @@ router.post('/', (req, res) => {
     stage: 'Queued',
     progress: 0,
     params: structuredClone(req.body),
+    attempts: [],
     createdAt: enqueuedAt,
   };
 
@@ -203,6 +272,7 @@ router.get('/status/:id', (req, res) => {
     progress: job.progress,
     result: job.result,
     error: job.error,
+    attempts: job.attempts,
     ace_job_id: job.aceJobId ?? null,
     ace_phase: job.acePhase ?? null,
     ace_phase_progress: job.acePhaseProgress ?? null,

@@ -843,6 +843,7 @@ export const minimaxBackend: EngineBackend = {
   resolveRequest,
   async generate(job: GenerationJob, ctx: GenerationContext): Promise<GenerationOutcome> {
     await runMinimaxGeneration(job, {
+      attempt: ctx.attempt,
       pollUntilDone: ctx.pollUntilDone,
       signal: ctx.signal,
     });

@@ -152,8 +152,10 @@ test('queued jobs retain captured ACE/MM3 backends across selector changes', asy
       job.status = 'succeeded'; job.result = { audioUrls: [`${job.id}.wav`] };
     } },
   };
+  const effectiveSeed = extractFunction('server/src/routes/generate.ts', 'effectiveSeed');
+  const finalizeAttempt = extractFunction('server/src/routes/generate.ts', 'finalizeAttempt', { effectiveSeed });
   const routeContext = {
-    getBackend: id => backends[id], runGeneration: extractFunction('server/src/routes/generate.ts', 'runGeneration', {
+    getBackend: id => backends[id], finalizeAttempt, runGeneration: extractFunction('server/src/routes/generate.ts', 'runGeneration', {
       getBackend: id => backends[id], pollUntilDone: () => 'poller',
     }), runOnGpuLane: lane.runOnGpuLane, gpuLaneBusy: lane.gpuLaneBusy, gpuLaneDepth: lane.gpuLaneDepth,
     noteEnqueued: family => enqueued.push(family), noteFinished: family => {
@@ -164,8 +166,8 @@ test('queued jobs retain captured ACE/MM3 backends across selector changes', asy
   const enqueue = extractFunction('server/src/routes/generate.ts', 'enqueueGeneration', routeContext);
   let release;
   lane.runOnGpuLane(() => new Promise(resolve => { release = resolve; }));
-  const jobA = { id: 'A', status: 'pending', params: {}, envelope: envA };
-  const jobB = { id: 'B', status: 'pending', params: {}, envelope: envB };
+  const jobA = { id: 'A', status: 'pending', params: {}, attempts: [], envelope: envA };
+  const jobB = { id: 'B', status: 'pending', params: {}, attempts: [], envelope: envB };
   enqueue(jobA); enqueue(jobB);
   fixture.setActive('missing');
   release();
