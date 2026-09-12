@@ -35,7 +35,13 @@ struct HotStepFamily {
     bool (*weights_present)(const char * models_dir);
 };
 
-// bool yue2_weights_present(const char * models_dir);   // <models>/yue2/yue2-lm-*.gguf — NOT active yet
+// yue2_weights_present is declared `static` in engine/src/yue2/yue2-model.h,
+// which hot-step-server.cpp includes at the TOP of the file (alongside
+// minimax/mm3-server.h, before this header), so it is already visible by
+// name here — same "earlier #include in the same TU" contract this file's
+// own header comment documents for mm3_weights_present. No forward
+// declaration here (a non-static one would conflict with yue2-model.h's own
+// `static` definition) — same reason mm3_weights_present has none either.
 
 // C++17 inline variable: exactly one definition across however many TUs end
 // up including this header (today: one), so g_hot_step_families itself is
@@ -46,7 +52,7 @@ inline constexpr HotStepFamily g_hot_step_families[] = {
     { "ace-step", nullptr },           // registry_scan() already covers this row; kept here so the
                                         // table — not the two call sites — is the map of "who can serve".
     { "MiniMax-Music3", mm3_weights_present },
-    // { "YuE2", yue2_weights_present },
+    { "YuE2", yue2_weights_present },
 };
 
 inline bool hot_step_any_family_weights_present(const char * models_dir) {

@@ -51,6 +51,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ---------------------------------------------------------------------
@@ -394,6 +395,46 @@ static std::vector<int> yue2_bpe_encode(const BPETokenizer * tok, const std::str
         encode_chunk(tok, chunk, ids);
     }
     return ids;
+}
+
+// Reverse of yue2_bpe_encode: ordinary-vocab ids (< EOD) -> UTF-8 text.
+// Milestone M7 addition (not part of M0's original scope) -- needed only to
+// render the plan stage's sampled ABC span back to readable text for the
+// `score.abc` result artifact (docs/plans/yue2/06-engine-port-plan.md §7).
+// Display-only / best-effort: an id outside the vocab, or a byte-string
+// fragment this process's own build_byte_encoder() table doesn't recognise,
+// is silently dropped rather than aborting the whole decode -- nothing
+// downstream is numeric here, unlike every other function in this file.
+static inline std::string yue2_bpe_decode(const BPETokenizer * tok, const std::vector<int32_t> & ids) {
+    static std::unordered_map<std::string, uint8_t> * byte_of_str = nullptr;
+    if (!byte_of_str) {
+        auto * m = new std::unordered_map<std::string, uint8_t>();
+        std::string byte2str[256];
+        build_byte_encoder(byte2str);
+        for (int b = 0; b < 256; b++) {
+            (*m)[byte2str[b]] = (uint8_t) b;
+        }
+        byte_of_str = m;
+    }
+    std::string out;
+    for (int32_t id : ids) {
+        if (id < 0 || (size_t) id >= tok->id_to_str.size()) {
+            continue;
+        }
+        const std::string & tstr = tok->id_to_str[(size_t) id];
+        size_t              i    = 0;
+        while (i < tstr.size()) {
+            int adv     = 1;
+            utf8_codepoint(tstr.c_str() + i, &adv);
+            const std::string cp_str = tstr.substr(i, (size_t) adv);
+            auto               it    = byte_of_str->find(cp_str);
+            if (it != byte_of_str->end()) {
+                out.push_back((char) it->second);
+            }
+            i += (size_t) adv;
+        }
+    }
+    return out;
 }
 
 // Load the tokenizer straight from the LM GGUF's tokenizer.ggml.tokens/

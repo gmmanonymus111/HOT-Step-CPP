@@ -79,7 +79,12 @@ $familyHooks = @(
         Call    = 'mm3_register_job_routes\s*\('
         LostMsg = "MID-FILE include (after the job system: Job/job_create/work_push), not next to mm3-server.h at the top - re-add it AFTER job_status_str(), which is where Job, job_create, job_set_phase, work_push and g_store are defined. Lose the include and POST /mm3/synth vanishes, leaving only the deprecated /mm3/synth-e2e bring-up path that does GPU work on an httplib thread. Without the call, POST /mm3/synth and GET /mm3/job are not routed."
     }
-    # YuE2 adds its own include/call row(s) here and nothing else in this file.
+    @{
+        Family  = "YuE2"
+        Include = '#include\s+"yue2/yue2-server\.h"'
+        Call    = 'yue2_register_routes\s*\('
+        LostMsg = "Single hook for the whole YuE2 backend subsystem (engine/src/yue2/). Without the include, every /yue2/* route vanishes, including the production POST /yue2/synth (which rides the SHARED /job routes -- there is no separate /yue2/job route to lose). The include alone registers nothing - the call site is the other half."
+    }
 )
 foreach ($hook in $familyHooks) {
     if ($content -match $hook.Include) {

@@ -85,9 +85,19 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 // is mm3_register_routes(svr, models_dir) below. Checked by verify-hooks.ps1.
 #include "minimax/mm3-server.h"
 
+// ── HOT-Step hook: YuE2 model probe (family-table visibility only) ─────
+// yue2-model.h is the loader/config/residency header for engine/src/yue2/ —
+// lightweight (no Job/work_push dependency), so it is safe to include here
+// at the top, unlike yue2-server.h below (which needs the job system and is
+// therefore included mid-file, next to minimax/mm3-job.h). Included here so
+// yue2_weights_present is visible by name to hot-step-families.h's family
+// table immediately below — MUST come before that include.
+#include "yue2/yue2-model.h"
+
 // ── HOT-Step hook: in-process model family registry ────────────────────
 // Generalises the two boot gates below beyond naming MM3 directly. MUST come
-// after minimax/mm3-server.h (see hot-step-families.h's own comment on why).
+// after minimax/mm3-server.h and yue2/yue2-model.h (see hot-step-families.h's
+// own comment on why).
 #include "hot-step-families.h"
 
 #include <atomic>
@@ -287,6 +297,14 @@ enum class JobPhase : int {
     DONE               = 12,
     FAILED             = 13,
     CANCELLED          = 14,
+    // HOT-Step: YuE2 (engine/src/yue2/) stage names. Generalised enough for
+    // any future family to adopt (docs/plans/yue2/06-engine-port-plan.md §7's
+    // "queued engine-window changes" item 3) rather than YuE2-hardcoded in
+    // spirit, but concretely only YuE2 populates these today. VAE decode
+    // reuses the existing VAE_DECODE phase above (same concept as ACE's own).
+    YUE2_PLAN          = 15,
+    YUE2_SEMANTIC      = 16,
+    YUE2_NAR           = 17,
 };
 
 static const char * job_phase_str(JobPhase p) {
@@ -306,6 +324,9 @@ static const char * job_phase_str(JobPhase p) {
         case JobPhase::DONE:               return "done";
         case JobPhase::FAILED:             return "failed";
         case JobPhase::CANCELLED:          return "cancelled";
+        case JobPhase::YUE2_PLAN:          return "plan";
+        case JobPhase::YUE2_SEMANTIC:      return "semantic";
+        case JobPhase::YUE2_NAR:           return "nar";
     }
     return "unknown";
 }
@@ -321,6 +342,17 @@ struct Job {
     // layout). Only populated when the /mm3/synth request set get_ar_codes;
     // retrieved via GET /mm3/job?id=<id>&ar=1. Empty otherwise.
     std::string       result_ar_codes;
+    // HOT-Step: YuE2 terminal fields (docs/plans/yue2/06-engine-port-plan.md
+    // §7's "queued engine-window changes" item 3 — generalised enough for any
+    // family to adopt, additive alongside the generic fields above, never a
+    // replacement). result_end_reason: "completed"|"limit_hit"|"cancelled"|
+    // "failed", empty until the job reaches DONE (or FAILED/CANCELLED, where
+    // it is normally left empty too — the job's own `status` already says
+    // that). result_stage_end_reasons: a pre-built JSON object string, e.g.
+    // {"plan":"skipped","semantic":"eos"}; empty if the family populated
+    // nothing (ACE/MM3 jobs never touch either field).
+    std::string       result_end_reason;
+    std::string       result_stage_end_reasons;
     std::atomic<bool> cancel{ false };
 
     // Phase tracking (advisory, independent of `status`). phase_step/phase_total
@@ -419,6 +451,18 @@ static const char * job_status_str(int s) {
 // The call site is mm3_register_job_routes(svr) next to mm3_register_routes().
 // Checked by verify-hooks.ps1.
 #include "minimax/mm3-job.h"
+
+// HOT-STEP: the only other hook wiring engine/src/yue2/ in. ONE include (not
+// MM3's two) — yue2-server.h itself pulls in yue2-job.h, which needs Job,
+// job_create(), job_set_phase(), work_push() and g_store, all defined above,
+// which is why this sits here rather than beside yue2/yue2-model.h at the
+// top (docs/plans/yue2/06-engine-port-plan.md §7 describes this as a single
+// include/call pair; this is the earliest point in the file where that
+// single include can actually compile — YuE2 registers no separate job
+// route, so unlike MM3 there is no reason to split it into two). The call
+// site is yue2_register_routes(svr, models_dir) next to mm3_register_routes().
+// Checked by verify-hooks.ps1.
+#include "yue2/yue2-server.h"
 
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
 // SSE clients connect to /logs and receive lines in real time.
@@ -3442,6 +3486,13 @@ int main(int argc, char ** argv) {
     // minimax/mm3-job.h has to be included after this file's job system.
     mm3_register_job_routes(svr);
 
+    // HOT-STEP: YuE2 backend — GET /yue2/props, POST /yue2/warm, POST
+    // /yue2/unload, POST /yue2/select-model, POST /yue2/tokenize-check, and
+    // the production POST /yue2/synth (which rides the SHARED GET/POST /job
+    // routes above for progress/result/cancel — no /yue2/job route exists).
+    // No-op (routes report available:false) when no YuE2 weights are present.
+    yue2_register_routes(svr, models_dir);
+
     // HOT-STEP: GET /vram — GPU memory usage (CUDA only)
     svr.Get("/vram", [](const httplib::Request &, httplib::Response & res) {
 #ifdef GGML_USE_CUDA
@@ -3578,7 +3629,22 @@ int main(int argc, char ** argv) {
         snprintf(phase_buf, sizeof(phase_buf),
                  "{\"status\":\"%s\",\"phase\":\"%s\",\"phase_step\":%d,\"phase_total\":%d}",
                  job_status_str(job->status.load()), job_phase_str(job->phase.load()), step, total);
-        res.set_content(phase_buf, "application/json");
+        // HOT-Step: additive YuE2 terminal fields, spliced in only when a
+        // family actually populated them (ACE/MM3 jobs leave both empty, so
+        // their response is byte-identical to before). Read only meaningful
+        // once status != running, same convention as result_body/result_mime.
+        std::string body = phase_buf;
+        if (!job->result_end_reason.empty() || !job->result_stage_end_reasons.empty()) {
+            body.pop_back();  // drop the closing '}'
+            if (!job->result_end_reason.empty()) {
+                body += ",\"end_reason\":\"" + job->result_end_reason + "\"";
+            }
+            if (!job->result_stage_end_reasons.empty()) {
+                body += ",\"stage_end_reasons\":" + job->result_stage_end_reasons;
+            }
+            body += "}";
+        }
+        res.set_content(body, "application/json");
     });
     svr.Post("/job", [](const httplib::Request & req, httplib::Response & res) {
         if (!req.has_param("id")) {

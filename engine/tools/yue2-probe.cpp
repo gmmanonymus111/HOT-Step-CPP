@@ -12,6 +12,7 @@
 //   yue2-probe --sampler-parity <fixture-root-dir> --stage plan|semantic --models <dir>
 //   yue2-probe --decode-parity <fixture-root-dir> --stage plan|semantic --models <dir>
 //   yue2-probe --generate --cot off --style <s> --lyrics <s> [--max-tokens <n>] [--seed <n>] --models <dir>
+//   yue2-probe --vae-parity <fixture-root-dir> --models <dir> [--variant standard|legacy]
 //
 // --info: header-only probe (no weights loaded) — prints config, tensor
 //         count/bytes per file, and any missing/unexpected tensor vs what
@@ -59,8 +60,10 @@
 
 #include "yue2/yue2-lm-graph.h"
 #include "yue2/yue2-model.h"
+#include "yue2/yue2-nar-graph.h"
 #include "yue2/yue2-sample.h"
 #include "yue2/yue2-tokenizer.h"
+#include "yue2/yue2-vae-graph.h"
 
 #include <algorithm>
 #include <chrono>
@@ -85,6 +88,8 @@ static void usage() {
             "       yue2-probe --ar-parity <fixture-root-dir> --stage plan|semantic --models <dir>\n"
             "       yue2-probe --sampler-parity <fixture-root-dir> --stage plan|semantic --models <dir>\n"
             "       yue2-probe --decode-parity <fixture-root-dir> --stage plan|semantic --models <dir>\n"
+            "       yue2-probe --nar-parity <fixture-root-dir> --models <dir>\n"
+            "       yue2-probe --vae-parity <fixture-root-dir> --models <dir> [--variant standard|legacy]\n"
             "       yue2-probe --generate --cot off --style <s> --lyrics <s> --max-tokens <n> --seed <n> "
             "--models <dir>\n");
 }
@@ -1458,6 +1463,610 @@ static int run_decode_parity(const Yue2Model & m, const std::string & fixture_di
     return (total > 0 && passed == total) ? 0 : 1;
 }
 
+// ── NAR parity (M5) ──────────────────────────────────────────────────────
+
+static std::vector<std::pair<int64_t, int64_t>> yue2_json_range_arr(yyjson_val * root, const char * key) {
+    std::vector<std::pair<int64_t, int64_t>> out;
+    yyjson_val *                             v = root ? yyjson_obj_get(root, key) : nullptr;
+    if (!v || !yyjson_is_arr(v)) {
+        return out;
+    }
+    size_t       idx, max;
+    yyjson_val * item;
+    yyjson_arr_foreach(v, idx, max, item) {
+        if (yyjson_is_arr(item) && yyjson_arr_size(item) == 2) {
+            out.push_back({ (int64_t) yyjson_get_int(yyjson_arr_get(item, 0)),
+                             (int64_t) yyjson_get_int(yyjson_arr_get(item, 1)) });
+        }
+    }
+    return out;
+}
+
+// §9: nar_cos/nar_sin/nar_pos_emb/state_initial are "single stored/looked-up
+// value" checks -- the plain rounding bound, not the 8x accumulation scale.
+static constexpr double YUE2_NAR_LOOKUP_GATE = YUE2_BF16_ROUNDING_BOUND;
+// nar_input_embedding_step000: one embedding lookup plus two additions (§9).
+static constexpr double YUE2_NAR_EMBED_GATE = 8.0 * YUE2_BF16_ROUNDING_BOUND;
+
+// velocity/state relative-L2, gated as a TREND across steps (§9): 28 NAR
+// layers' worth of accumulation for this step's own network pass, PLUS the
+// compounding of every already-completed step behind the state it's fed.
+// velocity at step s has s completed steps behind it; state AFTER step s has
+// s+1. final_latents (all `steps` completed) uses steps+28, matching the
+// schema's own worked "sqrt(28+32)" figure for the last pinned step.
+static double yue2_nar_velocity_gate(int64_t step) {
+    return 8.0 * YUE2_BF16_ROUNDING_BOUND * std::sqrt((double) (28 + step));
+}
+static double yue2_nar_state_gate(int64_t step) {
+    return 8.0 * YUE2_BF16_ROUNDING_BOUND * std::sqrt((double) (28 + step + 1));
+}
+
+// Generic relative-L2 array check against one already-loaded fixture buffer.
+// SKIPs (not FAILs) a genuinely-missing fixture file -- same posture as the
+// AR-parity/decode-parity helpers above.
+static bool yue2_check_array(const std::string & label, const std::vector<float> & got,
+                             const std::vector<float> & expected, double gate, int * total, int * passed) {
+    if (expected.empty()) {
+        printf("SKIP %-32s fixture file not found/readable\n", label.c_str());
+        return false;
+    }
+    if (got.size() != expected.size()) {
+        printf("FAIL %-32s size mismatch: got %zu expected %zu\n", label.c_str(), got.size(), expected.size());
+        (*total)++;
+        return false;
+    }
+    const double rl2 = yue2_rel_l2(got.data(), expected.data(), (int64_t) got.size());
+    (*total)++;
+    const bool ok = rl2 <= gate;
+    if (ok) {
+        (*passed)++;
+    }
+    printf("%s %-32s rel_l2=%.6f (gate %.6f, n=%zu)\n", ok ? "OK  " : "FAIL", label.c_str(), rl2, gate, got.size());
+    return ok;
+}
+
+// Reads back Yue2ArKvCache's layer K/V in TOKEN-MAJOR order [n, Nkv, D] —
+// deliberately NOT yue2_ar_kv_cache_dump_layer (yue2-lm-graph.h), which reads
+// HEAD-MAJOR [Nkv, n, D] to match 02_semantic's StaticKVCache dump. The NAR
+// fixture's own cache_layer{0,27}_{k,v}.bin is captured directly from
+// nar.py's un-transposed project_qkv() output ([T,Nkv,D], per
+// 03-reference-numerics.md §3.1) — a genuinely different axis order from the
+// AR eager path's cache, not a bug in either fixture. The underlying ggml
+// tensor is unchanged (still [D,T,Nkv,1], head-major in memory); only the
+// readback order differs here.
+static bool yue2_nar_kv_dump_token_major(const Yue2ArKvCache & cache, int layer, int64_t n,
+                                         std::vector<float> * k_out, std::vector<float> * v_out) {
+    if (layer < 0 || (size_t) layer >= cache.k.size() || n <= 0 || n > cache.filled) {
+        return false;
+    }
+    ggml_tensor * kt  = cache.k[(size_t) layer];
+    ggml_tensor * vt  = cache.v[(size_t) layer];
+    const int64_t D   = kt->ne[0];
+    const int64_t Nkv = kt->ne[2];
+    k_out->resize((size_t) (n * Nkv * D));
+    v_out->resize((size_t) (n * Nkv * D));
+    std::vector<uint16_t> tmp((size_t) (n * D));
+    for (int64_t h = 0; h < Nkv; h++) {
+        ggml_backend_tensor_get(kt, tmp.data(), (size_t) h * kt->nb[2], (size_t) (n * D) * sizeof(uint16_t));
+        for (int64_t t = 0; t < n; t++) {
+            for (int64_t d = 0; d < D; d++) {
+                (*k_out)[(size_t) (t * Nkv * D + h * D + d)] =
+                    ggml_fp16_to_fp32(*(const ggml_fp16_t *) &tmp[(size_t) (t * D + d)]);
+            }
+        }
+        ggml_backend_tensor_get(vt, tmp.data(), (size_t) h * vt->nb[2], (size_t) (n * D) * sizeof(uint16_t));
+        for (int64_t t = 0; t < n; t++) {
+            for (int64_t d = 0; d < D; d++) {
+                (*v_out)[(size_t) (t * Nkv * D + h * D + d)] =
+                    ggml_fp16_to_fp32(*(const ggml_fp16_t *) &tmp[(size_t) (t * D + d)]);
+            }
+        }
+    }
+    return true;
+}
+
+// --nar-parity: builds this chunk's AR-prefix KV (yue2_nar_chunk_init, which
+// reuses yue2_ar_prefill verbatim), runs the 32-step midpoint solve
+// (yue2_nar_solve_midpoint), and checks every sub-module/pinned-step/final
+// fixture file docs/plans/yue2/02-fixture-schema.md §1/§9 defines for
+// 03_nar/. Starts at chunk 0 and walks every chunk chunk_ranges names (every
+// v1.4 fixture captured so far has exactly one chunk).
+static int run_nar_parity(const std::string & models_dir, const std::string & fixture_dir) {
+    Yue2Model m;
+    yue2_discover(&m, models_dir.c_str());
+    if (!yue2_available(m)) {
+        fprintf(stderr, "FATAL: YuE2 LM GGUF not found/probe failed under %s\n", models_dir.c_str());
+        return 1;
+    }
+    std::string err;
+    if (!yue2_load_parts(&m, /*want_lm=*/true, /*want_vae=*/false, YUE2_VAE_STANDARD, /*want_encoder=*/false, &err)) {
+        fprintf(stderr, "FATAL: LM load failed: %s\n", err.c_str());
+        return 1;
+    }
+    printf("Loaded YuE2 LM (%.2f GB) via %s\n", (double) m.vram_lm / (1024.0 * 1024.0 * 1024.0),
+           m.backend ? ggml_backend_name(m.backend) : "(none)");
+
+    const std::string nar_dir = fixture_dir + "/03_nar";
+    yyjson_doc *       mdoc   = nullptr;
+    yyjson_val *       mroot  = yue2_json_read_root(nar_dir + "/manifest.json", &mdoc);
+    if (!mroot) {
+        fprintf(stderr, "FATAL: cannot read %s/manifest.json\n", nar_dir.c_str());
+        yue2_unload(&m);
+        return 1;
+    }
+    const int64_t                             ode_steps  = (int64_t) yue2_json_int(mroot, "ode_steps", 32);
+    const int64_t                             num_chunks = (int64_t) yue2_json_int(mroot, "num_chunks", 0);
+    std::vector<std::pair<int64_t, int64_t>> chunk_ranges = yue2_json_range_arr(mroot, "chunk_ranges");
+    yyjson_doc_free(mdoc);
+
+    std::vector<float> noise_full_song;
+    if (!yue2_read_f32_bin(nar_dir + "/noise_full_song.bin", &noise_full_song)) {
+        fprintf(stderr, "FATAL: cannot read %s/noise_full_song.bin\n", nar_dir.c_str());
+        yue2_unload(&m);
+        return 1;
+    }
+    std::vector<float> song_expected;
+    yue2_read_f32_bin(nar_dir + "/song_final_latents.bin", &song_expected);
+
+    const int64_t LD = (int64_t) m.lm_cfg.latent_dim;
+    printf("03_nar: num_chunks=%lld ode_steps=%lld total_frames=%zu\n", (long long) num_chunks, (long long) ode_steps,
+           LD > 0 ? noise_full_song.size() / (size_t) LD : (size_t) 0);
+
+    int    total = 0, passed = 0;
+    std::vector<float> song_got;
+    double total_velocity_ms    = 0.0;
+    int     total_velocity_calls = 0;
+
+    for (int64_t ci = 0; ci < num_chunks; ci++) {
+        char cdir_name[64];
+        snprintf(cdir_name, sizeof(cdir_name), "/chunks/chunk_%03lld", (long long) ci);
+        const std::string cdir = nar_dir + cdir_name;
+
+        yyjson_doc * cdoc  = nullptr;
+        yyjson_val * croot = yue2_json_read_root(cdir + "/manifest.json", &cdoc);
+        if (!croot) {
+            fprintf(stderr, "FATAL: cannot read %s/manifest.json\n", cdir.c_str());
+            yue2_unload(&m);
+            return 1;
+        }
+        const int64_t          ar_length     = (int64_t) yue2_json_int(croot, "ar_length", 0);
+        const int64_t          nar_length_ex = (int64_t) yue2_json_int(croot, "nar_length", 0);
+        std::vector<int64_t>   pinned_steps  = yue2_json_int_arr(croot, "pinned_steps");
+        yyjson_doc_free(cdoc);
+
+        int64_t a = 0, b = 0;
+        if ((size_t) ci < chunk_ranges.size()) {
+            a = chunk_ranges[(size_t) ci].first;
+            b = chunk_ranges[(size_t) ci].second;
+        }
+        const int64_t chunk_len = b - a;
+        if (chunk_len <= 0 || nar_length_ex != chunk_len + 2) {
+            fprintf(stderr,
+                    "FATAL: chunk_%03lld: bad range/nar_length in manifests (a=%lld b=%lld nar_length=%lld)\n",
+                    (long long) ci, (long long) a, (long long) b, (long long) nar_length_ex);
+            yue2_unload(&m);
+            return 1;
+        }
+
+        std::vector<int> ar_prefix_i32;
+        if (!yue2_read_i32_bin(cdir + "/ar_prefix_ids.bin", &ar_prefix_i32)) {
+            fprintf(stderr, "FATAL: cannot read %s/ar_prefix_ids.bin\n", cdir.c_str());
+            yue2_unload(&m);
+            return 1;
+        }
+        std::vector<int32_t> ar_prefix_ids(ar_prefix_i32.begin(), ar_prefix_i32.end());
+        if ((int64_t) ar_prefix_ids.size() != ar_length) {
+            fprintf(stderr, "WARN chunk_%03lld: ar_prefix_ids.bin has %zu ids, manifest says ar_length=%lld\n",
+                    (long long) ci, ar_prefix_ids.size(), (long long) ar_length);
+        }
+
+        printf("--- chunk_%03lld: ar_length=%lld chunk_len=%lld nar_length=%lld pinned_steps=%zu ---\n",
+               (long long) ci, (long long) ar_length, (long long) chunk_len, (long long) nar_length_ex,
+               pinned_steps.size());
+
+        Yue2NarChunk chunk;
+        if (!yue2_nar_chunk_init(m, ar_prefix_ids, chunk_len, &chunk, &err)) {
+            fprintf(stderr, "FATAL: chunk_%03lld init failed: %s\n", (long long) ci, err.c_str());
+            yue2_unload(&m);
+            return 1;
+        }
+
+        // (1) AR-prefix KV cache vs. the fixture's own dump -- same gate
+        // scale as decode-parity's kv check (layer index -> hidden-tap axis).
+        auto check_kv = [&](int layer, const std::string & path_k, const std::string & path_v, int tap_index) {
+            std::vector<float> exp_k, exp_v;
+            if (!yue2_read_bf16_widen_bin(path_k, &exp_k) || !yue2_read_bf16_widen_bin(path_v, &exp_v)) {
+                printf("SKIP cache_layer%d: fixture files not found under %s\n", layer, cdir.c_str());
+                return;
+            }
+            std::vector<float> got_k, got_v;
+            if (!yue2_nar_kv_dump_token_major(chunk.ar_cache, layer, chunk.ar_length, &got_k, &got_v)) {
+                printf("FAIL cache_layer%d: dump_layer failed\n", layer);
+                total += 2;
+                return;
+            }
+            const double gate = 8.0 * YUE2_BF16_ROUNDING_BOUND * std::sqrt((double) (tap_index + 1));
+            const double rl2_k =
+                yue2_rel_l2(got_k.data(), exp_k.data(), (int64_t) std::min(got_k.size(), exp_k.size()));
+            const double rl2_v =
+                yue2_rel_l2(got_v.data(), exp_v.data(), (int64_t) std::min(got_v.size(), exp_v.size()));
+            total += 2;
+            const bool ok_k = rl2_k <= gate, ok_v = rl2_v <= gate;
+            if (ok_k) {
+                passed++;
+            }
+            if (ok_v) {
+                passed++;
+            }
+            printf("%s cache_layer%d_k rel_l2=%.5f (gate %.5f)\n", ok_k ? "OK  " : "FAIL", layer, rl2_k, gate);
+            printf("%s cache_layer%d_v rel_l2=%.5f (gate %.5f)\n", ok_v ? "OK  " : "FAIL", layer, rl2_v, gate);
+        };
+        check_kv(0, cdir + "/cache_layer0_k.bin", cdir + "/cache_layer0_v.bin", 1);
+        check_kv((int) m.lm_cfg.block_count - 1, cdir + "/cache_layer27_k.bin", cdir + "/cache_layer27_v.bin",
+                  (int) m.lm_cfg.block_count);
+
+        // (2) RoPE table -- host formula check, independent of the graph's
+        // own ggml_rope_ext call (same position ids, same theta).
+        std::vector<float> cos_got, sin_got;
+        yue2_nar_rope_table(m.lm_cfg, ar_length, nar_length_ex, &cos_got, &sin_got);
+        std::vector<float> cos_exp, sin_exp;
+        yue2_read_f32_bin(cdir + "/nar_cos.bin", &cos_exp);
+        yue2_read_f32_bin(cdir + "/nar_sin.bin", &sin_exp);
+        yue2_check_array("nar_cos", cos_got, cos_exp, YUE2_NAR_LOOKUP_GATE, &total, &passed);
+        yue2_check_array("nar_sin", sin_got, sin_exp, YUE2_NAR_LOOKUP_GATE, &total, &passed);
+
+        // (3) AudioPositionEmbedding gather.
+        std::vector<float> pos_emb_got;
+        if (yue2_nar_pos_emb_lookup(m, nar_length_ex, &pos_emb_got, &err)) {
+            std::vector<float> pos_emb_exp;
+            yue2_read_bf16_widen_bin(cdir + "/nar_pos_emb.bin", &pos_emb_exp);
+            yue2_check_array("nar_pos_emb", pos_emb_got, pos_emb_exp, YUE2_NAR_LOOKUP_GATE, &total, &passed);
+        } else {
+            printf("FAIL nar_pos_emb: lookup failed: %s\n", err.c_str());
+            total++;
+        }
+
+        // (4) state_initial.bin sanity check -- our own f32 noise slice vs.
+        // the reference's bf16-cast copy of the same values (informational
+        // precision-policy check, not a bug signal if it's near the gate).
+        std::vector<float> chunk_noise(noise_full_song.begin() + (long) (a * LD),
+                                       noise_full_song.begin() + (long) (b * LD));
+        std::vector<float> state_initial_exp;
+        yue2_read_bf16_widen_bin(cdir + "/state_initial.bin", &state_initial_exp);
+        yue2_check_array("state_initial", chunk_noise, state_initial_exp, YUE2_NAR_LOOKUP_GATE, &total, &passed);
+
+        // (5) The 32-step midpoint solve itself.
+        Yue2NarSolveResult solve;
+        if (!yue2_nar_solve_midpoint(m, chunk, chunk_noise, (int) ode_steps, pinned_steps, /*want_emb0=*/true, &solve,
+                                     &err)) {
+            fprintf(stderr, "FATAL: chunk_%03lld solve failed: %s\n", (long long) ci, err.c_str());
+            yue2_nar_chunk_free(&chunk);
+            yue2_unload(&m);
+            return 1;
+        }
+        total_velocity_ms += solve.total_velocity_ms;
+        total_velocity_calls += solve.velocity_calls;
+
+        std::vector<float> embed0_exp;
+        yue2_read_bf16_widen_bin(cdir + "/nar_input_embedding_step000.bin", &embed0_exp);
+        yue2_check_array("nar_input_embedding_step000", solve.input_embedding_step0, embed0_exp, YUE2_NAR_EMBED_GATE,
+                         &total, &passed);
+
+        for (const auto & p : solve.pinned) {
+            char tag[16];
+            snprintf(tag, sizeof(tag), "%03lld", (long long) p.step);
+            std::vector<float> exp_first, exp_mid, exp_state;
+            yue2_read_f32_bin(cdir + "/velocity_step" + tag + "_first.bin", &exp_first);
+            yue2_read_f32_bin(cdir + "/velocity_step" + tag + "_mid.bin", &exp_mid);
+            yue2_read_f32_bin(cdir + "/state_after_step" + tag + ".bin", &exp_state);
+            const double gv = yue2_nar_velocity_gate(p.step);
+            const double gs = yue2_nar_state_gate(p.step);
+            yue2_check_array(std::string("velocity_step") + tag + "_first", p.velocity_first, exp_first, gv, &total,
+                             &passed);
+            yue2_check_array(std::string("velocity_step") + tag + "_mid", p.velocity_mid, exp_mid, gv, &total,
+                             &passed);
+            yue2_check_array(std::string("state_after_step") + tag, p.state_after, exp_state, gs, &total, &passed);
+        }
+
+        std::vector<float> final_exp;
+        yue2_read_f32_bin(cdir + "/final_latents.bin", &final_exp);
+        const double final_gate = 8.0 * YUE2_BF16_ROUNDING_BOUND * std::sqrt((double) (28 + ode_steps));
+        yue2_check_array("final_latents", solve.final_latents, final_exp, final_gate, &total, &passed);
+
+        song_got.insert(song_got.end(), solve.final_latents.begin(), solve.final_latents.end());
+
+        yue2_nar_chunk_free(&chunk);
+    }
+
+    if (!song_expected.empty()) {
+        const double final_gate = 8.0 * YUE2_BF16_ROUNDING_BOUND * std::sqrt((double) (28 + ode_steps));
+        yue2_check_array("song_final_latents", song_got, song_expected, final_gate, &total, &passed);
+    }
+
+    printf("velocity evals: %d, total %.1f ms, avg %.2f ms/eval\n", total_velocity_calls, total_velocity_ms,
+           total_velocity_calls ? total_velocity_ms / total_velocity_calls : 0.0);
+    printf("RESULT (nar-parity): %d/%d gates passed\n", passed, total);
+
+    yue2_unload(&m);
+    return (total > 0 && passed == total) ? 0 : 1;
+}
+
+// ── --vae-parity: milestone M6 gate ─────────────────────────────────────────
+//
+// Decodes 04_vae/<variant>/input_latents.bin (the NAR stage's own final
+// latents, duplicated into this stage so it needs zero dependency on the NAR
+// fixture files being present, per 02-fixture-schema.md §7) through
+// yue2-vae-graph.h's untiled and tiled paths, and compares both against the
+// fixture's own output_audio_full_planar.bin / output_audio_planar.bin.
+//
+// Gate: 02-fixture-schema.md §9's VAE row — relative error, target
+// PROVISIONAL <= 1e-4, reported alongside max abs diff and the reference's
+// OWN tiled-vs-full delta (never averaged together — a tiled/full delta in
+// the port is not automatically a bug without checking what the reference's
+// own delta already is, since tiled and untiled are not proven bit-identical
+// even within the reference itself).
+
+static double yue2_max_abs_diff(const float * got, const float * expected, int64_t n) {
+    double worst = 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        const double d = std::fabs((double) got[i] - (double) expected[i]);
+        if (d > worst) {
+            worst = d;
+        }
+    }
+    return worst;
+}
+
+// input_latents.bin is [T,64] ROW-MAJOR (numpy C-order: index = t*64+c, i.e.
+// channel-contiguous per frame) — transpose here to the channel-major
+// [64,T] layout (index = c*T+t) yue2-vae-graph.h's decode functions expect
+// (see that file's header note; this is the one host-side transpose the
+// milestone brief calls out explicitly).
+static std::vector<float> yue2_transpose_latents_tc_to_ct(const std::vector<float> & tc, int64_t T, int64_t C) {
+    std::vector<float> ct((size_t) (T * C));
+    for (int64_t t = 0; t < T; t++) {
+        for (int64_t c = 0; c < C; c++) {
+            ct[(size_t) (c * T + t)] = tc[(size_t) (t * C + c)];
+        }
+    }
+    return ct;
+}
+
+struct Yue2VaeFixtureTile {
+    int64_t tile_index = 0, start = 0, end = 0, left = 0, right = 0, out_start = 0, out_end = 0, crop_start = 0;
+};
+
+static std::vector<Yue2VaeFixtureTile> yue2_read_tile_boundaries(const std::string & path) {
+    std::vector<Yue2VaeFixtureTile> out;
+    yyjson_doc *                    doc  = yyjson_read_file(path.c_str(), 0, NULL, NULL);
+    if (!doc) {
+        return out;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (root && yyjson_is_arr(root)) {
+        size_t       idx, max;
+        yyjson_val * item;
+        yyjson_arr_foreach(root, idx, max, item) {
+            Yue2VaeFixtureTile tb;
+            auto               geti = [&](const char * k) -> int64_t {
+                yyjson_val * v = yyjson_obj_get(item, k);
+                return v ? (int64_t) yyjson_get_int(v) : 0;
+            };
+            tb.tile_index = geti("tile_index");
+            tb.start      = geti("start");
+            tb.end        = geti("end");
+            tb.left       = geti("left");
+            tb.right      = geti("right");
+            tb.out_start  = geti("out_start");
+            tb.out_end    = geti("out_end");
+            tb.crop_start = geti("crop_start");
+            out.push_back(tb);
+        }
+    }
+    yyjson_doc_free(doc);
+    return out;
+}
+
+static int run_vae_parity_one(Yue2Model & m, Yue2VaeVariant variant, const std::string & fixture_dir) {
+    const std::string vae_dir     = fixture_dir + "/04_vae";
+    const std::string variant_dir = vae_dir + "/" + YUE2_VAE_VARIANT_NAME[variant];
+
+    std::string err;
+    if (!yue2_load_parts(&m, /*want_lm=*/false, /*want_vae=*/true, variant, /*want_encoder=*/false, &err)) {
+        fprintf(stderr, "FATAL: VAE (%s) load failed: %s\n", YUE2_VAE_VARIANT_NAME[variant], err.c_str());
+        return 1;
+    }
+    printf("=== VAE parity: %s (%s) ===\n", YUE2_VAE_VARIANT_NAME[variant], fixture_dir.c_str());
+    printf("Loaded VAE (%s): %.2f GB, downsampling_ratio=%u required_halo=%u\n", YUE2_VAE_VARIANT_NAME[variant],
+           (double) m.vram_vae / (1024.0 * 1024.0 * 1024.0), m.vae_cfg.downsampling_ratio, m.vae_cfg.required_halo);
+
+    // Top-level manifest: core_frames/halo_frames are schema-fixed at 1024/16
+    // (02-fixture-schema.md v1.4 §7) but read from the fixture rather than
+    // hardcoded, so a mismatch is a loud FATAL, not a silent wrong-geometry run.
+    yyjson_doc *  top_doc  = nullptr;
+    yyjson_val *  top_root = yue2_json_read_root(vae_dir + "/manifest.json", &top_doc);
+    const int64_t core_frames = top_root ? yue2_json_int(top_root, "core_frames", 1024) : 1024;
+    const int64_t halo_frames = top_root ? yue2_json_int(top_root, "halo_frames", 16) : 16;
+    if (top_doc) {
+        yyjson_doc_free(top_doc);
+    }
+
+    std::vector<float> latents_tc;
+    if (!yue2_read_f32_bin(vae_dir + "/input_latents.bin", &latents_tc)) {
+        fprintf(stderr, "FATAL: cannot read %s/input_latents.bin\n", vae_dir.c_str());
+        return 1;
+    }
+    const int64_t C = (int64_t) m.vae_cfg.latent_dim;
+    if (C <= 0 || latents_tc.size() % (size_t) C != 0) {
+        fprintf(stderr, "FATAL: input_latents.bin size %zu not a multiple of latent_dim=%lld\n", latents_tc.size(),
+                (long long) C);
+        return 1;
+    }
+    const int64_t       T          = (int64_t) latents_tc.size() / C;
+    std::vector<float> latents_ct = yue2_transpose_latents_tc_to_ct(latents_tc, T, C);
+    printf("input_latents: T=%lld C=%lld\n", (long long) T, (long long) C);
+
+    std::vector<float> expected_full, expected_tiled;
+    const bool          have_full  = yue2_read_f32_bin(variant_dir + "/output_audio_full_planar.bin", &expected_full);
+    const bool          have_tiled = yue2_read_f32_bin(variant_dir + "/output_audio_planar.bin", &expected_tiled);
+
+    int total = 0, passed = 0;
+    const double gate = 1e-4;  // §9, PROVISIONAL, VAE row (true FP32, no BF16 anywhere)
+
+    // Reference's own tiled-vs-full delta, for scale — reported, never gated.
+    if (have_full && have_tiled && expected_full.size() == expected_tiled.size() && !expected_full.empty()) {
+        const double ref_rl2 = yue2_rel_l2(expected_tiled.data(), expected_full.data(), (int64_t) expected_full.size());
+        const double ref_max = yue2_max_abs_diff(expected_tiled.data(), expected_full.data(),
+                                                  (int64_t) expected_full.size());
+        printf("REF   tiled-vs-full (reference's own, not a port bug by itself) rel_l2=%.6f max_abs=%.6g\n", ref_rl2,
+               ref_max);
+    }
+
+    // ── untiled ("full=True") ──
+    if (have_full) {
+        std::vector<float> got;
+        int64_t             samples = 0;
+        const auto          t0      = std::chrono::steady_clock::now();
+        const bool          ok_run  = yue2_vae_decode(m, latents_ct.data(), T, &got, &samples, &err);
+        const double        ms      = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!ok_run) {
+            printf("FAIL %-32s decode error: %s\n", "vae_full", err.c_str());
+            total++;
+        } else {
+            const double sec_audio = (double) samples / (double) m.vae_cfg.sample_rate;
+            printf("vae_full: %lld samples/ch, %.1f ms (%.2f ms/s audio)\n", (long long) samples, ms,
+                   sec_audio > 0 ? ms / sec_audio : 0.0);
+            if ((int64_t) got.size() == (int64_t) expected_full.size()) {
+                const double rl2 = yue2_rel_l2(got.data(), expected_full.data(), (int64_t) got.size());
+                const double mx  = yue2_max_abs_diff(got.data(), expected_full.data(), (int64_t) got.size());
+                total++;
+                const bool ok = rl2 <= gate;
+                if (ok) {
+                    passed++;
+                }
+                printf("%s %-32s rel_l2=%.6g max_abs=%.6g (gate %.6g, n=%zu)\n", ok ? "OK  " : "FAIL", "vae_full",
+                       rl2, mx, gate, got.size());
+                if (getenv("YUE2_VAE_DIAG")) {
+                    const int64_t S = samples;
+                    for (int seg = 0; seg < 4; seg++) {
+                        const int64_t s0 = seg * S / 4, s1 = (seg + 1) * S / 4;
+                        double num = 0, den = 0;
+                        int64_t argmax = s0; double mxseg = 0;
+                        for (int ch = 0; ch < 2; ch++) {
+                            for (int64_t i = s0; i < s1; i++) {
+                                const size_t idx = (size_t) (ch * S + i);
+                                const double d = (double) got[idx] - (double) expected_full[idx];
+                                num += d * d; den += (double) expected_full[idx] * (double) expected_full[idx];
+                                if (std::fabs(d) > mxseg) { mxseg = std::fabs(d); argmax = i; }
+                            }
+                        }
+                        printf("  seg%d [%lld,%lld) rel_l2=%.6g max_abs=%.6g @%lld\n", seg, (long long) s0,
+                               (long long) s1, den > 0 ? std::sqrt(num / den) : 0.0, mxseg, (long long) argmax);
+                    }
+                }
+            } else {
+                printf("FAIL %-32s size mismatch: got %zu expected %zu\n", "vae_full", got.size(),
+                       expected_full.size());
+                total++;
+            }
+        }
+    } else {
+        printf("SKIP %-32s fixture file not found/readable\n", "vae_full");
+    }
+
+    // ── tiled ──
+    if (have_tiled) {
+        std::vector<float>               got;
+        int64_t                           samples = 0;
+        std::vector<Yue2VaeTileBoundary> tb;
+        const auto                       t0     = std::chrono::steady_clock::now();
+        const bool ok_run = yue2_vae_decode_tiled(m, latents_ct.data(), T, core_frames, halo_frames, &got, &samples,
+                                                  &tb, &err);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!ok_run) {
+            printf("FAIL %-32s decode error: %s\n", "vae_tiled", err.c_str());
+            total++;
+        } else {
+            const double sec_audio = (double) samples / (double) m.vae_cfg.sample_rate;
+            printf("vae_tiled: %lld samples/ch, %zu tiles, %.1f ms (%.2f ms/s audio)\n", (long long) samples,
+                   tb.size(), ms, sec_audio > 0 ? ms / sec_audio : 0.0);
+            if ((int64_t) got.size() == (int64_t) expected_tiled.size()) {
+                const double rl2 = yue2_rel_l2(got.data(), expected_tiled.data(), (int64_t) got.size());
+                const double mx  = yue2_max_abs_diff(got.data(), expected_tiled.data(), (int64_t) got.size());
+                total++;
+                const bool ok = rl2 <= gate;
+                if (ok) {
+                    passed++;
+                }
+                printf("%s %-32s rel_l2=%.6g max_abs=%.6g (gate %.6g, n=%zu)\n", ok ? "OK  " : "FAIL", "vae_tiled",
+                       rl2, mx, gate, got.size());
+            } else {
+                printf("FAIL %-32s size mismatch: got %zu expected %zu\n", "vae_tiled", got.size(),
+                       expected_tiled.size());
+                total++;
+            }
+
+            // Tile-boundary cross-check against the fixture's own
+            // restatement of the tile-loop formula (self-check only, per
+            // 02-fixture-schema.md §7 point 3 — the fixture file is not an
+            // independent observation of decode_tiled's real control flow).
+            std::vector<Yue2VaeFixtureTile> exp_tb = yue2_read_tile_boundaries(variant_dir + "/tile_boundaries.json");
+            if (!exp_tb.empty()) {
+                bool tb_ok = exp_tb.size() == tb.size();
+                for (size_t i = 0; tb_ok && i < tb.size(); i++) {
+                    tb_ok = tb[i].start == exp_tb[i].start && tb[i].end == exp_tb[i].end &&
+                            tb[i].left == exp_tb[i].left && tb[i].right == exp_tb[i].right &&
+                            tb[i].out_start == exp_tb[i].out_start && tb[i].out_end == exp_tb[i].out_end &&
+                            tb[i].crop_start == exp_tb[i].crop_start;
+                }
+                total++;
+                if (tb_ok) {
+                    passed++;
+                }
+                printf("%s %-32s %zu tiles vs %zu fixture tiles\n", tb_ok ? "OK  " : "FAIL", "vae_tile_boundaries",
+                       tb.size(), exp_tb.size());
+            } else {
+                printf("SKIP %-32s fixture file not found/readable\n", "vae_tile_boundaries");
+            }
+        }
+    } else {
+        printf("SKIP %-32s fixture file not found/readable\n", "vae_tiled");
+    }
+
+    printf("RESULT (vae-parity %s/%s): %d/%d gates passed\n", YUE2_VAE_VARIANT_NAME[variant], fixture_dir.c_str(),
+           passed, total);
+    return (total > 0 && passed == total) ? 0 : 1;
+}
+
+static int run_vae_parity(const std::string & models_dir, const std::string & fixture_dir,
+                          const std::string & variant_arg) {
+    Yue2Model m;
+    yue2_discover(&m, models_dir.c_str());
+
+    // Default (no --variant): standard only, per this milestone's brief
+    // ("iterate until standard passes ... run legacy once") — legacy is
+    // opt-in via --variant legacy, not run automatically alongside it.
+    std::vector<Yue2VaeVariant> variants;
+    if (variant_arg == "legacy") {
+        variants.push_back(YUE2_VAE_LEGACY);
+    } else {
+        variants.push_back(YUE2_VAE_STANDARD);
+    }
+
+    int rc = 0;
+    for (Yue2VaeVariant v : variants) {
+        if (!m.vae_file[v].found) {
+            fprintf(stderr, "SKIP: YuE2 VAE (%s) GGUF not found under %s\n", YUE2_VAE_VARIANT_NAME[v],
+                    models_dir.c_str());
+            continue;
+        }
+        const int one_rc = run_vae_parity_one(m, v, fixture_dir);
+        rc               = rc != 0 ? rc : one_rc;
+    }
+    yue2_unload(&m);
+    return rc;
+}
+
 // ── Free-running generation smoke test ──────────────────────────────────────
 
 // --generate: builds the request prefix, prefills it into a fresh KV cache,
@@ -1642,6 +2251,9 @@ int main(int argc, char ** argv) {
     std::string     ar_parity_stage;
     std::string     sampler_parity_dir;
     std::string     decode_parity_dir;
+    std::string     nar_parity_dir;
+    std::string     vae_parity_dir;
+    std::string     vae_parity_variant;
     bool            do_generate      = false;
     std::string     gen_style;
     std::string     gen_lyrics;
@@ -1674,6 +2286,12 @@ int main(int argc, char ** argv) {
             sampler_parity_dir = argv[++i];
         } else if (!strcmp(argv[i], "--decode-parity") && i + 1 < argc) {
             decode_parity_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--nar-parity") && i + 1 < argc) {
+            nar_parity_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--vae-parity") && i + 1 < argc) {
+            vae_parity_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--variant") && i + 1 < argc) {
+            vae_parity_variant = argv[++i];
         } else if (!strcmp(argv[i], "--generate")) {
             do_generate = true;
         } else if (!strcmp(argv[i], "--style") && i + 1 < argc) {
@@ -1745,6 +2363,24 @@ int main(int argc, char ** argv) {
             return 2;
         }
         return run_decode_parity_cli(models_dir, decode_parity_dir, ar_parity_stage);
+    }
+    if (!nar_parity_dir.empty()) {
+        if (models_dir.empty()) {
+            fprintf(stderr, "--nar-parity requires --models <dir>\n");
+            return 2;
+        }
+        return run_nar_parity(models_dir, nar_parity_dir);
+    }
+    if (!vae_parity_dir.empty()) {
+        if (models_dir.empty()) {
+            fprintf(stderr, "--vae-parity requires --models <dir>\n");
+            return 2;
+        }
+        if (!vae_parity_variant.empty() && vae_parity_variant != "standard" && vae_parity_variant != "legacy") {
+            fprintf(stderr, "--variant must be 'standard' or 'legacy', got '%s'\n", vae_parity_variant.c_str());
+            return 2;
+        }
+        return run_vae_parity(models_dir, vae_parity_dir, vae_parity_variant);
     }
     if (do_generate) {
         if (models_dir.empty()) {
