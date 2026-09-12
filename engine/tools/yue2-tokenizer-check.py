@@ -425,6 +425,13 @@ def main():
     ap.add_argument("--yue2-venv-site-packages", required=True, type=Path,
                      help="K:/yue2/.venv/Lib/site-packages, to import the installed yue2 package")
     ap.add_argument("--json-out", type=Path, default=None, help="optional path to dump full results as JSON")
+    ap.add_argument("--dump", type=Path, default=None,
+                     help="write {name,text,text_nfc,expected_ids} for the whole corpus to this path, for "
+                          "engine/tools/yue2-probe's --tokenizer-check to replay against the C++ tokenizer. "
+                          "expected_ids come from the REAL reference encoder (ref_tok.encode, i.e. NFC then "
+                          "tiktoken encode_ordinary, no EOS). text_nfc is unicodedata NFC of text -- since the "
+                          "engine does no NFC of its own (that's Node's job upstream), a C++-side check should "
+                          "tokenize text_nfc and compare against expected_ids, not the raw text field.")
     args = ap.parse_args()
 
     sys.path.insert(0, str(args.yue2_venv_site_packages))
@@ -435,6 +442,19 @@ def main():
 
     corpus = build_corpus()
     print(f"[check] corpus size: {len(corpus)} strings", file=sys.stderr)
+
+    if args.dump:
+        dump_cases = []
+        for name, text in corpus:
+            expected_ids = ref_tok.encode(text)
+            dump_cases.append({
+                "name": name,
+                "text": text,
+                "text_nfc": unicodedata.normalize("NFC", text),
+                "expected_ids": expected_ids,
+            })
+        args.dump.write_text(json.dumps({"cases": dump_cases}, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[check] wrote {len(dump_cases)} expected-id cases to {args.dump}", file=sys.stderr)
 
     results = []
     n_core_mismatch = 0

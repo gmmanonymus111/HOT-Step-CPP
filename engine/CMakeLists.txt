@@ -643,6 +643,18 @@ add_executable(ace-caption tools/ace-caption.cpp)
 target_link_libraries(ace-caption PRIVATE acestep-core)
 link_ggml_backends(ace-caption)
 
+# yue2-probe: bring-up CLI for the YuE2 GGUF loader (engine/src/yue2/yue2-model.h)
+# and tokenizer (engine/src/yue2/yue2-tokenizer.h).
+# --info/--load: config + tensor counts / actual weight load, no compute graphs.
+# --tokenize/--tokenizer-check/--prefix-check: BPE + protocol-assembly bring-up,
+# uses bpe.h (which pulls in yyjson.h) and yyjson directly for fixture JSON --
+# same dependency sa3-ggml-test already takes for its own JSON fixtures.
+# docs/plans/yue2/06-engine-port-plan.md milestone M0. Header-only loader
+# (no acestep-core dependency), same posture as moss-ggml-test.
+add_executable(yue2-probe tools/yue2-probe.cpp)
+target_link_libraries(yue2-probe PRIVATE yyjson)
+link_ggml_backends(yue2-probe)
+
 # bs-roformer-test: parity test for the GGML BS-RoFormer (SuperSep StableStep
 # separation) vs PyTorch goldens. See scripts/dump_bs_roformer_goldens.py.
 add_executable(bs-roformer-test tools/bs-roformer-test.cpp)
