@@ -37,93 +37,10 @@ import { getActiveBackendId } from '../services/backends/registry.js';
 import { runMinimaxGeneration, releaseMinimaxVramForAce } from '../services/backends/minimax/generate.js';
 import { mm3StreamUrl } from '../services/backends/minimax/client.js';
 import { runOnGpuLane, gpuLaneBusy, gpuLaneDepth, resetGpuLane } from '../services/generation/gpuLane.js';
+import { isActiveJob, type GenerationJob, type StageTiming } from '../services/generation/jobTypes.js';
+export type { GenerationJob, StageTiming } from '../services/generation/jobTypes.js';
 
 const router = Router();
-
-/** Internal job state */
-/** Timing data for a single pipeline stage. */
-export interface StageTiming {
-  name: string;
-  ms: number;
-}
-
-export interface GenerationJob {
-  id: string;
-  userId: string;
-  status: 'pending' | 'lm_running' | 'synth_running' | 'saving' | 'succeeded' | 'failed' | 'cancelled';
-  stage?: string;
-  progress?: number;
-  aceJobId?: string;  // Current ace-server job ID (LM or synth)
-  /** Fine-grained engine phase pulled from GET /job (e.g. "adapter_precompute").
-   *  Surfaces "stuck in the ~17 s adapter precompute" vs. "actually failed". */
-  acePhase?: string;
-  /** Sub-phase progress formatted by pollUntilDone, e.g. "step 12/50", or
-   *  empty when phase_total is 0. Surfaced to /status as ace_phase_progress. */
-  acePhaseProgress?: string;
-  lmResults?: AceRequest[];
-  result?: {
-    audioUrls: string[];
-    songIds: string[];
-    bpm?: number;
-    duration?: number;
-    keyScale?: string;
-    timeSignature?: string;
-    masteredAudioUrl?: string;
-    /** No-adapter reference render (bare-DiT low-step output), when enabled */
-    noAdapterAudioUrl?: string;
-    timing?: StageTiming[];
-    totalMs?: number;
-  };
-  error?: string;
-  params: any;
-  createdAt: number;
-  /** MiniMax-Music3 "play while rendering": true once the engine has confirmed
-   *  it will serve this job's audio on GET /mm3/stream. The ENGINE's answer,
-   *  not the request's — it may decline, and the UI must then behave exactly
-   *  as it does with streaming off. */
-  mm3Streaming?: boolean;
-  /** True when the engine is dispatching windows DURING planning (both model
-   *  stacks co-resident), false when it fell back to dispatching them after.
-   *  Undefined until the engine has decided. Purely informational — a serial
-   *  stream is still a stream. */
-  mm3Interleaved?: boolean;
-  /** Resolved render length in seconds, echoed by the engine at submit. Sent to
-   *  the browser so a streaming track knows its full duration before its first
-   *  window exists. */
-  mm3Duration?: number;
-  /** Ensemble takes this render is producing — the CLAMPED count the engine
-   *  actually accepted, so it is how many streams exist to open and how many
-   *  cards belong on screen. 1 (or absent) is an ordinary render. Known as soon
-   *  as the engine has the job, i.e. long before any audio. */
-  mm3Takes?: number;
-  /** Each take's seed, as a DECIMAL STRING. Strings because these are uint64 —
-   *  18226392072674864222 and its two successors all collapse to the same
-   *  float64, which is exactly what made three distinct takes report one seed
-   *  and become individually unreproducible. */
-  mm3TakeSeeds?: string[];
-  /** MM3 "require natural ending" outcome, set once the engine has finished.
-   *  Present only on a render that ran the arbitration, and only then — so
-   *  `dropped > 0` is the honest answer to "why did I ask for three and get
-   *  two?" rather than something the UI has to infer from a count. */
-  mm3Ending?: {
-    /** Candidate plans drawn across every round. */
-    planned: number;
-    /** Candidates that reached EOS and became songs. */
-    rendered: number;
-    /** Candidates that hit the frame cap and were thrown away unrendered. */
-    dropped: number;
-    /** Planning rounds it took (1 on the common path). */
-    rounds: number;
-  };
-  /** Stream preview WAV files emitted by the DEMON-style ring buffer */
-  streamPreviews?: Array<{
-    path: string;
-    step: number;
-    totalSteps: number;
-    slot: number;
-    timestamp: number;
-  }>;
-}
 
 const jobs = new Map<string, GenerationJob>();
 
@@ -1852,7 +1769,7 @@ router.post('/cancel/:id', (req, res) => {
 router.post('/cancel-all', (req, res) => {
   let cancelled = 0;
   for (const [, job] of jobs) {
-    if (job.status === 'pending' || job.status === 'lm_running' || job.status === 'synth_running') {
+    if (isActiveJob(job)) {
       job.status = 'cancelled';
       if (job.aceJobId) {
         aceClient.cancelJob(job.aceJobId).catch(() => {});
@@ -1868,14 +1785,10 @@ router.post('/cancel-all', (req, res) => {
 
 // GET /api/generate/queue — queue health / status inspection
 router.get('/queue', (_req, res) => {
-  const activeJob = Array.from(jobs.values()).find(j =>
-    j.status === 'lm_running' || j.status === 'synth_running' || j.status === 'saving'
-  );
+  const activeJob = Array.from(jobs.values()).find(j => isActiveJob(j) && j.status !== 'pending');
 
   // Count all non-terminal jobs in the jobs Map (includes pending jobs waiting in queue)
-  const depth = Array.from(jobs.values()).filter(j =>
-    ['pending', 'lm_running', 'synth_running', 'saving'].includes(j.status)
-  ).length;
+  const depth = Array.from(jobs.values()).filter(isActiveJob).length;
 
   res.json({
     depth,
@@ -1898,7 +1811,7 @@ router.post('/reset-queue', (_req, res) => {
 
   // Cancel all non-terminal jobs in the jobs Map
   for (const [, job] of jobs) {
-    if (['pending', 'lm_running', 'synth_running', 'saving'].includes(job.status)) {
+    if (isActiveJob(job)) {
       job.status = 'failed';
       job.error = 'Queue reset by user';
       job.stage = 'Reset';
@@ -2092,8 +2005,7 @@ router.post('/storm/stream', async (req, res) => {
   }
   // The stream drives the engine directly; refuse while queued jobs are active
   // so it doesn't interleave with (and stall) normal library generations.
-  const activeJobs = [...jobs.values()].filter(j =>
-    j.status === 'pending' || j.status === 'lm_running' || j.status === 'synth_running' || j.status === 'saving');
+  const activeJobs = [...jobs.values()].filter(isActiveJob);
   if (activeJobs.length > 0) {
     res.status(409).json({ error: `${activeJobs.length} generation job(s) active — wait for the queue to drain before streaming` });
     return;

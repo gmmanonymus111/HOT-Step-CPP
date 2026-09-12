@@ -61,7 +61,7 @@ import {
   mm3Synth, mm3JobDetail, mm3TokenizeCheck, mm3Unload, mm3Props,
   type Mm3SynthRequest, type Mm3JobDetail,
 } from './client.js';
-import type { GenerationJob, StageTiming } from '../../../routes/generate.js';
+import type { GenerationJob, StageTiming } from '../../generation/jobTypes.js';
 
 /** Injected so this module never imports back into routes/generate.ts at
  *  runtime (type-only import above is erased). pollUntilDone owns the stall
