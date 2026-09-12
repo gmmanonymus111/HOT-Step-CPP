@@ -53,6 +53,40 @@ export interface BackendCoreCapabilities {
   negativePrompt: boolean;
   batch: { max: number };
   seed: boolean;
+  // ── Forward-declared optional fields (docs/plans/yue2/01-seam-design.md
+  // §4.2) ── typed here so callers get a real type instead of `unknown`
+  // through the index signature below. Every field stays OPTIONAL: a
+  // manifest from a backend (or an older server) that doesn't set it simply
+  // omits it, and nothing may assume presence. None of these are MM3- or
+  // YuE2-specific — any backend can declare any of them.
+  /** Shape the backend wants its prompt in. `'structured'` = a headed
+   *  template (MM3's Structured Caption); `'freeform'` = a plain style +
+   *  lyrics prompt (ACE, and YuE2's declared shape). Cosmetic in this slice —
+   *  nothing branches on it yet (that's the CreatePanel/MetadataSection wiring
+   *  in the doc above, not done here). */
+  captionFormat?: 'freeform' | 'structured';
+  /** Backend honors a time-signature core param, the same sense `bpm`/
+   *  `keyscale` above report support for those two. */
+  timeSignature?: boolean;
+  /** What this backend's "language" field actually controls: `'vocal'` (sung
+   *  language) or `'lyrics'` (the lyrics text's own language). Hint only. */
+  languageMeans?: 'vocal' | 'lyrics';
+  /** True only when the backend is reachable and ITS OWN weight files
+   *  specifically weren't found — never for engine-down or corrupt-file
+   *  cases (see GlobalParamBar's models-missing banner). Promoted out of the
+   *  index signature below since it's now read generically, not just by MM3. */
+  modelsMissing?: boolean;
+  /** Paired with `modelsMissing` — a short user-facing explanation (e.g. "both
+   *  GGUFs (~24 GB)") shown instead of a generic fallback when present. */
+  modelsMissingHint?: string;
+  /** Plain-text license line for this backend's weights, e.g. "CC BY-NC 4.0
+   *  (non-commercial)". Cosmetic only — not a legal control, just something
+   *  to surface to the user. */
+  license?: string;
+  /** Short muted notice to pair with the backend picker — e.g. a
+   *  non-commercial-use reminder with an upstream contact address. Rendered
+   *  verbatim by BackendToggle.tsx: never truncated, reworded, or paraphrased. */
+  notice?: string;
   // Open — backends may report extra core-ish knobs (mirrors the server-side
   // index signature in backends/types.ts). Nothing here is guaranteed to
   // exist; check with `=== true` / `?.`, never assume presence.
@@ -131,6 +165,8 @@ export interface BackendCapabilities {
   core: BackendCoreCapabilities;
   features: BackendFeatureCapabilities;
   extensions: BackendExtensionParam[];
+  /** Plain-text weights-licence line (e.g. CC BY-NC 4.0 notice); optional, additive. */
+  license?: string;
 }
 
 /** Backend-shaped model catalogue (GET /api/backends/models). Buckets differ

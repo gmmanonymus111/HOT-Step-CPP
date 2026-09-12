@@ -253,6 +253,15 @@
         "moss-lm-q8_0",
         "moss-aud-f16"
       ]
+    },
+    {
+      "id": "yue2",
+      "name": "YuE2 (bf16 + VAE)",
+      "description": "YuE2 — a second generation backend, separate from ACE-Step and MiniMax-Music3: an autoregressive language model (plan/semantic/nar stages) plus a VAE decoder, producing 48 kHz stereo audio from a freeform style + lyrics prompt. Pick the LM plus exactly one VAE (Standard recommended; Legacy is for parity with earlier YuE checkpoints). ~8.3 GB total. License: CC BY-NC 4.0 (non-commercial) — free for personal and research use, but not for commercial products. For a commercial license, contact the upstream authors at gezhang@umich.edu.",
+      "fileIds": [
+        "yue2-lm-bf16",
+        "yue2-vae-standard-f32"
+      ]
     }
   ],
   "files": [
@@ -3556,6 +3565,73 @@
       "description": "MOSS-Music audio encoder — 32-layer Whisper-style tower plus the SwiGLU adapter and deepstack mergers that inject audio into the LM. F16 only, never quantised: the adapter output runs ~770x hotter than the encoder's, so quantisation error lands straight in the LM's input embeddings. Required by every moss-lm file; ~1.6 GB.",
       "tags": [
         "required"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "yue2-lm-bf16",
+      "filename": "yue2-lm-bf16.gguf",
+      "role": "yue2",
+      "subdir": "yue2",
+      "displayName": "YuE2 Language Model (BF16)",
+      "scale": null,
+      "variant": "lm",
+      "quant": "BF16",
+      "sizeBytes": 7267839328,
+      "repo": "scragnog/YuE2-GGUF",
+      "description": "YuE2 autoregressive language model — plans the semantic/acoustic token sequence from a freeform style + lyrics prompt (plan/semantic/nar stages). Source precision. Required alongside one of the VAE decoders below; this file is ~7.3 GB. Non-commercial use only: YuE2's weights are licensed CC BY-NC 4.0. For a commercial license, contact the upstream authors at gezhang@umich.edu.",
+      "tags": [
+        "pending-upload"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "yue2-vae-standard-f32",
+      "filename": "yue2-vae-standard-f32.gguf",
+      "role": "yue2",
+      "subdir": "yue2",
+      "displayName": "YuE2 VAE — Standard (F32)",
+      "scale": null,
+      "variant": "vae-standard",
+      "quant": "F32",
+      "sizeBytes": 530348768,
+      "repo": "scragnog/YuE2-GGUF",
+      "description": "YuE2's standard VAE stage — decodes the LM's planned tokens to 48 kHz stereo audio. Pick either this or the legacy decoder below, not both. Non-commercial use only: YuE2's weights are licensed CC BY-NC 4.0. For a commercial license, contact the upstream authors at gezhang@umich.edu.",
+      "tags": [
+        "pending-upload",
+        "recommended"
+      ],
+      "companions": [
+        {
+          "filename": "LICENSE",
+          "repoPath": "LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "yue2-vae-legacy-f32",
+      "filename": "yue2-vae-legacy-f32.gguf",
+      "role": "yue2",
+      "subdir": "yue2",
+      "displayName": "YuE2 VAE — Legacy (F32)",
+      "scale": null,
+      "variant": "vae-legacy",
+      "quant": "F32",
+      "sizeBytes": 530348768,
+      "repo": "scragnog/YuE2-GGUF",
+      "description": "YuE2's legacy VAE stage, kept for parity with earlier YuE checkpoints. Pick either this or the standard decoder above, not both. Non-commercial use only: YuE2's weights are licensed CC BY-NC 4.0. For a commercial license, contact the upstream authors at gezhang@umich.edu.",
+      "tags": [
+        "pending-upload"
       ],
       "companions": [
         {

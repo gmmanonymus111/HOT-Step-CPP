@@ -17,7 +17,7 @@ interface Props {
   onDelete: (filename: string) => void;
 }
 
-type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper' | 'mm3' | 'moss';
+type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper' | 'mm3' | 'moss' | 'yue2';
 
 const TABS: { id: RoleTab; label: string }[] = [
   { id: 'dit', label: 'DiT Models' },
@@ -30,6 +30,7 @@ const TABS: { id: RoleTab; label: string }[] = [
   { id: 'whisper', label: 'Whisper' },
   { id: 'mm3', label: 'MiniMax-Music3' },
   { id: 'moss', label: 'Captioning (MOSS)' },
+  { id: 'yue2', label: 'YuE2' },
 ];
 
 // ── Info blocks per category ────────────────────────────────
@@ -51,6 +52,7 @@ const ROLE_INFO: Record<string, string> = {
   whisper: 'OpenAI Whisper models for transcribing actual sung lyrics with word-level timestamps. Enable Whisper Lyrics in Post-Processing to use.',
   moss: 'MOSS-Music-8B — the only model here that ANALYSES audio rather than generating it. It captions your own tracks locally in the Training Studio, writing what it actually hears instead of rewriting a text analysis, and emits both the ACE-Step caption format and MM3 Structured Captions from a single pass. Pick one LM (Q8_0 recommended) plus the audio tower, which is required and never quantised. Nothing else in the app depends on these — they are only used when you choose MOSS as the caption provider.',
   mm3: 'MiniMax-Music3 — a separate generation backend with its own models: a language model plus a 5-way split flow stack (depth decoder, condition encoder, DiT, vocoder — the LM and DiT are the two you must pick; the rest default to auto). All required roles load together, needing ~24 GB of VRAM. Switch to it via the Backend toggle in the top bar. A LICENSE file is fetched alongside automatically once a GGUF finishes downloading.',
+  yue2: 'YuE2 — a third generation backend: a language model plus a VAE decoder, producing 48 kHz stereo audio from a freeform style + lyrics prompt (no headed caption template). Pick the LM plus exactly one VAE (Standard or Legacy — not both). Switch to it via the Backend toggle in the top bar. Non-commercial use only: YuE2 is licensed CC BY-NC 4.0 by its upstream authors — for a commercial license, contact gezhang@umich.edu. A LICENSE file is fetched alongside automatically once a GGUF finishes downloading.',
   // mm3Trt is NOT here — unlike every other entry in this record, it's new
   // text (the reviewer flagged it for i18n), so it's translated at its one
   // call site via t('models.mm3Trt.info') instead of joining this
@@ -501,6 +503,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
     () => files.filter(f => f.role === 'runtime' && f.id.startsWith('trt-rt-builder-')), [files],
   );
   const mossFiles = useMemo(() => files.filter(f => f.role === 'moss'), [files]);
+  const yue2Files = useMemo(() => files.filter(f => f.role === 'yue2'), [files]);
 
   const renderSimpleGroup = (roleFiles: RegistryFile[], info?: string) => (
     <div className="space-y-3">
@@ -617,6 +620,7 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
         </div>
       )}
       {activeTab === 'moss' && renderSimpleGroup(mossFiles, ROLE_INFO.moss)}
+      {activeTab === 'yue2' && renderSimpleGroup(yue2Files, ROLE_INFO.yue2)}
     </div>
   );
 };

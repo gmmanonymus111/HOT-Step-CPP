@@ -31,7 +31,13 @@ export interface BackendCoreCapabilities {
    *  token and the render ends there (engine mm3-ar-loop.h), so a requested
    *  duration is only a CEILING, never a target. ACE has no such stop: its
    *  metadata FSM is told a length and aims for it. */
-  duration: { max: number; auto: boolean };
+  /** `editable` says whether the UI's duration control does anything on this
+   *  backend. Optional and additive (plan §4.2 `duration.editable`): a
+   *  backend that omits it is read as editable (ACE's own behavior, and the
+   *  correct default for every backend written before this field existed).
+   *  false means "model-ended" — the UI hides the control and `max` is a
+   *  ceiling, never a target (see YuE2/MM3, both auto:true). */
+  duration: { max: number; auto: boolean; editable?: boolean };
   bpm: boolean;
   keyscale: boolean;
   negativePrompt: boolean;
@@ -134,6 +140,12 @@ export interface BackendCapabilities {
    *  PluginControls schema renderer (reuses the Lua plugin param schema —
    *  plan §4.2, §3.6). `group` splits them across the top-bar clusters. */
   extensions: BackendExtensionParam[];
+  /** Plain-text licensing notice the picker/Model Manager should show
+   *  verbatim (e.g. YuE2's CC BY-NC 4.0 non-commercial notice + upstream
+   *  commercial-license contact). Optional and additive — most backends omit
+   *  it. Not a substitute for MM3's own license-mandated `displayName`
+   *  string (backends/minimax/index.ts), which stays as it is. */
+  license?: string;
 }
 
 /** Backend-shaped model catalogue. ACE has an {lm,dit,vae,embedding} split;

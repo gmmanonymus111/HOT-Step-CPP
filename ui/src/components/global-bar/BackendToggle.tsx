@@ -15,6 +15,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Layers, Check } from 'lucide-react';
 import { useBackendStore } from '../../stores/backendStore';
+import { useCapabilities } from '../../hooks/useCapabilities';
 
 export const BackendToggle: React.FC = () => {
   const { t } = useTranslation();
@@ -22,6 +23,7 @@ export const BackendToggle: React.FC = () => {
   const activeBackendId = useBackendStore(s => s.activeBackendId);
   const fetchBackends = useBackendStore(s => s.fetchBackends);
   const switchBackend = useBackendStore(s => s.switchBackend);
+  const { capabilities } = useCapabilities();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -41,12 +43,20 @@ export const BackendToggle: React.FC = () => {
 
   const active = backends.find(b => b.id === activeBackendId) || backends[0];
 
+  // Optional plain-text notice a backend's manifest can carry (backendStore.ts
+  // BackendCoreCapabilities.notice) — e.g. a non-commercial-license reminder
+  // with an upstream contact address. Generic: keyed off the manifest field,
+  // never a backend id. Surfaced as a tooltip rather than an extra line under
+  // the picker so a notice never changes the bar's fixed height.
+  const notice = typeof capabilities?.license === 'string' ? capabilities.license : (typeof capabilities?.core?.notice === 'string' ? capabilities.core.notice : undefined);
+  const pickerTitle = notice ? `${t('globalBar.backend')} — ${notice}` : t('globalBar.backend');
+
   return (
     <div ref={wrapRef} className="relative flex-shrink-0 flex items-center">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        title={t('globalBar.backend')}
+        title={pickerTitle}
         className="group flex items-center gap-1.5 px-2 py-1.5 rounded-lg hover:bg-pink-500/10 transition-colors duration-150"
       >
         <Layers size={13} className="flex-shrink-0 text-zinc-500 group-hover:text-pink-400 transition-colors duration-150" />

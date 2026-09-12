@@ -294,6 +294,7 @@ async function capabilities(): Promise<BackendCapabilities> {
       sampleRate: 44100,
       propsStale: stale,
       modelsMissing,
+      modelsMissingHint: 'both GGUFs (~24 GB)',
       // TensorRT DiT renderer availability (docs/plans/2026-09-11-mm3-trt-dit-shipping.md).
       // Passed through verbatim so the Renderer row in BackendModelsDropdown —
       // the same place that used to read this off the (now-removed) Generation

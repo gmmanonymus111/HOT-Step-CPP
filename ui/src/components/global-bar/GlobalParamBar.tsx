@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { BarSection, ToggleSwitch } from './BarSection';
 import { useGlobalParams } from '../../context/GlobalParamsContext';
 import { useCapabilities } from '../../hooks/useCapabilities';
+import { useBackendStore } from '../../stores/backendStore';
 import { modelApi } from '../../services/api';
 import { ModelManagerModal } from '../model-manager/ModelManagerModal';
 import { ModelsDropdown, ModelsBadge } from './ModelsDropdown';
@@ -62,6 +63,7 @@ export const GlobalParamBar: React.FC = () => {
   const gp = useGlobalParams();
   const monitoring = useVstChainStore(s => s.monitoring);
   const { capabilities } = useCapabilities();
+  const backends = useBackendStore(s => s.backends);
 
   // Capability gating (docs/plans/multi-backend-architecture.md §4.5,
   // §2 principle 2): undefined/loading capabilities default to SHOWING every
@@ -203,21 +205,29 @@ export const GlobalParamBar: React.FC = () => {
     return () => clearTimeout(timer);
   }, []);
 
-  // ── MiniMax-Music3 "models missing" banner ────────────────────────
-  // capabilities().core.modelsMissing (server: backends/minimax/index.ts) is
-  // true only when the MM3 backend is active, the engine is reachable, and
-  // its weight files specifically weren't found — never for engine-down or
-  // corrupt-file cases. Surfacing is opt-in: a dismissible banner pointing at
-  // the Model Manager, never an auto-started 24 GB download.
-  const mm3ModelsMissing = capabilities?.backend === 'minimax-m3' && capabilities.core?.modelsMissing === true;
-  const [mm3BannerDismissed, setMm3BannerDismissed] = useState(false);
+  // ── "Models missing" banner (generic — any backend) ─────────────────
+  // capabilities().core.modelsMissing is true only when the ACTIVE backend is
+  // reachable and ITS OWN weight files specifically weren't found — never for
+  // engine-down or corrupt-file cases (docs/plans/yue2/01-seam-design.md
+  // §4.2). Was gated on `backend === 'minimax-m3'`; any backend can report it
+  // now (YuE2 will), so the gate reads only the flag. Surfacing stays
+  // opt-in: a dismissible banner pointing at the Model Manager, never an
+  // auto-started multi-GB download.
+  const modelsMissing = capabilities?.core?.modelsMissing === true;
+  const modelsMissingHint = typeof capabilities?.core?.modelsMissingHint === 'string'
+    ? capabilities.core.modelsMissingHint
+    : undefined;
+  const modelsMissingBackendName =
+    backends.find(b => b.id === capabilities?.backend)?.displayName || capabilities?.backend || '';
+  const [modelsMissingBannerDismissed, setModelsMissingBannerDismissed] = useState(false);
   const lastBackendRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const b = capabilities?.backend;
-    // Re-arm the banner whenever the user switches INTO minimax-m3, so a
-    // dismissal doesn't stick forever across backend switches.
-    if (b === 'minimax-m3' && lastBackendRef.current !== 'minimax-m3') {
-      setMm3BannerDismissed(false);
+    // Re-arm the banner on ANY backend switch (not just entering MM3), so a
+    // dismissal on one backend doesn't stick forever after switching to
+    // another whose models also happen to be missing.
+    if (b !== lastBackendRef.current) {
+      setModelsMissingBannerDismissed(false);
     }
     lastBackendRef.current = b;
   }, [capabilities?.backend]);
@@ -377,21 +387,26 @@ export const GlobalParamBar: React.FC = () => {
         </div>
       </div>
 
-      {/* MiniMax-Music3 models-missing banner — dismissible, links to the
-          Model Manager rather than auto-starting a 24 GB download. */}
-      {mm3ModelsMissing && !mm3BannerDismissed && (
+      {/* Models-missing banner (any backend) — dismissible, links to the
+          Model Manager rather than auto-starting a multi-GB download. */}
+      {modelsMissing && !modelsMissingBannerDismissed && (
         <div className="flex items-center gap-2 px-4 py-2 border-t border-amber-500/20 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-400">
           <AlertTriangle size={14} className="flex-shrink-0" />
-          <span className="flex-1">{t('globalBar.mm3ModelsMissing')}</span>
+          <span className="flex-1">
+            {t('globalBar.modelsMissing', {
+              backend: modelsMissingBackendName,
+              hint: modelsMissingHint ? ` — ${modelsMissingHint}` : '',
+            })}
+          </span>
           <button
             onClick={() => setShowModelManager(true)}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 font-medium transition-colors"
           >
             <Download size={12} />
-            {t('globalBar.mm3GetModels')}
+            {t('globalBar.getModels')}
           </button>
           <button
-            onClick={() => setMm3BannerDismissed(true)}
+            onClick={() => setModelsMissingBannerDismissed(true)}
             className="p-1 rounded-lg hover:bg-amber-500/15 text-amber-600 dark:text-amber-400 transition-colors"
             title={t('common.dismiss')}
           >
