@@ -1,4 +1,5 @@
 import type { AceRequest } from '../aceClient.js';
+import type { GenerationEnvelope } from '../backends/types.js';
 
 /** Internal job state */
 /** Timing data for a single pipeline stage. */
@@ -10,6 +11,7 @@ export interface StageTiming {
 export interface GenerationJob {
   id: string;
   userId: string;
+  envelope: Readonly<GenerationEnvelope>;
   status: 'pending' | 'running' | 'lm_running' | 'synth_running' | 'saving' | 'succeeded' | 'failed' | 'cancelled';
   stage?: string;
   progress?: number;

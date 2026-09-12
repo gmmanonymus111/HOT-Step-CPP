@@ -249,6 +249,7 @@ export type PollUntilDone = (
 /** Transitional step 4 context. `envelope`, `attempt`, and `lease` are added
  * only when steps 5, 7, and 8 respectively make those values real. */
 export interface GenerationContext {
+  envelope: Readonly<GenerationEnvelope>;
   signal: AbortSignal;
   pollUntilDone: PollUntilDone;
   stageProfile: (stage: string | undefined) => StageProfile;

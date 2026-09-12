@@ -123,7 +123,7 @@ function resolveRequest(submission: Readonly<Record<string, unknown>>): Resolved
     ...(typeof submission.title === 'string' ? { title: submission.title } : {}),
   };
   return {
-    operation: 'text2music',
+    operation: typeof submission.taskType === 'string' && submission.taskType ? submission.taskType : 'text2music',
     common,
     models: mm3PersistedSelection(),
     options,

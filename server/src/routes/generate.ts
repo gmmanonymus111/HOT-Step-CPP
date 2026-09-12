@@ -18,12 +18,14 @@ import { logGeneration, failGenerationLog } from '../services/logger.js';
 import { engineReady, engineBootStatus } from '../engineState.js';
 import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import { pushLog } from './logs.js';
-import { getActiveBackend, getActiveBackendId } from '../services/backends/registry.js';
+import { getBackend, getActiveBackendId } from '../services/backends/registry.js';
 import { mm3StreamUrl } from '../services/backends/minimax/client.js';
 import { runOnGpuLane, gpuLaneBusy, gpuLaneDepth, resetGpuLane } from '../services/generation/gpuLane.js';
 import { isActiveJob, type GenerationJob } from '../services/generation/jobTypes.js';
 import { pollUntilDone } from '../services/generation/pollUntilDone.js';
 import { translateParams } from '../services/generation/translateParams.js';
+import { buildEnvelope, GenerationEnvelopeError } from '../services/generation/envelope.js';
+import { noteEnqueued, noteFinished } from '../services/generation/residency.js';
 
 export type { GenerationJob, StageTiming } from '../services/generation/jobTypes.js';
 
@@ -51,8 +53,11 @@ setInterval(() => {
 /** Run the full generation pipeline */
 async function runGeneration(job: GenerationJob, signal: AbortSignal): Promise<void> {
   if (job.status === 'cancelled') return;
-  const backend = getActiveBackend();
+  const backendId = job.envelope?.backendId;
+  const backend = backendId ? getBackend(backendId) : undefined;
+  if (!backend) throw new Error(`Captured generation backend '${backendId ?? '(missing)'}' is not registered`);
   await backend.generate(job, {
+    envelope: job.envelope,
     signal,
     pollUntilDone,
     stageProfile: backend.stageProfile ?? (() => ({ stallMs: 900_000 })),
@@ -68,6 +73,8 @@ async function runGeneration(job: GenerationJob, signal: AbortSignal): Promise<v
 const MAX_RETRIES = 1; // retry once on transient failures
 
 function enqueueGeneration(job: GenerationJob): void {
+  const family = job.envelope.backendId;
+  noteEnqueued(family);
   if (gpuLaneBusy()) {
     console.log(`[Generate] Job ${job.id} queued (${gpuLaneDepth() + 1} waiting)`);
   }
@@ -123,7 +130,7 @@ function enqueueGeneration(job: GenerationJob): void {
     // The retry loop above swallows every generation failure, so reaching here
     // means the lane itself broke. Never leave that silent.
     console.error(`[Generate] Job ${job.id} lane error:`, err?.message || err);
-  });
+  }).finally(() => noteFinished(family));
 }
 
 // POST /api/generate — start a generation job
@@ -147,15 +154,30 @@ router.post('/', (req, res) => {
   const userId = getUserId(req);
   if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
 
+  const jobId = uuidv4();
+  const enqueuedAt = Date.now();
+  let envelope: ReturnType<typeof buildEnvelope>;
+  try {
+    envelope = buildEnvelope(req.body, userId, jobId, enqueuedAt);
+  } catch (err) {
+    const clientError = err instanceof GenerationEnvelopeError && err.code !== 'unknown_backend';
+    res.status(clientError ? 400 : 500).json({ error: err instanceof Error ? err.message : 'Cannot resolve generation request' });
+    return;
+  }
   const job: GenerationJob = {
-    id: uuidv4(),
+    id: jobId,
     userId,
+    envelope,
     status: 'pending',
     stage: 'Queued',
     progress: 0,
-    params: req.body,
-    createdAt: Date.now(),
+    params: structuredClone(req.body),
+    createdAt: enqueuedAt,
   };
+
+  if (envelope.submittedBackendMismatch !== undefined) {
+    console.log(`[Generate] Job ${job.id} submitted for '${envelope.submittedBackendMismatch}' but runs on '${envelope.backendId}'`);
+  }
 
   jobs.set(job.id, job);
 

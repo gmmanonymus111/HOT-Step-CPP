@@ -1208,11 +1208,9 @@ async function _executeItem(item: AudioQueueItem, token: string): Promise<void> 
   // Two captions on the generation, one caption field on the request — pick the
   // one the backend that will actually render this was trained on.
   //
-  // Read LIVE from backendStore rather than from `snapshot.backend`: the server
-  // routes on getActiveBackendId() at dequeue time and ignores the request's
-  // backend field entirely (routes/generate.ts), so a queue item submitted after
-  // the user switched backends runs on the NEW backend. Matching the snapshot
-  // here would hand MM3 the ACE caption in exactly that case.
+  // Read the live backendStore selection when submitting. The server freezes
+  // its active backend at POST time, so select the caption for that family.
+  // Later selector changes cannot redirect the accepted server-side job.
   //
   // The lyrics-set id is what lets the MM3 side resolve the song's caption
   // SOURCE — automatic-by-tempo from the album's own captioned tracks, a

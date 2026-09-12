@@ -50,9 +50,8 @@ type Phase = 'input' | 'inspiring' | 'preview' | 'generating';
  *  render is auto, enforced server-side in backends/minimax/generate.ts — this
  *  just keeps the estimate out of the request in the first place.
  *
- *  Read LIVE rather than captured, for the same reason audioGenQueueStore does:
- *  the server routes on the ACTIVE backend at dequeue time and ignores the
- *  request's own `backend` field. */
+ *  Read the live selection at submission, as audioGenQueueStore does. The
+ *  server freezes its active backend at POST time for the accepted job. */
 const isMm3Render = (): boolean =>
   useBackendStore.getState().activeBackendId === MM3_BACKEND_ID;
 
