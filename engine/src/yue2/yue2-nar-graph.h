@@ -91,6 +91,7 @@
 //   matching every real fixture and the reference's own inference-time
 //   behavior.
 
+#include "yue2-imatrix.h"
 #include "yue2-lm-graph.h"
 #include "yue2-model.h"
 
@@ -513,6 +514,7 @@ static bool yue2_nar_velocity(const Yue2Model & m, const Yue2NarChunk & chunk, c
         }
         return false;
     }
+    yue2_imatrix_hook(sched);
 
     ggml_backend_tensor_set(in_x_nar, x_nar_host.data(), 0, x_nar_host.size() * sizeof(float));
     ggml_backend_tensor_set(in_time_feat, time_feat.data(), 0, time_feat.size() * sizeof(float));

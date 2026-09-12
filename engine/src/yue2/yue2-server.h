@@ -25,6 +25,10 @@
 //   POST /yue2/tokenize-check   <- yue2_handle_tokenize_check (bring-up, cheap)
 //   POST /yue2/synth            <- yue2_handle_synth          (production; returns the
 //                                   shared engine job id — poll/fetch via GET/POST /job)
+//   POST /yue2/imatrix          <- yue2_handle_imatrix        (arm/disarm/save activation-
+//                                   importance collection for quantize --imatrix; mirrors
+//                                   minimax/mm3-server.h's POST /mm3/imatrix — see
+//                                   yue2-imatrix.h for what this collects and why)
 //
 // NOT implemented (rough edge, listed rather than built for time's sake —
 // task rule): POST /yue2/vae-decode and POST /yue2/abc-plan, the plan's own
@@ -34,6 +38,7 @@
 // equivalents were not built this pass since nothing in the M10 gate
 // (POST /yue2/synth end-to-end) needs them.
 
+#include "yue2-imatrix.h"
 #include "yue2-job.h"
 #include "yue2-model.h"
 #include "yue2-request.h"
@@ -152,18 +157,33 @@ static void yue2_handle_unload(const httplib::Request &, httplib::Response & res
     res.set_content("{\"unloaded\":true}", "application/json");
 }
 
-// POST /yue2/select-model — {"vae_variant": "standard"|"legacy"}. Only
-// active variant is ever resident (yue2_load_parts's own contract); if a VAE
-// is currently loaded this reloads it, otherwise it just records the pick
-// for the next warm/synth.
+// POST /yue2/select-model — {"vae_variant": "standard"|"legacy", "lm_type": "<token>"}.
+// Both fields optional/independent. vae_variant: only the active variant is
+// ever resident (yue2_load_parts's own contract); if a VAE is currently
+// loaded this reloads it, otherwise it just records the pick for the next
+// warm/synth. lm_type: "" (or omitted) means auto/best-first
+// (yue2_quant_rank order); a specific token (e.g. "Q4_K_M", "Q4_K_M-imat")
+// pins discovery to yue2-lm-<token>.gguf. Changing it from the current pick
+// unloads the model (yue2_unload has no LM-only free — mirrors mm3's
+// full-teardown-then-lazy-reload contract) and re-discovers; the next
+// warm/synth loads the new file. Not yet exposed by any UI; added for
+// standalone-server quant A/B (docs/plans/yue2/07-quant-ladder.md).
 static void yue2_handle_select_model(const httplib::Request & req, httplib::Response & res) {
     std::string variant_str;
+    std::string lm_type_str;
+    bool        lm_type_given = false;
     if (!req.body.empty()) {
         yyjson_doc * d = yyjson_read(req.body.data(), req.body.size(), 0);
         if (d) {
-            yyjson_val * v = yyjson_obj_get(yyjson_doc_get_root(d), "vae_variant");
+            yyjson_val * root = yyjson_doc_get_root(d);
+            yyjson_val * v    = yyjson_obj_get(root, "vae_variant");
             if (v && yyjson_is_str(v)) {
                 variant_str = yyjson_get_str(v);
+            }
+            yyjson_val * lt = yyjson_obj_get(root, "lm_type");
+            if (lt && yyjson_is_str(lt)) {
+                lm_type_str   = yyjson_get_str(lt);
+                lm_type_given = true;
             }
             yyjson_doc_free(d);
         }
@@ -177,8 +197,19 @@ static void yue2_handle_select_model(const httplib::Request & req, httplib::Resp
     }
 
     std::lock_guard<std::mutex> lock(g_yue2_mutex);
-    const bool                   want_vae = g_yue2.vae_resident;  // only reload if one is already resident
-    std::string                  err;
+
+    if (lm_type_given && lm_type_str != g_yue2.lm_type_want) {
+        // Full teardown: yue2_unload() drops LM+VAE together (no LM-only
+        // free exists), then re-discover pins the new LM file. VAE residency
+        // is lost too, but yue2_load_parts's need_vae check reloads it on the
+        // next warm/synth same as a cold start.
+        yue2_unload(&g_yue2);
+        g_yue2.lm_type_want = lm_type_str;
+        yue2_discover(&g_yue2, g_yue2.models_dir.c_str(), lm_type_str.empty() ? nullptr : lm_type_str.c_str());
+    }
+
+    const bool   want_vae = g_yue2.vae_resident;  // only reload if one is already resident
+    std::string  err;
     if (want_vae) {
         if (!yue2_load_parts(&g_yue2, false, true, variant, false, &err)) {
             yue2_json_error(res, 500, err.empty() ? "YuE2 select-model failed" : err);
@@ -187,8 +218,21 @@ static void yue2_handle_select_model(const httplib::Request & req, httplib::Resp
     } else {
         g_yue2.vae_loaded_variant = variant;  // recorded for the next warm/synth
     }
-    std::string body = "{\"selected\":true,\"vae_variant\":\"" + std::string(YUE2_VAE_VARIANT_NAME[variant]) + "\"}";
-    res.set_content(body, "application/json");
+
+    yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_bool(doc, root, "selected", true);
+    yyjson_mut_obj_add_strcpy(doc, root, "vae_variant", YUE2_VAE_VARIANT_NAME[variant]);
+    yyjson_mut_obj_add_strcpy(doc, root, "lm_type_want", g_yue2.lm_type_want.c_str());
+    yyjson_mut_obj_add_strcpy(doc, root, "lm_file", g_yue2.lm_file.found ? g_yue2.lm_file.name.c_str() : "");
+    yyjson_mut_obj_add_bool(doc, root, "lm_found", g_yue2.lm_file.found);
+    char * json = yyjson_mut_write(doc, 0, NULL);
+    res.set_content(json ? json : "{}", "application/json");
+    yyjson_mut_doc_free(doc);
+    if (json) {
+        free(json);
+    }
 }
 
 // POST /yue2/tokenize-check — bring-up: assemble the prefix and report its
@@ -236,6 +280,160 @@ static void yue2_handle_tokenize_check(const httplib::Request & req, httplib::Re
     }
 }
 
+// POST /yue2/imatrix — activation-importance collection for quantization.
+//
+// See yue2-imatrix.h for what an imatrix is, why 2-3 bit quants need one, and
+// why IQ2_XXS/IQ2_XS refuse to run without it. Mirrors
+// minimax/mm3-server.h's mm3_handle_imatrix exactly (same action set, same
+// response shape) — see that function's own comment for the full rationale;
+// noted here only where YuE2 diverges.
+//
+//   {"action":"start"}                  arm; clears anything already collected
+//   {"action":"start","keep":true}      arm and ADD to what is already there
+//   {"action":"stop"}                   disarm, keep the accumulator
+//   {"action":"status"}                 counts, no state change
+//   {"action":"reset"}                  disarm and throw the accumulator away
+//   {"action":"save","path":"out.gguf"} write it out (does NOT disarm)
+//
+// The calibration loop is: start -> N x POST /yue2/synth (poll GET /job?id=
+// to completion each) -> save. Unlike MM3's lm-plan driver, a YuE2 /synth
+// call IS the whole LM (plan + semantic AR + NAR flow all share one GGUF and
+// one tmap_lm), so there is no cheaper LM-only endpoint to prefer here — see
+// yue2-pipeline.h's yue2_pipeline_run, which counts one call as one chunk.
+static void yue2_handle_imatrix(const httplib::Request & req, httplib::Response & res) {
+    std::lock_guard<std::mutex> lock(g_yue2_mutex);
+
+    yyjson_doc * doc  = req.body.empty() ? nullptr : yyjson_read(req.body.data(), req.body.size(), 0);
+    yyjson_val * root = doc ? yyjson_doc_get_root(doc) : nullptr;
+    if (!req.body.empty() && (!root || !yyjson_is_obj(root))) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        yue2_json_error(res, 400, "body must be a JSON object");
+        return;
+    }
+    struct DocGuard {
+        yyjson_doc * d;
+        ~DocGuard() {
+            if (d) {
+                yyjson_doc_free(d);
+            }
+        }
+    } guard{ doc };
+
+    yyjson_val * action_v = root ? yyjson_obj_get(root, "action") : nullptr;
+    std::string  action   = (action_v && yyjson_is_str(action_v)) ? yyjson_get_str(action_v) : "";
+    if (action.empty()) {
+        action = "status";
+    }
+
+    std::vector<std::string> warnings;
+    std::string              saved_path;
+
+    if (action == "start") {
+        if (!g_yue2.lm_resident) {
+            yue2_json_error(res, 503, "the LM is not resident — POST /yue2/warm first");
+            return;
+        }
+        yyjson_val * keep_v = root ? yyjson_obj_get(root, "keep") : nullptr;
+        const bool   keep   = keep_v && yyjson_is_true(keep_v);
+        if (!keep) {
+            yue2_imatrix_reset();
+        }
+
+        // Only names that came out of the YuE2 LM GGUF are collectable, and
+        // only the 2-D ones can ever be a matmul weight — derived from
+        // tmap_lm rather than a name pattern so LoRA factors (if any ever
+        // exist) or KV views can't drift into the set. AR blocks
+        // (blk.N.attn_*/ffn_*), NAR twins (nar_blk.N.nar_attn_*/nar_ffn_*)
+        // and the shared token_embd/output/latent_pos_embed/vae2llm/llm2vae/
+        // time_embd tensors are all in this one tmap (05-gguf-layout.md §3).
+        g_yue2_imatrix.allow.clear();
+        for (const auto & kv : g_yue2.tmap_lm) {
+            if (kv.second && ggml_n_dims(kv.second) >= 2) {
+                g_yue2_imatrix.allow.insert(kv.first);
+            }
+        }
+        if (g_yue2_imatrix.allow.empty()) {
+            yue2_json_error(res, 500, "no LM weight names to collect — tmap_lm is empty");
+            return;
+        }
+
+        if (g_yue2.lm.output && ggml_is_quantized(g_yue2.lm.output->type)) {
+            warnings.push_back(std::string("the resident LM is ") + ggml_type_name(g_yue2.lm.output->type) +
+                               " — collect on the f16 or bf16 LM, or the imatrix describes this "
+                               "checkpoint's quantization damage instead of the model");
+        }
+        g_yue2_imatrix.armed = true;
+        fprintf(stderr, "[YUE2-IMAT] Armed over %zu LM tensors (LM = %s). Expect synth to run much slower.\n",
+                g_yue2_imatrix.allow.size(), g_yue2.lm_file.found ? g_yue2.lm_file.name.c_str() : "?");
+    } else if (action == "stop") {
+        g_yue2_imatrix.armed = false;
+    } else if (action == "reset") {
+        g_yue2_imatrix.armed = false;
+        yue2_imatrix_reset();
+    } else if (action == "save") {
+        yyjson_val * path_v = root ? yyjson_obj_get(root, "path") : nullptr;
+        saved_path           = (path_v && yyjson_is_str(path_v)) ? yyjson_get_str(path_v) : "";
+        if (saved_path.empty()) {
+            yue2_json_error(res, 400, "save needs a \"path\"");
+            return;
+        }
+        std::string err;
+        if (!yue2_imatrix_save(saved_path, &err)) {
+            yue2_json_error(res, 500, err.empty() ? "imatrix save failed" : err);
+            return;
+        }
+        fprintf(stderr, "[YUE2-IMAT] Wrote %s (%zu tensors, %lld rows, %lld runs)\n", saved_path.c_str(),
+                g_yue2_imatrix.ent.size(), (long long) yue2_imatrix_total_rows(), (long long) g_yue2_imatrix.runs);
+    } else if (action != "status") {
+        yue2_json_error(res, 400, "action must be start, stop, status, reset or save");
+        return;
+    }
+
+    const size_t usable = yue2_imatrix_usable();
+    if (g_yue2_imatrix.ent.size() && usable < g_yue2_imatrix.ent.size()) {
+        char buf[200];
+        snprintf(buf, sizeof(buf),
+                 "%zu of %zu seen tensors have NO finite rows and will be omitted — the LM forward is producing "
+                 "non-finite activations",
+                 g_yue2_imatrix.ent.size() - usable, g_yue2_imatrix.ent.size());
+        warnings.push_back(buf);
+    }
+
+    yyjson_mut_doc * o    = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * orot = yyjson_mut_obj(o);
+    yyjson_mut_doc_set_root(o, orot);
+    yyjson_mut_obj_add_bool(o, orot, "armed", g_yue2_imatrix.armed);
+    yyjson_mut_obj_add_uint(o, orot, "runs", (uint64_t) g_yue2_imatrix.runs);
+    yyjson_mut_obj_add_uint(o, orot, "tensors", (uint64_t) g_yue2_imatrix.ent.size());
+    yyjson_mut_obj_add_uint(o, orot, "tensors_expected", (uint64_t) g_yue2_imatrix.allow.size());
+    yyjson_mut_obj_add_uint(o, orot, "rows", (uint64_t) yue2_imatrix_total_rows());
+    yyjson_mut_obj_add_uint(o, orot, "usable_tensors", (uint64_t) usable);
+    yyjson_mut_obj_add_uint(o, orot, "bad_rows", (uint64_t) g_yue2_imatrix.bad_rows);
+    yyjson_mut_obj_add_uint(o, orot, "matmuls", (uint64_t) g_yue2_imatrix.nodes);
+    yyjson_mut_obj_add_uint(o, orot, "skipped_type", (uint64_t) g_yue2_imatrix.skipped_type);
+    yyjson_mut_obj_add_uint(o, orot, "skipped_stride", (uint64_t) g_yue2_imatrix.skipped_stride);
+    yyjson_mut_obj_add_uint(o, orot, "skipped_shape", (uint64_t) g_yue2_imatrix.skipped_shape);
+    yyjson_mut_obj_add_strcpy(o, orot, "lm", g_yue2.lm_file.found ? g_yue2.lm_file.name.c_str() : "");
+    if (!saved_path.empty()) {
+        yyjson_mut_obj_add_strcpy(o, orot, "path", saved_path.c_str());
+    }
+    if (!warnings.empty()) {
+        yyjson_mut_val * w = yyjson_mut_arr(o);
+        for (const auto & s : warnings) {
+            yyjson_mut_arr_add_strcpy(o, w, s.c_str());
+        }
+        yyjson_mut_obj_add_val(o, orot, "warnings", w);
+    }
+    char * json = yyjson_mut_write(o, 0, NULL);
+    yyjson_mut_doc_free(o);
+    res.set_content(json ? json : "{}", "application/json");
+    if (json) {
+        free(json);
+    }
+}
+
 // POST /yue2/synth — the production endpoint. Parses the request, creates a
 // job on the SHARED job system, and hands the render to the one GPU worker
 // thread; returns immediately with the job id (same shape ACE/MM3 already
@@ -263,6 +461,7 @@ static void yue2_register_routes(httplib::Server & svr, const char * models_dir)
     svr.Post("/yue2/select-model", yue2_handle_select_model);
     svr.Post("/yue2/tokenize-check", yue2_handle_tokenize_check);
     svr.Post("/yue2/synth", yue2_handle_synth);
+    svr.Post("/yue2/imatrix", yue2_handle_imatrix);
     fprintf(stderr, "[Server] YuE2 routes registered (models_dir=%s, available=%s)\n", models_dir,
             yue2_available(g_yue2) ? "yes" : "no");
 }

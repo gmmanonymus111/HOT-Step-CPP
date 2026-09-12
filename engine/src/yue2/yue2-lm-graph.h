@@ -69,6 +69,7 @@
 // design — a production incremental decode loop needs MM3's own persistent,
 // padded, bucketed cache shape instead.
 
+#include "yue2-imatrix.h"
 #include "yue2-model.h"
 
 #include "backend.h"
@@ -713,6 +714,7 @@ static bool yue2_ar_prefill(const Yue2Model & m, Yue2ArKvCache & cache, const st
         }
         return false;
     }
+    yue2_imatrix_hook(sched);
 
     ggml_backend_tensor_set(in_ids, ids.data(), 0, (size_t) T * sizeof(int32_t));
     std::vector<int32_t> pos_host((size_t) T);
@@ -867,6 +869,7 @@ static bool yue2_ar_decode_step(const Yue2Model & m, Yue2ArKvCache & cache, int3
         }
         return false;
     }
+    yue2_imatrix_hook(sched);
 
     const int32_t id32 = token_id;
     ggml_backend_tensor_set(in_ids, &id32, 0, sizeof(int32_t));

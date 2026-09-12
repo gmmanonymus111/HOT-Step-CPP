@@ -533,6 +533,19 @@ static bool yue2_pipeline_run(Yue2Model & m, const BPETokenizer & tok, Yue2Reque
                                Yue2PipelineResult * out, std::string * err) {
     yue2_request_resolve_defaults(&req, m.lm_cfg);
 
+    // One /yue2/synth job is one imatrix "chunk" — counted here (not inside
+    // the per-scheduler hook) so a job that runs plan+semantic+NAR still adds
+    // exactly one to imatrix.chunk_count, matching mm3-server.h's own
+    // one-call-one-chunk convention for /mm3/lm-plan.
+    if (g_yue2_imatrix.armed) {
+        g_yue2_imatrix.runs++;
+        if (g_yue2_imatrix.sources.size() < 256) {
+            std::string label = req.style.empty() ? req.id : req.style;
+            label += std::string(" [cot=") + yue2_cot_name(req.cot) + "]";
+            g_yue2_imatrix.sources.push_back(label);
+        }
+    }
+
     std::mt19937_64 rng(req.seed);
 
     std::vector<int32_t> abc_ids;

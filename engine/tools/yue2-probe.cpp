@@ -79,9 +79,17 @@
 #include <utility>
 #include <vector>
 
+// --lm-type: pin discovery to yue2-lm-<token>.gguf instead of best-first (see
+// yue2_discover's lm_type_override param). Empty = normal best-first pick.
+// Declared here (ahead of every run_* function, all of which call
+// yue2_discover) rather than beside g_yue2_dump_dir further down, which is
+// only read after main() has parsed argv.
+static std::string g_yue2_lm_type;
+
 static void usage() {
     fprintf(stderr,
-            "Usage: yue2-probe --info|--load --models <dir> [--vae standard|legacy] [--encoder]\n"
+            "Usage: yue2-probe --info|--load --models <dir> [--vae standard|legacy] [--encoder] [--lm-type <token>]\n"
+            "       (--lm-type pins yue2-lm-<token>.gguf instead of best-first discovery, e.g. Q4_K_M)\n"
             "       yue2-probe --tokenize <text-file> [--models <dir>] [--tokenizer-dir <dir>]\n"
             "       yue2-probe --tokenizer-check <expected-ids.json> [--models <dir>] [--tokenizer-dir <dir>]\n"
             "       yue2-probe --prefix-check <fixture-root-dir> [--models <dir>] [--tokenizer-dir <dir>]\n"
@@ -127,7 +135,7 @@ static void report_unexpected(const GGUFModel & gf, const std::map<std::string, 
 
 static int run_info(const std::string & models_dir, Yue2VaeVariant variant, bool want_encoder) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
 
     printf("=== YuE2 LM ===\n");
     if (!m.lm_file.found) {
@@ -260,7 +268,7 @@ static int run_info(const std::string & models_dir, Yue2VaeVariant variant, bool
 
 static int run_load(const std::string & models_dir, Yue2VaeVariant variant, bool want_encoder) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
 
     if (!m.lm_file.found) {
         fprintf(stderr, "FATAL: YuE2 LM GGUF not found under %s\n", models_dir.c_str());
@@ -336,7 +344,7 @@ static bool yue2_probe_load_tokenizer(const std::string & models_dir, const std:
     }
     if (!models_dir.empty()) {
         Yue2Model m;
-        yue2_discover(&m, models_dir.c_str());
+        yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
         if (m.lm_file.found && yue2_tokenizer_load_from_gguf(tok, m.lm_file.path)) {
             *used_source = "gguf:" + m.lm_file.path;
             return true;
@@ -1050,7 +1058,7 @@ static int run_ar_parity_semantic(const Yue2Model & m, const std::string & fixtu
 
 static int run_ar_parity(const std::string & models_dir, const std::string & fixture_dir, const std::string & stage) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
     if (!yue2_available(m)) {
         fprintf(stderr, "FATAL: YuE2 LM GGUF not found/probe failed under %s\n", models_dir.c_str());
         return 1;
@@ -1573,7 +1581,7 @@ static bool yue2_nar_kv_dump_token_major(const Yue2ArKvCache & cache, int layer,
 // v1.4 fixture captured so far has exactly one chunk).
 static int run_nar_parity(const std::string & models_dir, const std::string & fixture_dir) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
     if (!yue2_available(m)) {
         fprintf(stderr, "FATAL: YuE2 LM GGUF not found/probe failed under %s\n", models_dir.c_str());
         return 1;
@@ -2041,7 +2049,7 @@ static int run_vae_parity_one(Yue2Model & m, Yue2VaeVariant variant, const std::
 static int run_vae_parity(const std::string & models_dir, const std::string & fixture_dir,
                           const std::string & variant_arg) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
 
     // Default (no --variant): standard only, per this milestone's brief
     // ("iterate until standard passes ... run legacy once") — legacy is
@@ -2188,7 +2196,7 @@ static int run_generate(const Yue2Model & m, const std::string & models_dir, con
 static int run_sampler_parity_cli(const std::string & models_dir, const std::string & fixture_dir,
                                   const std::string & stage) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
     if (m.lm_cfg.vocab_size == 0) {
         fprintf(stderr, "FATAL: YuE2 LM config not found/parsed under %s\n", models_dir.c_str());
         return 1;
@@ -2199,7 +2207,7 @@ static int run_sampler_parity_cli(const std::string & models_dir, const std::str
 static int run_decode_parity_cli(const std::string & models_dir, const std::string & fixture_dir,
                                  const std::string & stage) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
     if (!yue2_available(m)) {
         fprintf(stderr, "FATAL: YuE2 LM GGUF not found/probe failed under %s\n", models_dir.c_str());
         return 1;
@@ -2220,7 +2228,7 @@ static int run_generate_cli(const std::string & models_dir, const std::string & 
                             const std::string & style, const std::string & lyrics, const std::string & cot_s,
                             int max_tokens_cli, unsigned long long seed) {
     Yue2Model m;
-    yue2_discover(&m, models_dir.c_str());
+    yue2_discover(&m, models_dir.c_str(), g_yue2_lm_type.empty() ? nullptr : g_yue2_lm_type.c_str());
     if (!yue2_available(m)) {
         fprintf(stderr, "FATAL: YuE2 LM GGUF not found/probe failed under %s\n", models_dir.c_str());
         return 1;
@@ -2282,6 +2290,8 @@ int main(int argc, char ** argv) {
             ar_parity_stage = argv[++i];
         } else if (!strcmp(argv[i], "--dump-dir") && i + 1 < argc) {
             g_yue2_dump_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--lm-type") && i + 1 < argc) {
+            g_yue2_lm_type = argv[++i];
         } else if (!strcmp(argv[i], "--sampler-parity") && i + 1 < argc) {
             sampler_parity_dir = argv[++i];
         } else if (!strcmp(argv[i], "--decode-parity") && i + 1 < argc) {

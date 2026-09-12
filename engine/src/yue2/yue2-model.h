@@ -282,6 +282,11 @@ struct Yue2Model {
     bool           lm_resident  = false;
     bool           vae_resident = false;
     Yue2VaeVariant vae_loaded_variant = YUE2_VAE_STANDARD;
+    // "" = auto/best-first (yue2_quant_rank order); otherwise pins discovery
+    // to yue2-lm-<lm_type_want>.gguf. Set by POST /yue2/select-model; a
+    // change forces yue2_unload() + re-discover so the next warm/synth picks
+    // it up (mirrors mm3-server.h's want_lm_quant contract).
+    std::string    lm_type_want;
 
     bool           backend_ref = false;
     ggml_backend_t backend     = nullptr;
@@ -613,17 +618,56 @@ static void yue2_probe_file(const std::string & path, Yue2FileInfo * fi, bool is
 
 // ── Discovery ─────────────────────────────────────────────────────────────
 
-// Rank a quant token best-first. v1 scope (05-gguf-layout.md §6/§9): only
-// bf16/f16/f32 are produced by the converter — no k-quants yet — so this is
-// intentionally small next to mm3_quant_rank's full ladder.
-static int yue2_quant_rank(const std::string & q) {
-    static const char * order[] = { "bf16", "BF16", "f16", "F16", "f32", "F32" };
-    for (int i = 0; i < (int) (sizeof(order) / sizeof(order[0])); i++) {
-        if (q == order[i]) {
-            return i;
+// Plain ASCII case-insensitive compare -- avoids pulling in <cstring>'s
+// strcasecmp/_stricmp split (quantize.cpp's #ifdef _WIN32 macro trick isn't
+// worth repeating in a header included from six different .h files here).
+static bool yue2_ieq(const std::string & a, const char * b) {
+    size_t i = 0;
+    for (; a[i] && b[i]; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') {
+            ca = (char) (ca - 'A' + 'a');
+        }
+        if (cb >= 'A' && cb <= 'Z') {
+            cb = (char) (cb - 'A' + 'a');
+        }
+        if (ca != cb) {
+            return false;
         }
     }
-    return 1000;
+    return a[i] == '\0' && b[i] == '\0';
+}
+
+// Rank a quant token best-first. Mirrors mm3_quant_rank (engine/src/minimax/
+// mm3-model.h) exactly: same ladder order, same "-imat suffix ranks one notch
+// better than its plain twin" rule, same unknown-token fallback. Quantized
+// files come from engine/tools/quantize.cpp's arch "yue2" rules (§2 of the
+// quant-ladder doc); f32 has no quantize.cpp path (it is only ever the
+// converter's own --type f32 output) but stays in the ladder as a rank
+// between the converter's native types and the quantized ones.
+static int yue2_quant_rank(const std::string & q) {
+    static const char * order[] = { "bf16",  "f16",    "f32",    "q8_0",   "Q6_K",   "Q5_K_M",
+                                    "Q5_K_S", "Q4_K_M", "Q4_K_S", "NVFP4",  "MXFP4",  "IQ4_XS",
+                                    "Q3_K_L", "Q3_K_M", "Q3_K_S", "IQ3_XXS", "Q2_K",  "IQ2_XS",
+                                    "IQ2_XXS" };
+    // Case-insensitive on the base token: quantize.cpp writes filenames from
+    // its uppercase VARIANTS[].name (Q6_K, IQ4_XS, ...), the converter writes
+    // lowercase (bf16, f16, f32) -- accept whichever casing shows up on disk
+    // rather than keeping two literal entries per token like mm3_quant_rank
+    // does for its handful of dual-case tokens.
+    std::string       base   = q;
+    int               bonus  = 1;
+    const std::string suffix = "-imat";
+    if (base.size() > suffix.size() && base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        base  = base.substr(0, base.size() - suffix.size());
+        bonus = 0;
+    }
+    for (int i = 0; i < (int) (sizeof(order) / sizeof(order[0])); i++) {
+        if (yue2_ieq(base, order[i])) {
+            return i * 2 + bonus;
+        }
+    }
+    return 1000;  // unknown quant: offered, but never auto-selected over a known one
 }
 
 // Find the best-first yue2-<stem>-<quant>.gguf across the search dirs.
@@ -684,7 +728,14 @@ static bool yue2_weights_present(const char * models_dir) {
 // Locate the LM GGUF and both VAE variant GGUFs, and probe their headers.
 // Cheap (mmap + header parse, no weight reads). Safe to call when nothing is
 // there — YuE2 is simply reported unavailable via Yue2FileInfo::found.
-static void yue2_discover(Yue2Model * m, const char * models_dir) {
+//
+// `lm_type_override`, when non-null/non-empty, pins the LM file to the exact
+// yue2-lm-<lm_type_override>.gguf (first search dir that has it) instead of
+// yue2_find_variant's best-first pick — quant-ladder measurement needs every
+// type probed in turn (bf16 as reference, then each quantize.cpp output),
+// not always the best one on disk. nullptr/empty preserves the normal
+// best-first behavior for every other caller.
+static void yue2_discover(Yue2Model * m, const char * models_dir, const char * lm_type_override = nullptr) {
     m->models_dir = models_dir ? models_dir : "";
     m->search_dirs.clear();
     m->meta_errors.clear();
@@ -701,7 +752,25 @@ static void yue2_discover(Yue2Model * m, const char * models_dir) {
     m->search_dirs.push_back(m->models_dir);
 
     std::string lm_path;
-    if (yue2_find_variant(m->search_dirs, "lm", &lm_path)) {
+    bool        have_lm_path = false;
+    if (lm_type_override && lm_type_override[0]) {
+        const std::string want = std::string("yue2-lm-") + lm_type_override + ".gguf";
+        for (const auto & dir : m->search_dirs) {
+            const std::string candidate = dir + YUE2_SEP + want;
+            if (yue2_file_exists(candidate)) {
+                lm_path      = candidate;
+                have_lm_path = true;
+                break;
+            }
+        }
+        if (!have_lm_path && m->meta_errors.size() < 24) {
+            m->meta_errors.push_back("--lm-type '" + std::string(lm_type_override) + "': no " + want +
+                                      " under " + m->search_dirs[0] + " or " + m->search_dirs[1]);
+        }
+    } else {
+        have_lm_path = yue2_find_variant(m->search_dirs, "lm", &lm_path);
+    }
+    if (have_lm_path) {
         yue2_probe_file(lm_path, &m->lm_file, /*is_lm=*/true, &m->lm_cfg, nullptr, &m->meta_errors);
     }
     for (int v = 0; v < YUE2_VAE_VARIANT_COUNT; v++) {
@@ -751,16 +820,38 @@ static bool yue2_load_lm_tensors(Yue2Model * m, const GGUFModel & gf, std::vecto
     m->lm.time_embd_b[1] = ld.req("time_embd.1.bias", H);
     m->lm.latent_pos_embed = ld.req("latent_pos_embed.weight", H, MF);
 
-    // TRAP (05-gguf-layout.md §3.3): latent_pos_embed must be the SAME dtype
-    // as the other big matmul weights (NATIVE policy), never independently
-    // promoted/demoted. Compared against token_embd rather than a hardcoded
-    // BF16, so this stays correct if a future --type f16/f32 LM file appears.
-    if (m->lm.latent_pos_embed && m->lm.token_embd && m->lm.latent_pos_embed->type != m->lm.token_embd->type) {
-        char buf[192];
-        snprintf(buf, sizeof(buf),
-                 "latent_pos_embed.weight type (%d) != token_embd.weight type (%d) — NATIVE policy violated",
-                 (int) m->lm.latent_pos_embed->type, (int) m->lm.token_embd->type);
-        ld.fail(buf);
+    // TRAP (05-gguf-layout.md §3.3): latent_pos_embed must never be
+    // block-quantized -- it is read by a plain ggml_get_rows index gather
+    // (yue2-nar-graph.h), not a matmul, and recompute-then-round-trip from
+    // the textbook sinusoid formula already mismatches the checkpoint's own
+    // stored values in 62,153/50,331,648 entries, so a lossy quant on top
+    // would only compound that. quantize.cpp's should_quantize() excludes
+    // this tensor by name for exactly this reason (see its YUE2 POLICY
+    // comment) -- this assert is the loader's own backstop in case a future
+    // quantizer or hand-edited GGUF skips that exclusion.
+    //
+    // On an UNQUANTIZED file (plain converter output, every big matmul weight
+    // sharing one NATIVE dtype) it must additionally match token_embd's own
+    // type exactly -- that is the stronger invariant the comment above used
+    // to assert unconditionally, before quantize.cpp made token_embd's type
+    // independently choosable per variant (Q8_0/Q6_K/... via VARIANTS[].embed)
+    // while latent_pos_embed stays untouched. Once token_embd itself is a
+    // quantized type, exact equality is no longer the right test; "still a
+    // genuine float type" is.
+    if (m->lm.latent_pos_embed) {
+        if (ggml_is_quantized(m->lm.latent_pos_embed->type)) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "latent_pos_embed.weight was block-quantized (type %d) -- must stay F32/F16/BF16",
+                     (int) m->lm.latent_pos_embed->type);
+            ld.fail(buf);
+        } else if (m->lm.token_embd && !ggml_is_quantized(m->lm.token_embd->type) &&
+                   m->lm.latent_pos_embed->type != m->lm.token_embd->type) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "latent_pos_embed.weight type (%d) != token_embd.weight type (%d) — NATIVE policy violated",
+                     (int) m->lm.latent_pos_embed->type, (int) m->lm.token_embd->type);
+            ld.fail(buf);
+        }
     }
 
     m->lm.blk.assign((size_t) L, Yue2LmLayer{});

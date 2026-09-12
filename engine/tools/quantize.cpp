@@ -4,12 +4,17 @@
 // get bumped in S/M variants, the embedding is always Q6_K, norms promoted to
 // F32. Streaming write: one tensor at a time, low memory footprint.
 //
-// TWO TENSOR-NAME CONVENTIONS
-// ---------------------------
+// THREE TENSOR-NAME CONVENTIONS
+// ------------------------------
 // ACE-Step GGUFs use HF names (model.layers.N.self_attn.v_proj.weight); the
 // MiniMax-Music3 GGUFs written by convert-mm3.py use llama.cpp names
 // (blk.N.attn_v.weight) plus prefixed synth modules (dit.blk.N.*, depth.blk.N.*,
-// cond.*, voc.*). EVERY policy rule below has to match both, or it silently
+// cond.*, voc.*); the YuE2 LM GGUF written by convert-yue2.py also uses
+// llama.cpp names, plus an AR/NAR twin split (blk.N.attn_*.weight vs.
+// blk.N.nar_attn_*.weight -- see YUE2 POLICY) and a handful of flat
+// flow-matching-head names with no blk. prefix at all (vae2llm.weight,
+// llm2vae.weight, time_embd.{0,1}.weight, latent_pos_embed.weight). EVERY
+// policy rule below has to match all three conventions, or it silently
 // misses: no layer bumps, and a 200k-row embedding dropping to the base type.
 //
 // MINIMAX-MUSIC3 POLICY (files carrying the mm3.model key)
@@ -21,6 +26,34 @@
 // quantizable was written F16. So the rule here is simply "quantize F16, never
 // touch F32" -- that reproduces the converter's policy exactly, with no name
 // list to drift out of sync. See engine/tools/convert-mm3.py.
+//
+// YUE2 POLICY (arch "yue2", no mm3.model key -- falls through the generic
+// ACE-shaped path below, PLUS the explicit exclusions in should_quantize())
+// ------------------------------------------------------------------------
+// Unlike MM3, convert-yue2.py does not pre-encode a quantizability decision
+// in the storage type -- the whole LM file is one NATIVE dtype (bf16/f16/f32,
+// see docs/plans/yue2/05-gguf-layout.md §3), so every big 2-D matmul weight
+// (blk.N.attn_*, blk.N.ffn_*, and their blk.N.nar_attn_*/nar_ffn_* twins) is
+// eligible and picked up by the ordinary is_important_sm/_l + should_quantize
+// path with zero yue2-specific code: those two functions match by substring
+// ("attn_v.weight", "ffn_down.weight", "attn_output.weight", ...), and a
+// substring match inside "blk.N.nar_attn_output.weight" is exactly as valid
+// as inside "blk.N.attn_output.weight" -- the NAR output projection gets the
+// same o_proj-style bump as the AR one for free. token_embd.weight and
+// output.weight are likewise already covered by is_embed()'s literal-name
+// check (same names MM3's own LM uses), so they get the Q8_0/Q6_K embed-type
+// floor from VARIANTS[].embed with no arch gating needed either.
+//
+// What genuinely needs a yue2-specific rule: four tensor families that are
+// 2-D (so the generic n_dims<2 exclusion does NOT catch them) but must never
+// be quantized regardless of variant or alignment luck --
+// latent_pos_embed.weight, vae2llm.weight, llm2vae.weight and the two
+// time_embd.{0,1}.weight matrices. These feed the flow-matching ODE
+// integrator (time/velocity conditioning) or the NAR position table directly;
+// engine/src/yue2/yue2-model.h's loader additionally asserts
+// latent_pos_embed stays a genuine float type (never block-quantized) since
+// ggml has no get_rows path that would make sense for a positional table read
+// by a plain index gather rather than a matmul. See should_quantize() below.
 //
 // Usage: quantize <input.gguf> <output.gguf> <type> [--imatrix <file.gguf>]
 // Types: Q2_K Q3_K_S Q3_K_M Q3_K_L Q4_K_S Q4_K_M Q5_K_S Q5_K_M Q6_K Q8_0 NVFP4 MXFP4
@@ -211,6 +244,16 @@ static bool should_quantize(const char * name, int n_dims, const char * arch) {
         return false;
     }
     if (strstr(name, "null_condition_emb")) {
+        return false;
+    }
+    // YuE2 flow-matching heads + AR/NAR positional table (see YUE2 POLICY
+    // above). Literal, unprefixed names -- unique to the yue2 arch, so no
+    // arch gate needed, same style as the MM3 literal-name exclusions above.
+    if (name_is(name, "latent_pos_embed.weight") || name_is(name, "vae2llm.weight") ||
+        name_is(name, "llm2vae.weight")) {
+        return false;
+    }
+    if (strncmp(name, "time_embd.", 10) == 0) {
         return false;
     }
     return true;
