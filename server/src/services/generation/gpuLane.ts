@@ -1,60 +1,86 @@
-// generation/gpuLane.ts — the single-GPU serialization lane
-//
-// The C++ engine owns one GPU and one global log pub/sub with no job tagging,
-// so two pieces of engine work running at once both thrash VRAM and leak each
-// other's progress lines. Everything heavy therefore goes through here and
-// runs strictly one at a time, in submission order.
-//
-// This used to be private to routes/generate.ts, where only generations could
-// use it. Post-processing re-runs (SuperSep split, StableStep/SA3, PP-VAE
-// re-encode) are just as GPU-hungry as a generation and have to share the same
-// lane, not race it.
+// One GPU owner at a time, including while reset work drains.
 
-type Task = () => void;
-
-const pending: Task[] = [];
-let running = false;
-
-/** True while a lane task is executing. */
-export function gpuLaneBusy(): boolean {
-  return running;
+export interface LaneLease {
+  readonly id: number;
+  readonly generation: number;
+  readonly label: string;
+  readonly family?: string;
+  readonly draining: boolean;
+  isCurrent(): boolean;
 }
 
-/** How many tasks are waiting behind the running one. */
-export function gpuLaneDepth(): number {
-  return pending.length;
+export class LaneResetError extends Error {
+  constructor() {
+    super('Queue reset by user');
+    this.name = 'LaneResetError';
+  }
 }
 
-/**
- * Drop every waiting task and mark the lane free. Backs the "reset queue"
- * escape hatch, so it deliberately lies about a task that is still running —
- * the caller has already cancelled the engine job it was waiting on. Returns
- * how many waiting tasks were dropped.
- */
+interface Pending {
+  label: string;
+  family?: string;
+  start(lease: LaneLease): void;
+  reject(error: Error): void;
+}
+
+const pending: Pending[] = [];
+let generation = 0;
+let nextLeaseId = 1;
+let current: LaneLease | null = null;
+
+export function gpuLaneBusy(): boolean { return current !== null; }
+export function gpuLaneDepth(): number { return pending.length; }
+export function gpuLaneOwner(): LaneLease | null { return current; }
+
+/** Invalidates callbacks and rejects queued tasks. The current task retains
+ * ownership until its promise settles, including any external post-processing.
+ * There is no timer release or release based only on an engine restart. */
 export function resetGpuLane(): number {
-  const drained = pending.length;
-  pending.length = 0;
-  running = false;
-  return drained;
+  generation++;
+  const drained = pending.splice(0);
+  for (const task of drained) task.reject(new LaneResetError());
+  return drained.length;
 }
 
-/**
- * Run `fn` on the GPU lane, waiting for any earlier task to finish first.
- * Resolves/rejects with `fn`'s own outcome — a rejection releases the lane
- * exactly like a success, so one failed task cannot wedge the queue.
- */
-export function runOnGpuLane<T>(fn: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const execute = () => {
-      running = true;
-      fn().then(resolve, reject).finally(() => {
-        running = false;
-        const next = pending.shift();
-        if (next) next();
-      });
-    };
+function pump(): void {
+  if (current) return;
+  const task = pending.shift();
+  if (!task) return;
+  const lease: LaneLease = {
+    id: nextLeaseId++, generation, label: task.label, family: task.family,
+    get draining() { return lease.generation !== generation; },
+    isCurrent: () => current === lease && lease.generation === generation,
+  };
+  Object.freeze(lease);
+  current = lease;
+  task.start(lease);
+}
 
-    if (running) pending.push(execute);
-    else execute();
+function finish(lease: LaneLease, settle: () => void): void {
+  // An old completion can never release another owner's lease.
+  if (current === lease) current = null;
+  settle();
+  pump();
+}
+
+export function runOnGpuLane<T>(
+  fn: (lease: LaneLease) => Promise<T>,
+  opts: { label?: string; family?: string } = {},
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    pending.push({
+      label: opts.label ?? 'gpu task', family: opts.family, reject,
+      start(lease) {
+        Promise.resolve().then(() => {
+          // Reset may have invalidated the lease before its first callback.
+          if (!lease.isCurrent()) throw new LaneResetError();
+          return fn(lease);
+        }).then(
+          value => finish(lease, () => resolve(value)),
+          error => finish(lease, () => reject(error)),
+        );
+      },
+    });
+    pump();
   });
 }

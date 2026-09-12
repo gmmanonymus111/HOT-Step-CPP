@@ -154,9 +154,10 @@ test('queued jobs retain captured ACE/MM3 backends across selector changes', asy
   };
   const effectiveSeed = extractFunction('server/src/routes/generate.ts', 'effectiveSeed');
   const finalizeAttempt = extractFunction('server/src/routes/generate.ts', 'finalizeAttempt', { effectiveSeed });
+  const emptyOutcome = extractFunction('server/src/routes/generate.ts', 'emptyOutcome');
   const routeContext = {
     getBackend: id => backends[id], finalizeAttempt, runGeneration: extractFunction('server/src/routes/generate.ts', 'runGeneration', {
-      getBackend: id => backends[id], pollUntilDone: () => 'poller',
+      getBackend: id => backends[id], emptyOutcome, pollUntilDone: () => 'poller',
     }), runOnGpuLane: lane.runOnGpuLane, gpuLaneBusy: lane.gpuLaneBusy, gpuLaneDepth: lane.gpuLaneDepth,
     noteEnqueued: family => enqueued.push(family), noteFinished: family => {
       finished.push(family); if (finished.length === 2) finishResolve();
@@ -166,6 +167,7 @@ test('queued jobs retain captured ACE/MM3 backends across selector changes', asy
   const enqueue = extractFunction('server/src/routes/generate.ts', 'enqueueGeneration', routeContext);
   let release;
   lane.runOnGpuLane(() => new Promise(resolve => { release = resolve; }));
+  await Promise.resolve(); // The lease starts callbacks on the next microtask.
   const jobA = { id: 'A', status: 'pending', params: {}, attempts: [], envelope: envA };
   const jobB = { id: 'B', status: 'pending', params: {}, attempts: [], envelope: envB };
   enqueue(jobA); enqueue(jobB);
@@ -183,7 +185,7 @@ test('queued jobs retain captured ACE/MM3 backends across selector changes', asy
 
 test('execution never falls back when a captured backend is missing', async () => {
   const backend = extractFunction('server/src/routes/generate.ts', 'runGeneration', {
-    getBackend: () => undefined, pollUntilDone: () => {},
+    getBackend: () => undefined, emptyOutcome: extractFunction('server/src/routes/generate.ts', 'emptyOutcome'), pollUntilDone: () => {},
   });
   await assert.rejects(backend({ id: 'missing', status: 'pending', envelope: { backendId: 'gone' } }, {}),
     error => error.message.includes("Captured generation backend 'gone'"));

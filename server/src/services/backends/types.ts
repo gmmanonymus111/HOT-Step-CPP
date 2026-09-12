@@ -7,6 +7,7 @@
 
 import type { PluginParamSchema } from '../aceClient.js';
 import type { GenerationJob, StageTiming } from '../generation/jobTypes.js';
+import type { LaneLease } from '../generation/gpuLane.js';
 
 /** Which job queue a backend's generations serialize against (plan §3.2/§4.4). */
 export type ResourcePool = 'gpu' | 'remote';
@@ -252,10 +253,11 @@ export type PollUntilDone = (
   timeoutMinutes?: number,
 ) => Promise<void>;
 
-/** Step 7 context. `lease` is added when step 8 makes lane ownership real. */
+/** Step 8 context. The lease is the shared lane ownership token for this run. */
 export interface GenerationContext {
   envelope: Readonly<GenerationEnvelope>;
   attempt: GenerationAttempt;
+  lease: LaneLease;
   signal: AbortSignal;
   pollUntilDone: PollUntilDone;
   stageProfile: (stage: string | undefined) => StageProfile;

@@ -20,7 +20,7 @@ import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import { pushLog } from './logs.js';
 import { getBackend, getActiveBackendId } from '../services/backends/registry.js';
 import { mm3StreamUrl } from '../services/backends/minimax/client.js';
-import { runOnGpuLane, gpuLaneBusy, gpuLaneDepth, resetGpuLane } from '../services/generation/gpuLane.js';
+import { runOnGpuLane, gpuLaneBusy, gpuLaneDepth, gpuLaneOwner, resetGpuLane, type LaneLease } from '../services/generation/gpuLane.js';
 import { isActiveJob, type GenerationJob } from '../services/generation/jobTypes.js';
 import { pollUntilDone } from '../services/generation/pollUntilDone.js';
 import { translateParams } from '../services/generation/translateParams.js';
@@ -100,14 +100,17 @@ async function runGeneration(
   job: GenerationJob,
   signal: AbortSignal,
   attempt: GenerationAttempt,
+  lease: LaneLease,
 ): Promise<GenerationOutcome> {
   if (job.status === 'cancelled') return emptyOutcome(job, 'cancelled');
   const backendId = job.envelope?.backendId;
   const backend = backendId ? getBackend(backendId) : undefined;
   if (!backend) throw new Error(`Captured generation backend '${backendId ?? '(missing)'}' is not registered`);
+  if (!lease.isCurrent()) return emptyOutcome(job, 'reset');
   return backend.generate(job, {
     envelope: job.envelope,
     attempt,
+    lease,
     signal,
     pollUntilDone,
     stageProfile: backend.stageProfile ?? (() => ({ stallMs: 900_000 })),
@@ -127,7 +130,7 @@ function enqueueGeneration(job: GenerationJob): void {
     console.log(`[Generate] Job ${job.id} queued (${gpuLaneDepth() + 1} waiting)`);
   }
 
-  void runOnGpuLane(async () => {
+  void runOnGpuLane(async (lease) => {
     const retryPolicy = job.envelope.policy.retry;
     let attemptNumber = 0;
     let reseededForAttempt = false;
@@ -148,7 +151,7 @@ function enqueueGeneration(job: GenerationJob): void {
       const abortController = new AbortController();
       (job as any)._abort = abortController;
       try {
-        const outcome = await runGeneration(job, abortController.signal, attempt);
+        const outcome = await runGeneration(job, abortController.signal, attempt, lease);
         finalizeAttempt(attempt, job, outcome);
         break; // A returned outcome, including a consumed failure, ends this retry scope.
       } catch (err: any) {
@@ -194,7 +197,7 @@ function enqueueGeneration(job: GenerationJob): void {
       }
     }
 
-  }).catch((err: any) => {
+  }, { label: `generate:${job.id}`, family }).catch((err: any) => {
     // The retry loop above swallows every generation failure, so reaching here
     // means the lane itself broke. Never leave that silent.
     console.error(`[Generate] Job ${job.id} lane error:`, err?.message || err);
@@ -409,6 +412,8 @@ router.get('/queue', (_req, res) => {
   res.json({
     depth,
     running: gpuLaneBusy(),
+    owner: gpuLaneOwner()?.label ?? null,
+    draining: gpuLaneOwner()?.draining ?? false,
     current: activeJob ? {
       id: activeJob.id,
       status: activeJob.status,

@@ -251,7 +251,9 @@ export function startRePostProcess(song: any, params: PostProcessParams): RePost
   logGenerationParams(jobId, ppParams as Record<string, any>);
   if (cpuOnly) logGeneration(jobId, 'INFO', '[Post-Processing] CPU-only chain: running beside the GPU lane');
 
-  const lane = cpuOnly ? (fn: () => Promise<void>) => fn() : runOnGpuLane;
+  const lane = cpuOnly
+    ? (fn: () => Promise<void>) => fn()
+    : (fn: () => Promise<void>) => runOnGpuLane(fn, { label: 'postprocess:' + jobId });
   void lane(async () => {
     job.status = 'running';
     job.stage = 'Starting...';

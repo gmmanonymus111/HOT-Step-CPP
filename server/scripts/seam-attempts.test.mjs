@@ -68,7 +68,8 @@ async function execute({ backendId = 'ace', actions, maxAttempts = 2, params = {
   const getBackend = id => id === backendId ? backend : undefined;
   const effectiveSeed = extract('effectiveSeed');
   const finalizeAttempt = extract('finalizeAttempt', { effectiveSeed });
-  const run = extract('runGeneration', { getBackend, pollUntilDone: () => 'poller' });
+  const emptyOutcome = extract('emptyOutcome');
+  const run = extract('runGeneration', { getBackend, emptyOutcome, pollUntilDone: () => 'poller' });
   const routeContext = {
     runGeneration: run, finalizeAttempt, runOnGpuLane: lane.runOnGpuLane,
     gpuLaneBusy: lane.gpuLaneBusy, gpuLaneDepth: lane.gpuLaneDepth,
