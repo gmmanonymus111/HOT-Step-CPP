@@ -490,6 +490,11 @@ export interface RegistryFile {
    *  engines for. Matched against dit_runtime.sm to mark the one a user
    *  actually needs. Absent on every other entry. */
   sm?: number;
+  /** Which generation backend this file belongs to (or "shared" across
+   *  several). Drives the top-level family tab in the Model Manager catalogue.
+   *  Optional — a hand-edited or pre-family registry entry falls back to a
+   *  role→family mapping (see ModelCatalogueTab's familyForFile). */
+  family?: 'as1.5' | 'mm3' | 'yue2' | 'shared';
 }
 
 /** Starter pack definition */
@@ -498,6 +503,8 @@ export interface StarterPack {
   name: string;
   description: string;
   fileIds: string[];
+  /** See RegistryFile.family — same fallback rules when absent. */
+  family?: 'as1.5' | 'mm3' | 'yue2' | 'shared';
 }
 
 /** Model registry response from server */

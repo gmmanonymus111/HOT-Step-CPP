@@ -262,6 +262,16 @@ struct Yue2FileInfo {
     std::string probe_error;
 };
 
+// One yue2-lm-<type>.gguf found on disk, for the props quant catalogue.
+// Mirrors MM3Variant (engine/src/minimax/mm3-model.h) exactly — the type
+// token is taken from the filename verbatim, same as MM3's `quant`.
+struct Yue2Variant {
+    std::string type;   // "bf16" | "Q8_0" | "Q4_K_M-imat" | ...
+    std::string path;
+    std::string name;   // basename
+    uint64_t    bytes = 0;
+};
+
 enum Yue2VaeVariant { YUE2_VAE_STANDARD = 0, YUE2_VAE_LEGACY = 1, YUE2_VAE_VARIANT_COUNT };
 
 static const char * const YUE2_VAE_VARIANT_NAME[YUE2_VAE_VARIANT_COUNT] = { "standard", "legacy" };
@@ -277,6 +287,11 @@ struct Yue2Model {
     Yue2LmConfig               lm_cfg;
     Yue2VaeConfig              vae_cfg;  // config of whichever variant is currently loaded/probed
     std::vector<std::string>  meta_errors;
+    // Every yue2-lm-*.gguf found across search_dirs (filename-only scan, no
+    // header probe) — reported at GET /yue2/props under variants.lm.available
+    // so the UI's quant picker can list installed LM types. Filled by
+    // yue2_discover(), same lifecycle as lm_file.
+    std::vector<Yue2Variant>  lm_variants;
 
     // residency — two parts only, per file-header note above.
     bool           lm_resident  = false;
@@ -670,6 +685,47 @@ static int yue2_quant_rank(const std::string & q) {
     return 1000;  // unknown quant: offered, but never auto-selected over a known one
 }
 
+// Every yue2-lm-<type>.gguf across the search dirs (filename-only, no header
+// probe), de-duplicated by type (earlier search dir wins, same "yue2/ before
+// root" precedence as yue2_find_variant) and sorted best-first by
+// yue2_quant_rank. Mirrors mm3_enumerate (engine/src/minimax/mm3-model.h).
+static void yue2_enumerate_lm(const Yue2Model & m, std::vector<Yue2Variant> * out) {
+    out->clear();
+    const std::string prefix = "yue2-lm-";
+    for (const auto & dir : m.search_dirs) {
+        std::vector<std::string> names;
+        yue2_list_dir(dir, &names);
+        for (const auto & n : names) {
+            if (n.size() <= prefix.size() + 5 || n.compare(0, prefix.size(), prefix) != 0) {
+                continue;
+            }
+            if (n.compare(n.size() - 5, 5, ".gguf") != 0) {
+                continue;
+            }
+            Yue2Variant v;
+            v.type = n.substr(prefix.size(), n.size() - prefix.size() - 5);
+            bool dup = false;
+            for (const auto & e : *out) {
+                if (e.type == v.type) {
+                    dup = true;  // earlier search dir already supplied this type
+                    break;
+                }
+            }
+            if (dup) {
+                continue;
+            }
+            v.path  = dir + YUE2_SEP + n;
+            v.name  = n;
+            v.bytes = yue2_file_size(v.path);
+            out->push_back(v);
+        }
+    }
+    std::sort(out->begin(), out->end(), [](const Yue2Variant & a, const Yue2Variant & b) {
+        const int ra = yue2_quant_rank(a.type), rb = yue2_quant_rank(b.type);
+        return ra != rb ? ra < rb : a.type < b.type;
+    });
+}
+
 // Find the best-first yue2-<stem>-<quant>.gguf across the search dirs.
 static bool yue2_find_variant(const std::vector<std::string> & search_dirs, const std::string & stem,
                               std::string * out_path) {
@@ -773,6 +829,7 @@ static void yue2_discover(Yue2Model * m, const char * models_dir, const char * l
     if (have_lm_path) {
         yue2_probe_file(lm_path, &m->lm_file, /*is_lm=*/true, &m->lm_cfg, nullptr, &m->meta_errors);
     }
+    yue2_enumerate_lm(*m, &m->lm_variants);
     for (int v = 0; v < YUE2_VAE_VARIANT_COUNT; v++) {
         std::string path;
         const std::string stem = std::string("vae-") + YUE2_VAE_VARIANT_NAME[v];

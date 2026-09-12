@@ -1,12 +1,68 @@
 // ModelCatalogueTab.tsx — Tabbed model catalogue browser
+//
+// Two-level tabs: a top-level family bar (ACE-Step 1.5 / MiniMax-Music3 /
+// YuE2 / Shared) selects which backend's models to browse, and — for
+// families with more than one role — a role sub-tab bar underneath picks
+// the specific component (DiT, LM, VAE, ...). The family selection is
+// controlled by the parent (ModelManagerModal) so the Starter Packs section
+// above the catalogue can filter to the same family.
 
-import React, { useState, useMemo } from 'react';
-import { ChevronDown, ChevronRight, Download, ExternalLink, Info, KeyRound, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronRight, Download, ExternalLink, Info, KeyRound, Mail, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ModelRow } from './ModelRow';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import type { RegistryFile, DownloadJob } from '../../types';
+
+export type FamilyTab = 'as1.5' | 'mm3' | 'yue2' | 'shared';
+
+export const FAMILY_TABS: { id: FamilyTab; label: string }[] = [
+  { id: 'as1.5', label: 'ACE-Step 1.5' },
+  { id: 'mm3', label: 'MiniMax-Music3' },
+  { id: 'yue2', label: 'YuE2' },
+  { id: 'shared', label: 'Shared' },
+];
+
+type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper' | 'mm3' | 'moss' | 'yue2';
+
+/** Role → family fallback, for entries with no `family` field of their own
+ *  (a hand-edited catalogue, or one written before this field existed). Every
+ *  entry in the shipped registry carries `family` directly — this only
+ *  matters as a safety net. */
+const ROLE_FAMILY_FALLBACK: Record<RoleTab, FamilyTab> = {
+  dit: 'as1.5', lm: 'as1.5', embedding: 'as1.5', vae: 'as1.5', 'pp-vae': 'as1.5',
+  stablestep: 'shared', supersep: 'shared', whisper: 'shared', moss: 'shared',
+  mm3: 'mm3', yue2: 'yue2',
+};
+
+/** Family for one registry file, honoring an explicit `family` first. The
+ *  'runtime' role has no tab of its own and splits across two families: the
+ *  TensorRT DLLs are MM3-only, the CUDA/ORT runtime DLLs are shared. */
+export function familyForFile(f: RegistryFile): FamilyTab {
+  if (f.family) return f.family;
+  if (f.role === 'runtime') return f.id.startsWith('trt-rt-') ? 'mm3' : 'shared';
+  return ROLE_FAMILY_FALLBACK[f.role as RoleTab] ?? 'shared';
+}
+
+/** Family for a starter pack: its own `family` field, or (fallback) the
+ *  family of its most common constituent file. */
+export function familyForPack(pack: { family?: FamilyTab; fileIds?: string[] }, files: RegistryFile[]): FamilyTab {
+  if (pack.family) return pack.family;
+  const counts: Partial<Record<FamilyTab, number>> = {};
+  for (const id of pack.fileIds ?? []) {
+    const f = files.find(x => x.id === id);
+    if (!f) continue;
+    const fam = familyForFile(f);
+    counts[fam] = (counts[fam] ?? 0) + 1;
+  }
+  let best: FamilyTab = 'shared';
+  let bestCount = -1;
+  for (const [fam, count] of Object.entries(counts) as [FamilyTab, number][]) {
+    if (count > bestCount) { best = fam; bestCount = count; }
+  }
+  return best;
+}
 
 interface Props {
   files: RegistryFile[];
@@ -15,23 +71,34 @@ interface Props {
   onCancel: (jobId: string) => void;
   onResume: (jobId: string) => void;
   onDelete: (filename: string) => void;
+  /** Selected by the family tab bar in ModelManagerModal (which also filters
+   *  the Starter Packs section to the same family) — the sole reason this
+   *  is a prop rather than local state. */
+  activeFamily: FamilyTab;
 }
 
-type RoleTab = 'dit' | 'lm' | 'embedding' | 'vae' | 'pp-vae' | 'stablestep' | 'supersep' | 'whisper' | 'mm3' | 'moss' | 'yue2';
-
-const TABS: { id: RoleTab; label: string }[] = [
-  { id: 'dit', label: 'DiT Models' },
-  { id: 'lm', label: 'Language Models' },
-  { id: 'embedding', label: 'Text Encoder' },
-  { id: 'vae', label: 'VAE' },
-  { id: 'pp-vae', label: 'PP-VAE' },
-  { id: 'stablestep', label: 'StableStep' },
-  { id: 'supersep', label: 'Stem Separation' },
-  { id: 'whisper', label: 'Whisper' },
-  { id: 'mm3', label: 'MiniMax-Music3' },
-  { id: 'moss', label: 'Captioning (MOSS)' },
-  { id: 'yue2', label: 'YuE2' },
-];
+/** Role sections shown under each family tab, in display order. */
+const FAMILY_SECTIONS: Record<FamilyTab, { id: RoleTab; label: string }[]> = {
+  'as1.5': [
+    { id: 'dit', label: 'DiT Models' },
+    { id: 'lm', label: 'Language Models' },
+    { id: 'embedding', label: 'Text Encoder' },
+    { id: 'vae', label: 'VAE' },
+    { id: 'pp-vae', label: 'PP-VAE' },
+  ],
+  mm3: [
+    { id: 'mm3', label: 'MiniMax-Music3' },
+  ],
+  yue2: [
+    { id: 'yue2', label: 'YuE2' },
+  ],
+  shared: [
+    { id: 'stablestep', label: 'StableStep' },
+    { id: 'supersep', label: 'Stem Separation' },
+    { id: 'whisper', label: 'Whisper' },
+    { id: 'moss', label: 'Captioning (MOSS)' },
+  ],
+};
 
 // ── Info blocks per category ────────────────────────────────
 
@@ -93,6 +160,159 @@ function groupLmFiles(files: RegistryFile[]): ModelGroup[] {
     }))
     .filter(g => g.files.length > 0);
 }
+
+// ── YuE2 quant ladder ─────────────────────────────────────────
+//
+// The registry only ships a BF16 LM today — the quant ladder entries land in
+// a later step. Grouping is data-driven from role 'yue2' files by quant so
+// each new quant just appears here once its registry entry exists, with no
+// UI change required.
+
+const YUE2_QUANT_ORDER = ['BF16', 'Q8_0', 'Q6_K', 'Q5_K_M', 'Q4_K_M-imat', 'Q4_K_S-imat', 'Q3_K_M-imat', 'NVFP4', 'MXFP4'];
+
+const YUE2_QUANT_NOTES: Record<string, string> = {
+  BF16: 'Reference precision — the source weights, no quantisation.',
+  Q8_0: 'Near-lossless — indistinguishable from BF16 in practice, about half the size.',
+  Q6_K: 'Close to source quality with a real size saving.',
+  Q5_K_M: 'Close to source quality with a real size saving, smaller than Q6_K.',
+  'Q4_K_M-imat': 'Imatrix-guided — importance-weighted rounding keeps quality up at a noticeably smaller size.',
+  'Q4_K_S-imat': 'Imatrix-guided — importance-weighted rounding keeps quality up at a noticeably smaller size.',
+  'Q3_K_M-imat': 'Imatrix-guided — the smallest quant considered usable.',
+  NVFP4: 'Experimental — scores below the k-quants above in testing so far.',
+  MXFP4: 'Experimental — scores below the k-quants above in testing so far.',
+};
+
+function sortByQuantOrder(quants: string[]): string[] {
+  return [...quants].sort((a, b) => {
+    const ia = YUE2_QUANT_ORDER.indexOf(a);
+    const ib = YUE2_QUANT_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+const Yue2Tab: React.FC<{
+  files: RegistryFile[];
+  downloadJobs: DownloadJob[];
+  onDownload: (fileId: string) => void;
+  onCancel: (jobId: string) => void;
+  onResume: (jobId: string) => void;
+  onDelete: (filename: string) => void;
+}> = ({ files, downloadJobs, onDownload, onCancel, onResume, onDelete }) => {
+  const lmFiles = useMemo(() => files.filter(f => f.variant === 'lm' || (f.variant ?? '').startsWith('lm-')), [files]);
+  const imatrixFiles = useMemo(
+    () => files.filter(f => f.variant === 'imatrix' || f.id.includes('imatrix') || f.filename.includes('imatrix')),
+    [files],
+  );
+  const vaeFiles = useMemo(() => files.filter(f => (f.variant ?? '').startsWith('vae-')), [files]);
+  const otherFiles = useMemo(
+    () => files.filter(f => !lmFiles.includes(f) && !imatrixFiles.includes(f) && !vaeFiles.includes(f)),
+    [files, lmFiles, imatrixFiles, vaeFiles],
+  );
+
+  const quantGroups = useMemo(() => {
+    const byQuant = new Map<string, RegistryFile[]>();
+    for (const f of lmFiles) {
+      const list = byQuant.get(f.quant) ?? [];
+      list.push(f);
+      byQuant.set(f.quant, list);
+    }
+    return sortByQuantOrder([...byQuant.keys()]).map(quant => ({
+      quant,
+      note: YUE2_QUANT_NOTES[quant],
+      files: byQuant.get(quant)!,
+    }));
+  }, [lmFiles]);
+
+  const rowProps = { downloadJobs, onDownload, onCancel, onResume, onDelete };
+  const findJob = (id: string) => downloadJobs.find(j => j.fileId === id && j.status !== 'completed' && j.status !== 'cancelled');
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+        {ROLE_INFO.yue2}
+      </div>
+
+      {/* Language model — grouped by quant */}
+      <div>
+        <h4 className="px-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5">Language Model — pick one quant</h4>
+        {quantGroups.length === 0 ? (
+          <p className="px-1 text-xs text-zinc-500">No YuE2 language model files in the catalogue yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {quantGroups.map(g => (
+              <div key={g.quant} className="rounded-xl border border-zinc-200 dark:border-white/5 bg-zinc-50/80 dark:bg-zinc-900/50 p-3">
+                <div className="flex items-baseline gap-2 mb-1.5">
+                  <span className="text-xs font-mono font-semibold text-zinc-700 dark:text-zinc-300">{g.quant}</span>
+                  {g.note && <span className="text-[10px] text-zinc-500 leading-relaxed">{g.note}</span>}
+                </div>
+                <div className="space-y-1.5">
+                  {g.files.map(f => (
+                    <ModelRow key={f.id} file={f} downloadJob={findJob(f.id)} {...rowProps} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Imatrix (quant-authoring only) */}
+      {imatrixFiles.length > 0 && (
+        <div>
+          <h4 className="px-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">Imatrix data</h4>
+          <p className="px-1 text-[10px] text-zinc-500 mb-1.5 leading-relaxed">
+            Only needed to produce new quants yourself — not required to run any quant above.
+          </p>
+          <div className="space-y-1.5">
+            {imatrixFiles.map(f => (
+              <ModelRow key={f.id} file={f} downloadJob={findJob(f.id)} {...rowProps} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* VAE decoder */}
+      <div>
+        <h4 className="px-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">VAE decoder — pick one</h4>
+        <p className="px-1 text-[10px] text-zinc-500 mb-1.5 leading-relaxed">
+          Standard is recommended; Legacy is kept for parity with earlier YuE checkpoints.
+        </p>
+        <div className="space-y-1.5">
+          {vaeFiles.map(f => (
+            <ModelRow key={f.id} file={f} downloadJob={findJob(f.id)} {...rowProps} />
+          ))}
+        </div>
+      </div>
+
+      {otherFiles.length > 0 && (
+        <div className="space-y-1.5">
+          {otherFiles.map(f => (
+            <ModelRow key={f.id} file={f} downloadJob={findJob(f.id)} {...rowProps} />
+          ))}
+        </div>
+      )}
+
+      {/* Licence notice */}
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 flex items-start gap-2.5">
+        <ShieldCheck size={15} className="mt-0.5 flex-shrink-0 text-amber-500" />
+        <p className="text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
+          Non-commercial use only — YuE2's weights are licensed{' '}
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 underline hover:no-underline">
+            CC BY-NC 4.0<ExternalLink size={10} />
+          </a>{' '}
+          by its upstream authors. For a commercial license, contact{' '}
+          <a href="mailto:gezhang@umich.edu" className="inline-flex items-center gap-1 underline hover:no-underline">
+            gezhang@umich.edu<Mail size={10} />
+          </a>.
+        </p>
+      </div>
+    </div>
+  );
+};
 
 // ── Collapsible group component ─────────────────────────────
 
@@ -162,12 +382,13 @@ const CollapsibleGroup: React.FC<{
 
 // ── TensorRT (MM3 DiT) group ─────────────────────────────────
 //
-// Not one of the generic role tabs — it's a dedicated group within the mm3
-// tab, since the ONNX graph is role 'mm3' but the runtime DLLs are role
-// 'runtime' (like the SuperSep/cuBLAS runtime entries, which have no catalogue
-// UI of their own at all; this is the first role:'runtime' set that gets one,
-// because unlike those, a TensorRT builder resource comes in several
-// GPU-specific variants a user must choose between, not just "install all").
+// Not one of the generic role sections — it's a dedicated group within the
+// mm3 family, since the ONNX graph is role 'mm3' but the runtime DLLs are
+// role 'runtime' (like the SuperSep/cuBLAS runtime entries, which have no
+// catalogue UI of their own at all; this is the first role:'runtime' set
+// that gets one, because unlike those, a TensorRT builder resource comes in
+// several GPU-specific variants a user must choose between, not just
+// "install all").
 
 const Mm3TrtGroup: React.FC<{
   onnxFile?: RegistryFile;
@@ -480,8 +701,18 @@ const StableStepTab: React.FC<{
 
 // ── Main component ──────────────────────────────────────────
 
-export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDownload, onCancel, onResume, onDelete }) => {
-  const [activeTab, setActiveTab] = useState<RoleTab>('dit');
+export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDownload, onCancel, onResume, onDelete, activeFamily }) => {
+  const sections = FAMILY_SECTIONS[activeFamily];
+  const [activeSection, setActiveSection] = useState<RoleTab>(sections[0].id);
+
+  // Switching family can leave activeSection pointing at a section that
+  // doesn't exist under the new family — snap back to that family's first.
+  useEffect(() => {
+    if (!sections.some(s => s.id === activeSection)) {
+      setActiveSection(sections[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFamily]);
 
   const ditGroups = useMemo(() => groupDitFiles(files), [files]);
   const lmGroups = useMemo(() => groupLmFiles(files), [files]);
@@ -530,97 +761,111 @@ export const ModelCatalogueTab: React.FC<Props> = ({ files, downloadJobs, onDown
 
   return (
     <div>
-      {/* Tab bar */}
-      <div className="flex gap-1 border-b border-zinc-200 dark:border-white/5 mb-4">
-        {TABS.map(tab => {
-          const count = files.filter(f => f.role === tab.id).length;
-          const installedCount = files.filter(f => f.role === tab.id && f.installed).length;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === tab.id
-                  ? 'text-pink-400 border-pink-500'
-                  : 'text-zinc-500 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300'
-              }`}
-            >
-              {tab.label}
-              <span className="ml-1.5 text-[10px] text-zinc-600 font-mono">{installedCount}/{count}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Tab content */}
-      {activeTab === 'dit' && (
-        <div className="space-y-3">
-          {ditGroups.map(g => (
-            <CollapsibleGroup
-              key={g.name}
-              group={g}
-              downloadJobs={downloadJobs}
-              onDownload={onDownload}
-              onCancel={onCancel}
-              onResume={onResume}
-              onDelete={onDelete}
-            />
-          ))}
+      {/* Role sub-tab bar — only when the family has more than one section.
+          (The family tab bar itself lives in ModelManagerModal, which also
+          uses it to filter the Starter Packs section above this component.) */}
+      {sections.length > 1 && (
+        <div className="flex gap-1 border-b border-zinc-200 dark:border-white/5 mb-4 overflow-x-auto">
+          {sections.map(tab => {
+            const count = files.filter(f => f.role === tab.id).length;
+            const installedCount = files.filter(f => f.role === tab.id && f.installed).length;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveSection(tab.id)}
+                className={`px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                  activeSection === tab.id
+                    ? 'text-pink-400 border-pink-500'
+                    : 'text-zinc-500 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300'
+                }`}
+              >
+                {tab.label}
+                <span className="ml-1.5 text-[10px] text-zinc-600 font-mono">{installedCount}/{count}</span>
+              </button>
+            );
+          })}
         </div>
       )}
 
-      {activeTab === 'lm' && (
-        <div className="space-y-3">
-          <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-            {ROLE_INFO.lm}
+      <div className={sections.length === 1 ? 'mt-4' : ''}>
+        {activeSection === 'dit' && (
+          <div className="space-y-3">
+            {ditGroups.map(g => (
+              <CollapsibleGroup
+                key={g.name}
+                group={g}
+                downloadJobs={downloadJobs}
+                onDownload={onDownload}
+                onCancel={onCancel}
+                onResume={onResume}
+                onDelete={onDelete}
+              />
+            ))}
           </div>
-          {lmGroups.map(g => (
-            <CollapsibleGroup
-              key={g.name}
-              group={g}
-              downloadJobs={downloadJobs}
-              onDownload={onDownload}
-              onCancel={onCancel}
-              onResume={onResume}
-              onDelete={onDelete}
-              defaultOpen
-            />
-          ))}
-        </div>
-      )}
+        )}
 
-      {activeTab === 'embedding' && renderSimpleGroup(embeddingFiles, ROLE_INFO.embedding)}
-      {activeTab === 'vae' && renderSimpleGroup(vaeFiles, ROLE_INFO.vae)}
-      {activeTab === 'pp-vae' && renderSimpleGroup(ppVaeFiles, ROLE_INFO['pp-vae'])}
-      {activeTab === 'stablestep' && (
-        <StableStepTab
-          files={stablestepFiles}
-          downloadJobs={downloadJobs}
-          onDownload={onDownload}
-          onCancel={onCancel}
-          onResume={onResume}
-          onDelete={onDelete}
-        />
-      )}
-      {activeTab === 'supersep' && renderSimpleGroup(supersepFiles, ROLE_INFO.supersep)}
-      {activeTab === 'whisper' && renderSimpleGroup(whisperFiles, ROLE_INFO.whisper)}
-      {activeTab === 'mm3' && (
-        <div className="space-y-3">
-          {renderSimpleGroup(mm3Files, ROLE_INFO.mm3)}
-          <Mm3TrtGroup
-            onnxFile={mm3TrtOnnx}
-            coreFiles={mm3TrtCore}
-            builderFiles={mm3TrtBuilders}
+        {activeSection === 'lm' && (
+          <div className="space-y-3">
+            <div className="rounded-xl bg-zinc-100/50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-white/5 px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+              {ROLE_INFO.lm}
+            </div>
+            {lmGroups.map(g => (
+              <CollapsibleGroup
+                key={g.name}
+                group={g}
+                downloadJobs={downloadJobs}
+                onDownload={onDownload}
+                onCancel={onCancel}
+                onResume={onResume}
+                onDelete={onDelete}
+                defaultOpen
+              />
+            ))}
+          </div>
+        )}
+
+        {activeSection === 'embedding' && renderSimpleGroup(embeddingFiles, ROLE_INFO.embedding)}
+        {activeSection === 'vae' && renderSimpleGroup(vaeFiles, ROLE_INFO.vae)}
+        {activeSection === 'pp-vae' && renderSimpleGroup(ppVaeFiles, ROLE_INFO['pp-vae'])}
+        {activeSection === 'stablestep' && (
+          <StableStepTab
+            files={stablestepFiles}
             downloadJobs={downloadJobs}
             onDownload={onDownload}
             onCancel={onCancel}
             onResume={onResume}
             onDelete={onDelete}
           />
-        </div>
-      )}
-      {activeTab === 'moss' && renderSimpleGroup(mossFiles, ROLE_INFO.moss)}
-      {activeTab === 'yue2' && renderSimpleGroup(yue2Files, ROLE_INFO.yue2)}
+        )}
+        {activeSection === 'supersep' && renderSimpleGroup(supersepFiles, ROLE_INFO.supersep)}
+        {activeSection === 'whisper' && renderSimpleGroup(whisperFiles, ROLE_INFO.whisper)}
+        {activeSection === 'mm3' && (
+          <div className="space-y-3">
+            {renderSimpleGroup(mm3Files, ROLE_INFO.mm3)}
+            <Mm3TrtGroup
+              onnxFile={mm3TrtOnnx}
+              coreFiles={mm3TrtCore}
+              builderFiles={mm3TrtBuilders}
+              downloadJobs={downloadJobs}
+              onDownload={onDownload}
+              onCancel={onCancel}
+              onResume={onResume}
+              onDelete={onDelete}
+            />
+          </div>
+        )}
+        {activeSection === 'moss' && renderSimpleGroup(mossFiles, ROLE_INFO.moss)}
+        {activeSection === 'yue2' && (
+          <Yue2Tab
+            files={yue2Files}
+            downloadJobs={downloadJobs}
+            onDownload={onDownload}
+            onCancel={onCancel}
+            onResume={onResume}
+            onDelete={onDelete}
+          />
+        )}
+      </div>
     </div>
   );
 };

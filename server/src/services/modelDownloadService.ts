@@ -120,6 +120,10 @@ interface RegistryFile {
   /** TensorRT builder-resource entries only — see ui/src/types.ts RegistryFile
    *  for the matching UI-side field. */
   sm?: number;
+  /** Which generation backend (or "shared" across several) this file belongs
+   *  to. Optional — absent on entries added before this field existed; the UI
+   *  falls back to a role→family mapping in that case. */
+  family?: 'as1.5' | 'mm3' | 'yue2' | 'shared';
 }
 
 // ── Service ─────────────────────────────────────────────────

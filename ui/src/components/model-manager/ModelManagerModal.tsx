@@ -10,9 +10,10 @@ import { useTranslation } from 'react-i18next';
 import { useModelRegistry } from './useModelRegistry';
 import { useDownloadStream } from './useDownloadStream';
 import { StarterPackCard } from './StarterPackCard';
-import { ModelCatalogueTab } from './ModelCatalogueTab';
+import { ModelCatalogueTab, FAMILY_TABS, familyForPack, type FamilyTab } from './ModelCatalogueTab';
 import { DownloadProgressBar } from './DownloadProgressBar';
 import { modelManagerApi } from '../../services/api';
+import { usePersistedState } from '../../hooks/usePersistedState';
 
 interface Props {
   onClose: () => void;
@@ -40,6 +41,11 @@ function getStoredHfToken(): string | undefined {
 export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
   const { t } = useTranslation();
   const { registry, loading, error, silentRefresh, getPackFiles, installedFiles } = useModelRegistry();
+
+  // Selected family tab (ACE-Step 1.5 / MiniMax-Music3 / YuE2 / Shared) —
+  // owned here (not inside ModelCatalogueTab) so the Starter Packs section
+  // above the catalogue can filter to the same family.
+  const [activeFamily, setActiveFamily] = usePersistedState<FamilyTab>('hs-modelManagerFamily', 'as1.5');
 
   const { jobs, hasActiveDownloads } = useDownloadStream({
     onComplete: silentRefresh,
@@ -105,6 +111,12 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
       .reduce((a, f) => a + f.sizeBytes, 0);
   }, [registry]);
 
+  // Starter packs for the currently selected family tab only.
+  const visiblePacks = useMemo(() => {
+    if (!registry) return [];
+    return registry.packs.filter(p => familyForPack(p, registry.files) === activeFamily);
+  }, [registry, activeFamily]);
+
   // ── Render ──────────────────────────────────────────────────
 
   return createPortal(
@@ -168,22 +180,44 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
                 </div>
               )}
 
-              {/* ── Starter Packs ────────────────────────── */}
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">{t('models.starterPacks')}</h3>
-                <p className="text-xs text-zinc-600 mb-4">{t('models.starterPacksDesc')}</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-                  {registry.packs.map(pack => (
-                    <StarterPackCard
-                      key={pack.id}
-                      pack={pack}
-                      files={getPackFiles(pack.id)}
-                      downloadJobs={jobs}
-                      onDownloadPack={handleDownloadPack}
-                    />
-                  ))}
-                </div>
+              {/* ── Family tabs ──────────────────────────── */}
+              {/* Selects the backend (ACE-Step 1.5 / MiniMax-Music3 / YuE2 /
+                  Shared) both the Starter Packs and the full catalogue below
+                  filter to — one selection drives both sections. */}
+              <div className="flex gap-1 border-b border-zinc-200 dark:border-white/5 overflow-x-auto">
+                {FAMILY_TABS.map(fam => (
+                  <button
+                    key={fam.id}
+                    onClick={() => setActiveFamily(fam.id)}
+                    className={`px-4 py-2.5 text-sm font-semibold whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                      activeFamily === fam.id
+                        ? 'text-pink-400 border-pink-500'
+                        : 'text-zinc-500 border-transparent hover:text-zinc-700 dark:hover:text-zinc-300'
+                    }`}
+                  >
+                    {fam.label}
+                  </button>
+                ))}
               </div>
+
+              {/* ── Starter Packs ────────────────────────── */}
+              {visiblePacks.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-1">{t('models.starterPacks')}</h3>
+                  <p className="text-xs text-zinc-600 mb-4">{t('models.starterPacksDesc')}</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                    {visiblePacks.map(pack => (
+                      <StarterPackCard
+                        key={pack.id}
+                        pack={pack}
+                        files={getPackFiles(pack.id)}
+                        downloadJobs={jobs}
+                        onDownloadPack={handleDownloadPack}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* ── Divider ──────────────────────────────── */}
               <div className="border-t border-zinc-200 dark:border-white/5" />
@@ -199,6 +233,7 @@ export const ModelManagerModal: React.FC<Props> = ({ onClose }) => {
                   onCancel={handleCancel}
                   onResume={handleResume}
                   onDelete={handleDelete}
+                  activeFamily={activeFamily}
                 />
               </div>
             </>

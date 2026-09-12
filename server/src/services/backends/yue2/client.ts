@@ -107,12 +107,15 @@ export interface Yue2Selection {
   vae_variant?: 'standard' | 'legacy';
 }
 
+/** Mirrors yue2_handle_select_model's actual response body
+ *  (engine/src/yue2/yue2-server.h) — {selected, vae_variant, lm_type_want,
+ *  lm_file, lm_found}, not mm3SelectModel's {changed, lm} shape. */
 export interface Yue2SelectModelResult {
-  changed: boolean;
-  unloaded: boolean;
-  lm: string;
+  selected: boolean;
   vae_variant: string;
-  available: boolean;
+  lm_type_want: string;
+  lm_file: string;
+  lm_found: boolean;
   error?: string;
 }
 
@@ -273,10 +276,15 @@ export async function yue2Unload(timeoutMs = TIMEOUT_QUICK): Promise<Yue2UnloadR
 /** POST /yue2/select-model — choose the LM dtype and the VAE variant.
  *  '' means auto (engine picks best-first). Throws on an unknown
  *  type/variant (400) — a failed model switch must be visible, not
- *  swallowed, matching mm3SelectModel's contract. */
+ *  swallowed, matching mm3SelectModel's contract.
+ *
+ *  Wire field is `lm_type`, not `lm` — matches the engine's
+ *  yue2_handle_select_model (engine/src/yue2/yue2-server.h), which reads
+ *  `req.lm_type` and otherwise silently keeps lm_type_given false, i.e. a
+ *  picked LM would never actually apply. */
 export async function yue2SelectModel(sel: Yue2Selection): Promise<Yue2SelectModelResult> {
   return yue2Post<Yue2SelectModelResult>('/yue2/select-model', {
-    lm: sel.lm ?? '',
+    lm_type: sel.lm ?? '',
     vae_variant: sel.vae_variant ?? '',
   }, TIMEOUT_QUICK);
 }

@@ -256,13 +256,18 @@ async function selectModel(selection: Record<string, string>) {
     lm: selection.lm ?? persisted.lm,
     vae_variant: (selection.vae as Yue2Selection['vae_variant']) ?? (persisted.vae_variant as Yue2Selection['vae_variant']),
   };
+  // `changed` isn't part of the engine's own response (yue2_handle_select_model
+  // returns {selected, vae_variant, lm_type_want, lm_file, lm_found} — no
+  // `changed`/`lm` field, unlike mm3SelectModel's shape); EngineBackend's
+  // interface requires it, so it's derived here from the persisted values.
+  const changed = (sel.lm ?? '') !== persisted.lm || (sel.vae_variant ?? '') !== persisted.vae_variant;
   const result = await yue2SelectModel(sel);
   setSetting(LM_TYPE_SETTING, sel.lm ?? '');
   setSetting(VAE_VARIANT_SETTING, sel.vae_variant ?? '');
-  if (result.changed) {
-    console.log(`[Backends] YuE2 models: lm=${result.lm} vae_variant=${result.vae_variant}`);
+  if (changed) {
+    console.log(`[Backends] YuE2 models: lm_type=${result.lm_type_want || '(auto)'} vae_variant=${result.vae_variant} lm_found=${result.lm_found}`);
   }
-  return { ...result };
+  return { ...result, changed };
 }
 
 export const yue2Backend: EngineBackend = {

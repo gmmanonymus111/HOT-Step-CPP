@@ -97,6 +97,35 @@ static void yue2_handle_props(const httplib::Request &, httplib::Response & res)
     yue2_json_add_file(doc, files, "vae_standard", g_yue2.vae_file[YUE2_VAE_STANDARD]);
     yue2_json_add_file(doc, files, "vae_legacy", g_yue2.vae_file[YUE2_VAE_LEGACY]);
 
+    // Quant catalogue — what the UI's LM quant picker is built from. Mirrors
+    // minimax/mm3-server.h's own "variants" block (add_role), scoped to just
+    // the LM (YuE2 has no per-role VAE quant ladder, only the fixed
+    // standard/legacy variant pick handled by /yue2/select-model's
+    // vae_variant field). "selected" is the type actually in force (the
+    // resolved pick, not the request), so a fallback from a deleted file is
+    // visible rather than silent.
+    {
+        yyjson_mut_val * variants = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, root, "variants", variants);
+        yyjson_mut_val * lm_v = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, variants, "lm", lm_v);
+        yyjson_mut_val * arr = yyjson_mut_arr(doc);
+        yyjson_mut_obj_add_val(doc, lm_v, "available", arr);
+        std::string selected;
+        for (const auto & v : g_yue2.lm_variants) {
+            yyjson_mut_val * e = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, e, "type", v.type.c_str());
+            yyjson_mut_obj_add_strcpy(doc, e, "filename", v.name.c_str());
+            yyjson_mut_obj_add_uint(doc, e, "bytes", v.bytes);
+            yyjson_mut_arr_add_val(arr, e);
+            if (v.name == g_yue2.lm_file.name) {
+                selected = v.type;
+            }
+        }
+        yyjson_mut_obj_add_strcpy(doc, lm_v, "selected", selected.c_str());
+        yyjson_mut_obj_add_strcpy(doc, lm_v, "requested", g_yue2.lm_type_want.c_str());
+    }
+
     yyjson_mut_val * vram = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "vram", vram);
     yyjson_mut_obj_add_uint(doc, vram, "lm_bytes", g_yue2.vram_lm);
