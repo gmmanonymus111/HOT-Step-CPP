@@ -85,6 +85,11 @@ static volatile int * _hotstep_guard_ = &hotstep_sampler_linked_;
 // is mm3_register_routes(svr, models_dir) below. Checked by verify-hooks.ps1.
 #include "minimax/mm3-server.h"
 
+// ── HOT-Step hook: in-process model family registry ────────────────────
+// Generalises the two boot gates below beyond naming MM3 directly. MUST come
+// after minimax/mm3-server.h (see hot-step-families.h's own comment on why).
+#include "hot-step-families.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
@@ -3204,10 +3209,12 @@ int main(int argc, char ** argv) {
         // dead engine: empty model dropdowns for BOTH backends and an MM3
         // "weights missing" CTA while the Model Manager showed them installed
         // (GitHub issue #118). ACE endpoints degrade per-request instead.
-        if (mm3_weights_present(models_dir)) {
+        // Generalised to every in-process family (hot-step-families.h) so a
+        // future family (e.g. YuE2) gets the same boot concession for free.
+        if (hot_step_any_family_weights_present(models_dir)) {
             fprintf(stderr,
-                    "[Server] No ACE-Step models in %s — MiniMax-Music3 weights found, continuing MM3-only\n",
-                    models_dir);
+                    "[Server] No ACE-Step models in %s — %s weights found, continuing without ACE\n",
+                    models_dir, hot_step_present_family_names(models_dir).c_str());
         } else {
             fprintf(stderr, "[Server] ERROR: no models found in %s\n", models_dir);
             return 1;
@@ -3308,13 +3315,14 @@ int main(int argc, char ** argv) {
         }
         if (have_lm) {
             fprintf(stderr, "[Server] WARNING: /synth unavailable, missing: %s\n", missing);
-        } else if (mm3_weights_present(models_dir)) {
-            // HOT-STEP: same MM3-only concession as the scan gate above — a
-            // partial ACE install (e.g. DiT without LM) must not kill the
-            // process when MiniMax-Music3 can still serve.
+        } else if (hot_step_any_family_weights_present(models_dir)) {
+            // HOT-STEP: same concession as the scan gate above — a partial
+            // ACE install (e.g. DiT without LM) must not kill the process
+            // when another in-process family can still serve.
+            const std::string present_families = hot_step_present_family_names(models_dir);
             fprintf(stderr,
-                    "[Server] WARNING: ACE pipeline unusable (missing: %s) — continuing for MiniMax-Music3\n",
-                    missing);
+                    "[Server] WARNING: ACE pipeline unusable (missing: %s) — continuing for %s\n",
+                    missing, present_families.c_str());
         } else {
             fprintf(stderr, "[Server] ERROR: no usable pipeline, synth missing: %s\n", missing);
             return 1;

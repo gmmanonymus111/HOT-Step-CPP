@@ -59,43 +59,65 @@ if ($content -match '#include\s+"hot-step-params\.h"') {
     $errors++
 }
 
-# ── Hook 4b: hot-step-server.cpp must include minimax/mm3-server.h ────
-#            Single hook for the whole MiniMax-Music3 backend subsystem
-#            (engine/src/minimax/). Lose it and /mm3/* silently disappears.
+# ── Hook 4-family: per-family include/call pairs on hot-step-server.cpp ──
+#    Each row is one family's wiring into the shared server (its own
+#    include + its own registration call), checked generically instead of
+#    one hand-written block per family. A new family (YuE2, ...) adds a row
+#    here when it gains its own hook include/call pair; nothing else in this
+#    script has to change for that.
 $content = Get-Content "$tools\hot-step-server.cpp" -Raw
-if ($content -match '#include\s+"minimax/mm3-server\.h"') {
-    Write-Host "  [OK] hot-step-server.cpp -> minimax/mm3-server.h" -ForegroundColor Green
-} else {
-    Write-Host "  [FAIL] hot-step-server.cpp missing minimax/mm3-server.h include" -ForegroundColor Red
-    Write-Host "         Without it the /mm3/props, /mm3/warm and /mm3/unload routes vanish." -ForegroundColor Yellow
-    $errors++
-}
-if ($content -match 'mm3_register_routes\s*\(') {
-    Write-Host "  [OK] hot-step-server.cpp calls mm3_register_routes()" -ForegroundColor Green
-} else {
-    Write-Host "  [FAIL] hot-step-server.cpp never calls mm3_register_routes()" -ForegroundColor Red
-    Write-Host "         The include alone registers nothing - the call site is the other half." -ForegroundColor Yellow
-    $errors++
+$familyHooks = @(
+    @{
+        Family  = "MiniMax-Music3"
+        Include = '#include\s+"minimax/mm3-server\.h"'
+        Call    = 'mm3_register_routes\s*\('
+        LostMsg = "Single hook for the whole MiniMax-Music3 backend subsystem (engine/src/minimax/). Without the include, /mm3/props, /mm3/warm and /mm3/unload routes vanish. The include alone registers nothing - the call site is the other half."
+    },
+    @{
+        Family  = "MiniMax-Music3"
+        Include = '#include\s+"minimax/mm3-job\.h"'
+        Call    = 'mm3_register_job_routes\s*\('
+        LostMsg = "MID-FILE include (after the job system: Job/job_create/work_push), not next to mm3-server.h at the top - re-add it AFTER job_status_str(), which is where Job, job_create, job_set_phase, work_push and g_store are defined. Lose the include and POST /mm3/synth vanishes, leaving only the deprecated /mm3/synth-e2e bring-up path that does GPU work on an httplib thread. Without the call, POST /mm3/synth and GET /mm3/job are not routed."
+    }
+    # YuE2 adds its own include/call row(s) here and nothing else in this file.
+)
+foreach ($hook in $familyHooks) {
+    if ($content -match $hook.Include) {
+        Write-Host "  [OK] hot-step-server.cpp -> $($hook.Family) include ($($hook.Include))" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] hot-step-server.cpp missing $($hook.Family) include ($($hook.Include))" -ForegroundColor Red
+        Write-Host "         $($hook.LostMsg)" -ForegroundColor Yellow
+        $errors++
+    }
+    if ($content -match $hook.Call) {
+        Write-Host "  [OK] hot-step-server.cpp calls $($hook.Family) registration ($($hook.Call))" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] hot-step-server.cpp never calls $($hook.Family) registration ($($hook.Call))" -ForegroundColor Red
+        Write-Host "         $($hook.LostMsg)" -ForegroundColor Yellow
+        $errors++
+    }
 }
 
-# -- Hook 4c: hot-step-server.cpp must include minimax/mm3-job.h ------------
-#             MID-FILE include (after the job system: Job/job_create/work_push),
-#             not next to mm3-server.h at the top. Lose it and POST /mm3/synth
-#             vanishes, leaving only the deprecated /mm3/synth-e2e bring-up path
-#             that does GPU work on an httplib thread.
-if ($content -match '#include\s+"minimax/mm3-job\.h"') {
-    Write-Host "  [OK] hot-step-server.cpp -> minimax/mm3-job.h" -ForegroundColor Green
+# -- Hook 4-gate: hot-step-server.cpp must ask the FAMILY TABLE, not one name -
+#    The two boot gates (registry_scan failure; ACE pipeline unusable) must
+#    call hot_step_any_family_weights_present(), not one family's own probe,
+#    and must include hot-step-families.h to get it. This hook exists so an
+#    upstream sync cannot silently restore the pre-generalisation gate.
+if ($content -match '#include\s+"hot-step-families\.h"') {
+    Write-Host "  [OK] hot-step-server.cpp -> hot-step-families.h" -ForegroundColor Green
 } else {
-    Write-Host "  [FAIL] hot-step-server.cpp missing minimax/mm3-job.h include" -ForegroundColor Red
-    Write-Host "         Re-add it AFTER job_status_str() - it needs Job, job_create," -ForegroundColor Yellow
-    Write-Host "         job_set_phase, work_push and g_store, which are defined there." -ForegroundColor Yellow
+    Write-Host "  [FAIL] hot-step-server.cpp missing hot-step-families.h include" -ForegroundColor Red
+    Write-Host "         Without it neither boot gate can see any family's weights-present probe." -ForegroundColor Yellow
     $errors++
 }
-if ($content -match 'mm3_register_job_routes\s*\(') {
-    Write-Host "  [OK] hot-step-server.cpp calls mm3_register_job_routes()" -ForegroundColor Green
+$gateMatches = [regex]::Matches($content, 'hot_step_any_family_weights_present\s*\(')
+if ($gateMatches.Count -ge 2) {
+    Write-Host "  [OK] hot-step-server.cpp calls hot_step_any_family_weights_present() at both boot gates" -ForegroundColor Green
 } else {
-    Write-Host "  [FAIL] hot-step-server.cpp never calls mm3_register_job_routes()" -ForegroundColor Red
-    Write-Host "         Without the call POST /mm3/synth and GET /mm3/job are not routed." -ForegroundColor Yellow
+    Write-Host "  [FAIL] hot-step-server.cpp calls hot_step_any_family_weights_present() only $($gateMatches.Count) time(s), expected 2+" -ForegroundColor Red
+    Write-Host "         An upstream sync restored the old single-name gate (registry_scan failing with" -ForegroundColor Yellow
+    Write-Host "         no family present falls straight to 'return 1;') - MM3-only installs (issue #118)" -ForegroundColor Yellow
+    Write-Host "         exit at boot with no error; re-add the family gate at both call sites." -ForegroundColor Yellow
     $errors++
 }
 
