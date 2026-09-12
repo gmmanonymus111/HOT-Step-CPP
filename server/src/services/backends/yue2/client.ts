@@ -288,7 +288,12 @@ export async function yue2SelectModel(sel: Yue2Selection): Promise<Yue2SelectMod
  *  id") — progress/result/cancel all go through aceClient's existing
  *  pollJob/getJobResult/cancelJob against that id, unchanged. */
 export async function yue2Synth(req: Yue2SynthRequest): Promise<Yue2SynthResponse> {
-  return yue2Post<Yue2SynthResponse>('/yue2/synth', req, TIMEOUT_QUICK);
+  const res = await yue2Post<Yue2SynthResponse>('/yue2/synth', req, TIMEOUT_QUICK);
+  // The engine answers {"id": ...} (the ACE /synth spelling); MM3's engine sends
+  // both spellings. Normalise so callers can rely on job_id.
+  if (!res.job_id && res.id) res.job_id = res.id;
+  if (!res.job_id) throw new Error('YuE2 /yue2/synth returned no job id');
+  return res;
 }
 
 /** Best-effort read of the additive end_reason/stage_end_reasons/artifact
