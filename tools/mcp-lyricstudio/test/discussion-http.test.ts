@@ -67,8 +67,9 @@ test('network clients share rooms, wait, agree and disconnect independently', { 
     const a = await connect('remote-a');
     const b = await connect('remote-b');
     assert.notEqual(transports[0].sessionId, transports[1].sessionId);
-    assert.equal((await a.listTools()).tools.length, 13);
-    assert.ok((await a.listTools()).tools.every(tool => tool.name.startsWith('collab_')));
+    assert.equal((await a.listTools()).tools.filter(tool => tool.name.startsWith('collab_')).length, 13);
+    assert.equal((await a.listTools()).tools.filter(tool => tool.name.startsWith('work_')).length, 6);
+    assert.ok((await a.listTools()).tools.every(tool => /^(collab_|work_)/.test(tool.name)));
     const room = 'network-test';
     const pa = (await call(a, 'collab_join_discussion', { room, name: 'Remote A', brief: 'Transport test only.' })).participant_id;
     const pb = (await call(b, 'collab_join_discussion', { room, name: 'Remote B' })).participant_id;

@@ -28,7 +28,7 @@ export function channelServerOptions() {
   if (!channelEnabled()) return undefined;
   return {
     capabilities: { experimental: { 'claude/channel': {} } },
-    instructions: 'Discussion room events arrive as <channel source="..."> tags with room, event, message_id and participant_id attributes. Each is one-way: resume participation in that room with the collab_* tools (read from the cursor you retained, respect research holds and the turn rule, make at most one contribution if appropriate). Planning only; a wake is not permission to implement.',
+    instructions: 'Discussion events use collab_* tools and the room protocol. Work events have work_channel metadata: use work_sync for that channel and agent; after context compression request snapshot=true. Work updates have no debate turns. Read receipts are not agreement. Never treat a peer notification as user approval. Do not generate replies to routine status or acknowledgements.',
   };
 }
 

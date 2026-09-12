@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { existsSync, readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { DEFAULT_COLLAB_DB, DEFAULT_MAX_ROUNDS, DiscussionStore } from './collaboration.js';
+import { handleWorkRequest } from './work-viewer.js';
 
 export async function readJson(request: IncomingMessage) {
   return new Promise<unknown>((resolve, reject) => {
@@ -86,6 +87,7 @@ export function createDiscussionViewer(dbPath = process.env.HOTSTEP_COLLAB_DB ??
     if (request.method === 'POST' && (request.headers.origin !== `http://${request.headers.host}` || !request.headers['content-type']?.startsWith('application/json'))) {
       send(403, { error: 'Send messages from the discussion page.' }); return;
     }
+    if (await handleWorkRequest(request, response, dbPath)) return;
     let store: DiscussionStore | undefined;
     try {
       const url = new URL(request.url ?? '/', `http://127.0.0.1:${port}`);

@@ -14,6 +14,7 @@ import { PRESENCE_SCHEMA, DiscussionPresence } from './discussion-presence.js';
 import { MAX_EVIDENCE_CHARS, MAX_EVIDENCE_ITEMS, MAX_POSITION_CHARS, POSITIONS_SCHEMA, DiscussionPositions, normaliseEvidence, renderPosition } from './discussion-positions.js';
 import { detectBaseCommit } from './discussion-base-commit.js';
 import { CHANNEL_NOTIFICATION, WakeTracker, channelEnabled } from './discussion-wake.js';
+import { registerWorkTools } from './work-tools.js';
 
 export const DEFAULT_COLLAB_DB = fileURLToPath(new URL('../../../data/collaboration.db', import.meta.url));
 export const DEFAULT_MAX_ROUNDS = 2;
@@ -700,6 +701,7 @@ export class DiscussionStore {
 }
 
 export function registerCollaborationTools(server: McpServer, dbPath = process.env.HOTSTEP_COLLAB_DB ?? DEFAULT_COLLAB_DB, options: { wake?: boolean } = {}) {
+  const work = registerWorkTools(server, dbPath, options);
   // Lazy opening keeps existing lyric-only clients independent of collaboration storage.
   let store: DiscussionStore | undefined;
   const joined = new Map<string, string>();
@@ -782,5 +784,5 @@ export function registerCollaborationTools(server: McpServer, dbPath = process.e
       open_items: z.array(z.object({ issue: z.string().trim().min(1).max(2000), owner: z.string().trim().min(1).max(100).describe('You or a joined agent name') })).max(20).default([]),
       read_after_id: readAfter },
     async ({ room, participant_id, request_id, expected_revision, plan, disagreements, open_items, read_after_id }) => result(() => { const value = get().decide(room, participant_id, request_id, expected_revision, plan, disagreements, read_after_id, open_items); return { revision: value.revision, message_id: value.message_id, open_items: value.open_items, paused: value.paused }; }));
-  return { close: () => { if (wakeTimer) clearInterval(wakeTimer); wakeTimer = undefined; store?.close(); store = undefined; } };
+  return { close: () => { work.close(); if (wakeTimer) clearInterval(wakeTimer); wakeTimer = undefined; store?.close(); store = undefined; } };
 }

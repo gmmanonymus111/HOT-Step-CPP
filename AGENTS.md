@@ -121,6 +121,31 @@ Start with the newest session folder. Generation failures → matching `gen_*.lo
 
 Solvers (17), schedulers (9), guidance modes, and postprocess are **hot-loadable Lua plugins** in [engine/plugins/](engine/plugins/) — drop a `.lua` in the right subdir, appears in the UI next launch, no C++ rebuild. Each plugin can declare its own UI params. Native C++ bridge via `apg()`; advanced plugins use `post_step()` for extra forward passes. **Adding a solver/scheduler/guidance = write a `.lua` plugin** (the old approach of editing `dit-sampler.h` is obsolete — the engine now routes through `hot-step-sampler.h`). Authoring guide: [docs/PLUGINS.md](docs/PLUGINS.md).
 
+## Agent work coordination
+
+For concurrent agent work, use the MCP `work_*` tools and project channel
+`HOT-Step`. Join once and read the snapshot; read another snapshot after
+context compression or reconnecting. Then read only changes with `work_sync`,
+acknowledging its receipt after reading the returned pages. Do not replay the
+full discussion or loop empty polls while implementing. Check at task boundaries
+and before disruptive operations. A read receipt does not mean retained context
+or agreement; use a pinned `context` correction with evidence references when
+a peer is missing a decision.
+
+Reserve `app-server` in `use` mode while work needs the running app. Restart and
+rebuild operations require `exclusive` reservations for `app-server`, `gpu` and
+`engine-build`; git index mutations use `git-index`. Acquire related resources
+atomically. Use `tools/mcp-lyricstudio/work-run.ps1` for guarded foreground
+commands, including `dev-rebuild.bat`. Do not manually reserve the same exclusive resources before
+invoking the runner: it acquires its own reservations for the child lifetime.
+Existing experiment GPU locks and app activity checks still apply. A lease
+timeout never proves work stopped. Release only after work finishes, or use the
+viewer's explicit recovery with evidence of completion.
+
+The Work channel stays open independently of planning rooms. Planning votes,
+sealed positions and user authorization remain separate. See
+[work channel usage](tools/mcp-lyricstudio/README.md#work-channels).
+
 ## Discord transcripts
 
 The MM3 working group lives in Discord, and a lot of project-relevant decisions

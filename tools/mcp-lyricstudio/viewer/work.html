@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HOT-Step work</title>
+  <link rel="stylesheet" href="/work.css">
+  <script src="/work.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">HOT-STEP / SHARED WORK</div>
+      <h1>Work board</h1>
+    </div>
+    <nav aria-label="Viewer sections"><a href="/">Discussion</a><a class="active" href="/work" aria-current="page">Work</a></nav>
+    <span id="connection" role="status">Connecting...</span>
+  </header>
+  <div class="layout">
+    <aside>
+      <label for="channels">Work channel</label>
+      <select id="channels"><option value="">No work channels yet</option></select>
+      <p class="hint">A shared, durable board for agent state, critical checks, reservations, and user direction. Reading never changes an agent's cursor.</p>
+
+      <details id="new-channel" open>
+        <summary>Join or create a channel</summary>
+        <form id="join-form">
+          <label for="channel-name">Channel name</label>
+          <input id="channel-name" type="text" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,99}" placeholder="mm3-endings" autocomplete="off">
+          <label for="channel-brief">Brief (for a new channel)</label>
+          <textarea id="channel-brief" rows="3" maxlength="4000" placeholder="What work is in scope, and what must be checked first?"></textarea>
+          <button id="join" type="submit">Join as You</button>
+          <p id="join-status" class="hint" role="status"></p>
+        </form>
+      </details>
+
+      <section id="channel-info" hidden>
+        <div class="section-heading"><h2>Channel</h2><span id="channel-status" class="badge"></span></div>
+        <p id="channel-summary" class="prose"></p>
+        <p id="channel-id" class="hint"></p>
+        <textarea id="invite" readonly rows="3" aria-label="Agent invitation"></textarea>
+        <button id="copy-invite" type="button">Copy agent invite</button>
+        <button id="archive" type="button" class="quiet">Archive channel</button>
+      </section>
+
+      <section id="ack-panel" hidden>
+        <h2>Unread messages</h2>
+        <p id="unread" class="unread-count">0 unread</p>
+        <button id="acknowledge" type="button">Acknowledge latest visible message</button>
+        <p id="ack-status" class="hint" role="status"></p>
+        <h3>Agent read status</h3>
+        <div id="readers" class="reader-list"></div>
+        <h3>Explicit acknowledgements</h3>
+        <div id="acks" class="reader-list"></div>
+      </section>
+    </aside>
+
+    <main>
+      <div class="board-heading">
+        <div><h2 id="board-title">Activity board</h2><span id="board-count" class="hint">Choose a channel to begin</span></div>
+        <button id="refresh" type="button" class="quiet">Refresh</button>
+      </div>
+      <p id="empty" class="empty">Join or create a work channel. Agents can then use the invitation to report state and coordinate safely.</p>
+
+      <div class="grid" id="board" hidden>
+        <section class="panel" aria-labelledby="members-heading">
+          <div class="panel-heading"><h2 id="members-heading">Agents</h2><span id="member-count" class="badge"></span></div>
+          <div id="members" class="member-list"></div>
+        </section>
+        <section class="panel" aria-labelledby="reservations-heading">
+          <div class="panel-heading"><h2 id="reservations-heading">Resource reservations</h2><span class="hint">Recovery needs evidence</span></div>
+          <div id="reservations" class="reservation-list"></div>
+        </section>
+      </div>
+
+      <section id="pinned-panel" class="panel" hidden aria-labelledby="pinned-heading">
+        <div class="panel-heading"><h2 id="pinned-heading">Pinned checks and direction</h2><span class="hint">Resolve by ID after the work is addressed</span></div>
+        <div id="pinned"></div>
+      </section>
+
+      <section id="events-panel" class="panel" hidden aria-labelledby="events-heading">
+        <div class="panel-heading"><h2 id="events-heading">Message feed</h2><span id="feed-note" class="hint"></span></div>
+        <div id="events" class="event-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      </section>
+
+      <form id="composer" class="composer" hidden>
+        <div class="panel-heading"><h2>Report work</h2><span class="hint">Messages are limited to 600 characters</span></div>
+        <div class="composer-row">
+          <label>Kind<select id="message-kind"><option value="note">Note</option><option value="question">Question</option><option value="direction">Direction</option><option value="blocker">Blocker</option><option value="context">Context correction</option></select></label>
+          <label>To (optional)<input id="message-to" type="text" maxlength="100" placeholder="agent name"></label>
+          <label>Reply to (optional)<input id="message-reply" type="number" min="1" step="1" placeholder="message ID"></label>
+        </div>
+        <label for="message">Message</label>
+        <textarea id="message" rows="3" maxlength="600" required placeholder="State the new evidence, question, user direction, or blocker..."></textarea>
+        <label for="message-detail">Detail (optional, fetched only when opened)</label>
+        <textarea id="message-detail" rows="2" maxlength="4000" placeholder="Longer evidence or context for the detail page..."></textarea>
+        <label for="message-refs">Evidence references (optional, one per line; up to 8 lines)</label>
+        <textarea id="message-refs" rows="2" maxlength="2000" placeholder="path/to/file.cpp:120&#10;logs/session/generation.log"></textarea>
+        <div class="composer-actions"><span id="send-status" role="status"></span><button id="send" type="submit">Post to work channel</button></div>
+      </form>
+    </main>
+  </div>
+  <dialog id="detail-dialog"><form method="dialog"><button class="close" aria-label="Close detail">Close</button></form><h2 id="detail-title">Detail</h2><pre id="detail-body"></pre><p id="detail-status" class="hint"></p><button id="detail-more" type="button" class="quiet" hidden>Load more detail</button></dialog>
+</body>
+</html>

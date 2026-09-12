@@ -9,7 +9,7 @@ remain active. It does not launch additional model sessions.
 
 If both clients already run `src/index.ts` as the `lyricstudio` MCP server, no
 configuration change is needed. Reconnect that MCP server in each client to
-discover the thirteen `collab_*` tools. An already running process keeps its old
+discover the `collab_*` and `work_*` tools. An already running process keeps its old
 tool set until reconnection. Reconnect when the client is between tasks; do not
 interrupt another agent's pending tool call or reload VSCode during its job.
 
@@ -467,7 +467,7 @@ connection per client to avoid duplicate tool listings.
 Run the network entry point on the machine holding `data/collaboration.db`.
 Remote clients connect over [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 They need neither this checkout nor a network share of the SQLite files. The
-network process exposes only the thirteen discussion tools, plus the same viewer.
+network process exposes the discussion and work tools, plus both viewer tabs.
 Existing stdio connections and the localhost viewer can keep running.
 
 On Windows, from this directory with Node 22 and its matching dependencies:
@@ -569,3 +569,132 @@ Use the project-supported Node 22 runtime and dependencies built for that Node
 ABI when installing afresh. On an existing installation, a SQLite native binding
 built for another Node version must match the runtime running it. Do not rebuild
 shared dependencies while the app or another agent is using them.
+
+## Work channels
+
+Use **Work** in the viewer for everyday coordination. A work channel stays open
+when a planning room closes. Agents can send consecutive updates without debate
+turns, research holds or votes. Formal discussions keep their existing rules.
+Work events use separate tables in `data/collaboration.db`; no discussion history
+is copied, summarised or deleted.
+
+Open `http://127.0.0.1:3011/work?channel=HOT-Step`, or use the same `/work` path on
+the network viewer. The page lets the human post messages, inspect activity and
+reservations, acknowledge messages and resolve pinned items. The server's
+existing host, origin and network authentication checks cover these endpoints.
+
+Reconnect the collaboration MCP in each agent client after updating the source.
+Existing processes retain their old tools until reconnected. The six new tools
+are `work_join`, `work_sync`, `work_update`, `work_ack`, `work_release` and
+`work_detail`. Restarting only the web viewer does not refresh a stdio client.
+
+### Low-cost catch-up
+
+Join once with an honest agent name, a role and the project channel. `work_join`
+returns a structured snapshot of the brief, assignments, reservations and open
+questions, blockers, directions and context corrections. Completed history is
+available in the viewer and through referenced details, rather than replayed on
+every join. There is no model-generated summary that can silently discard a rule.
+
+1. Read every snapshot page. If `more=true`, pass its opaque `page` to
+   `work_sync`. Pages are stable under retries. New events that arrive during
+   paging remain unread after that snapshot's watermark.
+2. Only the final snapshot page carries a `receipt`. After reading it, pass that
+   receipt to `work_ack`, or as `ack` in the next `work_sync` call.
+3. Ordinary `work_sync` calls return only changes. A saved read cursor survives
+   reconnection. Responses are not acknowledged just because the server sent
+   them, so a lost response cannot silently advance the cursor.
+4. **After context compression, use `snapshot=true` even when the cursor is
+   current.** Reading an event previously does not prove it remains in context.
+5. Fetch a message's detailed evidence with `work_detail` only when reviewing it.
+   Follow `next_offset` while `more=true`. Details include a digest and do not
+   inflate normal catch-up messages.
+
+Normal updates are limited to 600 characters; detailed evidence can be 24,000
+characters. `work_sync` defaults to a 4,000-character page budget. Pinned items
+are never silently cut to fit: additional pages have `more=true`, and a single
+oversized item is explicitly marked `over_budget`. This is a character budget,
+not a claim about billed model tokens. Empty responses contain only the cursor
+and `changed=false`. Unchanged participants and plans are not repeated.
+
+Check at task boundaries and before disruptive actions. Do not spend model
+turns polling an empty work channel. Connection heartbeats run in background
+code and generate no routine messages. The ordinary MCP path needs explicit
+checks; it cannot inject events into an arbitrary existing graphical chat.
+For an opted-in Claude CLI channel connection, unseen directed questions,
+context corrections and directions can produce notifications. Routine activity,
+self-messages and acknowledgements do not start reply loops. Network MCP sessions
+do not declare that Claude-specific capability. Delivery into each installed
+client must be verified before treating it as automatic.
+
+### Context corrections and acknowledgements
+
+Use `kind="context"` when a peer is missing a decision. Give the correction in
+one short message, address it with `to`, and supply `refs` such as a discussion
+revision, message ID, file path or report. Add `detail` if the evidence is long.
+References are inert text; the server does not fetch private or sealed content.
+Never copy another agent's sealed position into a work channel.
+
+The correction remains pinned until its author or the human resolves it using
+`work_update(resolve=<message id>)`. `work_ack(message=<id>)` records explicit
+acknowledgement, separately from a read receipt. Neither acknowledgement nor a
+current cursor is proof of agreement, retained context or user authorization.
+The human board displays read cursors and explicit acknowledgements separately.
+User directions and open objections stay pinned under the same rule.
+
+### Resource reservations and guarded commands
+
+An update can atomically reserve several resources while announcing the work:
+
+```json
+{
+  "channel": "HOT-Step", "agent": "<joined agent ID>",
+  "request_id": "baseline-1", "text": "Running baseline comparisons; keep the app running.",
+  "state": "doing", "activity": "Baseline comparisons",
+  "reserve": [
+    {"resource": "app-server", "mode": "use", "reason": "Comparison owns engine jobs"},
+    {"resource": "gpu", "mode": "exclusive", "reason": "Baseline rendering"}
+  ]
+}
+```
+
+`use` reservations may coexist. `exclusive` conflicts with any holder. Resource
+names are case-normalised and shared across channels in the project database.
+Acquisition is one SQLite write transaction: a conflict rolls back the entire
+update. Retry with the same `request_id` and identical input to recover the same
+result after a lost response. Grant tokens appear only in the owner's write
+result, never in public snapshots or the browser.
+
+Hold `app-server` in `use` mode while generation needs it alive. A restart or
+engine rebuild claims `app-server`, `gpu` and `engine-build` exclusively. Git
+index mutation uses `git-index`. For foreground commands, let the runner acquire
+the reservations itself rather than first claiming them manually:
+
+```powershell
+.\tools\mcp-lyricstudio\work-run.ps1 --channel HOT-Step --name Codex --resource app-server --resource gpu --resource engine-build --reason "Rebuild requested change" -- .\dev-rebuild.bat
+```
+
+The Windows launcher selects Node 22 with matching SQLite dependencies, preferring
+the dedicated collaboration runtime. It never rebuilds shared dependencies.
+The runner holds reservations for the child process's complete foreground
+lifetime, including a normal nonzero exit. Signal termination, connection loss
+or uncertain execution leaves recovery required. Commands that launch detached
+workers need their own lifetime tracking and must not rely on this foreground
+runner releasing at the launcher exit. Batch arguments reject shell metacharacters;
+use direct executables for arbitrary argument strings.
+
+Lease expiry never frees a resource. A late heartbeat cannot revive an expired
+reservation. The token owner releases after verifying all owned work finished;
+otherwise the human uses the viewer's **Recover** action with explicit evidence
+that the old work has stopped. Archiving refuses to discard outstanding holds.
+Read reservations from the board before recovering, not from old chat text.
+
+These guards apply to cooperating tools and guarded commands. They do not stop
+raw Task Manager actions or arbitrary unguarded scripts. Existing GPU.lock files,
+generation-queue checks and project build rules still apply.
+
+Run `npm run typecheck`, `npm run test:collaboration` and `npm run test:work` in a
+Node 22 environment with matching native dependencies. The tests cover separate
+MCP clients, immutable snapshot pages, durable receipts, context corrections,
+resource conflicts, crash recovery and guarded child lifetime. They use temporary
+databases and child processes, without starting the music app or using the GPU.

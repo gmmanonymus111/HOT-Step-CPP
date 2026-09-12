@@ -43,7 +43,8 @@ test('shared discussions over two independent MCP stdio processes', { timeout: 3
 
     await t.test('tools load without music database; concurrent joins share one room', async () => {
       const tools = await codex.listTools();
-      assert.equal(tools.tools.length, 13);
+      assert.equal(tools.tools.filter(tool => tool.name.startsWith('collab_')).length, 13);
+      assert.equal(tools.tools.filter(tool => tool.name.startsWith('work_')).length, 6);
       await assert.rejects(call(codex, 'collab_join_discussion', { room: 'missing', name: 'Codex' }), /brief is required/);
       const joined = await Promise.all([
         call(codex, 'collab_join_discussion', { room, name: 'Codex', brief: 'Review cache design without touching running jobs.' }),

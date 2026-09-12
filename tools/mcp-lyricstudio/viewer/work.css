@@ -1,0 +1,65 @@
+:root { color-scheme: dark; font: 15px/1.55 system-ui, sans-serif; background: #101419; color: #e5eaf0; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.topbar { padding: 24px 36px; border-bottom: 1px solid #2b3440; display: flex; align-items: center; gap: 24px; }
+.topbar > div { flex: 1; }
+.eyebrow { color: #86bea8; font-size: 11px; letter-spacing: .14em; }
+h1 { margin: 2px 0 0; font-size: 25px; font-weight: 600; letter-spacing: -.03em; }
+h2 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+nav { display: flex; gap: 14px; }
+nav a { color: #9eacba; text-decoration: none; padding: 5px 8px; border-radius: 5px; }
+nav a:hover, nav a.active { color: #e5eaf0; background: #222d37; }
+#connection { color: #9eacba; font-size: 12px; max-width: 280px; text-align: right; }
+#connection[data-state="live"] { color: #91cdb2; }
+#connection[data-state="error"] { color: #e3b381; }
+.layout { max-width: 1540px; margin: auto; display: grid; grid-template-columns: 315px minmax(0, 1fr); }
+aside { padding: 28px 25px; border-right: 1px solid #2b3440; align-self: start; position: sticky; top: 0; max-height: 100vh; overflow: auto; }
+main { min-width: 0; padding: 30px 38px 60px; }
+label { display: block; font-size: 13px; font-weight: 500; margin-top: 12px; }
+select, input { width: 100%; margin-top: 6px; padding: 9px 10px; background: #1b232d; color: #e5eaf0; border: 1px solid #3b4857; border-radius: 6px; font: inherit; }
+select { margin-bottom: 5px; }
+textarea { display: block; resize: vertical; width: 100%; min-height: 64px; max-height: 35vh; margin: 7px 0; padding: 10px; border: 1px solid #435165; border-radius: 6px; background: #1b232d; color: #e5eaf0; font: inherit; }
+button { border: 1px solid #435165; border-radius: 6px; padding: 8px 12px; background: #253b33; color: #d8ece2; font: inherit; cursor: pointer; }
+button:hover { background: #335044; }
+button:disabled { opacity: .5; cursor: default; }
+button.quiet { background: #232d38; color: #c0ccda; font-size: 12px; }
+button.danger { background: #412b2c; border-color: #a56f69; color: #efc5bd; font-size: 12px; }
+:focus-visible { outline: 2px solid #9bccff; outline-offset: 3px; }
+.hint, .muted { color: #9eacba; font-size: 13px; }
+.prose, .event-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.section-heading, .panel-heading, .board-heading, .composer-actions, .member-top, .reservation-title, .event-meta, .recover-row, .item-actions { display: flex; align-items: baseline; gap: 10px; }
+.section-heading, .panel-heading, .board-heading, .composer-actions { justify-content: space-between; }
+.badge { display: inline-block; font-size: 11px; padding: 2px 7px; border: 1px solid #435165; border-radius: 4px; color: #b5c6d9; white-space: nowrap; }
+details, #channel-info, #ack-panel { border-top: 1px solid #2b3440; padding-top: 18px; margin-top: 22px; }
+summary { cursor: pointer; font-size: 13px; }
+#join { margin-top: 10px; }
+#channel-info #invite { font-size: 12px; margin: 12px 0 8px; }
+#copy-invite { font-size: 12px; background: #232d38; }
+#archive { display: block; margin-top: 12px; }
+.unread-count { color: #d8b98e; margin: 3px 0 10px; }
+.reader-list { color: #9eacba; font-size: 12px; margin-bottom: 12px; }
+.reader-list p { margin: 4px 0; }
+.board-heading { margin-bottom: 22px; }
+.board-heading h2 { font-size: 20px; margin-bottom: 2px; }
+.empty { color: #9eacba; max-width: 600px; margin: 50px auto; padding: 30px; border: 1px dashed #3b4857; border-radius: 10px; text-align: center; }
+.grid { display: grid; grid-template-columns: minmax(250px, .9fr) minmax(320px, 1.1fr); gap: 14px; }
+.panel { background: #151c24; border: 1px solid #303b49; border-radius: 9px; padding: 18px; margin-bottom: 14px; }
+.member, .reservation, .event, .pinned { border: 1px solid #303b49; background: #171e27; border-radius: 7px; padding: 12px 14px; margin: 0 0 9px; }
+.member:last-child, .reservation:last-child, .event:last-child { margin-bottom: 0; }
+.member p, .reservation p { margin: 5px 0 0; }
+.state { margin-left: auto; font-size: 11px; color: #9eacba; }
+.state-doing { color: #a8ccec; }.state-blocked { color: #e3b381; }.state-done { color: #91cdb2; }
+.reservation-held { border-left: 3px solid #88b9d2; }.reservation-recovery { border-left: 3px solid #d4a782; }
+.recover-row { align-items: center; margin-top: 10px; }.recover-row input { margin: 0; }.recover-row button { flex: 0 0 auto; }
+#pinned-panel { border-left: 3px solid #b8a2e5; }.pinned { background: #222337; }.pinned-blocker { border-left-color: #d8877f; }.pinned-direction, .pinned-context { border-left-color: #b8a2e5; }
+.event { border-left: 3px solid #88b9d2; }.event.unread { background: #1b2930; border-left-color: #91cdb2; }
+.event-meta { flex-wrap: wrap; margin-bottom: 5px; }.event-meta time { margin-left: auto; }.event-text { margin: 0; }
+.message-id { color: #94a4b6; font-size: 12px; }.item-actions { margin-top: 10px; }.item-actions button { margin-right: 6px; }
+.composer { position: sticky; bottom: 0; background: #101419; padding: 18px 0 0; border-top: 1px solid #384556; margin-top: 8px; }
+.composer-row { display: grid; grid-template-columns: 150px minmax(130px, 1fr) 160px; gap: 10px; }.composer-row label { margin: 0; }
+#send-status { color: #d8b98e; font-size: 13px; }.composer-actions { align-items: center; }
+dialog { max-width: min(760px, calc(100vw - 35px)); width: 100%; background: #171e27; color: #e5eaf0; border: 1px solid #435165; border-radius: 8px; padding: 20px; }.close { float: right; }.close + h2 { padding-top: 5px; }#detail-more { margin-top: 8px; }
+dialog::backdrop { background: #0009; } dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; font: inherit; }
+[hidden] { display: none !important; }
+@media (max-width: 900px) { .topbar { padding: 20px; flex-wrap: wrap; }.topbar > div { flex-basis: 100%; } #connection { max-width: none; text-align: left; }.layout { display: block; } aside { position: static; max-height: none; border-right: 0; border-bottom: 1px solid #2b3440; padding: 20px; } main { padding: 24px 20px; }.grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .composer-row { grid-template-columns: 1fr; } nav { order: 3; } }
