@@ -25,7 +25,7 @@ import { type GenerationJob, type StageTiming } from '../../generation/jobTypes.
 
 export async function runAceGeneration(
   job: GenerationJob,
-  deps: { pollUntilDone: typeof importedPoller },
+  deps: { pollUntilDone: typeof importedPoller; signal: AbortSignal },
 ): Promise<void> {
   const { pollUntilDone } = deps;
   const pipelineStart = performance.now();
@@ -65,11 +65,6 @@ export async function runAceGeneration(
   }
 
   console.log(`[Generate] Job ${job.id} — ditModel=${job.params.ditModel || '(none)'}, synth_model=${aceReq.synth_model || '(none)'}, emb_model=${aceReq.emb_model || '(auto)'}, seed=${aceReq.seed ?? '(engine default)'}, lm_seed=${aceReq.lm_seed ?? `(tied to seed: ${aceReq.seed ?? 'engine default'})`}, source=${job.params.source || 'create'}`);
-  const abortController = new AbortController();
-
-  // Store abort controller for cancellation
-  (job as any)._abort = abortController;
-
   try {
     // Determine if we need the LM phase
     const skipLm = job.params.skipLm === true;
@@ -175,7 +170,7 @@ export async function runAceGeneration(
         const lmJobId = await aceClient.submitLm(aceReq, undefined, coResident);
         job.aceJobId = lmJobId;
 
-        await pollUntilDone(lmJobId, job, abortController.signal, timeoutMinutes);
+        await pollUntilDone(lmJobId, job, deps.signal, timeoutMinutes);
 
         // Fetch LM results (array of enriched AceRequests)
         const resultRes = await aceClient.getJobResult(lmJobId);
@@ -246,7 +241,7 @@ export async function runAceGeneration(
             const retryReq = { ...aceReq, lm_seed: seed, lm_rep_penalty: penalty };
             const retryJobId = await aceClient.submitLm(retryReq, undefined, coResident);
             job.aceJobId = retryJobId;
-            await pollUntilDone(retryJobId, job, abortController.signal, timeoutMinutes);
+            await pollUntilDone(retryJobId, job, deps.signal, timeoutMinutes);
             const retryRes = await aceClient.getJobResult(retryJobId);
             const retryOut = await retryRes.json() as AceRequest[];
             if (!Array.isArray(retryOut) || retryOut.length === 0) break;   // keep what we have
@@ -853,7 +848,7 @@ export async function runAceGeneration(
       }
       job.aceJobId = synthJobId;
 
-      await pollUntilDone(synthJobId, job, abortController.signal, timeoutMinutes);
+      await pollUntilDone(synthJobId, job, deps.signal, timeoutMinutes);
       } finally {
         unsubSynth();
       }
@@ -1076,7 +1071,7 @@ export async function runAceGeneration(
             refJobId = await aceClient.submitSynth(refReq, 'wav16', coResident);
           }
           job.aceJobId = refJobId;
-          await pollUntilDone(refJobId, job, abortController.signal, timeoutMinutes);
+          await pollUntilDone(refJobId, job, deps.signal, timeoutMinutes);
 
           const refRes = await aceClient.getJobResult(refJobId);
           const refBuffer = Buffer.from(await refRes.arrayBuffer());

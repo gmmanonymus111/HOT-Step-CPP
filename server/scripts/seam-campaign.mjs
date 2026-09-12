@@ -178,6 +178,12 @@ export function validatePinnedSelection(expected, actual) {
   }
 }
 
+export function verifyFrozenBinary(engine) {
+  if (!engine?.exe || !engine.binarySha256) throw new Error('Baseline has no frozen engine binary identity.');
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(engine.exe)).digest('hex');
+  if (actual !== engine.binarySha256) throw new Error('Frozen engine binary changed; a new build requires a separate declared comparison window.');
+}
+
 async function verifyPinnedSelection(expected) {
   if (fs.existsSync(GPU_LOCK)) throw new Error('GPU lock is held; cannot preflight engine selection.');
   const response = await fetch('http://127.0.0.1:8085/mm3/props', { signal: AbortSignal.timeout(5000) });
@@ -194,6 +200,7 @@ function preflight(args, p, manifest) {
   if (existing.version !== 2 || !existing.series?.[args.baselineSeries] || !existing.series?.[`${args.baselineSeries}-ggml`]) {
     throw new Error(`Baseline manifest must contain ${args.baselineSeries} and ${args.baselineSeries}-ggml`);
   }
+  verifyFrozenBinary(existing.series[args.baselineSeries].environment.engine);
   for (const name of [args.series, p.ggml.series]) {
     if (existing.series?.[name]) throw new Error(`Candidate series already exists: ${name}`);
     if (fs.existsSync(expectedPath(args.out, name))) throw new Error(`Refusing existing expected environment: ${expectedPath(args.out, name)}`);

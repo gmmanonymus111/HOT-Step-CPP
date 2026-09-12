@@ -3,9 +3,25 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { verifyRecord, validateContextUnchanged, validateWarmupTransition, validatePinnedSelection } from './seam-campaign.mjs';
+import crypto from 'node:crypto';
+import { verifyRecord, validateContextUnchanged, validateWarmupTransition, validatePinnedSelection, verifyFrozenBinary } from './seam-campaign.mjs';
 
 const transitionError = 'Environment changed during the run; artifacts retained, no accepted manifest entry';
+
+test('does not treat a replaced engine binary as an expected build change', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seam-binary-'));
+  const exe = path.join(dir, 'engine-fixture');
+  try {
+    fs.writeFileSync(exe, 'frozen');
+    const engine = { exe, binarySha256: crypto.createHash('sha256').update('frozen').digest('hex') };
+    assert.doesNotThrow(() => verifyFrozenBinary(engine));
+    fs.writeFileSync(exe, 'another build');
+    assert.throws(() => verifyFrozenBinary(engine), /Frozen engine binary changed/);
+  } finally {
+    fs.unlinkSync(exe);
+    fs.rmdirSync(dir);
+  }
+});
 
 test('blocks capture when engine restart lost the pinned model selection', () => {
   const pinned = { lm: { requested: 'q8_0', selected: 'q8_0' }, voc: { requested: 'f16', selected: 'f16' } };

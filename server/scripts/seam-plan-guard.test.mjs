@@ -113,6 +113,8 @@ test('production plan guard retries a degenerate LM result and preserves the liv
   let lmCall = 0;
   const logs = [];
   const subscriptions = [];
+  const pollSignals = [];
+  const controller = new AbortController();
   const sentinel = new Error('SYNTH_SENTINEL');
 
   const context = {
@@ -170,7 +172,7 @@ test('production plan guard retries a degenerate LM result and preserves the liv
       skipped: [],
     }),
     degeneratePlanReason,
-    pollUntilDone: async () => {},
+    pollUntilDone: async (_id, _job, signal) => { pollSignals.push(signal); },
     loadSourceAudio: () => undefined,
     loadSourceLatent: () => undefined,
     applyTempoAndPitch: value => value,
@@ -214,9 +216,12 @@ test('production plan guard retries a degenerate LM result and preserves the liv
     },
   };
 
-  await runGeneration(job, { pollUntilDone: context.pollUntilDone, signal: new AbortController().signal });
+  await runGeneration(job, { pollUntilDone: context.pollUntilDone, signal: controller.signal });
 
   assert.equal(lmRequests.length, 2, 'initial LM call plus one plan-guard retry');
+  assert.equal(pollSignals.length, 2);
+  assert.ok(pollSignals.every(signal => signal === controller.signal),
+    'initial and retried LM polls use the caller-owned abort signal');
   assert.equal(lmRequests[0].lm_seed, 7);
   assert.equal(lmRequests[0].lm_rep_penalty, 1.1);
   assert.equal(lmRequests[1].lm_seed, 1016, 'retry seed is shifted by 1009');

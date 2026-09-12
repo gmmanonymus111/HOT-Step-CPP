@@ -18,9 +18,7 @@ import { logGeneration, failGenerationLog } from '../services/logger.js';
 import { engineReady, engineBootStatus } from '../engineState.js';
 import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import { pushLog } from './logs.js';
-import { getActiveBackendId } from '../services/backends/registry.js';
-import { runAceGeneration } from '../services/backends/ace/generate.js';
-import { runMinimaxGeneration } from '../services/backends/minimax/generate.js';
+import { getActiveBackend, getActiveBackendId } from '../services/backends/registry.js';
 import { mm3StreamUrl } from '../services/backends/minimax/client.js';
 import { runOnGpuLane, gpuLaneBusy, gpuLaneDepth, resetGpuLane } from '../services/generation/gpuLane.js';
 import { isActiveJob, type GenerationJob } from '../services/generation/jobTypes.js';
@@ -51,13 +49,15 @@ setInterval(() => {
 // translateParams is now imported from ../services/generation/translateParams.ts
 
 /** Run the full generation pipeline */
-async function runGeneration(job: GenerationJob): Promise<void> {
+async function runGeneration(job: GenerationJob, signal: AbortSignal): Promise<void> {
   if (job.status === 'cancelled') return;
-  if (getActiveBackendId() === 'minimax-m3') {
-    await runMinimaxGeneration(job, { pollUntilDone });
-    return;
-  }
-  await runAceGeneration(job, { pollUntilDone });
+  const backend = getActiveBackend();
+  await backend.generate(job, {
+    signal,
+    pollUntilDone,
+    stageProfile: backend.stageProfile ?? (() => ({ stallMs: 900_000 })),
+    hooks: { onEngineJob() {}, onStage() {}, onArtifact() {} },
+  });
 }
 // ── Async generation queue ────────────────────────────────────────────
 // Generations run one at a time on the shared GPU lane (services/generation/
@@ -76,8 +76,10 @@ function enqueueGeneration(job: GenerationJob): void {
     let attempts = 0;
 
     while (attempts <= MAX_RETRIES) {
+      const abortController = new AbortController();
+      (job as any)._abort = abortController;
       try {
-        await runGeneration(job);
+        await runGeneration(job, abortController.signal);
         break; // success — exit retry loop
       } catch (err: any) {
         const msg = err.message || '';
@@ -112,6 +114,8 @@ function enqueueGeneration(job: GenerationJob): void {
           failGenerationLog(job.id, msg, 'unknown');
           break;
         }
+      } finally {
+        if ((job as any)._abort === abortController) delete (job as any)._abort;
       }
     }
 

@@ -1,19 +1,12 @@
 // backends/types.ts — EngineBackend interface + capability manifest shapes
 //
-// Phase 1 scaffolding (docs/plans/multi-backend-architecture.md §4.1/§4.2).
-// ADDITIVE ONLY: nothing in this file is wired into the generation path yet.
-// The ACE backend module (backends/ace/index.ts) wraps the existing
-// aceClient/aceEngineProcess/engineState modules by delegation — zero
-// behavior change to the live generation flow.
-//
-// `translate()` / `generate()` / `cancel()` are DELIBERATELY NOT part of this
-// interface yet. Per the plan, Phase 1 wraps lifecycle + capabilities +
-// models only; the generation path itself keeps flowing through the existing
-// routes/generate.ts → aceClient chain until a later phase moves it behind
-// this abstraction. Adding them here now would be a same-file no-op that
-// invites someone to half-wire the hot path before the plan calls for it.
+// Backend capability and generation contracts.
+// The request and outcome records are additive. Existing backend mappings stay
+// private to their generation modules; these contracts do not translate or
+// mutate the request.
 
 import type { PluginParamSchema } from '../aceClient.js';
+import type { GenerationJob, StageTiming } from '../generation/jobTypes.js';
 
 /** Which job queue a backend's generations serialize against (plan §3.2/§4.4). */
 export type ResourcePool = 'gpu' | 'remote';
@@ -162,8 +155,137 @@ export interface BackendModels {
  *  An empty-string value means "auto / backend default". */
 export type BackendModelSelection = Record<string, string>;
 
-/** A registered generation backend. See file header for what's intentionally
- *  missing (translate/generate/cancel — later phase). */
+// ── Generation request and execution records ────────────────────────────────
+
+export const GENERATION_ENVELOPE_VERSION = 1 as const;
+
+export type GenerationOperation =
+  | 'text2music' | 'cover' | 'repaint' | 'lego' | 'extract' | 'complete'
+  | (string & {});
+
+/** Descriptive common inputs. Optional values stay absent when the caller did
+ * not supply them; backend defaults remain in the existing mappers. */
+export interface CommonInputs {
+  caption: string;
+  lyrics: string;
+  instrumental?: boolean;
+  duration?: number;
+  seed?: number;
+  randomSeed?: boolean;
+  batchSize?: number;
+  title?: string;
+}
+
+/** Added to GenerationJob in step 5. */
+export interface GenerationEnvelope {
+  version: typeof GENERATION_ENVELOPE_VERSION;
+  jobId: string;
+  userId: string;
+  backendId: string;
+  operation: GenerationOperation;
+  submission: Readonly<Record<string, unknown>>;
+  common: CommonInputs;
+  models: BackendModelSelection;
+  options: Partial<Record<string, Readonly<Record<string, unknown>>>>;
+  policy: GenerationPolicy;
+  enqueuedAt: number;
+  submittedBackendMismatch?: string;
+}
+
+export interface GenerationPolicy {
+  retry: {
+    maxAttempts: number;
+    reseedOnRetry: boolean;
+  };
+  timeoutMinutes?: number;
+}
+
+export type GenerationEndReason =
+  | 'completed'
+  | 'cancelled'
+  | 'engine_failed'
+  | 'stalled'
+  | 'timeout'
+  | 'reset'
+  | 'failed';
+
+/** Added to GenerationJob in step 7. */
+export interface GenerationAttempt {
+  attempt: number;
+  startedAt: number;
+  endedAt?: number;
+  effective: { seed?: number; models: BackendModelSelection; [key: string]: unknown };
+  reseeded: boolean;
+  engineJobIds: string[];
+  endReason?: GenerationEndReason;
+  error?: string;
+  submittedBackendMismatch?: string;
+}
+
+export type CancelReason = 'user' | 'cancel-all' | 'reset' | 'stall' | 'timeout' | 'shutdown';
+
+export interface CancelAck {
+  /** Terminal engine status or verified exit of the owning process only. */
+  acknowledged: boolean;
+  engineStatus?: 'cancelled' | 'done' | 'failed' | 'process_exited';
+  waitedMs: number;
+}
+
+export interface StageProfile { stallMs: number; }
+
+export interface GenerationHooks {
+  onEngineJob(engineJobId: string): void;
+  onStage(stage: string, progress?: number): void;
+  onArtifact(artifact: GenerationArtifact): void;
+}
+
+export type PollUntilDone = (
+  engineJobId: string,
+  job: GenerationJob,
+  signal: AbortSignal,
+  timeoutMinutes?: number,
+) => Promise<void>;
+
+/** Transitional step 4 context. `envelope`, `attempt`, and `lease` are added
+ * only when steps 5, 7, and 8 respectively make those values real. */
+export interface GenerationContext {
+  signal: AbortSignal;
+  pollUntilDone: PollUntilDone;
+  stageProfile: (stage: string | undefined) => StageProfile;
+  hooks: GenerationHooks;
+}
+
+export interface ResolvedRequest {
+  operation: GenerationOperation;
+  common: CommonInputs;
+  models: BackendModelSelection;
+  options: Readonly<Record<string, unknown>>;
+  policy: GenerationPolicy;
+}
+
+export type GenerationArtifactKind =
+  | 'audio' | 'mastered' | 'latent' | 'lrc' | 'lyrics' | 'cover-art'
+  | (string & {});
+
+export interface GenerationArtifact {
+  kind: GenerationArtifactKind;
+  trackIndex: number;
+  url?: string;
+  path?: string;
+}
+
+export interface GenerationOutcome {
+  endReason: GenerationEndReason;
+  stages: StageTiming[];
+  artifacts: GenerationArtifact[];
+  songIds: string[];
+  result?: GenerationJob['result'];
+  error?: string;
+}
+
+/** A registered generation backend. Request resolution and one-attempt
+ *  execution are behind the interface in step 4. Cancellation is added with
+ *  complete engine acknowledgement and ID tracking in step 9. */
 export interface EngineBackend {
   /** 'ace' | 'minimax-m3' | ... */
   id: string;
@@ -180,6 +302,17 @@ export interface EngineBackend {
    *  route answers 501. Implementations must be idempotent — the UI posts the
    *  whole selection on every change. */
   selectModel?(selection: BackendModelSelection): Promise<{ changed: boolean; [k: string]: unknown }>;
+
+  /** Operations accepted by this backend. */
+  operations: readonly GenerationOperation[];
+  /** Pure request snapshot; does not call the engine or run a mapper. */
+  resolveRequest(submission: Readonly<Record<string, unknown>>): ResolvedRequest;
+  /** Run one attempt using the shared step 4 context. */
+  generate(job: GenerationJob, ctx: GenerationContext): Promise<GenerationOutcome>;
+  /** ACE supplies its existing stage windows; MM3 uses the shared default. */
+  stageProfile?(stage: string | undefined): StageProfile;
+  /** Optional until the residency redesign wires engine-side arbitration. */
+  arbitratesResidencyInEngine?: boolean;
   /** Release this backend's GPU residency WITHOUT stopping it (plan §4.4:
    *  arbitration is model residency, not process switching). Called
    *  fire-and-forget on the OUTGOING backend when the active backend changes,

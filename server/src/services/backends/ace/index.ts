@@ -1,21 +1,27 @@
 // backends/ace/index.ts — ACE-Step 1.5 backend
 //
-// Phase 1 scaffolding: implements EngineBackend by DELEGATING to the existing
-// aceClient / aceEngineProcess / engineState modules — no logic moves, no
-// behavior changes. This is the proof-of-shape backend; translateParams and
-// the LM-echo generation path stay where they are (routes/generate.ts) until
-// a later phase migrates them behind this interface (plan §4.1, §5 Phase 1).
+// Backend manifest plus the thin step 4 wrapper around the existing ACE
+// generation path. translateParams and the LM-echo body remain in the
+// generation module; this file does not move or rewrite that mapping.
 
 import { aceClient } from '../../aceClient.js';
 import { config } from '../../../config.js';
 import { isEngineSuspended, restartAceServer, stopAceServer } from '../../aceEngineProcess.js';
 import { engineReady } from '../../../engineState.js';
+import { runAceGeneration } from './generate.js';
 import type {
   EngineBackend,
   BackendCapabilities,
   BackendModels,
   BackendLifecycleStatus,
+  GenerationArtifact,
+  GenerationContext,
+  GenerationOperation,
+  GenerationOutcome,
+  ResolvedRequest,
+  StageProfile,
 } from '../types.js';
+import type { GenerationJob } from '../../generation/jobTypes.js';
 
 function status(): BackendLifecycleStatus {
   if (isEngineSuspended()) return 'suspended';
@@ -104,6 +110,84 @@ async function models(): Promise<BackendModels> {
   }
 }
 
+const ACE_OPERATIONS: readonly GenerationOperation[] = [
+  'text2music', 'cover', 'repaint', 'lego', 'extract', 'complete', 'cover-nofsq',
+];
+
+function firstText(submission: Readonly<Record<string, unknown>>, keys: string[]): string {
+  for (const key of keys) {
+    const value = submission[key];
+    if (typeof value === 'string' && value) return value;
+  }
+  return '';
+}
+
+function optionalNumber(value: unknown, positive = false): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return positive && value <= 0 ? undefined : value;
+}
+
+/** Pure descriptive snapshot. The live ACE mapper remains translateParams(). */
+function resolveRequest(submission: Readonly<Record<string, unknown>>): ResolvedRequest {
+  const instrumental = typeof submission.instrumental === 'boolean'
+    ? submission.instrumental : undefined;
+  const duration = optionalNumber(submission.duration, true);
+  const common = {
+    caption: firstText(submission, ['prompt', 'songDescription', 'caption', 'style']),
+    lyrics: instrumental === true
+      ? '[Instrumental]'
+      : typeof submission.lyrics === 'string' ? submission.lyrics : '',
+    ...(instrumental === undefined ? {} : { instrumental }),
+    ...(duration === undefined ? {} : { duration }),
+    ...(typeof submission.seed === 'number' && Number.isFinite(submission.seed)
+      ? { seed: submission.seed } : {}),
+    ...(typeof submission.randomSeed === 'boolean' ? { randomSeed: submission.randomSeed } : {}),
+    ...(typeof submission.batchSize === 'number' && Number.isFinite(submission.batchSize) && submission.batchSize > 0
+      ? { batchSize: submission.batchSize } : {}),
+    ...(typeof submission.title === 'string' ? { title: submission.title } : {}),
+  };
+  const taskType = typeof submission.taskType === 'string' && submission.taskType
+    ? submission.taskType : 'text2music';
+  const model = (key: string): string => {
+    const value = submission[key];
+    return typeof value === 'string' ? value : '';
+  };
+  return {
+    operation: taskType,
+    common,
+    models: {
+      dit: model('ditModel'),
+      lm: model('lmModel'),
+      vae: model('vaeModel'),
+      embedding: model('embeddingModel'),
+    },
+    options: {},
+    policy: { retry: { maxAttempts: 2, reseedOnRetry: true } },
+  };
+}
+
+function stageProfile(stage: string | undefined): StageProfile {
+  const text = stage ?? '';
+  return { stallMs: text.startsWith('Decoding audio (VAE)') || !/: Step \d+/.test(text) ? 900_000 : 120_000 };
+}
+
+function outcomeFromJob(job: GenerationJob): GenerationOutcome {
+  const result = job.result;
+  const artifacts: GenerationArtifact[] = (result?.audioUrls ?? []).map((url, trackIndex) => ({
+    kind: 'audio', trackIndex, url,
+  }));
+  if (result?.masteredAudioUrl) artifacts.push({ kind: 'mastered', trackIndex: 0, url: result.masteredAudioUrl });
+  if (result?.noAdapterAudioUrl) artifacts.push({ kind: 'noadapter', trackIndex: 0, url: result.noAdapterAudioUrl });
+  return {
+    endReason: job.status === 'succeeded' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
+    stages: result?.timing ?? [],
+    artifacts,
+    songIds: result?.songIds ?? [],
+    result,
+    error: job.error,
+  };
+}
+
 export const aceBackend: EngineBackend = {
   id: 'ace',
   displayName: 'ACE-Step 1.5',
@@ -124,6 +208,14 @@ export const aceBackend: EngineBackend = {
   },
   capabilities,
   models,
+  operations: ACE_OPERATIONS,
+  resolveRequest,
+  async generate(job: GenerationJob, ctx: GenerationContext): Promise<GenerationOutcome> {
+    await runAceGeneration(job, { pollUntilDone: ctx.pollUntilDone, signal: ctx.signal });
+    return outcomeFromJob(job);
+  },
+  stageProfile,
+  arbitratesResidencyInEngine: false,
   /** Model-residency arbitration (plan §4.4). Evicts every resident, not
    *  in-use ACE module so the other family isn't fighting it for VRAM. Uses
    *  the same GET /models/loaded + POST /models/unload pair the VRAM

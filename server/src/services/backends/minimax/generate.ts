@@ -68,6 +68,7 @@ import type { GenerationJob, StageTiming } from '../../generation/jobTypes.js';
  *  watchdog, the wall-clock timeout and cancel checks — MM3 jobs use the same
  *  engine /job endpoints, so it applies unchanged. */
 export interface MinimaxGenerationDeps {
+  signal: AbortSignal;
   pollUntilDone(
     aceJobId: string, job: GenerationJob, signal: AbortSignal, timeoutMinutes?: number,
   ): Promise<void>;
@@ -826,9 +827,6 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
 
   const { req, notes, autoDuration } = mapMinimaxParams(job.params);
 
-  const abortController = new AbortController();
-  (job as any)._abort = abortController;
-
   startGenerationLog(job.id, 'mm3-text2music');
   logGenerationParams(job.id, req as unknown as Record<string, unknown>);
   for (const n of notes) log('WARNING', `[MM3] ${n}`);
@@ -1016,7 +1014,7 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
     }, DETAIL_POLL_MS);
     detailTimer.unref?.();
 
-    await deps.pollUntilDone(sub.job_id, job, abortController.signal, timeoutMinutes);
+    await deps.pollUntilDone(sub.job_id, job, deps.signal, timeoutMinutes);
     clearInterval(detailTimer);
     detailTimer = undefined;
     timing.push({ name: 'MM3 Generate', ms: Math.round(performance.now() - submitStart) });

@@ -17,13 +17,20 @@ import { listMm3Planks } from './plank.js';
 import { MM3_HIDDENS_EXT, listMm3Hiddens } from './hiddens.js';
 import { listMm3LmAdapters } from './lmAdapter.js';
 import { mm3Props, mm3PropsCached, mm3SelectModel, mm3Unload } from './client.js';
+import { runMinimaxGeneration } from './generate.js';
 import type { Mm3Props, Mm3RoleVariants } from './client.js';
 import type {
   EngineBackend,
   BackendCapabilities,
   BackendModels,
   BackendLifecycleStatus,
+  GenerationArtifact,
+  GenerationContext,
+  GenerationOperation,
+  GenerationOutcome,
+  ResolvedRequest,
 } from '../types.js';
+import type { GenerationJob } from '../../generation/jobTypes.js';
 
 /** Duration ceiling we expose. The checkpoint's own cap is 9,000 frames
  *  (= 360 s @ 25 fps) and the engine clamps to it; 300 s is the honest
@@ -76,6 +83,68 @@ export function mm3PersistedSelection(): { lm: string } & Record<Mm3Role, string
     cond:  roleOf('cond'),
     dit:   roleOf('dit'),
     voc:   roleOf('voc'),
+  };
+}
+
+const MM3_OPERATIONS: readonly GenerationOperation[] = ['text2music'];
+
+function firstText(submission: Readonly<Record<string, unknown>>, keys: string[]): string {
+  for (const key of keys) {
+    const value = submission[key];
+    if (typeof value === 'string' && value) return value;
+  }
+  return '';
+}
+
+function optionalNumber(value: unknown, positive = false): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return positive && value <= 0 ? undefined : value;
+}
+
+/** Pure descriptive snapshot. MM3's live defaults and validation remain in
+ * mapMinimaxParams(); this function never invokes that mapper. */
+function resolveRequest(submission: Readonly<Record<string, unknown>>): ResolvedRequest {
+  const instrumental = typeof submission.instrumental === 'boolean'
+    ? submission.instrumental : undefined;
+  const duration = optionalNumber(submission.duration, true);
+  const options: Record<string, unknown> = {};
+  for (const key of Object.keys(submission)) {
+    if (key.startsWith('mm3')) options[key] = submission[key];
+  }
+  const common = {
+    caption: firstText(submission, ['prompt', 'songDescription', 'caption', 'style']),
+    lyrics: instrumental === true ? '' : typeof submission.lyrics === 'string' ? submission.lyrics : '',
+    ...(instrumental === undefined ? {} : { instrumental }),
+    ...(duration === undefined ? {} : { duration }),
+    ...(typeof submission.seed === 'number' && Number.isFinite(submission.seed) ? { seed: submission.seed } : {}),
+    ...(typeof submission.randomSeed === 'boolean' ? { randomSeed: submission.randomSeed } : {}),
+    ...(typeof submission.batchSize === 'number' && Number.isFinite(submission.batchSize) && submission.batchSize > 0
+      ? { batchSize: submission.batchSize } : {}),
+    ...(typeof submission.title === 'string' ? { title: submission.title } : {}),
+  };
+  return {
+    operation: 'text2music',
+    common,
+    models: mm3PersistedSelection(),
+    options,
+    policy: { retry: { maxAttempts: 2, reseedOnRetry: true } },
+  };
+}
+
+function outcomeFromJob(job: GenerationJob): GenerationOutcome {
+  const result = job.result;
+  const artifacts: GenerationArtifact[] = (result?.audioUrls ?? []).map((url, trackIndex) => ({
+    kind: 'audio', trackIndex, url,
+  }));
+  if (result?.masteredAudioUrl) artifacts.push({ kind: 'mastered', trackIndex: 0, url: result.masteredAudioUrl });
+  if (result?.noAdapterAudioUrl) artifacts.push({ kind: 'noadapter', trackIndex: 0, url: result.noAdapterAudioUrl });
+  return {
+    endReason: job.status === 'succeeded' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
+    stages: result?.timing ?? [],
+    artifacts,
+    songIds: result?.songIds ?? [],
+    result,
+    error: job.error,
   };
 }
 
@@ -770,6 +839,16 @@ export const minimaxBackend: EngineBackend = {
   capabilities,
   models,
   selectModel,
+  operations: MM3_OPERATIONS,
+  resolveRequest,
+  async generate(job: GenerationJob, ctx: GenerationContext): Promise<GenerationOutcome> {
+    await runMinimaxGeneration(job, {
+      pollUntilDone: ctx.pollUntilDone,
+      signal: ctx.signal,
+    });
+    return outcomeFromJob(job);
+  },
+  arbitratesResidencyInEngine: true,
   /** Model-residency arbitration (plan §4.4): switching away from MM3 frees
    *  its ~13 GB rather than leaving it parked next to the ACE pipeline.
    *
