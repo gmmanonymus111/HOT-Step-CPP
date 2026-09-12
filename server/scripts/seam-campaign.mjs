@@ -9,6 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { compareManifest } from './seam-compare.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -171,6 +172,22 @@ function runWarmup(spec) {
   validateWarmupTransition({ runnerStatus: capture.status, stderr: capture.stderr, lockPresent: fs.existsSync(GPU_LOCK), record, expectedRuntime: spec.expectedRuntime });
 }
 
+export function validatePinnedSelection(expected, actual) {
+  if (!expected || !Object.keys(expected).length || !isDeepStrictEqual(expected, actual)) {
+    throw new Error('Engine model selection differs from the baseline; restore the pinned selection before any capture.');
+  }
+}
+
+async function verifyPinnedSelection(expected) {
+  if (fs.existsSync(GPU_LOCK)) throw new Error('GPU lock is held; cannot preflight engine selection.');
+  const response = await fetch('http://127.0.0.1:8085/mm3/props', { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`Cannot verify engine model selection: HTTP ${response.status}`);
+  const props = await response.json();
+  const actual = Object.fromEntries(Object.entries(props.variants || {}).map(([role, value]) =>
+    [role, { requested: value.requested, selected: value.selected }]));
+  validatePinnedSelection(expected, actual);
+}
+
 function preflight(args, p, manifest) {
   if (!fs.existsSync(manifest)) throw new Error(`Missing baseline manifest: ${manifest}`);
   const existing = readJson(manifest);
@@ -180,6 +197,7 @@ function preflight(args, p, manifest) {
   for (const name of [args.series, p.ggml.series]) {
     if (existing.series?.[name]) throw new Error(`Candidate series already exists: ${name}`);
     if (fs.existsSync(expectedPath(args.out, name))) throw new Error(`Refusing existing expected environment: ${expectedPath(args.out, name)}`);
+    if (fs.existsSync(path.join(args.out, `${name}-comparison.json`))) throw new Error(`Comparison report already exists: ${name}`);
   }
   const warmManifest = p.warmTrt.manifest;
   if (fs.existsSync(warmManifest)) throw new Error(`Refusing existing warmup manifest: ${warmManifest}`);
@@ -201,6 +219,7 @@ async function campaign(args) {
   const p = plan(args);
   const manifest = path.join(args.out, 'manifest-v2.json');
   preflight(args, p, manifest);
+  await verifyPinnedSelection(readJson(manifest).series[args.baselineSeries].environment.selection);
   const before = await contextSnapshot(context);
   runWarmup(p.warmTrt);
   for (const capture of p.aceAndMm3) for (const run of [1, 2]) {
@@ -228,7 +247,11 @@ async function campaign(args) {
       series: item.name,
       expectedEnvironment: item.environment,
     });
-    console.log(JSON.stringify(report, null, 2));
+    const reportFile = path.join(args.out, `${item.name}-comparison.json`);
+    fs.writeFileSync(reportFile, JSON.stringify(report, null, 2), { flag: 'wx' });
+    console.log(JSON.stringify({ baselineSeries, series: item.name, status: report.status,
+      comparisons: report.comparisons.length, errors: report.errors.length,
+      blocked: report.blocked.length, reportFile }));
     if (!report.ok) throw new Error(`Seam comparison failed: ${baselineSeries} vs ${item.name}`);
   }
   console.log(`Campaign context preserved (${context.coverage || 'context coverage not labelled'}).`);

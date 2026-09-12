@@ -112,6 +112,7 @@ test('production plan guard retries a degenerate LM result and preserves the liv
   ];
   let lmCall = 0;
   const logs = [];
+  const subscriptions = [];
   const sentinel = new Error('SYNTH_SENTINEL');
 
   const context = {
@@ -155,7 +156,11 @@ test('production plan guard retries a degenerate LM result and preserves the liv
     getLmCache: () => undefined,
     setLmCache(key, outputs) { cacheWrites.push({ key, outputs: clone(outputs) }); },
     getLmCacheSize: () => cacheWrites.length,
-    subscribeLines: () => () => {},
+    subscribeLines: callback => {
+      const subscription = { callback, releases: 0 };
+      subscriptions.push(subscription);
+      return () => { subscription.releases++; };
+    },
     resolveTriggerSpecs: () => [],
     resolveAdapterTriggers: paths => paths.length ? [{ word: 'artist-trigger', position: 'prepend' }] : [],
     readAdapterTrigger: () => ({ trigger: '', position: '' }),
@@ -209,7 +214,7 @@ test('production plan guard retries a degenerate LM result and preserves the liv
     },
   };
 
-  await runGeneration(job);
+  await runGeneration(job, { pollUntilDone: context.pollUntilDone, signal: new AbortController().signal });
 
   assert.equal(lmRequests.length, 2, 'initial LM call plus one plan-guard retry');
   assert.equal(lmRequests[0].lm_seed, 7);
@@ -234,5 +239,8 @@ test('production plan guard retries a degenerate LM result and preserves the liv
   assert.equal(synthRequests[0].guidance_mode, 'apg');
   assert.deepEqual(synthRequests[0].plugin_params, { marker: 'preserve-me' });
   assert.equal(job.status, 'failed', 'the synth sentinel is consumed by the real generation error path');
+  assert.equal(subscriptions.length, 2, 'both LM and synth phases subscribed');
+  assert.ok(subscriptions.every(subscription => subscription.releases === 1),
+    'both subscriptions are released exactly once, including the failed synth phase');
   assert.ok(logs.some(entry => entry.message.includes('Plan Guard') && entry.message.includes('retry 1/2')));
 });

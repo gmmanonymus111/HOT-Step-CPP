@@ -3,9 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { verifyRecord, validateContextUnchanged, validateWarmupTransition } from './seam-campaign.mjs';
+import { verifyRecord, validateContextUnchanged, validateWarmupTransition, validatePinnedSelection } from './seam-campaign.mjs';
 
 const transitionError = 'Environment changed during the run; artifacts retained, no accepted manifest entry';
+
+test('blocks capture when engine restart lost the pinned model selection', () => {
+  const pinned = { lm: { requested: 'q8_0', selected: 'q8_0' }, voc: { requested: 'f16', selected: 'f16' } };
+  assert.doesNotThrow(() => validatePinnedSelection(pinned, structuredClone(pinned)));
+  assert.throws(() => validatePinnedSelection(pinned, { ...pinned, lm: { requested: '', selected: 'f16' } }), /model selection differs/);
+  assert.throws(() => validatePinnedSelection(pinned, {}), /model selection differs/);
+  assert.throws(() => validatePinnedSelection({}, {}), /model selection differs/);
+});
 
 function record(overrides = {}) {
   return {
