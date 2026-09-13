@@ -20,7 +20,7 @@ import { logEngine } from './logger.js';
 import { pushLog } from '../routes/logs.js';
 import { setEngineReady } from '../engineState.js';
 import { aceClient } from './aceClient.js';
-import { resolveGpuSelection } from './gpuDevices.js';
+import { buildGpuEnv } from './gpuDevices.js';
 
 /** The live child, or null when nothing is running. */
 let aceProcess: ChildProcess | null = null;
@@ -168,32 +168,11 @@ export function startAceServer(): ChildProcess | null {
   // UI writes `CUDA_VISIBLE_DEVICES=` for Auto, dotenv turns that into an empty
   // string, and an empty CUDA_VISIBLE_DEVICES hides EVERY GPU — the engine
   // silently fell back to CPU.
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const { env, selection: gpu } = buildGpuEnv();
   const spawnOpts: { stdio: any; env: NodeJS.ProcessEnv } = {
     stdio: ['ignore', 'pipe', 'pipe'] as any,
     env,
   };
-
-  /** Delete an env var regardless of the case Windows stored its name in. */
-  const unsetEnv = (name: string) => {
-    for (const k of Object.keys(env)) {
-      if (k.toUpperCase() === name) delete env[k];
-    }
-  };
-
-  // ── GPU selection (issue #153) ───────────────────────────────────────────
-  // Resolved to a GPU UUID wherever possible: nvidia-smi indices (what the
-  // Settings picker shows) and CUDA indices are different enumerations, and on
-  // a mixed rig they can be exact reverses of each other.
-  const gpu = resolveGpuSelection(config.aceServer.cudaVisibleDevices);
-  unsetEnv('CUDA_VISIBLE_DEVICES');
-  if (gpu.visibleDevices) env.CUDA_VISIBLE_DEVICES = gpu.visibleDevices;
-  // Belt and braces for any index that still survives into the child: with
-  // PCI_BUS_ID, CUDA's device order matches nvidia-smi's, so the engine's
-  // "Device 0/1" log lines line up with the Settings dropdown. Never override
-  // a value the user set themselves.
-  const hasDeviceOrder = Object.keys(env).some(k => k.toUpperCase() === 'CUDA_DEVICE_ORDER');
-  if (gpu.forcePciOrder && !hasDeviceOrder) env.CUDA_DEVICE_ORDER = 'PCI_BUS_ID';
   console.log(gpu.log);
 
   if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {

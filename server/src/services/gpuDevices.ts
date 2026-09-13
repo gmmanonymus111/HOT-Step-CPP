@@ -30,6 +30,7 @@
 
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
+import { config } from '../config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -202,4 +203,25 @@ export function resolveGpuSelection(setting: string): GpuSelection {
     log: `[Server] GPU: manual — using CUDA_VISIBLE_DEVICES=${raw} as given `
        + '(could not resolve it to a GPU UUID; forcing CUDA_DEVICE_ORDER=PCI_BUS_ID)',
   };
+}
+
+/**
+ * A child env with the GPU decision applied: CUDA_VISIBLE_DEVICES unset (in
+ * any letter case Windows stored it) and then set only when the decision
+ * names a device, plus CUDA_DEVICE_ORDER=PCI_BUS_ID when indices survive and
+ * the user has not pinned an order themselves. Used for ace-server and every
+ * ace-train child, so training lands on the same card as generation (#153).
+ */
+export function buildGpuEnv(base: NodeJS.ProcessEnv = process.env): { env: NodeJS.ProcessEnv; selection: GpuSelection } {
+  const env: NodeJS.ProcessEnv = { ...base };
+  // config.aceServer.cudaVisibleDevices tracks Settings edits live; process.env
+  // only holds what .env said at boot.
+  const selection = resolveGpuSelection(config.aceServer.cudaVisibleDevices);
+  for (const k of Object.keys(env)) {
+    if (k.toUpperCase() === 'CUDA_VISIBLE_DEVICES') delete env[k];
+  }
+  if (selection.visibleDevices) env.CUDA_VISIBLE_DEVICES = selection.visibleDevices;
+  const hasDeviceOrder = Object.keys(env).some((k) => k.toUpperCase() === 'CUDA_DEVICE_ORDER');
+  if (selection.forcePciOrder && !hasDeviceOrder) env.CUDA_DEVICE_ORDER = 'PCI_BUS_ID';
+  return { env, selection };
 }

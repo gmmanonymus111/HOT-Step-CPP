@@ -76,6 +76,15 @@ export interface Mm3Status {
    *  measurement" caveat next to a flash estimate, never present it as
    *  calibrated, while this is false. Absent on an older server = false. */
   flashVramCalibrated?: boolean;
+  /** Which GGML backend the engine build beside the server ships, read off the
+   *  backend library on disk ('unknown' when it cannot be read). */
+  engineBackend?: 'cuda' | 'hip' | 'vulkan' | 'metal' | 'cpu' | 'unknown';
+  /** Whether `--attn flash` can run on that build at all. The fused
+   *  attention-training op is CUDA + CPU only, so a Vulkan (AMD/Intel) or Metal
+   *  engine refuses to start under flash — the form must grey the checkbox out
+   *  rather than offer a setting that cannot launch (#149). Absent on an older
+   *  server, which the form treats as "supported", exactly as before. */
+  flashSupported?: boolean;
   /** Usable rows for the preview-song picker (Mm3TrainCard's select, default
    *  = auto). Empty when the dataset has no codes cache yet. */
   previewSongs?: Array<{

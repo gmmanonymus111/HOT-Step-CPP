@@ -12,6 +12,7 @@
 // Spec: docs/plans/2026-07-27-preprocess-implementation.md §4.5, §2.9
 
 import fs from 'fs';
+import { buildGpuEnv } from '../gpuDevices.js';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
@@ -262,7 +263,7 @@ export async function runPreprocessJob(job: TrainingJob): Promise<void> {
       emitProgress(job);
       pushLog(`[Training] Preprocess job ${job.id}: ace-train ${included.length} songs → ${outDir}`);
 
-      const child = spawn(exe, args, { windowsHide: true });
+      const child = spawn(exe, args, { windowsHide: true, env: buildGpuEnv().env });
       job.child = child;
 
       const stderrTail: string[] = [];

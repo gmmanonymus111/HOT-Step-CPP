@@ -15,6 +15,7 @@
 // Spec: docs/plans/2026-08-20-mm3-training-server-design.md §2.3.
 
 import fs from 'fs';
+import { buildGpuEnv } from '../gpuDevices.js';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
@@ -322,7 +323,7 @@ async function runMm3AceTrain(
     emitProgress(job);
     pushLog(`[Training] ${kind} job ${job.id}: ${exe} ${args.slice(0, 2).join(' ')}`);
 
-    const child = spawn(exe, args, { windowsHide: true });
+    const child = spawn(exe, args, { windowsHide: true, env: buildGpuEnv().env });
     job.child = child;
 
     // The run's own log, beside its checkpoints. Without this the trainer's

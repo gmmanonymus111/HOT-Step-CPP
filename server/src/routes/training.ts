@@ -102,7 +102,8 @@ import { engineQueueDepth, engineUnderstandReady, pickBestLm } from '../services
 import * as queue from '../services/training/labelingQueue.js';
 import { isEngineSuspended } from '../services/aceEngineProcess.js';
 import {
-  aceTrainExe, findRegCorpora, getModelSnapshot, pickBf16, pickDitBaseFor, pickLmFor, refreshModelSnapshot,
+  aceTrainExe, engineGpuBackend, engineSupportsFlashAttnTraining,
+  findRegCorpora, getModelSnapshot, pickBf16, pickDitBaseFor, pickLmFor, refreshModelSnapshot,
   tensorsDir, tensorsRoot, variantKeyFor,
   type ResolvedPreprocessOptions, type ResolvedTrainDitOptions, type ResolvedTrainLmOptions,
 } from '../services/training/aceTrain.js';
@@ -1860,6 +1861,15 @@ router.get('/datasets/:id/mm3', async (req: Request, res: Response) => {
       // mode, and the card must caption it "pending measurement", never
       // present it as a proven saving.
       flashVramCalibrated: mm3FlashVramCalibrated(),
+      // Whether `--attn flash` can run AT ALL on this build. The fused
+      // attention-training op has CUDA and CPU implementations only, so on a
+      // Vulkan (AMD/Intel) or Metal engine ace-train refuses to start rather
+      // than let the scheduler quietly run it on the CPU — which made the
+      // DEFAULT MM3 recipe unlaunchable on an AMD card (#149). Reported so the
+      // form can grey the checkbox out and say why, instead of offering a
+      // setting the route then has to coerce behind the user's back.
+      engineBackend: engineGpuBackend(),
+      flashSupported: engineSupportsFlashAttnTraining(),
       defaults: MM3_LM_DEFAULTS,
       presets: MM3_LM_PRESETS,
       defaultPreset: MM3_LM_DEFAULT_PRESET,
@@ -2120,10 +2130,22 @@ router.post('/datasets/:id/mm3-train-lm', async (req: Request, res: Response) =>
     const captionsDir = ds.sourceDir;
 
     const b = (req.body || {}) as Record<string, unknown>;
+    // ABSENT means absent — `undefined`, `null`, or something that is not a
+    // number in range. A present 0 or false is an ANSWER and must never be read
+    // as "the caller said nothing", which is the shape that trained #142's runs
+    // with a 4096-frame history the form said was off. `Number(null)` is 0, so
+    // null is rejected explicitly rather than silently meaning "off".
     const num = (k: string, d: number, lo: number, hi: number): number => {
+      if (b[k] === undefined || b[k] === null) return d;
       const v = Number(b[k]);
       return Number.isFinite(v) && v >= lo && v <= hi ? v : d;
     };
+    // Same rule for the boolean knobs: absent = the recipe default, present =
+    // exactly what was asked. `x === true` alone silently discards an explicit
+    // `false` for every field whose default is true (pissaFrozenF16 was one),
+    // which is the dead-checkbox shape #149 hit on attnBackend.
+    const bool = (k: string, d: boolean): boolean =>
+      b[k] === undefined || b[k] === null ? d : b[k] === true;
     // A named preset (fast / balanced / thorough) sits UNDER the request's own
     // fields: `{preset:'thorough'}` alone trains Thorough, `{preset:'thorough',
     // steps: 800}` trains Thorough for 800 steps. No name = the defaults = Fast.
@@ -2278,8 +2300,42 @@ router.post('/datasets/:id/mm3-train-lm', async (req: Request, res: Response) =>
     // prefix: it probes the fused op at S_kv = n_pfx + S and runs it on the
     // spliced K/V. The coercion to exact that lived here is gone; an engine
     // that predates it still exits 2 on the pair, loudly.
-    const attnBackendResolved: 'exact' | 'flash' = b.attnBackend === 'flash' ? 'flash' : D.attnBackend;
+    //
+    // ENUMERATED, not `=== 'flash' ? 'flash' : default`. The default has been
+    // 'flash' since 2026-09-06, so that test could only ever answer 'flash':
+    // unticking Flash Attention sent `attnBackend: 'exact'`, the route threw it
+    // away, and the run was refused by the trainer on an AMD card for a setting
+    // the user had already switched off (#149). Same manual-whitelist shape as
+    // the stopMode bug in 70dbd333, one field along.
+    let attnBackendResolved: 'exact' | 'flash' =
+      b.attnBackend === 'flash' ? 'flash'
+      : b.attnBackend === 'exact' ? 'exact'
+      : D.attnBackend;
+    // There is no fused attention-training kernel for Vulkan or Metal (the op
+    // is CUDA + CPU only), and ace-train refuses to start rather than let the
+    // scheduler run it on the CPU behind the user's back — which on an AMD
+    // Windows build means the DEFAULT recipe cannot launch at all. Coerce, log
+    // and echo (below) instead of handing every non-NVIDIA user a fatal error
+    // for a default they never chose. The engine's own probe stays the
+    // authority; this only keeps the default launchable.
+    if (attnBackendResolved === 'flash' && !engineSupportsFlashAttnTraining()) {
+      console.log(`[Training] mm3-train-lm: attnBackend -> exact (engine backend ${engineGpuBackend()} `
+                 + 'has no fused attention-training kernel; ace-train would refuse to start)');
+      attnBackendResolved = 'exact';
+    }
     void framesWillBeEmitted;
+    // HOT-PiZZA is the default method, so an ABSENT method block must resolve to
+    // it rather than to a plain LoRA — but an explicit `pissa: false` has to turn
+    // its own variant off too, or unticking PiSSA in the form would leave
+    // hotPizza standing on the default and train PiSSA anyway.
+    // `hotPissa` is the method's first-day name, still read as an alias.
+    const hotPizzaRaw = b.hotPizza ?? b.hotPissa;
+    const hotPizzaResolved: boolean = hotPizzaRaw === undefined || hotPizzaRaw === null
+      ? (b.pissa === false ? false : D.hotPizza)
+      : hotPizzaRaw === true;
+    // hotPizza implies pissa: it IS PiSSA, with the rank mask on the principal
+    // component. A client that sends only hotPizza gets the init it needs.
+    const pissaResolved: boolean = bool('pissa', D.pissa) || hotPizzaResolved;
     // The engine refuses a trainable prefix together with prior preservation
     // (the prior capture needs an inert model, and a prefix is non-zero from
     // initialisation) — exit 2 after the base load. Say so here instead, since
@@ -2316,7 +2372,7 @@ router.post('/datasets/:id/mm3-train-lm', async (req: Request, res: Response) =>
       regScoreLast: num('regScoreLast', 0, 0, 9000),
       scoreLast:    num('scoreLast', 0, 0, 9000),
       scoreLastEndOnly: b.scoreLastEndOnly === true,
-      keepResumeState: b.keepResumeState === true,
+      keepResumeState: bool('keepResumeState', D.keepResumeState),
       longTracks: longTracksResolved,
       verifyExport: b.verifyExport === true,
       lyricsDropout: num('lyricsDropout', 0, 0, 1),
@@ -2340,24 +2396,27 @@ router.post('/datasets/:id/mm3-train-lm', async (req: Request, res: Response) =>
       lokrAlpha:   num('lokrAlpha', D.lokrAlpha, 1, 8192),
       // Flag-contract parity fields (2026-09-05) — see mm3MethodConflict above
       // for the exclusivity refusal and MM3_LM_DEFAULTS for what each does.
+      // EVERY one of these resolves through `bool`: absent = the recipe
+      // default, present = exactly what the caller asked, including false.
+      // `x === true` read an explicit false and an absent key as the same
+      // thing, which silently dropped pissaFrozenF16 (default ON, and the UI
+      // has no control for it, so every Training Studio run trained without the
+      // 0.6 GB saving the shipped recipe was rated with).
       attnBackend: attnBackendResolved,
-      rslora: b.rslora === true,
-      dora:   b.dora === true,
-      hira:   b.hira === true,
-      loha:   b.loha === true,
+      rslora: bool('rslora', D.rslora),
+      dora:   bool('dora', D.dora),
+      hira:   bool('hira', D.hira),
+      loha:   bool('loha', D.loha),
       // hotPizza implies pissa (it is PiSSA with a different mask); a client
       // that sends only hotPizza gets the init it needs rather than a 400.
-      // Both fall back to MM3_LM_DEFAULTS when ABSENT (unlike the other method
-      // booleans, which read absent as off): HOT-PiZZA is the default method,
-      // and a caller that posts no method at all must get the default, not a
-      // plain LoRA. An explicit false still switches it off.
-      pissa:  (b.pissa === undefined ? D.pissa : b.pissa === true)
-           || ((b.hotPizza ?? b.hotPissa) === undefined ? D.hotPizza : (b.hotPizza ?? b.hotPissa) === true),
-      // hotPissa: the method's first-day name, still read as an alias.
-      hotPizza: (b.hotPizza ?? b.hotPissa) === undefined ? D.hotPizza : (b.hotPizza ?? b.hotPissa) === true,
-      pissaCache: b.pissaCache === undefined ? D.pissaCache : b.pissaCache === true,
-      pissaFrozenF16: b.pissaFrozenF16 === true,
-      hra:    b.hra === true,
+      // HOT-PiZZA is the default method, so a caller that posts no method at
+      // all must get it rather than a plain LoRA. An explicit false still
+      // switches it off.
+      pissa:  pissaResolved,
+      hotPizza: hotPizzaResolved,
+      pissaCache: bool('pissaCache', D.pissaCache),
+      pissaFrozenF16: bool('pissaFrozenF16', D.pissaFrozenF16),
+      hra:    bool('hra', D.hra),
       loraPlusRatio: num('loraPlusRatio', D.loraPlusRatio, 1, 64),
       artistToken:   artistTokenResolved,
       artistTokenK:  num('artistTokenK', D.artistTokenK, 1, 256),
@@ -2631,6 +2690,15 @@ router.post('/datasets/:id/mm3-resume-lm', (req: Request, res: Response) => {
       console.log('[Training] mm3-resume-lm: attnBackend -> exact '
                  + `(prefixFrames=${opts.prefixFrames}, prefixN=${opts.prefixN} — either one makes the `
                  + 'attention mask rectangular, which the engine refuses under flash)');
+      opts.attnBackend = 'exact';
+    }
+    // And the same build check the start route makes: a run recorded as flash
+    // (or a resume request asking for it) cannot launch on a Vulkan or Metal
+    // engine, because the fused op has no kernel there. Coerce rather than let
+    // the resume die on the trainer's refusal (#149).
+    if (opts.attnBackend !== 'exact' && !engineSupportsFlashAttnTraining()) {
+      console.log(`[Training] mm3-resume-lm: attnBackend -> exact (engine backend ${engineGpuBackend()} `
+                 + 'has no fused attention-training kernel)');
       opts.attnBackend = 'exact';
     }
     opts.resumeFrom = run.resume.statePath;

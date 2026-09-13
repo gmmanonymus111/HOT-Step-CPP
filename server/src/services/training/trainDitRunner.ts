@@ -14,6 +14,7 @@
 // Spec: docs/plans/2026-07-28-dit-trainer-implementation.md §2.8, §4.4
 
 import fs from 'fs';
+import { buildGpuEnv } from '../gpuDevices.js';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
@@ -354,7 +355,7 @@ export async function runTrainDitJob(job: TrainingJob): Promise<void> {
       emitProgress(job);
       pushLog(`[Training] train-dit job ${job.id}: ace-train ${opts.adapterType} r${opts.rank} → ${opts.adapterDir}`);
 
-      const child = spawn(exe, args, { windowsHide: true });
+      const child = spawn(exe, args, { windowsHide: true, env: buildGpuEnv().env });
       job.child = child;
 
       const stderrTail: string[] = [];

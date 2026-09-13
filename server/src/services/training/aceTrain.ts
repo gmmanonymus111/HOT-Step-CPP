@@ -29,6 +29,59 @@ export function aceTrainExe(): string | null {
   return fs.existsSync(exe) ? exe : null;
 }
 
+// ── Which GGML backend this engine build ships ───────────────────────────
+//
+// The engine exposes no build-type field: /props carries models and defaults,
+// and /vram is compiled out to zeros on anything but CUDA, which is
+// indistinguishable from "ace-server is down". What IS on disk is the backend
+// library itself, next to the binaries, because that is how GGML loads it —
+// release.yml packs ggml-cuda.dll for the CUDA variants and ggml-vulkan.dll
+// for the Vulkan one, and the CPU build gets neither.
+//
+// Read here rather than guessed because of #149: the fused attention-training
+// ops (GGML_OP_FLASH_ATTN_TRAIN/_BACK) exist for CPU and CUDA only — there is
+// no Vulkan or Metal kernel — so `--attn flash` on an AMD/Windows build is a
+// hard refusal from ace-train five minutes into a model load.
+
+export type EngineGpuBackend = 'cuda' | 'hip' | 'vulkan' | 'metal' | 'cpu' | 'unknown';
+
+/** The GPU backend library sitting beside ace-server, or 'cpu' when there is
+ *  none and 'unknown' when the directory cannot be read at all. CUDA wins a
+ *  tie: a build that ships both loads CUDA first. */
+export function engineGpuBackend(): EngineGpuBackend {
+  let names: string[];
+  try {
+    names = fs.readdirSync(path.dirname(config.aceServer.exe)).map(n => n.toLowerCase());
+  } catch {
+    return 'unknown';
+  }
+  const has = (backend: string): boolean =>
+    names.includes(`ggml-${backend}.dll`)
+    || names.includes(`libggml-${backend}.so`)
+    || names.includes(`libggml-${backend}.dylib`);
+  if (has('cuda')) return 'cuda';
+  if (has('hip')) return 'hip';
+  if (has('vulkan')) return 'vulkan';
+  if (has('metal')) return 'metal';
+  // No GPU backend library at all, but the binaries are there: a CPU build.
+  return names.some(n => n.startsWith('ace-server')) ? 'cpu' : 'unknown';
+}
+
+/** Whether `--attn flash` can run on this build.
+ *
+ *  fattn-train is a CUDA kernel (engine/ggml/src/ggml-cuda/fattn-train.cu) plus
+ *  a CPU path in ggml-cpu/ops.cpp; ggml-hip compiles the same CUDA sources.
+ *  Vulkan and Metal have no implementation, and ace-train refuses to start
+ *  rather than let the scheduler fall back to the CPU for them (#149).
+ *
+ *  'unknown' answers TRUE: an unreadable engine directory must not take a
+ *  working flash run away from a CUDA user, and the engine still refuses the
+ *  pair loudly if the guess is wrong. */
+export function engineSupportsFlashAttnTraining(): boolean {
+  const backend = engineGpuBackend();
+  return backend !== 'vulkan' && backend !== 'metal';
+}
+
 /** DiT model name → filesystem-safe variant key (extension stripped). */
 export function variantKeyFor(ditModel: string): string {
   const raw = String(ditModel ?? '').replace(/\\/g, '/');

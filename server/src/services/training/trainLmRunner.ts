@@ -13,6 +13,7 @@
 // Spec: docs/plans/2026-07-27-lm-trainer-implementation.md §2.9, §4.4
 
 import fs from 'fs';
+import { buildGpuEnv } from '../gpuDevices.js';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
@@ -368,7 +369,7 @@ export async function runTrainLmJob(job: TrainingJob): Promise<void> {
         const args = buildTrainLmArgs({ opts: legOpts, modelsDir: config.aceServer.models });
         pushLog(`[Training] train-lm job ${job.id}: ace-train ${legOpts.lmSize}${legLabel} → ${legOpts.adapterDir}`);
 
-        const child = spawn(exe, args, { windowsHide: true });
+        const child = spawn(exe, args, { windowsHide: true, env: buildGpuEnv().env });
         job.child = child;
 
         const stderrTail: string[] = [];

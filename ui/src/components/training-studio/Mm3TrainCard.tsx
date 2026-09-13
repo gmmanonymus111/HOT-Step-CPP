@@ -264,17 +264,27 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
   // would be wrong for exactly the users who need it most.
   const chosen = status?.bases?.find(b => b.id === form?.basePrecision);
   const flashCalibrated = status ? (status.flashVramCalibrated ?? mm3FlashVramCalibrated(status.vramModel)) : false;
+  // Whether this engine build can run --attn flash AT ALL. The fused
+  // attention-training op is CUDA + CPU only, so on a Vulkan (AMD/Intel) or
+  // Metal engine ace-train refuses to start — and since flash is the default,
+  // that made the DEFAULT recipe unlaunchable with no way to see why (#149).
+  // An older server does not report it; treat that as supported, as before.
+  const flashSupported = status?.flashSupported !== false;
+  // What will ACTUALLY run, which is what the estimate and the checkbox both
+  // have to show — the route coerces to exact on an unsupported build.
+  const attnEffective: 'exact' | 'flash' =
+    form && flashSupported && form.attnBackend === 'flash' ? 'flash' : 'exact';
   const peak = (() => {
     if (!form || !status?.vramModel || !chosen) return null;
     const mb    = estimateMm3PeakMb(chosen.bytes, form.rank, form.maxFrames, status.vramModel,
                                     form.optimizer,
                                     form.cropAnchor === 'song' ? form.prefixFrames : 0,
-                                    256, form.attnBackend)
+                                    256, attnEffective)
                 + (chosen.extraMb || 0);
     // Flash mode's own coefficients are not measured yet (MM3_VRAM_MODEL.flash
     // is null server-side), so the number above is silently standing in for
     // exact mode's — say so rather than presenting it as a proven saving.
-    const flashCaveat = form.attnBackend === 'flash' && !flashCalibrated
+    const flashCaveat = attnEffective === 'flash' && !flashCalibrated
       ? ` (${t('trainingStudio.mm3.flashVramPending', 'flash: estimate pending measurement')})` : '';
     const total = status.gpuTotalMb || 0;
     const gb    = (mb / 1024).toFixed(1);
@@ -348,13 +358,12 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
           targetLossMetric: form.targetLossMetric,
           targetLossEpochs: form.targetLossEpochs,
         } : {}),
-        // The engine refuses a prefix under `zero` anchoring, and the control
-        // is disabled there — belt and braces so a stale form cannot send it.
-        // Under `song` the value is ALWAYS sent, 0 included: the server resolves
-        // a missing key to its default (4096), so omitting 0 silently trained
-        // with the full prefix while the form said off (#142).
-        ...(form.cropAnchor === 'song'
-          ? { prefixFrames: Math.max(0, form.prefixFrames) } : {}),
+        // ALWAYS sent, 0 included, and 0 under `zero` anchoring where the
+        // engine refuses a prefix outright. The route resolves a MISSING key to
+        // its default, which was 4096 until the whole-song recipe landed, so
+        // every omission here was a run trained with 164 s of history the form
+        // said was off (#142).
+        prefixFrames: form.cropAnchor === 'song' ? Math.max(0, form.prefixFrames) : 0,
         ...(form.trigger.trim()
           ? { trigger: form.trigger.trim(), triggerPrepend: form.triggerPrepend }
           : {}),
@@ -384,34 +393,47 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
               ? { previewSongId: form.previewSongId } : {}),
           },
         } : {}),
-        // Flag-contract parity fields (2026-09-05): only sent when moved off
-        // default, same "an older engine never sees it" rule as everywhere
-        // else in this codebase. adapterType==='lora' guards the whole group —
-        // the server ignores them under lokr, but sending only the relevant
-        // side keeps the request body honest about what actually ran.
+        // Flag-contract parity fields (2026-09-05). EVERY ONE IS SENT, ALWAYS,
+        // including the falses and the zeros.
+        //
+        // They used to be spread in only when switched on, on an "an older
+        // engine never sees it" rule that does not apply here: this body goes
+        // to our own route, and it is the ARG BUILDER, not the request, that
+        // decides which flags an older ace-train sees. What omission actually
+        // bought was a class of dead checkboxes — the route reads a missing key
+        // as "use the default", so unticking anything whose default is ON left
+        // the default standing. attnBackend (default flash since 2026-09-06)
+        // was refused by the trainer on an AMD card with the box unticked
+        // (#149); PiSSA/HOT-PiZZA (default on) was the same bug one line down.
+        //
         // NOT gated on adapterType: --attn is orthogonal to the adapter
         // parameterization and mm3-lm-train accepts it under LoKr too, where the
-        // VRAM saving is identical. Gating it meant the checkbox stayed visibly
-        // ticked while the request omitted the field and the run trained exact.
-        // Always sent: the default is flash since 2026-09-06, so an omitted
-        // field would turn a deliberate 'exact' back into flash on the route.
-        attnBackend: form.attnBackend,
-        ...(form.adapterType === 'lora' && form.dora ? { dora: true } : {}),
-        ...(form.adapterType === 'lora' && form.hira ? { hira: true } : {}),
-        ...(form.adapterType === 'lora' && form.loha ? { loha: true } : {}),
-        ...(form.adapterType === 'lora' && form.rslora ? { rslora: true } : {}),
-        ...(form.adapterType === 'lora' && form.pissa && !form.dora && !form.hira && !form.loha
-          ? { pissa: true, ...(form.hotPizza ? { hotPizza: true } : {}) } : {}),
-        ...(form.adapterType === 'lora' && form.hra && !form.dora && !form.hira && !form.loha && !form.pissa
-          ? { hra: true } : {}),
-        ...(form.adapterType === 'lora' && form.loraPlusRatio !== 1 ? { loraPlusRatio: form.loraPlusRatio } : {}),
-        ...(form.adapterType === 'lora' && form.artistTokenOn
-          ? { artistToken: form.artistToken, artistTokenK: form.artistTokenK, artistTokenLr: form.artistTokenLr }
-          : {}),
-        // Never sent alongside a regularisation corpus — the engine refuses the
-        // pair, and the route now 400s on it. The control is disabled there too.
-        ...(form.adapterType === 'lora' && form.prefixN > 0 && !form.regDatasetId
-          ? { prefixN: form.prefixN } : {}),
+        // VRAM saving is identical.
+        // Forced to 'exact' when the engine build has no fused-attention kernel
+        // (Vulkan/Metal): the trainer refuses to start there, and the checkbox
+        // is disabled with that reason shown.
+        attnBackend: flashSupported ? form.attnBackend : 'exact',
+        // The LoRA-family group is meaningless under LoKr, so it is sent as all
+        // off there rather than omitted — the route's defaults would otherwise
+        // reinstate HOT-PiZZA under a LoKr request.
+        dora:   form.adapterType === 'lora' && form.dora,
+        hira:   form.adapterType === 'lora' && form.hira,
+        loha:   form.adapterType === 'lora' && form.loha,
+        rslora: form.adapterType === 'lora' && form.rslora,
+        pissa:    form.adapterType === 'lora' && form.pissa
+                  && !form.dora && !form.hira && !form.loha,
+        hotPizza: form.adapterType === 'lora' && form.pissa && form.hotPizza
+                  && !form.dora && !form.hira && !form.loha,
+        hra: form.adapterType === 'lora' && form.hra
+             && !form.dora && !form.hira && !form.loha && !form.pissa,
+        loraPlusRatio: form.adapterType === 'lora' ? form.loraPlusRatio : 1,
+        artistToken: form.adapterType === 'lora' && form.artistTokenOn ? form.artistToken : '',
+        artistTokenK: form.artistTokenK,
+        artistTokenLr: form.artistTokenLr,
+        // 0 alongside a regularisation corpus — the engine refuses the pair and
+        // the route 400s on it. The control is disabled there too.
+        prefixN: form.adapterType === 'lora' && !form.regDatasetId
+          ? Math.max(0, form.prefixN) : 0,
       };
       await startMm3TrainLm(body);
     } finally {
@@ -1022,19 +1044,27 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
                         + 'silence, because that value was tuned on a different model.')}
                     </span>
                   </label>
-                  <label className="flex items-start gap-2 text-[11px] text-zinc-600 dark:text-zinc-300 self-end pb-1">
-                    <input type="checkbox" className="mt-0.5" checked={form.attnBackend === 'flash'}
+                  <label className={'flex items-start gap-2 text-[11px] text-zinc-600 dark:text-zinc-300 '
+                                  + `self-end pb-1${flashSupported ? '' : ' opacity-60'}`}>
+                    <input type="checkbox" className="mt-0.5" checked={attnEffective === 'flash'}
+                      disabled={!flashSupported}
                       onChange={e => set('attnBackend', e.target.checked ? 'flash' : 'exact')} />
                     <span>
                       {t('trainingStudio.mm3.attnBackend', 'Flash attention')}
                       <span className="block text-[10px] text-zinc-500">
-                        {flashCalibrated
-                          ? t('trainingStudio.mm3.attnBackendHelp',
-                              'Fused attention kernels — see the VRAM estimate above for the measured saving.')
-                          : t('trainingStudio.mm3.attnBackendHelpPending',
-                              'Fused attention kernels, once mm3-lm-train gains --attn (landing '
-                              + 'concurrently). VRAM saving not yet measured — the estimate above stands '
-                              + 'in with exact mode\'s number until it is.')}
+                        {!flashSupported
+                          ? t('trainingStudio.mm3.attnBackendUnsupported',
+                              'Unavailable on this build: the fused attention kernels exist for CUDA '
+                              + 'only, and the trainer refuses to start on a {{backend}} engine rather '
+                              + 'than run them on the CPU behind your back. Training runs in exact mode.',
+                              { backend: status?.engineBackend ?? 'non-CUDA' })
+                          : flashCalibrated
+                            ? t('trainingStudio.mm3.attnBackendHelp',
+                                'Fused attention kernels — see the VRAM estimate above for the measured saving.')
+                            : t('trainingStudio.mm3.attnBackendHelpPending',
+                                'Fused attention kernels, once mm3-lm-train gains --attn (landing '
+                                + 'concurrently). VRAM saving not yet measured — the estimate above stands '
+                                + 'in with exact mode\'s number until it is.')}
                       </span>
                     </span>
                   </label>
@@ -1222,8 +1252,12 @@ export const Mm3TrainCard: React.FC<{ datasetId: string; trigger?: string }> = (
                       disabled={form.cropAnchor === 'zero'}
                       onClick={() => set('prefixFrames',
                         form.prefixFrames > 0 ? 0 : form.maxFrames)}>
+                      {/* An ACTION, not a state. It read "Off" while the field
+                          still said 4096, which is how at least one user
+                          reported having switched the prefix off and trained
+                          with it anyway (#142). */}
                       {form.prefixFrames > 0
-                        ? t('trainingStudio.mm3.prefixOff', 'Off')
+                        ? t('trainingStudio.mm3.prefixTurnOff', 'Turn off')
                         : t('trainingStudio.mm3.prefixMatch', 'Match crop')}
                     </button>
                   </div>
