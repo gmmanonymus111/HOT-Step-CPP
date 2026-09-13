@@ -352,7 +352,70 @@ const _listeners = new Set<() => void>();
 
 /** Ready gate — resolves when IDB restore is complete.
  *  resumeQueue() awaits this before processing items. */
-const _idbReady: Promise<void> = _restoreFromIDB();
+const _idbReady: Promise<void> = _restoreFromIDB().then(() => { void _hydrateFinishedItems(); });
+
+/** Song ids already reconciled against their row this session — including the
+ *  ones that came back with no master, so a track that genuinely has none is
+ *  not re-fetched on every sweep. */
+const _hydratedSongIds = new Set<string>();
+
+/** Pull a finished queue item's missing fields off its song ROW.
+ *
+ *  A queue item only ever knew what the JOB result told it, and the job result
+ *  reported one mastered URL and one duration for a whole render — nothing at
+ *  all on MM3, which used to fold the master into audioUrls. So a finished card
+ *  played WITHOUT the unmastered/mastered switch that the identical track gets
+ *  from Recent Songs or the Library, and every take of an ensemble claimed the
+ *  same length. The row has all of it, per song, and it is the same row those
+ *  other two views read — so asking it is what makes the three agree. */
+async function _hydrateItemFromSong(item: AudioQueueItem): Promise<boolean> {
+  const songId = item.songId;
+  if (!songId || _hydratedSongIds.has(songId)) return false;
+  _hydratedSongIds.add(songId);
+  try {
+    const { song } = await songApi.get(songId);
+    if (!song) return false;
+    let dirty = false;
+    const mastered = song.masteredAudioUrl || (song as any).mastered_audio_url;
+    if (mastered && mastered !== item.masteredAudioUrl) { item.masteredAudioUrl = mastered; dirty = true; }
+    const noAdapter = song.noAdapterAudioUrl || (song as any).noadapter_audio_url;
+    if (noAdapter && noAdapter !== item.noAdapterAudioUrl) { item.noAdapterAudioUrl = noAdapter; dirty = true; }
+    const raw = song.audioUrl || (song as any).audio_url;
+    if (raw && raw !== item.audioUrl) { item.audioUrl = raw; dirty = true; }
+    const dur = Number(song.duration);
+    if (Number.isFinite(dur) && dur > 0 && dur !== item.audioDuration) { item.audioDuration = dur; dirty = true; }
+    const coverUrl = song.coverUrl || (song as any).cover_url;
+    if (coverUrl && !item.coverUrl) { item.coverUrl = coverUrl; dirty = true; }
+    return dirty;
+  } catch {
+    // The row may be gone (deleted from the Library) — leave the item as it is.
+    _hydratedSongIds.delete(songId);
+    return false;
+  }
+}
+
+/** Reconcile the finished items a restored queue came back with. Newest first
+ *  and bounded, because this runs on every page load and the interesting items
+ *  are the ones still on screen. */
+async function _hydrateFinishedItems(limit = 80): Promise<void> {
+  const todo = _state.items
+    .filter(i => i.status === 'succeeded' && i.songId && !_hydratedSongIds.has(i.songId))
+    .slice(-limit)
+    .reverse();
+  if (todo.length === 0) return;
+  let dirty = false;
+  // Four at a time: enough to finish a full queue quickly, few enough that a
+  // page load does not fire eighty simultaneous reads at the server.
+  const workers = Array.from({ length: Math.min(4, todo.length) }, async () => {
+    for (;;) {
+      const item = todo.pop();
+      if (!item) return;
+      if (await _hydrateItemFromSong(item)) dirty = true;
+    }
+  });
+  await Promise.all(workers);
+  if (dirty) _emit(true);
+}
 
 function _emit(immediate = false) {
   _state = { ..._state, items: [..._state.items] };
@@ -667,6 +730,8 @@ async function _notifySongCreated(songId: string): Promise<void> {
     const { song } = await songApi.get(songId);
     if (song) {
       window.dispatchEvent(new CustomEvent('song-created', { detail: { song } }));
+      // This IS the row the restore sweep would have asked for.
+      _hydratedSongIds.add(songId);
       const item = _state.items.find(i => i.songId === songId);
       if (item) {
         let dirty = false;
