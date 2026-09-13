@@ -246,7 +246,22 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
         std::string full = std::string(models_dir) + REGISTRY_SEP + fname;
         std::string type = registry_classify_gguf(full.c_str());
         if (type.empty()) {
-            fprintf(stderr, "[Registry] WARNING: skipping %s (unknown architecture)\n", fname.c_str());
+            // Sibling backends keep their weights next to the ACE-Step ones but
+            // load them through their own code paths (StableStep refiner,
+            // MiniMax-Music3, YuE2). Not errors: say so instead of making a
+            // healthy install look broken (#151).
+            std::string lower = fname;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            const char * owner = nullptr;
+            if (lower.find("sa3-") == 0)       owner = "StableStep";
+            else if (lower.find("mm3-") == 0)  owner = "MiniMax-Music3";
+            else if (lower.find("yue2-") == 0) owner = "YuE2";
+            if (owner) {
+                fprintf(stderr, "[Registry] %s -> %s (loaded by its own backend, not an ACE-Step model)\n",
+                        fname.c_str(), owner);
+            } else {
+                fprintf(stderr, "[Registry] WARNING: skipping %s (unknown architecture)\n", fname.c_str());
+            }
             continue;
         }
 
@@ -435,7 +450,19 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
         }
 
         if (type.empty()) {
-            fprintf(stderr, "[Registry] WARNING: skipping %s/ (unrecognized ONNX directory)\n", dname.c_str());
+            // Directories owned by other backends: onnx/ (TRT exports, read by
+            // the TRT loaders), sa3/ (StableStep bundle), mm3/ and yue2/ (their
+            // own registries). Valid installs, not unrecognized ones (#151).
+            const char * owner = nullptr;
+            if (lower_dir == "onnx")      owner = "TensorRT/ONNX exports";
+            else if (lower_dir == "sa3")  owner = "StableStep bundle";
+            else if (lower_dir == "mm3")  owner = "MiniMax-Music3";
+            else if (lower_dir == "yue2") owner = "YuE2";
+            if (owner) {
+                fprintf(stderr, "[Registry] %s/ -> %s (loaded by its own backend)\n", dname.c_str(), owner);
+            } else {
+                fprintf(stderr, "[Registry] WARNING: skipping %s/ (unrecognized ONNX directory)\n", dname.c_str());
+            }
             continue;
         }
 
