@@ -46,6 +46,12 @@ const CONFIGS: Record<string, Partial<AceRequest>> = {
   P50: { inference_steps: 50, guidance_scale: 20, shift: -1, infer_method: 'md_hamiltonian_v2', scheduler: 'linear_quadratic', guidance_mode: 'dynamic_cfg' },
   // The mirrored-audition turbo recipe.
   T8: { inference_steps: 8, guidance_scale: 1.0, shift: 0, infer_method: 'euler' },
+  // Diagnostic variants of P50, one knob each (2026-09-03 hiss hunt).
+  P50g7:  { inference_steps: 50, guidance_scale: 7,  shift: -1, infer_method: 'md_hamiltonian_v2', scheduler: 'linear_quadratic', guidance_mode: 'dynamic_cfg' },
+  P50g1:  { inference_steps: 50, guidance_scale: 1,  shift: -1, infer_method: 'md_hamiltonian_v2', scheduler: 'linear_quadratic', guidance_mode: 'dynamic_cfg' },
+  E50:    { inference_steps: 50, guidance_scale: 20, shift: -1, infer_method: 'euler' },
+  E50g7:  { inference_steps: 50, guidance_scale: 7,  shift: -1, infer_method: 'euler' },
+  P50vae: { inference_steps: 50, guidance_scale: 20, shift: -1, infer_method: 'md_hamiltonian_v2', scheduler: 'linear_quadratic', guidance_mode: 'dynamic_cfg', vae_model: 'vae-BF16.gguf' },
 };
 
 const SYNTH_MODEL = 'acestep-v15-merge-base-sft-turbo-xl-thirds-BF16.gguf';
