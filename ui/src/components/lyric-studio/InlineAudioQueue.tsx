@@ -71,6 +71,13 @@ export const InlineAudioQueue: React.FC = () => {
   const finishedCount = finished.length;
   const failedCount = items.filter(i => i.status === 'failed').length;
 
+  // The track the player holds is keyed by `songId || id` (audioQueueItemToTrack),
+  // so comparing against item.id alone never matched a COMPLETED item — the one
+  // case that can be playing. The row then showed Play while it was playing.
+  const isPlaying = useCallback(
+    (item: AudioQueueItem) => currentSongId != null && currentSongId === (item.songId || item.id),
+    [currentSongId]);
+
   const handlePlay = useCallback((item: AudioQueueItem) => {
     if (!item.audioUrl) return;
     pbPlay(audioQueueItemToTrack(item));
@@ -161,7 +168,7 @@ export const InlineAudioQueue: React.FC = () => {
         <>
           <GroupLabel label="Active" color="text-pink-400" />
           {active.map(item => (
-            <QueueItemRow key={item.id} item={item} isPlayingInMain={currentSongId === item.id} onPlay={handlePlay} />
+            <QueueItemRow key={item.id} item={item} isPlayingInMain={isPlaying(item)} onPlay={handlePlay} />
           ))}
         </>
       )}
@@ -170,7 +177,7 @@ export const InlineAudioQueue: React.FC = () => {
         <>
           <GroupLabel label="Queued" color="text-zinc-600 dark:text-zinc-400" />
           {queued.map(item => (
-            <QueueItemRow key={item.id} item={item} isPlayingInMain={currentSongId === item.id} onPlay={handlePlay} />
+            <QueueItemRow key={item.id} item={item} isPlayingInMain={isPlaying(item)} onPlay={handlePlay} />
           ))}
         </>
       )}
@@ -179,7 +186,7 @@ export const InlineAudioQueue: React.FC = () => {
         <>
           <GroupLabel label="Completed" color="text-green-400" />
           {finished.map(item => (
-            <QueueItemRow key={item.id} item={item} isPlayingInMain={currentSongId === item.id} onPlay={handlePlay} onDownload={handleDownload} />
+            <QueueItemRow key={item.id} item={item} isPlayingInMain={isPlaying(item)} onPlay={handlePlay} onDownload={handleDownload} />
           ))}
         </>
       )}

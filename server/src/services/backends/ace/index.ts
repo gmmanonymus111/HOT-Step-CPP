@@ -176,8 +176,17 @@ function outcomeFromJob(job: GenerationJob): GenerationOutcome {
   const artifacts: GenerationArtifact[] = (result?.audioUrls ?? []).map((url, trackIndex) => ({
     kind: 'audio', trackIndex, url,
   }));
-  if (result?.masteredAudioUrl) artifacts.push({ kind: 'mastered', trackIndex: 0, url: result.masteredAudioUrl });
-  if (result?.noAdapterAudioUrl) artifacts.push({ kind: 'noadapter', trackIndex: 0, url: result.noAdapterAudioUrl });
+  // Per-track where the backend reported it; the scalars are take 0's only.
+  const mastered = result?.masteredAudioUrls
+    ?? (result?.masteredAudioUrl ? [result.masteredAudioUrl] : []);
+  mastered.forEach((url, trackIndex) => {
+    if (url) artifacts.push({ kind: 'mastered', trackIndex, url });
+  });
+  const noAdapter = result?.noAdapterAudioUrls
+    ?? (result?.noAdapterAudioUrl ? [result.noAdapterAudioUrl] : []);
+  noAdapter.forEach((url, trackIndex) => {
+    if (url) artifacts.push({ kind: 'noadapter', trackIndex, url });
+  });
   return {
     endReason: job.status === 'succeeded' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
     stages: result?.timing ?? [],

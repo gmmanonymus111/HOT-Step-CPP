@@ -1177,6 +1177,15 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
     }
     const audioUrls: string[] = [];
     const songIds: string[] = [];
+    // Parallel to audioUrls. Until 2026-09-13 the mastered take was pushed INTO
+    // audioUrls and the mastered field was never filled, so a queue card had no
+    // way to offer the unmastered/mastered switch — and "original" was secretly
+    // the master. The song rows always stored the two apart; this makes the job
+    // result agree with them.
+    const masteredUrls: string[] = [];
+    // Each take ends at its own EOS, so they genuinely differ. The scalar
+    // `duration` below is the longest, which is the render — not the take.
+    const takeDurationsOut: number[] = [];
 
     for (let takeIdx = 0; takeIdx < nTakes; takeIdx++) {
       // Decimal string throughout — a uint64 seed does not survive float64, and
@@ -1427,7 +1436,11 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       }
 
 
-      audioUrls.push(masteredUrl || audioUrl);
+      // RAW here, master alongside — the same split the song row uses, so the
+      // player's "unmastered" really is the unmastered render.
+      audioUrls.push(audioUrl);
+      masteredUrls.push(masteredUrl || '');
+      takeDurationsOut.push(duration);
       songIds.push(songId);
     }
     // Every MM3 take now stops at its own EOS, so report the longest — that is
@@ -1457,6 +1470,9 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       audioUrls,
       songIds,
       duration,
+      masteredAudioUrl: masteredUrls.find(u => !!u) || undefined,
+      masteredAudioUrls: masteredUrls,
+      durations: takeDurationsOut,
       timing,
       totalMs,
     };

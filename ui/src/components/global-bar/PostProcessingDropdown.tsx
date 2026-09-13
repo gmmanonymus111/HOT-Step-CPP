@@ -297,12 +297,19 @@ export const PostProcessingDropdown: React.FC = () => {
   // GGML (root GGUFs) backend installs from the extended availability endpoint.
   const [stableStepBackends, setStableStepBackends] = useState<{ onnx: boolean; gguf: boolean }>({ onnx: false, gguf: false });
   const [stableStepAvailable, setStableStepAvailable] = useState(false);
+  // Why it is unavailable, not just that it is. The GGML weights (5.8 GB) and
+  // the T5Gemma tokenizer (34 MB, under onnx/sa3 because the ONNX set shares it)
+  // go missing independently, and "not installed" next to a full models folder
+  // sends you looking in the wrong place.
+  const [stableStepParts, setStableStepParts] = useState<{ tokenizer: boolean; ggufWeights: boolean }>(
+    { tokenizer: true, ggufWeights: true });
   useEffect(() => {
     fetch('/api/models/stablestep')
       .then(r => r.json())
       .then(data => {
         setStableStepAvailable(!!data.available);
         setStableStepBackends({ onnx: !!data.backends?.onnx, gguf: !!data.backends?.gguf });
+        setStableStepParts({ tokenizer: !!data.tokenizer, ggufWeights: !!data.ggufWeights });
       })
       .catch(() => { setStableStepAvailable(false); setStableStepBackends({ onnx: false, gguf: false }); });
   }, []);
@@ -556,9 +563,14 @@ export const PostProcessingDropdown: React.FC = () => {
             <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-sky-500/10 border border-sky-500/20">
               <span className="text-sky-400 text-xs mt-px">ⓘ</span>
               <p className="text-[10px] text-sky-300/80 leading-relaxed">
-                StableStep models are not installed — download a backend set in the
-                Model Manager (StableStep tab; GGML ~5.8 GB or ONNX ~12 GB) to
-                enable this feature.
+                {stableStepParts.ggufWeights && !stableStepParts.tokenizer
+                  ? 'The StableStep weights are installed but the T5Gemma tokenizer is missing. '
+                    + 'Both backends need it: download tokenizer.json, tokenizer_config.json and '
+                    + 'special_tokens_map.json in the Model Manager (StableStep tab, ~34 MB) to '
+                    + 're-enable this feature.'
+                  : 'StableStep models are not installed — download a backend set in the '
+                    + 'Model Manager (StableStep tab; GGML ~5.8 GB or ONNX ~12 GB) to '
+                    + 'enable this feature.'}
               </p>
             </div>
           )}

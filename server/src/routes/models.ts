@@ -96,12 +96,22 @@ router.get('/stablestep', (_req, res) => {
     res.json({
       available: onnx || gguf,
       backends: { onnx, gguf },
+      // Which HALF is missing. The tokenizer is 34 MB and lives under onnx/sa3
+      // even though the GGML backend needs it too, so deleting the 12 GB ONNX
+      // set takes the GGML backend down with it — and the old answer to that
+      // was a bare "not installed" next to 5.8 GB of present GGUFs.
+      tokenizer: tokenizerOk,
+      ggufWeights: SA3_GGUF_FILES.every(f => fs.existsSync(path.join(modelsDir, f))),
+      onnxGraph: fs.existsSync(path.join(sa3Dir, 'sa3-dit.onnx')),
       files: sa3Files,
     });
   } catch (err: any) {
     res.json({
       available: false,
       backends: { onnx: false, gguf: false },
+      tokenizer: false,
+      ggufWeights: false,
+      onnxGraph: false,
       files: [],
       error: err.message,
     });

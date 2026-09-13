@@ -37,6 +37,33 @@ function getSongSource(song: Song): string {
   return (song.generationParams as any)?.source || (song.generation_params as any)?.source || 'create';
 }
 
+/** Lyric Studio is the only source that knows WHO a song is by and what it is
+ *  ABOUT — it stamps both into generation_params. So its rows read as
+ *  "Artist - Title" over the subject, instead of a bare title over a caption
+ *  that is the same handful of genre words on every track of an album. */
+function lyricStudioMeta(song: Song): { artist: string; subject: string } {
+  const gp = (song.generationParams || song.generation_params) as any;
+  if (!gp || gp.source !== 'lyric-studio') return { artist: '', subject: '' };
+  return {
+    artist: typeof gp.artist === 'string' ? gp.artist.trim() : '',
+    subject: typeof gp.subject === 'string' ? gp.subject.trim() : '',
+  };
+}
+
+/** Title as DISPLAYED — never what rename edits, which stays the stored title. */
+function displayTitle(song: Song): string {
+  const title = song.title || 'Untitled';
+  const { artist } = lyricStudioMeta(song);
+  // Don't double up when the stored title already carries the artist.
+  if (!artist || title.startsWith(`${artist} - `)) return title;
+  return `${artist} - ${title}`;
+}
+
+/** The one-line description under the title. */
+function displaySubtext(song: Song): string {
+  return lyricStudioMeta(song).subject || song.style || song.caption || '';
+}
+
 // ── Pagination ───────────────────────────────────────────────────────────────
 const PAGE_SIZE_KEY = 'hs-library-pageSize';
 const PAGE_SIZE_OPTIONS: (number | 'all')[] = [20, 40, 60, 80, 100, 'all'];
@@ -785,7 +812,7 @@ const SongItem: React.FC<SongItemProps> = ({
             <div className={`text-sm font-medium truncate ${
               isStreaming ? 'text-orange-400' : isActive ? 'text-pink-400' : 'text-zinc-800 dark:text-zinc-200'
             }`}>
-              {disguiseTitle(song.title || 'Untitled')}
+              {disguiseTitle(displayTitle(song))}
             </div>
             {/* The row equivalent of the grid card's badge + bar: the track is
                 playable, and this is how much of it exists so far. */}
@@ -818,7 +845,7 @@ const SongItem: React.FC<SongItemProps> = ({
           </div>
         )}
         <div className="text-xs text-zinc-500 truncate mt-0.5">
-          {isDisguised ? '' : (song.style || song.caption || t('library.noDescription'))}
+          {isDisguised ? '' : (displaySubtext(song) || t('library.noDescription'))}
         </div>
       </div>
 
@@ -1088,7 +1115,7 @@ const SongCard: React.FC<SongCardProps> = ({
         ) : (
           <div className="flex items-center gap-1 group/title pointer-events-auto">
             <div className={`text-sm font-semibold drop-shadow-sm truncate ${isActive ? 'text-pink-400' : 'text-white'}`}>
-              {disguiseTitle(song.title || 'Untitled')}
+              {disguiseTitle(displayTitle(song))}
             </div>
             {onRename && !selectionMode && (
               <button
@@ -1104,7 +1131,7 @@ const SongCard: React.FC<SongCardProps> = ({
 
         {/* Style / Caption — wraps, max 3 lines */}
         <div className="text-[11px] text-white/70 mt-0.5 leading-tight line-clamp-3">
-          {isDisguised ? '' : (song.style || song.caption || t('library.noDescription'))}
+          {isDisguised ? '' : (displaySubtext(song) || t('library.noDescription'))}
         </div>
 
         {/* Quality + Date row */}
@@ -1170,7 +1197,7 @@ const TableTitleCell: React.FC<{
       <span className={`font-medium truncate ${
         isStreaming ? 'text-orange-400' : isActive ? 'text-pink-400' : 'text-zinc-200'
       }`}>
-        {disguiseTitle(song.title || 'Untitled')}
+        {disguiseTitle(displayTitle(song))}
       </span>
       {/* Third view mode, same treatment. A row that reads as an ordinary track
           while its audio is still being written is the bug this exists to stop. */}
@@ -1536,7 +1563,7 @@ const SongTable: React.FC<SongTableProps> = ({
               ),
 
               title: <TableTitleCell song={song} isActive={isActive} onRename={onRename ? (newTitle) => onRename(song, newTitle) : undefined} disguiseTitle={disguiseTitle} />,
-              style: <TableStyleCell text={isDisguised ? '—' : (song.style || song.caption || '—')} />,
+              style: <TableStyleCell text={isDisguised ? '—' : (displaySubtext(song) || '—')} />,
               source: badge ? <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${badge.cls}`}>{badge.label}</span> : null,
               bpm: <span className="text-zinc-500 font-mono">{bpm || '—'}</span>,
               key: <span className="text-zinc-500">{keyScale || '—'}</span>,

@@ -377,6 +377,12 @@ export interface GenerationJob {
     timeSignature?: string;
     masteredAudioUrl?: string;
     noAdapterAudioUrl?: string;
+    /** Per-track, index-aligned with audioUrls. The scalars above are only ever
+     *  track 0's, so a multi-take render needs these to give each take its own
+     *  master / reference / length. '' or 0 = that track has none. */
+    masteredAudioUrls?: string[];
+    noAdapterAudioUrls?: string[];
+    durations?: number[];
   };
   error?: string;
   /** MiniMax-Music3 live audio: true once the engine has confirmed it will

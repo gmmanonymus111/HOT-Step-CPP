@@ -667,14 +667,28 @@ async function _notifySongCreated(songId: string): Promise<void> {
     const { song } = await songApi.get(songId);
     if (song) {
       window.dispatchEvent(new CustomEvent('song-created', { detail: { song } }));
-      // Backfill coverUrl into the queue item so the playback track uses cover art
-      const coverUrl = song.coverUrl || song.cover_url;
-      if (coverUrl) {
-        const item = _state.items.find(i => i.songId === songId);
-        if (item && !item.coverUrl) {
-          item.coverUrl = coverUrl;
-          _emit(true);
+      const item = _state.items.find(i => i.songId === songId);
+      if (item) {
+        let dirty = false;
+        // Backfill coverUrl into the queue item so the playback track uses cover art
+        const coverUrl = song.coverUrl || song.cover_url;
+        if (coverUrl && !item.coverUrl) { item.coverUrl = coverUrl; dirty = true; }
+        // The song ROW is the authority on which takes exist: it stores the raw
+        // render and its master in separate columns, which is what the playbar's
+        // unmastered/mastered switch keys off. Backfilling from it means a queue
+        // card offers the same switch as every other place the track is played,
+        // whatever the job result happened to report.
+        const mastered = song.masteredAudioUrl || (song as any).mastered_audio_url;
+        if (mastered && !item.masteredAudioUrl) { item.masteredAudioUrl = mastered; dirty = true; }
+        const noAdapter = song.noAdapterAudioUrl || (song as any).noadapter_audio_url;
+        if (noAdapter && !item.noAdapterAudioUrl) { item.noAdapterAudioUrl = noAdapter; dirty = true; }
+        // Per-take length, from the row that measured it off the WAV header.
+        const dur = Number(song.duration);
+        if (Number.isFinite(dur) && dur > 0 && dur !== item.audioDuration) {
+          item.audioDuration = dur;
+          dirty = true;
         }
+        if (dirty) _emit(true);
       }
     }
   } catch {
@@ -794,7 +808,11 @@ export async function enqueueSimpleGen(
           const audioUrls = status.result?.audioUrls || [];
           const audioUrl = audioUrls[0] || '';
           const songIds = status.result?.songIds || [];
-          const masteredUrl = status.result?.masteredAudioUrl;
+          const takeMastered = status.result?.masteredAudioUrls ?? [];
+          const takeNoAdapter = status.result?.noAdapterAudioUrls ?? [];
+          const takeDuration = (t: number) =>
+            status.result?.durations?.[t] || status.result?.duration;
+          const masteredUrl = takeMastered[0] || status.result?.masteredAudioUrl;
           item.status = 'succeeded';
           item.audioUrl = audioUrl;
           item.songId = songIds[0];
@@ -812,11 +830,14 @@ export async function enqueueSimpleGen(
               s.stage = 'Complete!';
               s.audioUrl = audioUrls[t] || '';
               s.songId = songIds[t];
-              s.audioDuration = status.result?.duration;
+              // Take t's own master, reference and LENGTH — see the live path.
+              s.masteredAudioUrl = takeMastered[t] || '';
+              s.noAdapterAudioUrl = takeNoAdapter[t] || '';
+              s.audioDuration = takeDuration(t);
             }
           }
-          item.noAdapterAudioUrl = status.result?.noAdapterAudioUrl;
-          item.audioDuration = status.result?.duration;
+          item.noAdapterAudioUrl = takeNoAdapter[0] || status.result?.noAdapterAudioUrl;
+          item.audioDuration = takeDuration(0);
           item.progress = 100;
           item.stage = 'Complete!';
           _state.completionCounter++;
@@ -1119,13 +1140,15 @@ async function _tryReconnect(item: AudioQueueItem, _token: string): Promise<bool
       // Already done — just collect the results
       const audioUrl = status.result?.audioUrls?.[0];
       const songId = status.result?.songIds?.[0];
-      const masteredUrl = status.result?.masteredAudioUrl;
+      const masteredUrl = status.result?.masteredAudioUrls?.[0] || status.result?.masteredAudioUrl;
+      const noAdapterUrl = status.result?.noAdapterAudioUrls?.[0] || status.result?.noAdapterAudioUrl;
+      const dur = status.result?.durations?.[0] || status.result?.duration;
       if (audioUrl) {
         item.audioUrl = audioUrl;
         if (songId) item.songId = songId;
         if (masteredUrl) item.masteredAudioUrl = masteredUrl;
-        if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
-        if (status.result?.duration) item.audioDuration = status.result.duration;
+        if (noAdapterUrl) item.noAdapterAudioUrl = noAdapterUrl;
+        if (dur) item.audioDuration = dur;
       }
       item.status = 'succeeded';
       item.progress = 100;
@@ -1430,7 +1453,14 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
         const songIds = status.result?.songIds || [];
         const audioUrl = audioUrls[0];
         const songId = songIds[0];
-        const masteredUrl = status.result?.masteredAudioUrl;
+        const takeMastered = status.result?.masteredAudioUrls ?? [];
+        const takeNoAdapter = status.result?.noAdapterAudioUrls ?? [];
+        // Per-track length where the backend reports it, else the render-wide
+        // scalar — which is right for a single take and the best we have for
+        // an older job that predates the array.
+        const takeDuration = (t: number) =>
+          status.result?.durations?.[t] || status.result?.duration;
+        const masteredUrl = takeMastered[0] || status.result?.masteredAudioUrl;
         // Ensemble / natural-ending candidates: the server returns the rendered
         // takes in take order, so sibling t owns audioUrls[t] and songIds[t] —
         // the same split the Create page does. Until 2026-09-09 this loop only
@@ -1446,7 +1476,11 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
             s.stage = 'Complete!';
             s.audioUrl = audioUrls[t] || '';
             s.songId = songIds[t];
-            s.audioDuration = status.result?.duration;
+            // Take t's own master, reference and LENGTH. The scalars are take
+            // 0's, so using them gave three cards one duration and one master.
+            s.masteredAudioUrl = takeMastered[t] || '';
+            s.noAdapterAudioUrl = takeNoAdapter[t] || '';
+            s.audioDuration = takeDuration(t);
           }
         }
         if (audioUrl) {
@@ -1454,7 +1488,7 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
           if (songId) item.songId = songId;
           if (masteredUrl) item.masteredAudioUrl = masteredUrl;
           if (status.result?.noAdapterAudioUrl) item.noAdapterAudioUrl = status.result.noAdapterAudioUrl;
-          if (status.result?.duration) item.audioDuration = status.result.duration;
+          if (takeDuration(0)) item.audioDuration = takeDuration(0);
           _emit(true);
           // If server didn't provide duration, probe the audio file
           if (!item.audioDuration) _probeAudioDuration(item.id, audioUrl);

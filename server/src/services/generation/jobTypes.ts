@@ -34,6 +34,17 @@ export interface GenerationJob {
     masteredAudioUrl?: string;
     /** No-adapter reference render (bare-DiT low-step output), when enabled */
     noAdapterAudioUrl?: string;
+    /** Per-track mastered renders, index-aligned with audioUrls. The scalar
+     *  above is only ever the FIRST non-empty one, so a multi-take render used
+     *  to hand every take take 0's master — or, on MM3, no master at all.
+     *  '' means that track produced none. */
+    masteredAudioUrls?: string[];
+    /** Per-track no-adapter reference renders, index-aligned with audioUrls. */
+    noAdapterAudioUrls?: string[];
+    /** Per-track durations in seconds, index-aligned with audioUrls. MM3 takes
+     *  each stop at their own EOS, so the scalar `duration` (the longest) is
+     *  wrong for every take but one. */
+    durations?: number[];
     timing?: StageTiming[];
     totalMs?: number;
   };

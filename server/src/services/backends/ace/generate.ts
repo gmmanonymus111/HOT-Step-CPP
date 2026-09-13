@@ -1366,6 +1366,10 @@ export async function runAceGeneration(
       timeSignature,
       masteredAudioUrl: masteredUrls.find(u => !!u) || undefined,
       noAdapterAudioUrl: noAdapterUrls.find(u => !!u) || undefined,
+      // Index-aligned with audioUrls, so a caller holding track i can find
+      // track i's master rather than track 0's.
+      masteredAudioUrls: audioUrls.map((_, i) => masteredUrls[i] || ''),
+      noAdapterAudioUrls: audioUrls.map((_, i) => noAdapterUrls[i] || ''),
       timing,
       totalMs,
     };
