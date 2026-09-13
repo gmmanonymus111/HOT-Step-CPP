@@ -248,6 +248,16 @@ export const useBackendStore = create<BackendState>((set, get) => ({
       const res = await fetch(`/api/capabilities?backend=${encodeURIComponent(backendId)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: BackendCapabilities = await res.json();
+      // A probe that could not reach the engine answers with an all-false
+      // "down" manifest. Caching that is worse than having no manifest at all:
+      // consumers read `!capabilities` as "still loading, show everything",
+      // but an `up: false` manifest reads as "this backend can do nothing" —
+      // which is how restarting the engine emptied the post-processing menu
+      // and left it empty until the page was reloaded (issue #153).
+      if (data && data.up === false) {
+        console.warn(`[Backends] capabilities for "${backendId}" report the engine down — not caching`);
+        return;
+      }
       set({ capabilities: { ...get().capabilities, [backendId]: data } });
     } catch (err) {
       console.warn(`[Backends] capabilities fetch failed for "${backendId}":`, err instanceof Error ? err.message : String(err));

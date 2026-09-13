@@ -403,8 +403,10 @@ export const settingsApi = {
   /** Update .env values (partial — only send changed keys) */
   updateEnv: (values: Record<string, string>) =>
     post<{ updated: string[]; restartRequired: boolean }>('/settings/env', { values }),
-  /** Detect available GPUs via nvidia-smi */
-  getGpus: () => get<{ gpus: Array<{ index: number; name: string; memoryMB: number }> }>('/settings/gpus'),
+  /** Detect available GPUs via nvidia-smi. `uuid` is what the picker stores in
+   *  CUDA_VISIBLE_DEVICES — the index is display-only, because nvidia-smi and
+   *  CUDA number GPUs differently (issue #153). */
+  getGpus: () => get<{ gpus: Array<{ index: number; uuid: string; name: string; memoryMB: number }> }>('/settings/gpus'),
 };
 
 // ── Parameter Profiles ──────────────────────────────────────

@@ -20,6 +20,7 @@ import { logEngine } from './logger.js';
 import { pushLog } from '../routes/logs.js';
 import { setEngineReady } from '../engineState.js';
 import { aceClient } from './aceClient.js';
+import { resolveGpuSelection } from './gpuDevices.js';
 
 /** The live child, or null when nothing is running. */
 let aceProcess: ChildProcess | null = null;
@@ -161,40 +162,55 @@ export function startAceServer(): ChildProcess | null {
   // IMPORTANT: On Windows, process.env is a case-insensitive Proxy, but spreading
   // it to a plain object creates case-sensitive keys. The key is typically 'Path'
   // not 'PATH', so we must find the actual key to avoid creating a shadowing duplicate.
-  const spawnOpts: { stdio: any; env?: NodeJS.ProcessEnv } = {
+  //
+  // The env is now ALWAYS rebuilt, because the GPU decision includes "unset
+  // CUDA_VISIBLE_DEVICES". Inheriting process.env was not neutral: the Settings
+  // UI writes `CUDA_VISIBLE_DEVICES=` for Auto, dotenv turns that into an empty
+  // string, and an empty CUDA_VISIBLE_DEVICES hides EVERY GPU — the engine
+  // silently fell back to CPU.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const spawnOpts: { stdio: any; env: NodeJS.ProcessEnv } = {
     stdio: ['ignore', 'pipe', 'pipe'] as any,
+    env,
   };
 
-  const needsCustomEnv = (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs))
-    || config.aceServer.cudaVisibleDevices;
+  /** Delete an env var regardless of the case Windows stored its name in. */
+  const unsetEnv = (name: string) => {
+    for (const k of Object.keys(env)) {
+      if (k.toUpperCase() === name) delete env[k];
+    }
+  };
 
-  if (needsCustomEnv) {
-    const env = { ...process.env };
+  // ── GPU selection (issue #153) ───────────────────────────────────────────
+  // Resolved to a GPU UUID wherever possible: nvidia-smi indices (what the
+  // Settings picker shows) and CUDA indices are different enumerations, and on
+  // a mixed rig they can be exact reverses of each other.
+  const gpu = resolveGpuSelection(config.aceServer.cudaVisibleDevices);
+  unsetEnv('CUDA_VISIBLE_DEVICES');
+  if (gpu.visibleDevices) env.CUDA_VISIBLE_DEVICES = gpu.visibleDevices;
+  // Belt and braces for any index that still survives into the child: with
+  // PCI_BUS_ID, CUDA's device order matches nvidia-smi's, so the engine's
+  // "Device 0/1" log lines line up with the Settings dropdown. Never override
+  // a value the user set themselves.
+  const hasDeviceOrder = Object.keys(env).some(k => k.toUpperCase() === 'CUDA_DEVICE_ORDER');
+  if (gpu.forcePciOrder && !hasDeviceOrder) env.CUDA_DEVICE_ORDER = 'PCI_BUS_ID';
+  console.log(gpu.log);
 
-    // GPU device selection (e.g. "0", "1", "0,1")
-    if (config.aceServer.cudaVisibleDevices) {
-      env.CUDA_VISIBLE_DEVICES = config.aceServer.cudaVisibleDevices;
-      console.log(`[Server] GPU selection: CUDA_VISIBLE_DEVICES=${config.aceServer.cudaVisibleDevices}`);
+  if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
+    // Find the actual PATH key (case-insensitive on Windows)
+    const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
+    const pathSep = process.platform === 'win32' ? ';' : ':';
+    env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
+
+    // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
+    // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
+    const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
+    if (fs.existsSync(trtllmLibs)) {
+      env[pathKey] = trtllmLibs + pathSep + env[pathKey];
+      console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
     }
 
-    if (config.aceServer.trtLibs && fs.existsSync(config.aceServer.trtLibs)) {
-      // Find the actual PATH key (case-insensitive on Windows)
-      const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
-      const pathSep = process.platform === 'win32' ? ';' : ':';
-      env[pathKey] = config.aceServer.trtLibs + pathSep + (env[pathKey] || '');
-
-      // Also inject TRT-LLM Executor libs if available (tensorrt_llm.dll + plugin)
-      // exe is at engine/build/Release/ace-server.exe → up 3 to engine/
-      const trtllmLibs = path.join(path.dirname(config.aceServer.exe), '..', '..', 'trtllm-libs');
-      if (fs.existsSync(trtllmLibs)) {
-        env[pathKey] = trtllmLibs + pathSep + env[pathKey];
-        console.log(`[Server] TRT-LLM libs: ${trtllmLibs}`);
-      }
-
-      console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
-    }
-
-    spawnOpts.env = env;
+    console.log(`[Server] TensorRT libs: ${config.aceServer.trtLibs}`);
   }
 
   const child = spawn(exe, args, spawnOpts);

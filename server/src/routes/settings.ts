@@ -6,8 +6,6 @@
 
 import { Router } from 'express';
 import fs from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import {
   ENV_FILE_PATH,
   EXPOSED_ENV_KEYS,
@@ -15,8 +13,8 @@ import {
   reloadEnvConfig,
   config,
 } from '../config.js';
+import { listGpus } from '../services/gpuDevices.js';
 
-const execFileAsync = promisify(execFile);
 const router = Router();
 
 /** Set of exposed keys for fast lookup */
@@ -177,32 +175,17 @@ router.post('/env', (req, res) => {
  * GET /api/settings/gpus
  *
  * Detect available NVIDIA GPUs via nvidia-smi.
- * Returns an array of { index, name, memoryMB } objects.
+ * Returns an array of { index, uuid, name, memoryMB } objects.
  * Returns empty array if nvidia-smi is unavailable (AMD, Intel, CPU-only).
+ *
+ * `uuid` is what the picker writes to CUDA_VISIBLE_DEVICES. The index is
+ * display-only: nvidia-smi numbers GPUs in PCI bus order while CUDA numbers
+ * them by its own FASTEST_FIRST guess, so an index written to
+ * CUDA_VISIBLE_DEVICES could select a different card than the one shown
+ * (issue #153). UUIDs have no ordering to get wrong.
  */
 router.get('/gpus', async (_req, res) => {
-  try {
-    const { stdout } = await execFileAsync('nvidia-smi', [
-      '--query-gpu=index,name,memory.total',
-      '--format=csv,noheader,nounits',
-    ], { timeout: 5000 });
-
-    const gpus = stdout.trim().split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const [index, name, memoryMB] = line.split(',').map(s => s.trim());
-        return {
-          index: parseInt(index, 10),
-          name,
-          memoryMB: parseInt(memoryMB, 10),
-        };
-      });
-
-    res.json({ gpus });
-  } catch {
-    // nvidia-smi not found or failed — not an NVIDIA system
-    res.json({ gpus: [] });
-  }
+  res.json({ gpus: await listGpus() });
 });
 
 export default router;

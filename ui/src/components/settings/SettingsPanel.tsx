@@ -174,7 +174,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [restartKeys, setRestartKeys] = useState<string[]>([]);
 
   // Detected GPUs for the GPU selector dropdown
-  const [detectedGpus, setDetectedGpus] = useState<Array<{ index: number; name: string; memoryMB: number }>>([]);
+  const [detectedGpus, setDetectedGpus] = useState<Array<{ index: number; uuid: string; name: string; memoryMB: number }>>([]);
 
   // Subsection open/close state
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
@@ -210,6 +210,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   // Track which keys have changed
   const envDirty = Object.keys(envValues).some((k) => envValues[k] !== envOriginal[k]);
+
+  // The GPU picker stores a GPU UUID, not an index (issue #153 — nvidia-smi
+  // and CUDA number GPUs differently, so an index could select the other card).
+  // A .env written before that change still holds a bare index, so map it onto
+  // the matching card for display; anything we cannot resolve gets its own
+  // option rather than silently reading as "Auto".
+  const gpuRaw = (envValues.CUDA_VISIBLE_DEVICES || '').trim();
+  const gpuMatch = gpuRaw
+    ? detectedGpus.find(g => g.uuid && g.uuid.toLowerCase() === gpuRaw.toLowerCase())
+      ?? detectedGpus.find(g => String(g.index) === gpuRaw)
+    : undefined;
+  const gpuSelectValue = gpuRaw ? (gpuMatch ? (gpuMatch.uuid || String(gpuMatch.index)) : gpuRaw) : '';
+  const gpuSelectUnknown = !!gpuRaw && !gpuMatch;
 
   const handleEnvChange = (key: string, value: string) => {
     setEnvValues((prev) => ({ ...prev, [key]: value }));
@@ -256,10 +269,17 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   /** Apply restart-required settings by restarting, from where they were saved.
    *  The restart control already existed in the sidebar, but nothing in the
    *  Save Environment flow pointed at it, so a saved value could sit on screen
-   *  looking active while the engine ran on the old one indefinitely (#99). */
+   *  looking active while the engine ran on the old one indefinitely (#99).
+   *
+   *  The app-level restarting overlay has to be raised too. Without it the
+   *  Settings page stayed on screen against a server that was going away: the
+   *  button read "Restarting…" forever, nothing reloaded when the server came
+   *  back, and every panel that probes the engine (post-processing among them)
+   *  quietly degraded to "unavailable" (issue #153). */
   const handleRestartNow = async () => {
     setRestarting(true);
     setEnvStatus({ type: 'warning', text: 'Restarting…' });
+    window.dispatchEvent(new CustomEvent('hotstep:restarting'));
     try {
       await fetch('/api/shutdown/restart', { method: 'POST' });
     } catch {
@@ -348,22 +368,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <div className="setting-info">
                   <div className="setting-label">GPU Device</div>
                   <div className="setting-description">
-                    Which GPU the engine should use. Requires restart.
+                    Which GPU the engine should use. Auto picks the card with the most VRAM.
+                    Requires restart.
                   </div>
                 </div>
                 {detectedGpus.length > 0 ? (
                   <select
                     id="env-CUDA_VISIBLE_DEVICES"
                     className="env-select"
-                    value={envValues.CUDA_VISIBLE_DEVICES || ''}
+                    value={gpuSelectValue}
                     onChange={(e) => handleEnvChange('CUDA_VISIBLE_DEVICES', e.target.value)}
                   >
-                    <option value="">Auto (best available)</option>
+                    <option value="">Auto (most VRAM)</option>
                     {detectedGpus.map((gpu) => (
-                      <option key={gpu.index} value={String(gpu.index)}>
+                      <option key={gpu.uuid || gpu.index} value={gpu.uuid || String(gpu.index)}>
                         GPU {gpu.index}: {gpu.name} ({Math.round(gpu.memoryMB / 1024)} GB)
                       </option>
                     ))}
+                    {gpuSelectUnknown && (
+                      <option value={gpuSelectValue}>{gpuSelectValue} (from .env)</option>
+                    )}
                   </select>
                 ) : (
                   <input

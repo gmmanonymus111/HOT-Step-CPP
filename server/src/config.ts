@@ -29,6 +29,14 @@ if (!fs.existsSync(ENV_PATH) && fs.existsSync(ENV_EXAMPLE_PATH)) {
 }
 dotenvConfig({ path: ENV_PATH });
 
+// An EMPTY CUDA_VISIBLE_DEVICES is not "no preference" — it is "no GPUs at
+// all", and every child we spawn (ace-server, ace-train) inherits it and falls
+// back to CPU without saying why. The Settings GPU picker writes exactly that
+// line when the user selects Auto, so drop it here rather than propagate it.
+if (process.env.CUDA_VISIBLE_DEVICES !== undefined && process.env.CUDA_VISIBLE_DEVICES.trim() === '') {
+  delete process.env.CUDA_VISIBLE_DEVICES;
+}
+
 // Smart defaults: resolve paths relative to project root so users can
 // build the engine and drop models in place without editing any config.
 //

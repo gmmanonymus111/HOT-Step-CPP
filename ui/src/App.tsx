@@ -394,6 +394,16 @@ const AppContent: React.FC = () => {
   const [isShutdown, setIsShutdown] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
 
+  // Settings' own "Restart now" button posts to /api/shutdown/restart from deep
+  // inside the panel and cannot reach this state directly, so it announces the
+  // restart instead. Without this the page sat there against a dead server and
+  // never reloaded when it came back (issue #153).
+  useEffect(() => {
+    const onRestarting = () => setIsRestarting(true);
+    window.addEventListener('hotstep:restarting', onRestarting);
+    return () => window.removeEventListener('hotstep:restarting', onRestarting);
+  }, []);
+
   // ── URL-based routing ──────────────────────────────────────
   const navigateTo = useCallback((view: string) => {
     // Save deep Lyric Studio URL before leaving so we can restore it

@@ -32,6 +32,19 @@ export function useCapabilities(): UseCapabilitiesResult {
     // too, from switchBackend, so this covers first-use and page reload).
     if (useBackendStore.getState().capabilities[activeBackendId]) return;
     void fetchCapabilities(activeBackendId);
+
+    // A probe made while the engine is down or still loading caches nothing,
+    // so retry until one lands. The engine takes tens of seconds to come up
+    // after a restart, and without this the manifest stayed missing for the
+    // rest of the session (issue #153).
+    const iv = setInterval(() => {
+      if (useBackendStore.getState().capabilities[activeBackendId]) {
+        clearInterval(iv);
+        return;
+      }
+      void fetchCapabilities(activeBackendId);
+    }, 10_000);
+    return () => clearInterval(iv);
   }, [activeBackendId, fetchCapabilities]);
 
   return { capabilities, loading };
