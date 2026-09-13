@@ -87,6 +87,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [stemStats, setStemStats] = useState<StemStats | null>(null);
   const [stemClearConfirm, setStemClearConfirm] = useState(false);
   const [stemClearing, setStemClearing] = useState(false);
+  const [stemClearError, setStemClearError] = useState<string | null>(null);
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     onSettingsChange({ ...settings, [key]: value });
@@ -145,12 +146,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   const handleClearStems = async () => {
     setStemClearing(true);
+    setStemClearError(null);
     try {
       await deleteAllJobs();
       setStemStats({ totalBytes: 0, jobCount: 0, stemCount: 0 });
       setStemClearConfirm(false);
     } catch (err: any) {
       console.error('[Settings] Clear stems failed:', err);
+      setStemClearError(err?.message || 'Clear failed');
     } finally {
       setStemClearing(false);
     }
@@ -921,6 +924,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   {t('settings.storage.cancel')}
                 </button>
               </div>
+            )}
+            {stemClearError && (
+              <span className="text-xs text-red-400" style={{ whiteSpace: 'nowrap' }}>{stemClearError}</span>
             )}
           </div>
         </div>

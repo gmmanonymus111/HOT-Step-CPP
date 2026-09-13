@@ -632,6 +632,31 @@ router.get('/jobs', (_req: Request, res: Response) => {
 });
 
 /**
+ * DELETE /all — Delete ALL stem data (used by Settings page)
+ *
+ * Must be registered before DELETE /:jobId — otherwise Express matches
+ * "/all" against the "/:jobId" pattern (jobId="all") since routes are
+ * tried in registration order, so this handler is unreachable and every
+ * "Clear All Stems" request 404s as "Job not found" (#154).
+ */
+router.delete('/all', (_req: Request, res: Response) => {
+  // Cancel all running jobs
+  for (const [, job] of jobs) {
+    if (job.status === 'pending' || job.status === 'extracting') {
+      job.status = 'cancelled';
+    }
+  }
+  jobs.clear();
+
+  if (fs.existsSync(stemsBaseDir)) {
+    fs.rmSync(stemsBaseDir, { recursive: true, force: true });
+    fs.mkdirSync(stemsBaseDir, { recursive: true });
+    console.log('[StemStudio] All stems cleared');
+  }
+  res.json({ ok: true });
+});
+
+/**
  * DELETE /:jobId — Delete a single extraction job
  */
 router.delete('/:jobId', (req: Request, res: Response) => {
@@ -652,26 +677,6 @@ router.delete('/:jobId', (req: Request, res: Response) => {
   } else {
     res.status(404).json({ error: 'Job not found' });
   }
-});
-
-/**
- * DELETE /all — Delete ALL stem data (used by Settings page)
- */
-router.delete('/all', (_req: Request, res: Response) => {
-  // Cancel all running jobs
-  for (const [, job] of jobs) {
-    if (job.status === 'pending' || job.status === 'extracting') {
-      job.status = 'cancelled';
-    }
-  }
-  jobs.clear();
-
-  if (fs.existsSync(stemsBaseDir)) {
-    fs.rmSync(stemsBaseDir, { recursive: true, force: true });
-    fs.mkdirSync(stemsBaseDir, { recursive: true });
-    console.log('[StemStudio] All stems cleared');
-  }
-  res.json({ ok: true });
 });
 
 /**
