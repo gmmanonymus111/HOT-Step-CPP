@@ -960,9 +960,16 @@ export async function resumeQueue(token: string): Promise<void> {
   _pruneDeletedSongs(token);
 
   // Items that were mid-flight when the page went away are RECONNECTED, not
-  // resubmitted: the server is already running that job and reattaching to it
-  // costs nothing and loses nothing. Those are handled by the runner's
-  // _tryReconnect path and need no permission.
+  // resubmitted, IF the server still knows the job (browser-only reload —
+  // the ace-server process never stopped). Reattaching then costs nothing
+  // and loses nothing. Handled by the runner's _tryReconnect path and needs
+  // no permission.
+  //
+  // But when the server has forgotten the job (a full app restart, not just
+  // a page reload — issue #146), _tryReconnect's 404 used to fall through to
+  // a silent from-scratch re-submit: a full LM+synth run starting itself with
+  // nobody at the machine and nothing clicked. _processQueue now holds that
+  // case exactly like a never-submitted item instead.
   //
   // Items that were never submitted are a different question. The queue is
   // persisted, so it survives a browser restart, an OS reboot, or a tab the
@@ -1137,11 +1144,21 @@ async function _processQueue(token: string): Promise<void> {
             _emit(true);
             continue;
           }
-          // Server doesn't know about this job — clear and re-submit
-          console.log(`[AudioQueue] Job ${next.jobId} not found on server — re-submitting`);
+          // Server doesn't know about this job — the process that was running
+          // it is gone (a full app restart, not just a page reload), so this
+          // is no longer a reconnect: starting it now means beginning a brand
+          // new LM+synth run with nobody at the machine and nothing clicked —
+          // the exact hazard issue #100 already fixed for never-submitted
+          // items (see RestoredQueueBanner.tsx). Hold it the same way instead
+          // of silently re-submitting.
+          console.log(`[AudioQueue] Job ${next.jobId} not found on server (full restart) — holding for user resume`);
           next.jobId = undefined;
-          next.stage = 'Re-submitting…';
+          next.stage = 'Interrupted — needs resume';
+          next.progress = undefined;
+          _heldIds.add(next.id);
+          _state.awaitingResume = _heldIds.size;
           _emit(true);
+          continue;
         }
 
         await _executeItem(next, token);
@@ -1580,8 +1597,11 @@ async function _pollUntilDone(item: AudioQueueItem, _token: string): Promise<voi
       }
       // A job the server has never heard of died with the process that owned it.
       // Allow a few ticks in case the server is mid-restart, then surface it as
-      // an engine outage so the runner parks and re-submits, rather than polling
-      // a dead id forever behind a spinner that never resolves.
+      // an engine outage so the runner parks and re-checks once the engine is
+      // back, rather than polling a dead id forever behind a spinner that
+      // never resolves. The re-check goes through _tryReconnect again, which
+      // now holds the item for user resume instead of silently re-submitting
+      // (issue #146) once it confirms the job is really gone.
       if (msg.includes('Job not found')) {
         if (++notFound >= 4) throw new Error('Engine not ready: job was lost when the server restarted');
       } else {

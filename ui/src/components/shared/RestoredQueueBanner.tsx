@@ -7,9 +7,12 @@
  * wrong when a browser restores a tab by itself days later: a full render would
  * begin with nobody at the machine and nothing clicked (issue #100).
  *
- * Items that were already submitted still reconnect without asking. There is
- * a job running on the server either way, and reattaching to it loses nothing.
- * Only items that never left the browser wait here.
+ * Items that were already submitted still reconnect without asking, as long as
+ * the server still knows the job (a browser-only reload — the job runs on
+ * regardless, so reattaching loses nothing). When the server has forgotten it
+ * instead (a full app restart, not just a reload), that reconnect fails and
+ * the item is held here too, the same as one that never left the browser
+ * (issue #146) — otherwise it would quietly start a brand new generation.
  */
 
 import React from 'react';
