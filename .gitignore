@@ -114,6 +114,10 @@ Thumbs.db
 .claude/*
 !.claude/skills/
 .gemini/
+# Codex's own per-machine config. The SHARED Codex rules live in AGENTS.md,
+# which is committed; this holds sandbox/approval settings that are one
+# person's machine, not the project's.
+.codex/
 
 # Dev-only scripts (local only, not needed by end users)
 dev.bat
