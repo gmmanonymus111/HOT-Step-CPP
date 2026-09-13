@@ -1,6 +1,6 @@
 # HOT-Step CPP
 
-A feature-rich UI for [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp), local AI music generation powered by GGML, with native safetensors support. Two music models run natively in the engine: **ACE-Step 1.5** and **MiniMax-Music3**, switchable from the toolbar.
+A feature-rich UI for [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp), local AI music generation powered by GGML, with native safetensors support. Three music models run natively in the engine: **ACE-Step 1.5**, **MiniMax-Music3** and **YuE2**, switchable from the toolbar.
 
 Describe a song with a text caption and lyrics, and get stereo 48kHz audio generated entirely on your local hardware. No cloud, no API keys, no subscriptions.
 
@@ -13,7 +13,7 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 > ### 🎓 Training Studio *(experimental, but it works)*
 > Train your own **style adapters entirely inside HOT-Step**, with no Python and no external tools. Point it at a folder of songs and it walks the whole pipeline: **dataset creation** (local BPM/key analysis, lyrics from Genius, and AI captions from a captioning model that runs on your own machine), **tensor preprocessing**, then native **training** in C++/GGML on your GPU.
 >
-> It trains adapters for **both models**. For ACE-Step that's planner LM LoRA (0.6B/1.7B/4B) and DiT LoRA. For MiniMax-Music3 it's planner LM LoRA/LoKr and flow-DiT LoRA.
+> It trains adapters for **ACE-Step 1.5 and MiniMax-Music3**. For ACE-Step that's planner LM LoRA (0.6B/1.7B/4B) and DiT LoRA. For MiniMax-Music3 it's planner LM LoRA/LoKr and flow-DiT LoRA. YuE2 has no adapter training yet.
 >
 > **It fits on a normal card.** Training against a quantized base takes the VRAM floor from 31.4 GB down to around 10 GB, which is what makes MM3 adapter training possible below a 32 GB card at all. Runs pause and resume, survive a server restart, render an audio preview at every checkpoint so you can hear an adapter mid-run, and score themselves so you can tell which checkpoint is actually best rather than assuming it is the last one.
 >
@@ -35,6 +35,19 @@ Describe a song with a text caption and lyrics, and get stereo 48kHz audio gener
 > MM3 ships in a **split model format**, one GGUF per pipeline component, each selectable at its own quantisation from the global bar's Models section. Mix a high-precision language model with a compact DiT, and swap the DiT quant without reloading the 17 GB LM. Every planner quant below Q8 is built against an **importance matrix**, which is the difference between Q2 being unusable and Q2 sounding close to Q8. The split-model design follows [minimaxmusic.cpp](https://github.com/ServeurpersoCom/minimaxmusic.cpp); older two-file installs keep working unchanged.
 >
 > Your existing tooling applies to MM3 output too: the Lua solver plugins, StableStep, VST effects and mastering all run on it. Feedback very welcome on the Discord.
+
+> ### 🆕 YuE2 backend *(new, v1)*
+> The third model in the app is a **native C++/GGML port of [YuE2](https://huggingface.co/m-a-p/YuE2-3B)** by [m-a-p](https://huggingface.co/m-a-p). The whole pipeline runs in the same engine as the other two: the autoregressive LM writes an ABC-notation plan, then semantic tokens, then the NAR flow stage fills in acoustics, and an Oobleck VAE decodes to 48 kHz stereo. The tokenizer is checked token-for-token against the upstream Python implementation. A **YuE2** tab appears in the Model Manager, and the backend switch in the global bar picks it up once the weights are installed.
+>
+> **Prompting is freeform.** A plain style description plus lyrics — no Structured Caption, no BPM or key fields. YuE2 decides its own length (up to six minutes) because each stage ends on its own terminator, so there is no duration slider to set.
+>
+> **Chain of Thought is a dial.** *Full* writes out structure and melody before generating audio (the reference default), *Melody only* writes less, and *Off* skips the ABC plan entirely — fastest, least structured. CFG scale, ODE steps and the choice between the standard and legacy VAE checkpoints are all exposed.
+>
+> **A full quant ladder.** One GGUF for the LM, one for the VAE, each selectable on its own. The recommended pack is a Q8 LM plus the F32 decoder, about 4.5 GB; everything below Q5 is built against an **importance matrix** and the ladder is scored by NAR-stage error against the BF16 reference, down to IQ2_XS at 1.37 GB. Formats include NVFP4 and MXFP4. The small end is labelled honestly — Q2 is audibly degraded and says so in the Model Manager.
+>
+> This is a v1. Text-to-music only, one take per render, and no adapters, training, streaming, covers, repaint or lyric timestamps on this backend yet. Post-processing, StableStep, VST effects, mastering and Whisper transcription all work on its output.
+>
+> **Licence:** YuE2's weights are **CC BY-NC 4.0 — non-commercial use only**, unlike the other two backends. The picker and Model Manager carry the same notice. For commercial use, contact the upstream authors at gezhang@umich.edu.
 
 ## Download
 
@@ -85,13 +98,13 @@ Pre-built portable releases — no installation required. Extract, run, done.
 
 HOT-Step CPP extends the base acestep.cpp engine with 100+ features across inference, audio processing, and creative tooling. Here are the big ones:
 
-🎹 **Two music models, one app** — ACE-Step 1.5 and MiniMax-Music3 both run natively in the C++/GGML engine, switchable from the toolbar. The UI hides controls that do not apply to the model you are on, so you are never adjusting a knob that does nothing.
+🎹 **Three music models, one app** — ACE-Step 1.5, MiniMax-Music3 and YuE2 all run natively in the C++/GGML engine, switchable from the toolbar. The UI hides controls that do not apply to the model you are on, so you are never adjusting a knob that does nothing.
 
-🎓 **Training Studio** — Fine-tune style adapters for either model on your own GPU, with no Python. Dataset creation, captioning, preprocessing and training all happen in-app. Training against a quantized base drops the VRAM floor from 31.4 GB to about 10 GB. Runs pause, resume, survive restarts, preview audio at every checkpoint, and score themselves so you can pick the best one.
+🎓 **Training Studio** — Fine-tune style adapters for ACE-Step 1.5 or MiniMax-Music3 on your own GPU, with no Python. Dataset creation, captioning, preprocessing and training all happen in-app. Training against a quantized base drops the VRAM floor from 31.4 GB to about 10 GB. Runs pause, resume, survive restarts, preview audio at every checkpoint, and score themselves so you can pick the best one.
 
 🎧 **Local audio captioning** — MOSS-Music-8B runs natively in the engine as `ace-caption`. Point it at audio, get a caption, with nothing sent anywhere. One encode produces every caption format at once, and hybrid mode pairs what the model hears with what Essentia measures so tempo and key come from analysis rather than a guess.
 
-📉 **Importance-matrix quantization** — Every MiniMax-Music3 planner quant below Q8 is built against an importance matrix measured from the full-precision model, so the quantizer spends its error budget on the weights that carry signal. Plain Q2_K produced mush; the same file rebuilt this way sits close to Q8. Formats go down to IQ2_XXS at 2.75 GB, against 17.2 GB at full precision.
+📉 **Importance-matrix quantization** — Every MiniMax-Music3 planner quant below Q8, and every YuE2 LM quant below Q5, is built against an importance matrix measured from the full-precision model, so the quantizer spends its error budget on the weights that carry signal. Plain Q2_K produced mush; the same file rebuilt this way sits close to Q8. Formats go down to IQ2_XXS at 2.75 GB, against 17.2 GB at full precision.
 
 🎛️ **17 Solvers, 9 Schedulers, 7 Guidance Modes, Postprocess Plugins** — Fully extensible Lua plugin architecture for ODE/SDE solvers, noise schedulers, guidance modes, and postprocess pipelines. Drop a `.lua` file into `engine/plugins/` and it appears in the UI at next launch — no C++ rebuild needed. Includes research-derived modes like CFG-MP (manifold projection), SMC-CFG (sliding mode control), and CFG-Zero⋆ (zero-init). Each plugin can expose its own user-facing parameters (sliders, toggles, dropdowns). **[Create your own →](docs/PLUGINS.md)**
 
@@ -581,6 +594,7 @@ If you see errors about Metal Toolchain, these can usually be ignored — the em
 - **[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)** — The C++ GGML inference engine by ServeurpersoCom
 - **[minimaxmusic.cpp](https://github.com/ServeurpersoCom/minimaxmusic.cpp)** — ServeurpersoCom's independent MiniMax-Music3 port; HOT-Step's MM3 split-model format follows its per-component design, reused with the author's blessing
 - **[MiniMax-Music3](https://huggingface.co/MiniMaxAI/MiniMax-Music3)** — Text-to-music model by [MiniMax](https://huggingface.co/MiniMaxAI); powers HOT-Step's second generation backend via our native C++/GGML port ([GGUF conversion](https://huggingface.co/scragnog/MiniMax-Music3-GGUF)). The MM3 Structured Caption format is MiniMax's design. Weights under the [MiniMax-Music3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE)
+- **[YuE2](https://huggingface.co/m-a-p/YuE2-3B)** — Text-to-music model by [m-a-p](https://huggingface.co/m-a-p) (Multimodal Art Projection); powers HOT-Step's third generation backend via our native C++/GGML port ([GGUF conversion](https://huggingface.co/scragnog/YuE2-GGUF)). Weights under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — non-commercial use only; for a commercial licence, contact the authors at gezhang@umich.edu
 - **[MOSS-Music-8B-Instruct](https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct)** — Music understanding/captioning model by the [OpenMOSS Team](https://huggingface.co/OpenMOSS-Team); powers local dataset captioning in Training Studio via our native GGML port ([GGUF conversion](https://huggingface.co/scragnog/MOSS-Music-8B-Instruct-GGUF)). Shipping local captioning in a free tool was only possible because they released it under Apache 2.0
 - **[HOT-Step 9000](https://github.com/scragnog/HOT-Step-9000)** — The Python-based sister project with full feature support
 - **Alexander Allan ([MDMAchine](https://github.com/MDMAchine))** — STORM solver plugin (adaptive STORK/DPM++3M hybrid) and MD Audio Tiled Core postprocess plugin (advanced tiled VAE decode with OLA crossfading, dual-pass merge, and DSP chain)
