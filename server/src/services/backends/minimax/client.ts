@@ -201,9 +201,15 @@ export interface Mm3SynthRequest {
   /** Keep the candidate batch, but render only the first nonempty EOS take.
    *  Only applies with require_eos; explicit variations leave this false. */
   stop_after_first_eos?: boolean;
-  /** Maximum planning rounds before the job fails. Only read when
-   *  `require_eos` is set. */
+  /** Maximum planning rounds before the job fails. Read whenever candidates
+   *  are in play — `require_eos` OR `min_frames`. */
   eos_rounds?: number;
+  /** Shortest plan worth rendering, in frames (25 fps). Omitted = no floor.
+   *  A plan under it is dropped and re-planned on the same machinery as one
+   *  that never ended: a two-second "song" has ended correctly and is still
+   *  not the song the lyrics asked for. Engages the candidate path on its own,
+   *  so it works with `require_eos` off. */
+  min_frames?: number;
   /** -1 = engine draws one; the resolved value comes back in the response. */
   seed?: number;
   /** Default = the checkpoint's flow.cfg_scale (1.7). */
@@ -403,6 +409,10 @@ export interface Mm3JobDetail {
   /** Dropped candidates that actually reached the frame ceiling. Other
    *  dropped candidates were stopped or not selected after an EOS winner. */
   takes_capped?: number;
+  /** Dropped candidates that ENDED but landed under `min_frames`. Distinct
+   *  from capped, and the one worth reporting: it means the planner keeps
+   *  ending the song before the lyrics are sung. */
+  takes_short?: number;
   /** Per-take summary. Present whenever there is more than one take, and —
    *  since the ending arbitration — whenever `require_eos` was set, even for a
    *  single surviving take. Take t's audio is at

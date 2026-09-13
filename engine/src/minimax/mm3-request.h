@@ -607,6 +607,12 @@ struct MM3SynthRequest {
     bool    require_eos = false;
     bool    stop_after_first_eos = false;
     int     eos_rounds  = 4;
+    /** Shortest plan worth rendering, in frames (25 fps). 0 = no floor.
+     *  A plan that stops after a second or two has "ended" as far as the model
+     *  is concerned and is useless as the song that was asked for, so it is
+     *  dropped and re-planned exactly like one that never ended at all.
+     *  See MM3GenRequest::min_frames. */
+    int     min_frames  = 0;
 
     // Replay previously-captured codes instead of sampling them. Both must be
     // present together, with acoustic == semantic * 7. Entry 0 is the
@@ -938,6 +944,16 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
             }
             out->eos_rounds = (int) yyjson_get_sint(r);
         }
+        yyjson_val * mf = yyjson_obj_get(root, "min_frames");
+        if (mf && !yyjson_is_null(mf)) {
+            if (!yyjson_is_int(mf) || yyjson_get_sint(mf) < 0) {
+                if (err) {
+                    *err = "\"min_frames\" must be a non-negative integer";
+                }
+                return false;
+            }
+            out->min_frames = (int) yyjson_get_sint(mf);
+        }
     }
     // ── Ensemble takes ──
     {
@@ -1265,6 +1281,7 @@ static bool mm3_parse_synth_request(const MM3Model & m, yyjson_val * root, MM3Sy
     out->gen.require_eos = out->require_eos;
     out->gen.stop_after_first_eos = out->stop_after_first_eos;
     out->gen.eos_rounds  = out->eos_rounds;
+    out->gen.min_frames  = out->min_frames;
     out->gen.plugins    = plug;
     // MM3 Plank replay. MM3GenRequest holds these by value, and the job worker
     // takes the whole MM3SynthRequest by value too, so the copy chain is safe —

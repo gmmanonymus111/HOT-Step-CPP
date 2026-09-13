@@ -711,6 +711,14 @@ struct MM3GenRequest {
     bool require_eos = false;
     bool stop_after_first_eos = false;  // one song, still K candidate rows
     int  eos_rounds  = 4;
+    /** Shortest plan worth rendering, in frames (25 fps). 0 = no floor.
+     *  A plan can reach EOS after two seconds: it has ended, correctly, on a
+     *  song the planner decided was over — which is not the song the lyrics
+     *  asked for. Such a plan is dropped and re-planned on the SAME machinery
+     *  as one that never ended, because the remedy is identical: different
+     *  seeds. Works with require_eos off too, in which case "accepted" means
+     *  long enough and nothing else. */
+    int  min_frames  = 0;
     /** Called once, right after planning, with the ORIGINAL take indices
      *  that ended (in order), so the job layer can compact its take list
      *  before the flow stage: streamed chunks and the finished songs then
@@ -1295,14 +1303,36 @@ static bool mm3_generate_takes(const MM3Model & m, const MM3GenRequest & req, MM
         // repeated with the seeds moved on by K while no take has ended, up to
         // eos_rounds times. mm3_ar_plan_takes resets every MM3ArResult and
         // prefills afresh on each call, so re-running it is a clean re-plan.
-        const bool cand       = req.require_eos && !interleave;
-        aopt.stop_after_first_eos = cand && req.stop_after_first_eos;
-        aopt.lrc_eos_only = cand;
+        // The minimum-length floor rides the SAME candidate machinery: both
+        // failures say "this plan is not the song that was asked for", and both
+        // are answered by re-planning at different seeds. So either one on its
+        // own is enough to make the takes candidates.
+        const int  min_frames = req.min_frames > 0 ? req.min_frames : 0;
+        const bool cand       = (req.require_eos || min_frames > 0) && !interleave;
+        aopt.stop_after_first_eos = req.require_eos && cand && req.stop_after_first_eos;
+        // Keyed to require_eos alone: the LRC behaviour belongs to the endings
+        // feature, and a length floor must not quietly change it.
+        aopt.lrc_eos_only = req.require_eos && !interleave;
         const int  rounds_max = cand ? (req.eos_rounds > 0 ? req.eos_rounds : 1) : 1;
-        if (req.require_eos && interleave) {
-            fprintf(stderr, "[MM3-Pipe] require_eos ignored on an interleaved stream: what was planned has already "
-                            "been played, so nothing can be dropped or re-planned\n");
+        if ((req.require_eos || min_frames > 0) && interleave) {
+            fprintf(stderr, "[MM3-Pipe] require_eos/min_frames ignored on an interleaved stream: what was planned "
+                            "has already been played, so nothing can be dropped or re-planned\n");
         }
+        // A candidate is kept only if it is the song that was asked for: ended,
+        // where endings are required, AND long enough to hold the lyrics.
+        const auto accepted = [&](int t) -> bool {
+            const MM3ArResult & a = ars[(size_t) t];
+            if (a.n_frames <= 0) {
+                return false;
+            }
+            if (req.require_eos && !a.eos_hit) {
+                return false;
+            }
+            if (min_frames > 0 && a.n_frames < min_frames) {
+                return false;
+            }
+            return true;
+        };
         int round = 0;
         for (;; round++) {
             if (round > 0) {
@@ -1324,20 +1354,39 @@ static bool mm3_generate_takes(const MM3Model & m, const MM3GenRequest & req, MM
             if (!cand) {
                 break;
             }
-            int n_end = 0;
+            int n_keep  = 0;
+            int n_short = 0;
             for (int t = 0; t < K; t++) {
-                n_end += ars[(size_t) t].eos_hit ? 1 : 0;
+                if (accepted(t)) {
+                    n_keep++;
+                } else if (min_frames > 0 && ars[(size_t) t].n_frames > 0 &&
+                           ars[(size_t) t].n_frames < min_frames &&
+                           (!req.require_eos || ars[(size_t) t].eos_hit)) {
+                    n_short++;
+                }
             }
-            if (n_end > 0) {
-                fprintf(stderr, "[MM3-Pipe] natural ending: %d of %d candidates ended in round %d; the rest are dropped\n",
-                        n_end, K, round + 1);
+            if (n_keep > 0) {
+                fprintf(stderr,
+                        "[MM3-Pipe] candidates: %d of %d kept in round %d; the rest are dropped (%d too short)\n",
+                        n_keep, K, round + 1, n_short);
                 break;
             }
             if (round + 1 >= rounds_max) {
                 if (err) {
-                    *err = "no candidate ended naturally after " + std::to_string(rounds_max) + " round(s) of " +
-                           std::to_string(K) + " (" + std::to_string(rounds_max * K) +
-                           " plans reached the frame cap); the adapter or prompt is not producing endings";
+                    const int planned = rounds_max * K;
+                    if (min_frames > 0 && n_short > 0) {
+                        *err = "every candidate ended too early after " + std::to_string(rounds_max) +
+                               " round(s) of " + std::to_string(K) + " (" + std::to_string(planned) +
+                               " plans, all shorter than " + std::to_string(min_frames / 25) +
+                               "s); the prompt or adapter is ending the song before the lyrics are sung";
+                    } else if (req.require_eos) {
+                        *err = "no candidate ended naturally after " + std::to_string(rounds_max) + " round(s) of " +
+                               std::to_string(K) + " (" + std::to_string(planned) +
+                               " plans reached the frame cap); the adapter or prompt is not producing endings";
+                    } else {
+                        *err = "no candidate reached the minimum length after " + std::to_string(rounds_max) +
+                               " round(s) of " + std::to_string(K) + " (" + std::to_string(planned) + " plans)";
+                    }
                 }
                 return false;
             }
@@ -1345,14 +1394,14 @@ static bool mm3_generate_takes(const MM3Model & m, const MM3GenRequest & req, MM
         int winner = -1;
         if (aopt.stop_after_first_eos) {
             for (int t = 0; t < K; t++) {
-                if (ars[(size_t) t].eos_hit && ars[(size_t) t].n_frames > 0) {
+                if (accepted(t)) {
                     winner = t;
                     break;
                 }
             }
         }
         for (int t = 0; t < K; t++) {
-            outs[t].dropped         = cand && (!ars[(size_t) t].eos_hit || (winner >= 0 && t != winner));
+            outs[t].dropped         = cand && (!accepted(t) || (winner >= 0 && t != winner));
             outs[t].round           = round;
             outs[t].eos_rounds_used = round + 1;
         }

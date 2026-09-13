@@ -556,6 +556,28 @@ async function capabilities(): Promise<BackendCapabilities> {
         default: true,
       },
       {
+        // ── Minimum length ──
+        //
+        // The other half of "the plan is not the song that was asked for". A
+        // plan can reach EOS after two seconds: it ended, correctly, on a song
+        // the planner decided was over — and the lyrics were never sung. That
+        // is indistinguishable from success everywhere downstream, so it is
+        // saved, queued and counted as a track.
+        //
+        // The floor is derived from the lyrics rather than fixed, because the
+        // only defensible statement is "these words cannot be sung this fast".
+        // Same `!== false` idiom as the toggles above.
+        key: 'mm3MinLength',
+        type: 'toggle',
+        label: 'Reject Short Renders',
+        hint: 'Throws away a plan that ends before the lyrics could have been '
+            + 'sung, and re-plans it with fresh seeds — the same treatment as a '
+            + 'plan that never ends. The floor is worked out from the word count '
+            + 'at a deliberately generous 4 words/sec, so only renders that are '
+            + 'clearly too short are caught. Turn off for deliberately tiny renders.',
+        default: true,
+      },
+      {
         key: 'mm3LmTemperature',
         group: 'lm',
         type: 'slider',

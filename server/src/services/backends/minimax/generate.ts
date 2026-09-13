@@ -93,6 +93,43 @@ const MM3_MAX_DURATION_SEC = 300;
 // in twelve attempts is a prompt problem, not a luck problem.
 const MM3_ENDING_TAKES  = 3;
 const MM3_ENDING_ROUNDS = 4;
+
+// ── Minimum length (mm3MinLength) ────────────────────────────────────────────
+//
+// A plan that reaches EOS after two seconds has ended, correctly, on a song the
+// planner decided was over — and never sang the lyrics. Downstream that is
+// indistinguishable from success, so it is saved and queued as a track.
+//
+// The floor is the shortest length in which the supplied lyrics COULD have been
+// sung, which is the only claim that is safe to make automatically. Measured
+// per-artist vocal pacing across this project's catalogue runs 0.51-3.29
+// words/sec, so 4.0 sits clear of the fastest real delivery: anything under the
+// resulting floor did not sing the words, it is not merely a fast performance.
+const MM3_MAX_WORDS_PER_SEC = 4.0;
+/** Frames per second of the MM3 planner — 1 semantic frame = 40 ms. */
+const MM3_FPS = 25;
+/** Floor for a render with no lyrics to measure. A sub-15s "song" is broken
+ *  whatever the prompt said, and an instrumental still has no other yardstick. */
+const MM3_MIN_FLOOR_SEC = 15;
+/** The floor may never eat more than this share of the ceiling, or a long
+ *  lyric sheet could demand a length the model cannot reach and fail every
+ *  round on arithmetic rather than on quality. */
+const MM3_MIN_CEILING_SHARE = 0.5;
+
+/** Shortest plausible length for these lyrics, in seconds. */
+function mm3MinDurationSec(lyrics: string): number {
+  const words = (lyrics || '')
+    // Section markers ([Verse], [Chorus]) are not sung.
+    .replace(/\[[^\]]*\]/g, ' ')
+    .split(/\s+/)
+    .filter(w => /[\p{L}\p{N}]/u.test(w))
+    .length;
+  const sung = words > 0 ? words / MM3_MAX_WORDS_PER_SEC : 0;
+  return Math.min(
+    Math.max(MM3_MIN_FLOOR_SEC, Math.ceil(sung)),
+    Math.floor(MM3_MAX_DURATION_SEC * MM3_MIN_CEILING_SHARE),
+  );
+}
 /** Engine ceiling on `takes` (ggml amortises a quantised weight read across at
  *  most 8 mat-vec columns, and a CFG pair costs two). */
 const MM3_MAX_TAKES = 8;
@@ -443,6 +480,22 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
     );
   }
 
+  // ── Minimum length ───────────────────────────────────────────────────────
+  //
+  // Rides the ending machinery: a plan under the floor is dropped and re-planned
+  // exactly like one that never ended, because the remedy is the same. Works
+  // with endings off too — the engine then accepts any plan that is long enough.
+  const minLengthOn = params.mm3MinLength !== false;
+  const minDurationSec = minLengthOn ? mm3MinDurationSec(lyrics) : 0;
+  const minFrames = minDurationSec > 0 ? Math.round(minDurationSec * MM3_FPS) : 0;
+  if (minFrames > 0) {
+    notes.push(
+      `minimum length ${minDurationSec}s (${minFrames} frames): a candidate shorter than this is dropped `
+      + `and re-planned, like one that never ends. Derived from the lyrics at ${MM3_MAX_WORDS_PER_SEC} words/sec, `
+      + `floor ${MM3_MIN_FLOOR_SEC}s. Turn "Reject Short Renders" off to keep very short renders.`,
+    );
+  }
+
   return {
     req: {
       dit_backend: requestedDitBackend,
@@ -520,6 +573,14 @@ export function mapMinimaxParams(params: any): MinimaxParamMapping {
         require_eos: true,
         eos_rounds: MM3_ENDING_ROUNDS,
         ...(askedTakes === 1 ? { stop_after_first_eos: true } : {}),
+      } : {}),
+      // Minimum length. Omitted at 0 so turning the toggle off gives back
+      // exactly the request this backend sent before the check existed. With
+      // endings off it still engages the candidate machinery on its own —
+      // eos_rounds has to travel with it or the engine falls back to 4 anyway.
+      ...(minFrames > 0 ? {
+        min_frames: minFrames,
+        ...(requireEnding ? {} : { eos_rounds: MM3_ENDING_ROUNDS }),
       } : {}),
       // MM3 Plank replay. A plank that will not load is a note, not a failure:
       // the render proceeds with a normal AR pass.
@@ -1156,10 +1217,13 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
     // the seeds on by a whole round. The engine's own per-take list is the only
     // record of which plans survived and what drew them, so it wins outright —
     // for the song rows below and for the take count the browser reads.
-    if (req.require_eos) {
+    // Either gate can drop candidates, so either one makes the engine's list
+    // the authority on what survived.
+    if (req.require_eos || (req.min_frames ?? 0) > 0) {
       const planned = Math.max(nTakes, Number(finalDetail?.takes_planned ?? req.takes ?? nTakes));
       const dropped = Number(finalDetail?.takes_dropped ?? Math.max(0, planned - nTakes));
       const capped = Number(finalDetail?.takes_capped ?? dropped);
+      const tooShort = Number(finalDetail?.takes_short ?? 0);
       const rounds  = Math.max(1, Number(finalDetail?.eos_rounds_used ?? 1));
       const seeds   = takeDetail
         .map(d => String(d?.seed_str ?? d?.seed ?? ''))
@@ -1169,11 +1233,18 @@ export async function runMinimaxGeneration(job: GenerationJob, deps: MinimaxGene
       job.mm3Ending = { planned, rendered: nTakes, dropped, rounds };
       const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
       log('INFO',
-        `[MM3] Natural ending: ${planned} ${plural(planned, 'candidate', 'candidates')} planned in `
-        + `${rounds} ${plural(rounds, 'round', 'rounds')}, ${nTakes} ended and `
+        `[MM3] Candidates: ${planned} ${plural(planned, 'plan', 'plans')} in `
+        + `${rounds} ${plural(rounds, 'round', 'rounds')}, ${nTakes} kept and `
         + `${plural(nTakes, 'was', 'were')} rendered, ${capped} capped, `
-        + `${Math.max(0, dropped - capped)} other candidates not selected`
+        + `${tooShort} too short, `
+        + `${Math.max(0, dropped - capped - tooShort)} other candidates not selected`
         + (seeds.length ? ` (seeds ${seeds.join(', ')})` : ''));
+      if (tooShort > 0) {
+        const floorSec = Math.round((req.min_frames ?? 0) / MM3_FPS);
+        log('INFO',
+          `[MM3] ${tooShort} ${plural(tooShort, 'plan', 'plans')} ended before the ${floorSec}s minimum and `
+          + `${plural(tooShort, 'was', 'were')} re-planned. Turn "Reject Short Renders" off to keep them.`);
+      }
     }
     const audioUrls: string[] = [];
     const songIds: string[] = [];
